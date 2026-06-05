@@ -110,6 +110,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   `docs/UPGRADE.md` source-checkout upgrade and rollback snippets to export
   `local-dev-token` when source env files contain an empty `AWF_API_TOKEN=`
   entry, while keeping `AWF_POSTGRES_PASSWORD` restore strict.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HWemN` by making source-checkout
+  upgrade, rollback, and uninstall Core stop snippets prefer checkout-root
+  `.env` before legacy `docker/compose/.env`, matching source-checkout
+  setup/start env precedence while preserving the legacy fallback.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -2364,6 +2368,41 @@ git diff --check
 Final focused repair result: `3 passed in 0.80s`; `ruff check` passed;
 `ruff format --check` reported `1 file already formatted`; `git diff --check`
 reported no whitespace errors.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HWemN`:
+
+- `docs/UPGRADE.md` source-checkout upgrade and rollback snippets now stop Core
+  with checkout-root `.env` when it exists, then fall back to legacy
+  `docker/compose/.env`, then to a stop command without an env file.
+- `docs/UNINSTALL.md` applies the same root-first stop selection to the
+  introductory source-checkout metadata refresh snippet and both source-checkout
+  uninstall lanes.
+- `tests/unit/docs/test_public_docs_status.py` now rejects legacy-first stop
+  guards and requires UPGRADE/UNINSTALL source-checkout snippets to preserve
+  root-first legacy fallback ordering.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+```
+
+Red-phase result after updating the focused regression: failed as expected with
+`4 failed`; the assertions rejected the legacy-first
+`if [ -f docker/compose/.env ]; then` stop guard in UPGRADE and UNINSTALL.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `4 passed in 0.80s`; snippet syntax check
+`1 passed in 0.75s`; `ruff check` passed; `ruff format --check` reported
+`1 file already formatted`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad

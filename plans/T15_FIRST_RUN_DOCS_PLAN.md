@@ -599,3 +599,18 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
 ```
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HWemN`:
+source-checkout upgrade, rollback, and uninstall snippets that preserve legacy
+`docker/compose/.env` fallback must still prefer checkout-root `.env` for the
+Core stop command when it exists. `awf setup --source-checkout` and
+`awf start --source-checkout` read checkout-root `.env` first, so the stop step
+must not let a stale legacy Compose env file select the wrong project or ports.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HWemN`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```

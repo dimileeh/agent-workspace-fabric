@@ -607,13 +607,6 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
     checkout_refresh_line = "git pull"
-    stop_guard_line = "if [ -f docker/compose/.env ]; then"
-    stop_env_file_line = (
-        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
-    )
-    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
-    stop_guard_end_line = "\nfi\n"
-    root_stop_line = "docker compose --env-file .env -f docker/compose/local-service.yml stop"
     cases = (
         (
             "Quickstart Lane 2",
@@ -669,20 +662,12 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         )
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"
-        if root_stop_line in section:
-            stop_end_index = section.index(root_stop_line)
-        else:
-            assert stop_guard_line in section, f"{label} must guard optional compose env file"
-            assert stop_env_file_line in section, f"{label} must reuse compose env file if present"
-            assert stop_fallback_line in section, f"{label} must stop Core without compose env file"
-            assert stop_guard_end_line in section, f"{label} must close compose env guard"
-            stop_fallback_index = section.index(stop_fallback_line)
-            stop_end_index = _required_index(
-                section,
-                stop_guard_end_line,
-                label,
-                start=stop_fallback_index,
-            )
+        _stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+            label,
+            section,
+            env_restore_end_index,
+            require_legacy_fallback=not label.startswith("Quickstart"),
+        )
         checkout_refresh_index = section.index(checkout_refresh_line)
         assert (
             env_restore_start_index
@@ -1721,12 +1706,6 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
     )
     no_stop_guidance = "Editing `~/.awf/config.yml` remains the no-stop option"
     checkout_cd_line = "cd /path/to/aira-agent-workspace-fabric"
-    stop_guard_line = "if [ -f docker/compose/.env ]; then"
-    stop_env_file_line = (
-        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
-    )
-    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
-    stop_guard_end_line = "\nfi\n"
     source_cases = (
         (
             "global tool install",
@@ -1768,10 +1747,6 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
     )
     assert intro_words.index(core_stop_guidance) < intro_setup_words_index
     assert checkout_cd_line in intro_section
-    assert stop_guard_line in intro_section
-    assert stop_env_file_line in intro_section
-    assert stop_fallback_line in intro_section
-    assert stop_guard_end_line in intro_section
     intro_setup_index = _required_index(
         intro_section,
         intro_setup_line,
@@ -1784,20 +1759,18 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
             "refreshing source-checkout metadata",
         )
     )
-    intro_fallback_index = intro_section.index(stop_fallback_line)
+    intro_stop_start_index, intro_stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+        "intro source-checkout uninstall",
+        intro_section,
+        intro_env_restore_end_index,
+        require_legacy_fallback=True,
+    )
     assert (
         intro_section.index(checkout_cd_line)
         < intro_env_restore_start_index
         < intro_env_restore_end_index
-        < intro_section.index(stop_guard_line)
-        < intro_section.index(stop_env_file_line)
-        < intro_fallback_index
-        < _required_index(
-            intro_section,
-            stop_guard_end_line,
-            "intro source-checkout uninstall",
-            start=intro_fallback_index,
-        )
+        < intro_stop_start_index
+        < intro_stop_end_index
         < intro_setup_index
     ), "intro must provide guarded Core stop commands before metadata refresh"
     for label, section, setup_line in source_cases:
@@ -1806,10 +1779,6 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         assert port_block_guidance in section_words, f"{label} must explain setup port blockers"
         assert section_words.index(core_stop_guidance) < section_words.index(setup_line)
         assert checkout_cd_line in section, f"{label} must cd into the source checkout"
-        assert stop_guard_line in section, f"{label} must provide a compose stop guard"
-        assert stop_env_file_line in section, f"{label} must stop with compose env file"
-        assert stop_fallback_line in section, f"{label} must stop without compose env file"
-        assert stop_guard_end_line in section, f"{label} must close the compose stop guard"
         env_restore_start_index, env_restore_end_index = (
             _assert_source_checkout_service_env_restore_before_stop(
                 f"{label} uninstall",
@@ -1817,20 +1786,18 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
                 "refreshing source-checkout metadata",
             )
         )
-        stop_fallback_index = section.index(stop_fallback_line)
+        stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+            f"{label} uninstall",
+            section,
+            env_restore_end_index,
+            require_legacy_fallback=True,
+        )
         assert (
             section.index(checkout_cd_line)
             < env_restore_start_index
             < env_restore_end_index
-            < section.index(stop_guard_line)
-            < section.index(stop_env_file_line)
-            < stop_fallback_index
-            < _required_index(
-                section,
-                stop_guard_end_line,
-                f"{label} uninstall",
-                start=stop_fallback_index,
-            )
+            < stop_start_index
+            < stop_end_index
             < section.index(setup_line)
         ), f"{label} must provide guarded Core stop commands before metadata refresh"
 
@@ -1876,12 +1843,6 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
     no_global_heading = "For the source checkout with no global install lane"
-    stop_guard_line = "if [ -f docker/compose/.env ]; then"
-    stop_env_file_line = (
-        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
-    )
-    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
-    stop_guard_end_line = "\nfi\n"
     setup_line = 'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"'
     no_global_commands = (
         setup_line,
@@ -1895,10 +1856,6 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
 
     assert no_global_heading in rollback_section
     no_global_section = rollback_section.split(no_global_heading, maxsplit=1)[1]
-    assert stop_guard_line in no_global_section
-    assert stop_env_file_line in no_global_section
-    assert stop_fallback_line in no_global_section
-    assert stop_guard_end_line in no_global_section
     env_restore_start_index, env_restore_end_index = (
         _assert_source_checkout_service_env_restore_before_stop(
             "no-global source-checkout rollback",
@@ -1906,20 +1863,18 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
             "rollback",
         )
     )
-    stop_fallback_index = no_global_section.index(stop_fallback_line)
+    stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+        "no-global source-checkout rollback",
+        no_global_section,
+        env_restore_end_index,
+        require_legacy_fallback=True,
+    )
     assert (
         no_global_section.index("uv sync --extra dev")
         < env_restore_start_index
         < env_restore_end_index
-        < no_global_section.index(stop_guard_line)
-        < no_global_section.index(stop_env_file_line)
-        < stop_fallback_index
-        < _required_index(
-            no_global_section,
-            stop_guard_end_line,
-            "no-global source-checkout rollback",
-            start=stop_fallback_index,
-        )
+        < stop_start_index
+        < stop_end_index
         < no_global_section.index(setup_line)
     )
     for command in no_global_commands:
@@ -1932,12 +1887,6 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     rollback_section = _markdown_section(upgrade_text, "## Rollback")
     global_heading = "For the source checkout with global tool install lane"
     no_global_heading = "For the source checkout with no global install lane"
-    stop_guard_line = "if [ -f docker/compose/.env ]; then"
-    stop_env_file_line = (
-        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
-    )
-    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
-    stop_guard_end_line = "\nfi\n"
     setup_line = 'awf setup --source-checkout "$PWD"'
     start_line = 'awf start --source-checkout "$PWD"'
     global_commands = (
@@ -1955,10 +1904,6 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     )[0]
     assert "cd /path/to/aira-agent-workspace-fabric" in global_section
     assert "uv tool install . --force" in global_section
-    assert stop_guard_line in global_section
-    assert stop_env_file_line in global_section
-    assert stop_fallback_line in global_section
-    assert stop_guard_end_line in global_section
     env_restore_start_index, env_restore_end_index = (
         _assert_source_checkout_service_env_restore_before_stop(
             "global source-checkout rollback",
@@ -1966,20 +1911,18 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
             "rollback",
         )
     )
-    stop_fallback_index = global_section.index(stop_fallback_line)
+    stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+        "global source-checkout rollback",
+        global_section,
+        env_restore_end_index,
+        require_legacy_fallback=True,
+    )
     assert (
         global_section.index("uv tool install . --force")
         < env_restore_start_index
         < env_restore_end_index
-        < global_section.index(stop_guard_line)
-        < global_section.index(stop_env_file_line)
-        < stop_fallback_index
-        < _required_index(
-            global_section,
-            stop_guard_end_line,
-            "global source-checkout rollback",
-            start=stop_fallback_index,
-        )
+        < stop_start_index
+        < stop_end_index
         < global_section.index(setup_line)
         < global_section.index(start_line)
     )
@@ -2699,15 +2642,66 @@ def _assert_source_checkout_postgres_password_restore(
     return password_init_index, password_guard_end_index
 
 
+def _assert_source_checkout_stop_prefers_root_env(
+    label: str,
+    section: str,
+    start: int,
+    *,
+    require_legacy_fallback: bool = False,
+) -> tuple[int, int]:
+    """Assert source-checkout stop commands use checkout-root .env before legacy env."""
+    bare_root_stop_line = "docker compose --env-file .env -f docker/compose/local-service.yml stop"
+    root_stop_guard_line = "if [ -f .env ]; then"
+    root_stop_line = "  docker compose --env-file .env -f docker/compose/local-service.yml stop"
+    legacy_first_stop_guard_line = "if [ -f docker/compose/.env ]; then"
+    legacy_stop_guard_line = "elif [ -f docker/compose/.env ]; then"
+    legacy_stop_line = (
+        "  docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop"
+    )
+    stop_else_line = "else"
+    stop_fallback_line = "  docker compose -f docker/compose/local-service.yml stop"
+
+    assert legacy_first_stop_guard_line not in section[start:].splitlines(), (
+        f"{label} must prefer checkout root .env over legacy docker/compose/.env"
+    )
+
+    bare_root_stop_match = re.search(rf"(?m)^{re.escape(bare_root_stop_line)}$", section[start:])
+    if bare_root_stop_match is not None:
+        assert not require_legacy_fallback, f"{label} must keep legacy compose env fallback"
+        bare_root_stop_index = start + bare_root_stop_match.start()
+        return bare_root_stop_index, bare_root_stop_index + len(bare_root_stop_line)
+
+    root_stop_guard_index = _shell_line_index(section, root_stop_guard_line, label, start)
+    root_stop_index = _shell_line_index(section, root_stop_line, label, root_stop_guard_index)
+    legacy_stop_guard_index = _shell_line_index(
+        section,
+        legacy_stop_guard_line,
+        label,
+        root_stop_index,
+    )
+    legacy_stop_index = _shell_line_index(section, legacy_stop_line, label, legacy_stop_guard_index)
+    stop_else_index = _shell_line_index(section, stop_else_line, label, legacy_stop_index)
+    stop_fallback_index = _shell_line_index(section, stop_fallback_line, label, stop_else_index)
+    stop_guard_end_index = _shell_closing_fi_index(section, stop_fallback_index, label)
+
+    assert (
+        root_stop_guard_index
+        < root_stop_index
+        < legacy_stop_guard_index
+        < legacy_stop_index
+        < stop_else_index
+        < stop_fallback_index
+        < stop_guard_end_index
+    ), f"{label} must stop with root .env before legacy compose env fallback"
+    return root_stop_guard_index, stop_guard_end_index
+
+
 def _assert_source_checkout_service_env_restore_before_stop(
     label: str,
     section: str,
     lifecycle: str,
 ) -> tuple[int, int]:
     """Assert source-checkout snippets restore service secrets before stopping Core."""
-    stop_guard_line = "if [ -f docker/compose/.env ]; then"
-    root_stop_line = "docker compose --env-file .env -f docker/compose/local-service.yml stop"
-
     api_restore_start_index, api_restore_end_index = _assert_source_checkout_api_token_restore(
         label,
         section,
@@ -2720,10 +2714,11 @@ def _assert_source_checkout_service_env_restore_before_stop(
             lifecycle,
         )
     )
-    if root_stop_line in section:
-        stop_index = _shell_line_index(section, root_stop_line, label, password_restore_end_index)
-    else:
-        stop_index = _shell_line_index(section, stop_guard_line, label, password_restore_end_index)
+    stop_index, _stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+        label,
+        section,
+        password_restore_end_index,
+    )
 
     assert (
         api_restore_start_index

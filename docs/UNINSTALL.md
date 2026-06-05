@@ -55,7 +55,9 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
-if [ -f docker/compose/.env ]; then
+if [ -f .env ]; then
+  docker compose --env-file .env -f docker/compose/local-service.yml stop
+elif [ -f docker/compose/.env ]; then
   docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 else
   docker compose -f docker/compose/local-service.yml stop
@@ -147,7 +149,9 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
-if [ -f docker/compose/.env ]; then
+if [ -f .env ]; then
+  docker compose --env-file .env -f docker/compose/local-service.yml stop
+elif [ -f docker/compose/.env ]; then
   docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 else
   docker compose -f docker/compose/local-service.yml stop
@@ -216,7 +220,9 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
-if [ -f docker/compose/.env ]; then
+if [ -f .env ]; then
+  docker compose --env-file .env -f docker/compose/local-service.yml stop
+elif [ -f docker/compose/.env ]; then
   docker compose --env-file docker/compose/.env -f docker/compose/local-service.yml stop
 else
   docker compose -f docker/compose/local-service.yml stop
