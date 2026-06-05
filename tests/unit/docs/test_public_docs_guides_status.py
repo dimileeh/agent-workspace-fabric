@@ -8,6 +8,7 @@ from urllib.parse import quote
 
 import pytest
 
+from tests.unit.docs import public_docs_markdown_helpers as markdown_helpers
 from tests.unit.docs import public_docs_status_helpers as helpers
 from tests.unit.docs.public_docs_status_helpers import (
     PACKAGE_DATABASE_URL_ENCODED_EXPORT,
@@ -917,6 +918,27 @@ def test_public_docs_are_discovered_from_docs_tree(
     monkeypatch.setattr(module, "README_PATH", tmp_path / "README.md")
 
     assert _public_docs() == {"docs/NEW_GUIDE.md"}
+
+
+def test_public_docs_path_overrides_do_not_mutate_markdown_helper_globals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (tmp_path / "README.md").write_text("# Docs\n", encoding="utf-8")
+    (docs_dir / "NEW_GUIDE.md").write_text("# New Guide\n", encoding="utf-8")
+    original_repo_root = markdown_helpers.REPO_ROOT
+    original_readme_path = markdown_helpers.README_PATH
+    original_index_candidates = markdown_helpers.DOCS_INDEX_CANDIDATES
+
+    monkeypatch.setattr(helpers, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(helpers, "README_PATH", tmp_path / "README.md")
+
+    assert _public_docs() == {"docs/NEW_GUIDE.md"}
+    assert original_repo_root == markdown_helpers.REPO_ROOT
+    assert original_readme_path == markdown_helpers.README_PATH
+    assert original_index_candidates == markdown_helpers.DOCS_INDEX_CANDIDATES
 
 
 def test_root_public_docs_linked_from_readme_are_discovered(

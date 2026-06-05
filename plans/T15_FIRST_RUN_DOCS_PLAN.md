@@ -930,6 +930,55 @@ git diff --check
 # No whitespace errors.
 ```
 
+## Post-Review Repair for Review-Level Comment `issue:4620140358`
+
+Problem statement and scope:
+`tests/unit/docs/public_docs_status_helpers.py` delegates Markdown discovery
+helpers by mutating `public_docs_markdown_helpers.REPO_ROOT`, `README_PATH`, and
+`DOCS_INDEX_CANDIDATES` before each call. The values match at import time, but
+the runtime mutation is unnecessary shared state and is unsafe for future
+parallel test execution. Keep the repair scoped to the docs test helper bridge
+and a focused regression that preserves existing monkeypatch-based temp-repo
+tests.
+
+Requirements checklist:
+
+- Preserve current public-doc discovery behavior and the status helper's
+  monkeypatchable `REPO_ROOT` / `README_PATH` compatibility surface.
+- Remove all sibling module global mutation from
+  `public_docs_status_helpers.py`.
+- Pass repo/readme/index paths explicitly into `public_docs_markdown_helpers.py`
+  helper calls that need filesystem context.
+- Do not run full AWF/GitHub-owned validation, full coverage, frontend builds,
+  pushes, rebases, or branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Add a regression proving status-helper path overrides do not mutate
+   `public_docs_markdown_helpers` globals.
+2. Add keyword-only repo/readme/index path parameters to the Markdown helper
+   functions that read docs or resolve links.
+3. Replace `_sync_markdown_helper_paths()` with direct wrapper calls that pass
+   the current status-helper paths.
+4. Run targeted public-doc discovery tests, focused ruff checks, and a format
+   check on the touched helper files.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_public_docs_path_overrides_do_not_mutate_markdown_helper_globals -q
+# Red phase fails before the helper change; final result passes.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_every_public_guide_is_linked_from_docs_index_or_readme tests/unit/docs/test_public_docs_status.py::test_awf_commands_mentioned_in_public_docs_exist_in_cli_help_tree tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid tests/unit/docs/test_public_docs_guides_status.py::test_public_docs_path_overrides_do_not_mutate_markdown_helper_globals tests/unit/docs/test_public_docs_guides_status.py::test_public_docs_are_discovered_from_docs_tree tests/unit/docs/test_public_docs_guides_status.py::test_root_public_docs_linked_from_readme_are_discovered tests/unit/docs/test_public_docs_guides_status.py::test_copy_paste_docs_ignore_missing_readme_linked_docs tests/unit/docs/test_public_docs_guides_status.py::test_awf_command_mentions_ignore_missing_readme_linked_docs -q
+# Focused public-doc discovery and delegation tests pass.
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/public_docs_markdown_helpers.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/test_public_docs_guides_status.py
+# All checks pass.
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/public_docs_markdown_helpers.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/test_public_docs_guides_status.py
+# Touched Python files are formatted.
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HabO-`
 
 Problem statement and scope:

@@ -61,47 +61,86 @@ class AwfCommandMention:
     command_path: tuple[str, ...]
 
 
-def _public_docs() -> set[str]:
-    public_docs = _all_public_markdown_docs()
-    public_docs.update(_readme_public_doc_links())
-    public_docs.update(_present_docs(OPTIONAL_PUBLIC_GUIDES))
+def _default_readme_path(repo_root: Path, readme_path: Path | None) -> Path:
+    return readme_path if readme_path is not None else repo_root / "README.md"
+
+
+def _default_docs_index_candidates(
+    repo_root: Path,
+    readme_path: Path | None,
+    docs_index_candidates: Iterable[Path] | None,
+) -> Iterable[Path]:
+    if docs_index_candidates is not None:
+        return docs_index_candidates
+    return (_default_readme_path(repo_root, readme_path), repo_root / "docs" / "README.md")
+
+
+def _public_docs(
+    *,
+    repo_root: Path = REPO_ROOT,
+    readme_path: Path | None = None,
+) -> set[str]:
+    public_docs = _all_public_markdown_docs(repo_root=repo_root)
+    public_docs.update(_readme_public_doc_links(repo_root=repo_root, readme_path=readme_path))
+    public_docs.update(_present_docs(OPTIONAL_PUBLIC_GUIDES, repo_root=repo_root))
     return {doc for doc in public_docs if _is_public_doc_path(doc)}
 
 
-def _all_public_markdown_docs() -> set[str]:
-    docs_dir = REPO_ROOT / "docs"
+def _all_public_markdown_docs(*, repo_root: Path = REPO_ROOT) -> set[str]:
+    docs_dir = repo_root / "docs"
     if not docs_dir.exists():
         return set()
 
     return {
-        path.relative_to(REPO_ROOT).as_posix()
+        path.relative_to(repo_root).as_posix()
         for path in docs_dir.rglob("*.md")
-        if _is_public_doc_path(path.relative_to(REPO_ROOT).as_posix())
+        if _is_public_doc_path(path.relative_to(repo_root).as_posix())
     }
 
 
-def _docs_index_links() -> set[str]:
+def _docs_index_links(
+    *,
+    repo_root: Path = REPO_ROOT,
+    readme_path: Path | None = None,
+    docs_index_candidates: Iterable[Path] | None = None,
+) -> set[str]:
     links: set[str] = set()
-    for index_path in DOCS_INDEX_CANDIDATES:
+    for index_path in _default_docs_index_candidates(
+        repo_root,
+        readme_path,
+        docs_index_candidates,
+    ):
         if index_path.exists():
-            links.update(_markdown_doc_links(index_path))
+            links.update(_markdown_doc_links(index_path, repo_root=repo_root))
     return {link for link in links if _is_public_doc_path(link)}
 
 
-def _readme_public_doc_links() -> set[str]:
-    return {link for link in _markdown_doc_links(README_PATH) if _is_public_doc_path(link)}
+def _readme_public_doc_links(
+    *,
+    repo_root: Path = REPO_ROOT,
+    readme_path: Path | None = None,
+) -> set[str]:
+    path = _default_readme_path(repo_root, readme_path)
+    return {
+        link for link in _markdown_doc_links(path, repo_root=repo_root) if _is_public_doc_path(link)
+    }
 
 
-def _markdown_doc_links(path: Path) -> set[str]:
+def _markdown_doc_links(path: Path, *, repo_root: Path = REPO_ROOT) -> set[str]:
     text = path.read_text(encoding="utf-8")
     return {
         resolved
         for target in LINK_RE.findall(text)
-        if (resolved := _resolve_markdown_link(path, target)) is not None
+        if (resolved := _resolve_markdown_link(path, target, repo_root=repo_root)) is not None
     }
 
 
-def _resolve_markdown_link(source_path: Path, target: str) -> str | None:
+def _resolve_markdown_link(
+    source_path: Path,
+    target: str,
+    *,
+    repo_root: Path = REPO_ROOT,
+) -> str | None:
     target = target.strip()
     parsed = urlparse(target)
     if parsed.scheme or parsed.netloc:
@@ -113,7 +152,7 @@ def _resolve_markdown_link(source_path: Path, target: str) -> str | None:
     base_dir = source_path.parent
     resolved = (base_dir / raw_path).resolve()
     try:
-        rel_path = resolved.relative_to(REPO_ROOT)
+        rel_path = resolved.relative_to(repo_root)
     except ValueError:
         return None
     return rel_path.as_posix()
@@ -129,8 +168,8 @@ def _is_public_doc_path(rel_path: str) -> bool:
     return rel_path not in PLANNING_DOC_NAMES
 
 
-def _present_docs(candidates: Iterable[str]) -> set[str]:
-    return {rel_path for rel_path in candidates if (REPO_ROOT / rel_path).exists()}
+def _present_docs(candidates: Iterable[str], *, repo_root: Path = REPO_ROOT) -> set[str]:
+    return {rel_path for rel_path in candidates if (repo_root / rel_path).exists()}
 
 
 def _typer_command_tree(typer_app: object) -> set[tuple[str, ...]]:
@@ -151,11 +190,15 @@ def _command_name(command: object) -> str:
     return command.callback.__name__.replace("_", "-")
 
 
-def _awf_command_mentions(paths: Iterable[Path]) -> list[AwfCommandMention]:
+def _awf_command_mentions(
+    paths: Iterable[Path],
+    *,
+    repo_root: Path = REPO_ROOT,
+) -> list[AwfCommandMention]:
     root_groups = {path[0] for path in _typer_command_tree(app) if len(path) == 2}
     mentions: list[AwfCommandMention] = []
     for rel_path in paths:
-        doc_path = REPO_ROOT / rel_path
+        doc_path = repo_root / rel_path
         if not doc_path.exists():
             continue
         text = doc_path.read_text(encoding="utf-8")
@@ -225,12 +268,19 @@ def _looks_like_command_token(token: str) -> bool:
     return not ("/" in token or "=" in token)
 
 
-def _copy_paste_docs() -> set[str]:
-    docs = _present_docs(COPY_PASTE_DOC_HINTS)
+def _copy_paste_docs(
+    *,
+    repo_root: Path = REPO_ROOT,
+    readme_path: Path | None = None,
+) -> set[str]:
+    docs = _present_docs(COPY_PASTE_DOC_HINTS, repo_root=repo_root)
     docs.update(
         rel_path
-        for rel_path in _present_docs(_public_docs())
-        if "copy-paste" in (REPO_ROOT / rel_path).read_text(encoding="utf-8").lower()
+        for rel_path in _present_docs(
+            _public_docs(repo_root=repo_root, readme_path=readme_path),
+            repo_root=repo_root,
+        )
+        if "copy-paste" in (repo_root / rel_path).read_text(encoding="utf-8").lower()
         and rel_path.endswith(".md")
     )
     return docs

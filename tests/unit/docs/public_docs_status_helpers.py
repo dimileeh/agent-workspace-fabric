@@ -1381,43 +1381,39 @@ def _assert_package_upgrade_restores_service_env(
     ), f"{label} must restore missing service env before restart"
 
 
-def _sync_markdown_helper_paths() -> None:
-    _markdown_helpers.REPO_ROOT = REPO_ROOT
-    _markdown_helpers.README_PATH = README_PATH
-    _markdown_helpers.DOCS_INDEX_CANDIDATES = (
-        README_PATH,
-        REPO_ROOT / "docs" / "README.md",
-    )
-
-
 def _public_docs() -> set[str]:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._public_docs()
+    return _markdown_helpers._public_docs(repo_root=REPO_ROOT, readme_path=README_PATH)
 
 
 def _all_public_markdown_docs() -> set[str]:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._all_public_markdown_docs()
+    return _markdown_helpers._all_public_markdown_docs(repo_root=REPO_ROOT)
 
 
 def _docs_index_links() -> set[str]:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._docs_index_links()
+    return _markdown_helpers._docs_index_links(
+        repo_root=REPO_ROOT,
+        readme_path=README_PATH,
+        docs_index_candidates=(README_PATH, REPO_ROOT / "docs" / "README.md"),
+    )
 
 
 def _readme_public_doc_links() -> set[str]:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._readme_public_doc_links()
+    return _markdown_helpers._readme_public_doc_links(
+        repo_root=REPO_ROOT,
+        readme_path=README_PATH,
+    )
 
 
 def _markdown_doc_links(path: Path) -> set[str]:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._markdown_doc_links(path)
+    return _markdown_helpers._markdown_doc_links(path, repo_root=REPO_ROOT)
 
 
 def _resolve_markdown_link(source_path: Path, target: str) -> str | None:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._resolve_markdown_link(source_path, target)
+    return _markdown_helpers._resolve_markdown_link(
+        source_path,
+        target,
+        repo_root=REPO_ROOT,
+    )
 
 
 def _is_public_doc_path(rel_path: str) -> bool:
@@ -1425,8 +1421,7 @@ def _is_public_doc_path(rel_path: str) -> bool:
 
 
 def _present_docs(candidates: Iterable[str]) -> set[str]:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._present_docs(candidates)
+    return _markdown_helpers._present_docs(candidates, repo_root=REPO_ROOT)
 
 
 def _typer_command_tree(typer_app: object) -> set[tuple[str, ...]]:
@@ -1438,8 +1433,7 @@ def _command_name(command: object) -> str:
 
 
 def _awf_command_mentions(paths: Iterable[Path]) -> list[AwfCommandMention]:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._awf_command_mentions(paths)
+    return _markdown_helpers._awf_command_mentions(paths, repo_root=REPO_ROOT)
 
 
 def _ignore_awf_command_line(line: str) -> bool:
@@ -1462,8 +1456,7 @@ def _looks_like_command_token(token: str) -> bool:
 
 
 def _copy_paste_docs() -> set[str]:
-    _sync_markdown_helper_paths()
-    return _markdown_helpers._copy_paste_docs()
+    return _markdown_helpers._copy_paste_docs(repo_root=REPO_ROOT, readme_path=README_PATH)
 
 
 def _fence_delimiter_count_is_even(text: str) -> bool:

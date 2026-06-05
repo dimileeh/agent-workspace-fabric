@@ -2626,6 +2626,50 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for Review-Level Comment `issue:4620140358`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `public_docs_status_helpers.py` no longer mutates
+  `public_docs_markdown_helpers.REPO_ROOT`, `README_PATH`, or
+  `DOCS_INDEX_CANDIDATES` before delegating Markdown helper calls.
+- Complete: Markdown helper functions that depend on repository paths now
+  accept explicit keyword-only path context while preserving their default
+  module-level behavior.
+- Complete: The status-helper compatibility wrappers still honor monkeypatched
+  `REPO_ROOT` and `README_PATH` values used by the focused temp-repo tests.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `tests/unit/docs/public_docs_markdown_helpers.py`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_guides_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_public_docs_path_overrides_do_not_mutate_markdown_helper_globals -q
+# Red phase before helper change: failed because markdown_helpers.REPO_ROOT was
+# overwritten with the temp repo root.
+# Final result: 1 passed in the combined focused run below.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_every_public_guide_is_linked_from_docs_index_or_readme tests/unit/docs/test_public_docs_status.py::test_awf_commands_mentioned_in_public_docs_exist_in_cli_help_tree tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid tests/unit/docs/test_public_docs_guides_status.py::test_public_docs_path_overrides_do_not_mutate_markdown_helper_globals tests/unit/docs/test_public_docs_guides_status.py::test_public_docs_are_discovered_from_docs_tree tests/unit/docs/test_public_docs_guides_status.py::test_root_public_docs_linked_from_readme_are_discovered tests/unit/docs/test_public_docs_guides_status.py::test_copy_paste_docs_ignore_missing_readme_linked_docs tests/unit/docs/test_public_docs_guides_status.py::test_awf_command_mentions_ignore_missing_readme_linked_docs -q
+# 8 passed in 0.74s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/public_docs_markdown_helpers.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/test_public_docs_guides_status.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/public_docs_markdown_helpers.py tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/test_public_docs_guides_status.py
+# 3 files already formatted
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HabPD`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
