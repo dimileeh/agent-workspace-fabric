@@ -84,6 +84,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: Client Planner Exception Tests Depend On Ambient Env File
+
+### Problem Statement And Scope
+
+GitHub Actions run `27015318392` fails in `python-coverage-shards (4)` because
+two MCP client-integration tests expect planner exceptions to be rendered as
+`SETUP_READINESS_FAILED`, but in CI the tool returns
+`START_COMPOSE_ASSETS_MISSING` before the monkeypatched planner is called. The
+tests pass in this workspace only because a root `.env` exists here; CI uses a
+clean checkout where the default client env file is absent.
+
+Scope is limited to making those two tests environment-independent. The MCP
+runtime behavior remains unchanged: missing env files still block before client
+apply instructions, while planner exceptions are still redacted readiness
+failures once the env-file precondition is satisfied.
+
+### Requirements Checklist
+
+- Preserve the missing-env regression that asserts
+  `START_COMPOSE_ASSETS_MISSING` wins before apply commands.
+- Make the ValueError planner regression explicitly satisfy env-file
+  resolution so it reaches the monkeypatched planner in clean checkouts.
+- Make the unexpected-exception planner regression explicitly satisfy env-file
+  resolution so it reaches the monkeypatched planner in clean checkouts.
+- Keep secret-redaction assertions unchanged.
+
+### Implementation Steps
+
+1. Update the two planner-exception tests to monkeypatch
+   `_resolve_client_env_file` to a test-local env path.
+2. Run the two targeted regressions and the focused client-integration test
+   file.
+3. Run focused lint on the touched test file.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_value_error_is_readiness_failure tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_unexpected_exception_is_generic -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools_client_integration.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HWzCQ
 
 ### Problem Statement And Scope

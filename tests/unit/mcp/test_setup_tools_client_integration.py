@@ -378,11 +378,13 @@ async def test_client_integration_instructions_planning_value_error_is_readiness
     from awf.mcp import setup_tools
 
     raw_token = "sk-proj-" + "f" * 40
+    env_file = tmp_path / ".env"
     leaked_detail = f"{tmp_path}/config.toml contains {raw_token}"
 
     def fail_plan(*_args: Any, **_kwargs: Any) -> Any:
         raise ValueError(leaked_detail)
 
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
     monkeypatch.setattr(setup_tools, "build_client_config_plan", fail_plan)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
@@ -410,11 +412,13 @@ async def test_client_integration_instructions_planning_unexpected_exception_is_
     from awf.mcp import setup_tools
 
     raw_token = "sk-proj-" + "g" * 40
+    env_file = tmp_path / ".env"
     leaked_detail = f"missing client descriptor {raw_token}"
 
     def fail_plan(*_args: Any, **_kwargs: Any) -> Any:
         raise KeyError(leaked_detail)
 
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
     monkeypatch.setattr(setup_tools, "build_client_config_plan", fail_plan)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 

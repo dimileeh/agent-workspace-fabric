@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: Client Planner Exception Tests Depend On Ambient Env File
+
+### Requirement Status
+
+- Preserve the missing-env regression that asserts
+  `START_COMPOSE_ASSETS_MISSING` wins before apply commands: Complete.
+- Make the ValueError planner regression explicitly satisfy env-file
+  resolution so it reaches the monkeypatched planner in clean checkouts:
+  Complete.
+- Make the unexpected-exception planner regression explicitly satisfy env-file
+  resolution so it reaches the monkeypatched planner in clean checkouts:
+  Complete.
+- Keep secret-redaction assertions unchanged: Complete.
+
+### Evidence
+
+Files changed:
+
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+CI failure inspected:
+
+- GitHub Actions run `27015318392`, job `python-coverage-shards (4)`, failed
+  with two assertions in `tests/unit/mcp/test_setup_tools_client_integration.py`
+  where the payload reason code was `START_COMPOSE_ASSETS_MISSING` instead of
+  the expected `SETUP_READINESS_FAILED`.
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_value_error_is_readiness_failure tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_unexpected_exception_is_generic -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools_client_integration.py
+```
+
+Latest results:
+
+- Targeted planner-exception regressions: 2 passed.
+- Focused client-integration test file: 14 passed.
+- Focused ruff: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HWzCQ
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
