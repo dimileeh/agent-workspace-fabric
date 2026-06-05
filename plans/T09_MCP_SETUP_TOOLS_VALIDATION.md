@@ -53,6 +53,49 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6Hel1F
+
+### Requirement Status
+
+- Preserve existing structured MCP payloads for project-profile initialization:
+  Complete.
+- Guard only the planned write-path `.exists()` probe against `OSError`:
+  Complete.
+- Treat a failed planned-path probe as non-existent so the writer branch can
+  surface the structured write error: Complete.
+- Add a focused regression for a planned `.awf/workspace.yml` probe that raises
+  before the writer is called: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_project_profile.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_planned_profile_probe_oserror_uses_structured_write_error -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `planned_written_path.exists()` raised `PermissionError`, which surfaced as
+  `ToolError` from `awf_initialize_project_profile`.
+- Regression test after the implementation change: 1 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HelbK
 
 ### Requirement Status

@@ -84,6 +84,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6Hel1F Planned Profile Probe OSError
+
+### Problem Statement And Scope
+
+The PR review reports that `_initialize_project_profile_result` calls
+`planned_written_path.exists()` outside an `OSError` guard. If probing the
+planned `.awf/workspace.yml` path raises, the exception can escape the MCP tool
+instead of returning the structured `_error_result` payload used by adjacent
+branches.
+
+Scope is limited to the planned write-path existence probe in
+`awf_initialize_project_profile` and a focused regression. Existing profile
+probe behavior, preview generation, payload assembly, and writer error handling
+remain unchanged.
+
+### Requirements Checklist
+
+- Preserve existing structured MCP payloads for project-profile initialization.
+- Guard only the planned write-path `.exists()` probe against `OSError`.
+- Treat a failed planned-path probe as non-existent so the writer branch can
+  surface the structured write error.
+- Add a focused regression for a planned `.awf/workspace.yml` probe that raises
+  before the writer is called.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for the planned-path probe `OSError`.
+2. Wrap the planned write-path existence probe in `try`/`except OSError`.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_planned_profile_probe_oserror_uses_structured_write_error -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HelbK Setup-Status Issue Remediation
 
 ### Problem Statement And Scope

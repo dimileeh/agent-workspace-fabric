@@ -167,6 +167,61 @@ async def test_initialize_project_profile_file_exists_with_force_has_non_contrad
 
 
 @pytest.mark.unit
+async def test_initialize_project_profile_planned_profile_probe_oserror_uses_structured_write_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    expected_project = project.resolve()
+    planned_profile_path = expected_project / ".awf" / "workspace.yml"
+    leaked_detail = "/srv/awf/internal/.awf/workspace.yml permission denied"
+    preview = SimpleNamespace(
+        path=project,
+        draft=SimpleNamespace(template="generic"),
+        to_dict=lambda: {
+            "path": str(project),
+            "inspection": {"detected_template": "generic"},
+            "draft": {"template": "generic", "yaml": "name: generic\n"},
+            "diagnostics": {},
+        },
+    )
+    original_exists = setup_tools.Path.exists
+
+    def fail_planned_profile_probe(path: Path) -> bool:
+        if path == planned_profile_path:
+            raise PermissionError(leaked_detail)
+        return original_exists(path)
+
+    def fail_write(_preview: Any, *, force: bool) -> Path:
+        _ = force
+        raise PermissionError(leaked_detail)
+
+    monkeypatch.setattr(setup_tools, "preview_project_onboarding", lambda *_a, **_k: preview)
+    monkeypatch.setattr(setup_tools.Path, "exists", fail_planned_profile_probe)
+    monkeypatch.setattr(setup_tools, "write_workspace_profile", fail_write)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "write_profile": True},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_FAILED"
+    assert payload["message"] == "could not write project profile: PermissionError"
+    assert payload["detail"] == {
+        "project_path": str(expected_project),
+        "force": False,
+    }
+    assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("exc_type", [RuntimeError, ValueError])
 async def test_initialize_project_profile_write_runtime_and_value_errors_are_structured(
     exc_type: type[Exception],

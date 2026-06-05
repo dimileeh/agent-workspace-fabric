@@ -751,12 +751,12 @@ def _initialize_project_profile_result(
 
     mode = "write" if write_profile else "preview"
     planned_written_path = repository / ".awf" / "workspace.yml" if write_profile else None
-    if (
-        planned_written_path is not None
-        and existing_profile_path is None
-        and planned_written_path.exists()
-    ):
-        existing_profile_path = planned_written_path
+    if planned_written_path is not None and existing_profile_path is None:
+        try:
+            if planned_written_path.exists():
+                existing_profile_path = planned_written_path
+        except OSError:
+            pass
     if planned_written_path is not None and existing_profile_path is not None and not force:
         return _error_result(
             safe_result,
