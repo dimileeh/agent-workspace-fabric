@@ -64,6 +64,16 @@ def _partial_cleanup() -> WorkspaceCleanupResult:
     )
 
 
+async def _noop_retry_overlay_unmounts(*, limit: int | None) -> None:
+    """Async no-op stand-in for the deferred auth-overlay umount re-sweep.
+
+    Added to the existing ``_release_terminal_runtime_resources`` workers so the
+    new guarded sweep call is a no-op: it must not perturb their release-error
+    aggregation, resume-scan, or final re-raise / CancelledError invariants.
+    """
+    del limit
+
+
 class _RecordingLog:
     def __init__(self) -> None:
         self.warnings: list[tuple[str, dict[str, Any]]] = []
@@ -114,6 +124,7 @@ async def test_release_resources_logs_transient_db_warning_for_candidate(
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=_release,
         _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_noop_retry_overlay_unmounts,
     )
 
     with pytest.raises(InterfaceError):
@@ -152,6 +163,7 @@ async def test_release_resources_reraises_resume_failure_when_no_release_errors(
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=None,
         _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_noop_retry_overlay_unmounts,
     )
 
     with pytest.raises(RuntimeError, match="resume scan failed"):
@@ -183,6 +195,7 @@ async def test_release_resources_propagates_cancelled_from_resume_scan(
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=None,
         _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_noop_retry_overlay_unmounts,
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -219,6 +232,7 @@ async def test_release_resources_swallows_resume_failure_after_release_error(
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=_release,
         _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_noop_retry_overlay_unmounts,
     )
 
     with pytest.raises(ValueError, match="non-transient release failure"):

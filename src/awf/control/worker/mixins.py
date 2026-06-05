@@ -54,6 +54,33 @@ class WorkerDelegatesMixin:
     _has_terminal_runtime_release_failure_event = (
         _cleanup._has_terminal_runtime_release_failure_event
     )
+    # Deferred Claude auth-overlay umount re-sweep (issue #399). The module-level
+    # ``_teardown_terminal_auth_overlay`` and ``_handle_terminal_auth_overlay_unmount_retry_failure``
+    # free functions are intentionally not delegated (called as module globals).
+    _retry_pending_terminal_auth_overlay_unmounts = (
+        _cleanup._retry_pending_terminal_auth_overlay_unmounts
+    )
+    _retry_pending_terminal_auth_overlay_unmount_for_candidate = (
+        _cleanup._retry_pending_terminal_auth_overlay_unmount_for_candidate
+    )
+    _list_pending_terminal_auth_overlay_unmount_candidates = (
+        _cleanup._list_pending_terminal_auth_overlay_unmount_candidates
+    )
+    _count_terminal_auth_overlay_unmount_pending_events = (
+        _cleanup._count_terminal_auth_overlay_unmount_pending_events
+    )
+    _has_terminal_auth_overlay_unmount_terminal_event = (
+        _cleanup._has_terminal_auth_overlay_unmount_terminal_event
+    )
+    _record_terminal_auth_overlay_unmount_resolved = (
+        _cleanup._record_terminal_auth_overlay_unmount_resolved
+    )
+    _record_terminal_auth_overlay_unmount_exhausted = (
+        _cleanup._record_terminal_auth_overlay_unmount_exhausted
+    )
+    _append_terminal_auth_overlay_unmount_pending = (
+        _cleanup._append_terminal_auth_overlay_unmount_pending
+    )
 
     _draining_execution_task_count = _dispatch_methods._draining_execution_task_count
     _available_execution_slots = _dispatch_methods._available_execution_slots
