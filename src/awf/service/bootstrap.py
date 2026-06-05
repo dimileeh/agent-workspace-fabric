@@ -308,10 +308,6 @@ def _persist_work_dir_propagation_result(
         timestamp=now_iso,
     )
     try:
-        existing = pre_existing_env
-        existing[AWF_WORK_DIR_BIND_PROPAGATION_ENV] = new_posture.propagation
-        existing[AWF_CLAUDE_AUTH_FORCE_COPY_ENV] = new_posture.force_copy
-        existing[AWF_WORK_DIR_PROPAGATION_TIMESTAMP_ENV] = new_posture.timestamp
         lines: list[str] = []
         if env_file.exists():
             for raw_line in env_file.read_text(encoding="utf-8").splitlines():
