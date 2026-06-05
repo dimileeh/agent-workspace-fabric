@@ -1267,9 +1267,13 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
 
     The marker predicate is intentionally event-type existence/count only (no JSONB
     value comparison), so it behaves identically on Postgres (prod) and SQLite
-    (tests): a terminal-status workspace on this node (or ``node_id IS NULL``, matching
-    ``_list_terminal_runtime_candidates``) with a non-empty ``repo_url``, at least one
-    ``pending`` marker, and no ``resolved`` and no ``exhausted`` marker.
+    (tests): a terminal-status workspace owned by this node — by ``Workspace.node_id``
+    or, for legacy unstamped rows, by the active/latest ``ResourceReservation`` node
+    (the same effective-node reservation fallback
+    ``_list_terminal_released_pending_planning_scope_auto_retry_candidates`` uses), only
+    falling back to ``node_id IS NULL`` when no reservation exists — with a non-empty
+    ``repo_url``, at least one ``pending`` marker, and no ``resolved`` and no
+    ``exhausted`` marker.
 
     Candidates are additionally gated on the *effective-release* predicate (the same
     ``terminal_runtime_effectively_released_expr`` the terminal-runtime candidate/resume
@@ -1289,6 +1293,37 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
         correlated_to=Workspace,
     )
     worker_node_id = effective_worker_config_node_id(self._config)
+    # Derive an effective owning node from reservations, mirroring
+    # ``_list_terminal_released_pending_planning_scope_auto_retry_candidates``.
+    # A plain ``node_id IS NULL`` fallback would admit a legacy unstamped row on
+    # *every* worker; a non-owning worker would then run the overlay teardown
+    # against its own namespace, see no mount/upper, and record a terminal
+    # ``resolved`` marker — permanently suppressing the owning worker's deferred
+    # retry while the overlay stays leaked on the real node. Coalescing onto the
+    # active/latest reservation node keeps the deferred sweep on the reservation
+    # owner; only a row with no reservation at all still falls back to NULL.
+    active_reservation_node = (
+        select(ResourceReservation.node_id)
+        .where(ResourceReservation.workspace_id == Workspace.id)
+        .where(ResourceReservation.released_at.is_(None))
+        .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+        .limit(1)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+    latest_reservation_node = (
+        select(ResourceReservation.node_id)
+        .where(ResourceReservation.workspace_id == Workspace.id)
+        .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+        .limit(1)
+        .correlate(Workspace)
+        .scalar_subquery()
+    )
+    effective_node = func.coalesce(
+        Workspace.node_id,
+        active_reservation_node,
+        latest_reservation_node,
+    )
     pending_exists = (
         select(WorkspaceEvent.id)
         .where(WorkspaceEvent.workspace_id == Workspace.id)
@@ -1321,8 +1356,12 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
         .where(Workspace.status.in_(terminal_status_values))
         .where(
             or_(
-                Workspace.node_id == worker_node_id,
-                Workspace.node_id.is_(None),
+                effective_node == worker_node_id,
+                and_(
+                    Workspace.node_id.is_(None),
+                    active_reservation_node.is_(None),
+                    latest_reservation_node.is_(None),
+                ),
             )
         )
         .where(pending_exists)

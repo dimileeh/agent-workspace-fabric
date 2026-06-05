@@ -33,7 +33,12 @@ from awf.control.worker import cleanup as worker_cleanup
 from awf.control.worker.types import _TerminalRuntimeCandidate
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    ResourceReservationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
@@ -877,6 +882,92 @@ async def test_pending_candidate_query_excludes_revoked_release(
     )
     assert effective_id in candidate_ids, (
         "effectively-released workspace with a pending marker must still surface"
+    )
+
+
+async def _reserve_on_node(
+    session: AsyncSession,
+    ws: Workspace,
+    *,
+    node_id: str,
+) -> None:
+    """Stamp *ws* with a ``ResourceReservation`` on *node_id* (and clear ``node_id``).
+
+    Models a legacy unstamped row (``Workspace.node_id IS NULL``) whose effective
+    owner is recoverable only from its reservation, exactly as the deferred-sweep
+    candidate query now resolves it.
+    """
+    ws.node_id = None
+    task = await TaskRepository(session).create_or_get(
+        repo_url=ws.repo_url,
+        base_branch=ws.branch_base,
+        title=ws.task_title,
+        prompt=ws.task_prompt,
+        external_id=None,
+        idempotency_key=None,
+        task_class=ws.task_class,
+        owned_paths=list(ws.owned_paths),
+    )
+    attempt = await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
+    await ResourceReservationRepository(session).create(
+        workspace_id=ws.id,
+        attempt_id=attempt.id,
+        node_id=node_id,
+        steady_cpu=1.0,
+        steady_memory_gb=1.0,
+        peak_cpu=1.0,
+        peak_memory_gb=1.0,
+        disk_mb=None,
+        phase="workspace_lifecycle",
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_candidate_query_uses_reservation_effective_node(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A legacy ``node_id IS NULL`` row is swept only by its reservation owner.
+
+    Without the effective-node fallback the deferred overlay sweep would admit such
+    a row on *every* worker; a non-owning worker would then tear down nothing in its
+    own namespace and record a terminal ``resolved`` marker that permanently
+    suppresses the owning worker's retry while the overlay stays leaked on the real
+    node. Coalescing onto the active/latest reservation node keeps the row on the
+    reservation owner; a row whose reservation is on a *different* node must not
+    surface for this worker.
+    """
+    sweeper = _sweeper(factory, node_id="node-1")
+    owned_id: str = ""
+    foreign_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws_owned = await _make_workspace(session, repo, compose_project_name="awf_owned")
+        ws_foreign = await _make_workspace(session, repo, compose_project_name="awf_foreign")
+        owned_id = ws_owned.id
+        foreign_id = ws_foreign.id
+        await _reserve_on_node(session, ws_owned, node_id="node-1")
+        await _reserve_on_node(session, ws_foreign, node_id="node-2")
+        for ws in (ws_owned, ws_foreign):
+            await repo.add_event(
+                ws,
+                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            )
+            await repo.add_event(
+                ws,
+                event_type=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                reason_code=worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+                payload={"attempt": 1},
+            )
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(limit=None)  # noqa: SLF001
+    candidate_ids = {c.workspace_id for c in candidates}
+    assert owned_id in candidate_ids, (
+        "a null-node row reserved on this worker's node must be swept by this worker"
+    )
+    assert foreign_id not in candidate_ids, (
+        "a null-node row reserved on another node must not be swept by this worker"
     )
 
 
