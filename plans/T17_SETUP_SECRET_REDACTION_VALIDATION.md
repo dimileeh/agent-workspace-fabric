@@ -2601,3 +2601,57 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/s
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 # Success: no issues found in 1 source file
 ```
+
+## Review-Level Comment `issue:4620175517` MCP Multiline Fragment Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: MCP exact-secret collection still includes reconstructed full
+  quoted multiline Compose env-file secrets from the selected env file.
+- Complete: MCP exact-secret collection now excludes first physical-line
+  fragments for those same quoted multiline secrets, including the provider
+  environment contribution that is also parsed from the Compose env file.
+- Complete: MCP workspace log reads no longer over-redact unrelated text that
+  matches only the skipped first-line fragment while still redacting the full
+  multiline secret.
+- Complete: service-log first-line fragment behavior and the shared Compose
+  parser behavior were left unchanged. The duplicated-parser review item was
+  already stale because both MCP and service logs use
+  `compose_env_file_quoted_multiline_values()`, and the single-quoted
+  backslash behavior matches Docker Compose's documented escaped-quote syntax
+  plus the existing regression test.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `tests/unit/mcp/test_mcp_multiline_compose_redaction.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py::test_read_workspace_log_does_not_redact_multiline_first_line_fragment_outside_secret -q --tb=short -ra
+# 1 failed: the unrelated first-line fragment was redacted as <redacted>.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py::test_read_workspace_log_does_not_redact_multiline_first_line_fragment_outside_secret -q --tb=short -ra
+# 1 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+# 3 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+# Success: no issues found in 1 source file
+```

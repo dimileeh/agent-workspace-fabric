@@ -160,3 +160,63 @@ async def test_read_workspace_log_redacts_multiline_compose_env_file_provider_se
     for fragment in secret.splitlines():
         assert fragment not in data
     assert data == f"provider emitted\n{REDACTION_MARKER}\ndone\n"
+
+
+@pytest.mark.unit
+async def test_read_workspace_log_does_not_redact_multiline_first_line_fragment_outside_secret(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Do not treat a quoted multiline secret's first line as an exact secret."""
+    _clear_known_secret_env(monkeypatch)
+    first_line = "opaque-first-fragment"
+    secret = f"{first_line}\noperator-second-fragment\nopaque-third-fragment"
+    compose_env_file = _write_multiline_secret_env_file(tmp_path, secret)
+    settings = Settings(_env_file=None, work_dir=str(tmp_path))
+    service = WorkspaceService(factory, log_root=tmp_path / "logs", settings=settings)
+    mcp = build_mcp_server(
+        service=service,
+        settings=settings,
+        compose_env_file=compose_env_file,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Log multiline first-line fragment",
+            task_prompt="Read logs.",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+    raw_text = f"public mention {first_line}\nprovider emitted\n{secret}\ndone\n"
+    store = LogStore(root=tmp_path / "logs", session_factory=factory)
+    sink = await store.open_stream(
+        workspace_id=workspace.id,
+        stream_id="setup.stdout",
+        source="setup",
+        name="Setup stdout",
+        kind="stdout",
+    )
+    await sink.write(raw_text)
+    await sink.close()
+
+    chunk = await _call(
+        mcp,
+        "awf_read_workspace_log",
+        {
+            "workspace_id": workspace.id,
+            "stream_id": "setup.stdout",
+            "offset": 0,
+            "limit_bytes": len(raw_text),
+        },
+    )
+
+    assert isinstance(chunk, dict)
+    data = chunk["data"]
+    assert first_line in data
+    for fragment in secret.splitlines()[1:]:
+        assert fragment not in data
+    assert data == f"public mention {first_line}\nprovider emitted\n{REDACTION_MARKER}\ndone\n"

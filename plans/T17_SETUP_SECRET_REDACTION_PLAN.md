@@ -2189,3 +2189,58 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
+
+## Review-Level Comment `issue:4620175517` MCP Multiline Fragment Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports that MCP exact-secret collection still adds
+the first physical-line fragment returned by `compose_env_file_values()` for a
+quoted multiline Compose env-file secret, then also adds the reconstructed full
+multiline value. That can over-redact unrelated MCP workspace-log content that
+contains the same first-line text outside the secret.
+
+The duplicated-parser item is already stale in this checkout because service
+logs and MCP use `compose_env_file_quoted_multiline_values()` from
+`awf.service.environment`. The single-quoted backslash item conflicts with
+Docker Compose's documented escaped-quote syntax and the existing regression
+test, so this repair leaves that behavior unchanged.
+
+This repair is limited to MCP exact-secret collection, a focused MCP
+regression, and this plan/validation evidence. It does not change branch
+management, pushing, broad validation, full coverage, OpenAPI drift, frontend
+validation, or unrelated Compose parsing behavior.
+
+### Requirements Checklist
+
+- MCP exact-secret collection must include the reconstructed full quoted
+  multiline Compose env-file secret.
+- MCP exact-secret collection must not include the first physical-line fragment
+  for that same quoted multiline secret when the full value spans lines.
+- MCP workspace log reads must avoid over-redacting unrelated text that matches
+  only the skipped first-line fragment while still redacting the full
+  multiline secret.
+- Service-log first-line fragment behavior and shared Compose parser behavior
+  remain unchanged.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused MCP regression that emits an unrelated copy of the first-line
+   fragment and the full multiline secret in a workspace log.
+2. Update `_mcp_compose_env_file_secret_values()` to build the same first-line
+   fragment exclusion context service logs already use.
+3. Keep the existing full multiline secret collection and exact-secret
+   deduplication.
+4. Run the focused MCP regression, adjacent MCP multiline redaction tests, and
+   narrow lint/type checks for touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py::test_read_workspace_log_does_not_redact_multiline_first_line_fragment_outside_secret -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```

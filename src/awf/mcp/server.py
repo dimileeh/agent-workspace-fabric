@@ -545,7 +545,14 @@ def _mcp_secret_values(
         service_settings.github_token,
     ]
     values.extend(_mcp_compose_env_file_secret_values(resolved_compose_env_file))
-    values.extend(value for key, value in provider_environ.items() if is_secret_env_key(key))
+    _, quoted_multiline_first_line_values = _mcp_quoted_multiline_secret_context(
+        resolved_compose_env_file
+    )
+    values.extend(
+        value
+        for key, value in provider_environ.items()
+        if is_secret_env_key(key) and (key, value) not in quoted_multiline_first_line_values
+    )
     return tuple(dict.fromkeys(value for value in values if value and len(value) >= 4))
 
 
@@ -565,22 +572,35 @@ def _mcp_compose_env_file_secret_values(compose_env_file: Path | None) -> tuple[
         if compose_env_file is not None
         else None
     )
+    (
+        quoted_multiline_values,
+        quoted_multiline_first_line_values,
+    ) = _mcp_quoted_multiline_secret_context(resolved_env_file)
     values = [
         value
         for key, value in compose_env_file_values(resolved_env_file).items()
-        if value and len(value) >= 4 and is_secret_env_key(key)
+        if value
+        and len(value) >= 4
+        and is_secret_env_key(key)
+        and (key, value) not in quoted_multiline_first_line_values
     ]
-    values.extend(_mcp_quoted_multiline_secret_values(resolved_env_file))
+    values.extend(quoted_multiline_values)
     return tuple(dict.fromkeys(values))
 
 
-def _mcp_quoted_multiline_secret_values(compose_env_file: Path | None) -> tuple[str, ...]:
-    """Return Compose quoted multiline secret values for exact MCP redaction."""
-    return tuple(
-        entry.value
-        for entry in compose_env_file_quoted_multiline_values(compose_env_file)
-        if len(entry.value) >= 4 and is_secret_env_key(entry.key)
-    )
+def _mcp_quoted_multiline_secret_context(
+    compose_env_file: Path | None,
+) -> tuple[tuple[str, ...], frozenset[tuple[str, str]]]:
+    """Return full quoted multiline MCP secrets and parsed first-line fragments."""
+    values: list[str] = []
+    first_line_values: set[tuple[str, str]] = set()
+    for entry in compose_env_file_quoted_multiline_values(compose_env_file):
+        if len(entry.value) < 4 or not is_secret_env_key(entry.key):
+            continue
+        values.append(entry.value)
+        if not entry.closed_on_first_line:
+            first_line_values.add((entry.key, entry.first_line_value))
+    return tuple(values), frozenset(first_line_values)
 
 
 def _redact_sensitive_payload(
