@@ -268,10 +268,26 @@ async def read_log_chunk(
     offset: int,
     limit_bytes: int,
 ) -> tuple[str, int, bool]:
-    return await asyncio.to_thread(_read_log_chunk, path, offset, limit_bytes)
+    chunk, next_offset, eof = await read_log_chunk_bytes(
+        path=path,
+        offset=offset,
+        limit_bytes=limit_bytes,
+    )
+    return chunk.decode("utf-8", errors="replace"), next_offset, eof
 
 
-def _read_log_chunk(path: Path, offset: int, limit_bytes: int) -> tuple[str, int, bool]:
+async def read_log_chunk_bytes(
+    *,
+    path: Path,
+    offset: int,
+    limit_bytes: int,
+) -> tuple[bytes, int, bool]:
+    """Read a byte-preserving log chunk without decoding caller offsets."""
+    return await asyncio.to_thread(_read_log_chunk_bytes, path, offset, limit_bytes)
+
+
+def _read_log_chunk_bytes(path: Path, offset: int, limit_bytes: int) -> tuple[bytes, int, bool]:
+    """Read a bounded byte chunk and return the next byte offset."""
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         file_size = handle.tell()
@@ -280,7 +296,7 @@ def _read_log_chunk(path: Path, offset: int, limit_bytes: int) -> tuple[str, int
         chunk = handle.read(max(limit_bytes, 0))
 
     next_offset = safe_offset + len(chunk)
-    return chunk.decode("utf-8", errors="replace"), next_offset, next_offset >= file_size
+    return chunk, next_offset, next_offset >= file_size
 
 
 async def stream_compose_service_logs(

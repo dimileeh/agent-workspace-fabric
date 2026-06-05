@@ -611,6 +611,238 @@ class TestReadWorkspaceArtifact:
         assert result["size_bytes"] == len(decoded)
 
     @pytest.mark.unit
+    async def test_read_workspace_artifact_redacts_compose_env_file_provider_secret(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Redact compose env-file provider secrets from text artifacts."""
+        secret = "opaque-compose-value"
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"ANTHROPIC_AUTH_TOKEN={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact Compose env redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "provider.txt").write_bytes(f"prefix {secret} suffix".encode())
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {"workspace_id": workspace.id, "relative_path": "provider.txt", "limit_bytes": 1024},
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"prefix <redacted> suffix"
+        assert result["size_bytes"] == len(decoded)
+
+    @pytest.mark.unit
+    async def test_read_workspace_artifact_redacts_custom_compose_env_secret(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Redact bare custom secret-like Compose env values from text artifacts."""
+        key = "CUSTOM_CLIENT_SECRET"
+        secret = "bare-compose-custom-value"
+        monkeypatch.delenv(key, raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"{key}={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact custom Compose env redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "custom-provider.txt").write_bytes(f"prefix {secret} suffix".encode())
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "custom-provider.txt",
+                "limit_bytes": 1024,
+            },
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"prefix <redacted> suffix"
+        assert secret.encode() not in decoded
+
+    @pytest.mark.unit
+    async def test_read_workspace_artifact_redacts_unicode_compose_env_secret(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Redact non-ASCII Compose env secrets from UTF-8 text artifacts."""
+        key = "ANTHROPIC_AUTH_TOKEN"
+        secret = "p\u00e4ssw\u00f6rd1234"
+        monkeypatch.delenv(key, raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"{key}={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact Unicode Compose env redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "unicode-provider.txt").write_bytes(f"prefix {secret} suffix".encode())
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "unicode-provider.txt",
+                "limit_bytes": 1024,
+            },
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"prefix <redacted> suffix"
+        assert secret.encode("utf-8") not in decoded
+
+    @pytest.mark.unit
+    async def test_read_workspace_artifact_redacts_overlapping_exact_secret_bytes(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Redact self-overlapping exact secrets before returning text artifacts."""
+        secret = "abcabc"
+        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact overlapping exact secret redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "overlap.txt").write_bytes(b"abcabcabc")
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "overlap.txt",
+                "limit_bytes": 1024,
+            },
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"<redacted>"
+        assert secret.encode() not in decoded
+        assert b"abc" not in decoded
+
+    @pytest.mark.unit
+    async def test_read_workspace_artifact_coalesces_adjacent_exact_secret_bytes(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Coalesce adjacent exact secret spans before returning text artifacts."""
+        api_secret = "alpha-secret-value"
+        github_secret = "bravo-secret-value"
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path),
+            api_token=api_secret,
+            github_token=github_secret,
+        )
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(service=service, settings=settings)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact adjacent exact secret redaction",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "adjacent.txt").write_bytes(
+            f"prefix {api_secret}{github_secret} suffix".encode()
+        )
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "adjacent.txt",
+                "limit_bytes": 1024,
+            },
+        )
+
+        assert isinstance(result, dict)
+        decoded = base64.b64decode(result["content"])
+        assert decoded == b"prefix <redacted> suffix"
+        assert api_secret.encode() not in decoded
+        assert github_secret.encode() not in decoded
+
+    @pytest.mark.unit
     async def test_read_workspace_artifact_does_not_redact_base64_content(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -723,56 +955,12 @@ class TestReadWorkspaceArtifact:
         assert result["error_code"] == "ARTIFACT_BLOCKED"
 
     @pytest.mark.unit
-    async def test_redaction_expansion_triggers_oversized(
-        self,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        secret = "ABCD"
-        settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
-        service = WorkspaceService(factory, settings=settings)
-        mcp = build_mcp_server(service=service, settings=settings)
-        async with factory() as session:
-            workspace = await WorkspaceRepository(session).create(
-                repo_url="git@github.com:example/app.git",
-                branch_base="main",
-                task_title="Artifact redaction oversize",
-                task_prompt="Read artifact.",
-                agent="codex",
-                test_commands=[],
-            )
-            await session.commit()
-        artifact_dir = tmp_path / "artifacts" / workspace.id
-        artifact_dir.mkdir(parents=True)
-        limit_bytes = 100
-        payload = (secret * (limit_bytes // len(secret))).encode()
-        (artifact_dir / "secret.txt").write_bytes(payload)
-
-        result = await mcp.call_tool(
-            "awf_read_workspace_artifact",
-            {
-                "workspace_id": workspace.id,
-                "relative_path": "secret.txt",
-                "limit_bytes": limit_bytes,
-            },
-        )
-        assert isinstance(result, CallToolResult)
-        assert result.isError is True
-        assert result.structuredContent is not None
-        assert result.structuredContent["error_code"] == "ARTIFACT_OVERSIZED"
-        assert result.structuredContent.get("detail") is not None
-        assert isinstance(result.structuredContent["detail"], dict)
-        assert result.structuredContent["detail"]["limit_bytes"] == limit_bytes
-        assert result.structuredContent["detail"]["actual_bytes"] == (
-            (limit_bytes // len(secret)) * len("<redacted>")
-        )
-
-    @pytest.mark.unit
     async def test_binary_artifact_containing_secret_is_blocked(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        """Verify binary artifacts containing configured secrets are blocked."""
         secret = "test-secret-token-abc"
         settings = Settings(_env_file=None, work_dir=str(tmp_path), api_token=secret)
         service = WorkspaceService(factory, settings=settings)
@@ -807,6 +995,7 @@ class TestReadWorkspaceArtifact:
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
+        """Verify binary artifacts containing provider env secrets are blocked."""
         secret = "env-secret-token-abc"
         monkeypatch.setenv("OPENAI_API_KEY", secret)
         settings = Settings(_env_file=None, work_dir=str(tmp_path))
@@ -836,6 +1025,53 @@ class TestReadWorkspaceArtifact:
                 "limit_bytes": 1024,
             },
         )
+        assert isinstance(result, dict)
+        assert result["error_code"] == "ARTIFACT_BLOCKED"
+
+    @pytest.mark.unit
+    async def test_binary_artifact_containing_compose_env_file_provider_secret_is_blocked(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Block binary artifacts containing compose env-file provider secrets."""
+        secret = "opaque-compose-binary-value"
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        compose_env_file = tmp_path / "compose.env"
+        compose_env_file.write_text(f"ANTHROPIC_AUTH_TOKEN={secret}\n", encoding="utf-8")
+        settings = Settings(_env_file=None, work_dir=str(tmp_path))
+        service = WorkspaceService(factory, settings=settings)
+        mcp = build_mcp_server(
+            service=service,
+            settings=settings,
+            compose_env_file=compose_env_file,
+        )
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Artifact binary Compose env blocked",
+                task_prompt="Read artifact.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+        artifact_dir = tmp_path / "artifacts" / workspace.id
+        artifact_dir.mkdir(parents=True)
+        payload = b"\x00" + f"prefix {secret} suffix".encode() + b"\x00\xff"
+        (artifact_dir / "secret-compose-env.bin").write_bytes(payload)
+
+        result = await _call(
+            mcp,
+            "awf_read_workspace_artifact",
+            {
+                "workspace_id": workspace.id,
+                "relative_path": "secret-compose-env.bin",
+                "limit_bytes": 1024,
+            },
+        )
+
         assert isinstance(result, dict)
         assert result["error_code"] == "ARTIFACT_BLOCKED"
 

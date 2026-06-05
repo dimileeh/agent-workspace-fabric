@@ -82,6 +82,23 @@ def _runtime_cli_ok(expected_executable: str) -> Any:
 
 
 @pytest.mark.unit
+def test_provider_readiness_public_secret_env_key_classifier() -> None:
+    """Classify public-looking keys separately from secret environment keys."""
+    assert provider_readiness.is_secret_env_key("OPENAI_API_KEY")
+    assert provider_readiness.is_secret_env_key("custom-token")
+    assert provider_readiness.is_secret_env_key("PASSWORD")
+    assert provider_readiness.is_secret_env_key("workspace_client_secret")
+    assert provider_readiness.is_secret_env_key("PRIVATE_KEY")
+    assert provider_readiness.is_secret_env_key("PRIVATEKEY")
+    assert provider_readiness.is_secret_env_key("APIKEY")
+    assert provider_readiness.is_secret_env_key("ACCESSKEY")
+    assert provider_readiness.is_secret_env_key("SSH_PRIVATE_KEY")
+    assert provider_readiness.is_secret_env_key("custom-private-key")
+    assert not provider_readiness.is_secret_env_key("PUBLIC_URL")
+    assert not provider_readiness.is_secret_env_key("TOKEN_BUCKET_SIZE")
+
+
+@pytest.mark.unit
 def test_provider_readiness_validates_aliases_and_rejects_unknown() -> None:
     assert validate_provider_names(
         ["claude", "cursor", "opencode", "codex", "grok", "docker", ""]

@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from sqlalchemy.engine import make_url
 
+from awf.common.redaction import redact_secrets
 from awf.service import provider_readiness
 from awf.service.config import (
     COMPOSE_ENV_FILE_OMITTED,
@@ -885,7 +886,7 @@ def _secret_values(
 
 def _redact_text(value: str, secrets: frozenset[str]) -> str:
     redacted = provider_readiness._redact(value, secrets)
-    return _redact_uri(redacted)
+    return redact_secrets(_redact_uri(redacted))
 
 
 def _redact_uri(value: str) -> str:
