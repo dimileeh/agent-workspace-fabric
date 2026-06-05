@@ -591,10 +591,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         smoke_root = Path(tempfile.mkdtemp(prefix="awf-first-run-smoke-"))
         results = run_harness(config, smoke_root=smoke_root)
         print(f"temp root: {smoke_root}")
+        _print_results(results)
     else:
         with tempfile.TemporaryDirectory(prefix="awf-first-run-smoke-") as temp_dir:
             results = run_harness(config, smoke_root=Path(temp_dir))
-    _print_results(results)
+            _print_results(results)
     has_failure = any(result.status == "failed" for result in results)
     has_pass = any(result.status == "passed" for result in results)
     return 0 if has_pass and not has_failure else 1
@@ -811,8 +812,17 @@ def _source_setup_result(
             stderr_tail=stderr_tail,
         )
     source_checkout = _payload_source_checkout(payload)
+    if source_checkout is None:
+        return SmokeResult(
+            lane=lane,
+            status="failed",
+            command=command.argv,
+            reason="setup dry-run did not emit details.source_checkout as an object",
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+        )
     selected = _source_checkout_root(source_checkout)
-    if source_checkout is not None and selected is None:
+    if selected is None:
         return SmokeResult(
             lane=lane,
             status="failed",

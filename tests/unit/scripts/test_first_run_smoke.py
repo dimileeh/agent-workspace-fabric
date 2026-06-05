@@ -241,6 +241,41 @@ def test_main_exits_zero_when_any_result_passes_without_failures(
 
 
 @pytest.mark.unit
+def test_main_prints_results_before_temporary_root_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Result printing happens while the non-keep-temp smoke root still exists."""
+    observed_root: Path | None = None
+
+    def passing_harness(
+        _config: smoke.SmokeConfig,
+        *,
+        smoke_root: Path,
+    ) -> tuple[smoke.SmokeResult, ...]:
+        nonlocal observed_root
+        assert smoke_root.exists()
+        observed_root = smoke_root
+        return (
+            smoke.SmokeResult(
+                lane=smoke.Lane.INSTALLER_FIXTURE,
+                status="passed",
+                command=("awf", "--help"),
+            ),
+        )
+
+    def assert_root_exists_during_print(_results: tuple[smoke.SmokeResult, ...]) -> None:
+        assert observed_root is not None
+        assert observed_root.exists()
+
+    monkeypatch.setattr(smoke, "run_harness", passing_harness)
+    monkeypatch.setattr(smoke, "_print_results", assert_root_exists_during_print)
+
+    assert smoke.main(["--lane", "installer-fixture"]) == 0
+    assert observed_root is not None
+    assert not observed_root.exists()
+
+
+@pytest.mark.unit
 def test_tool_install_lane_stops_after_first_post_install_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -703,6 +738,38 @@ def test_source_setup_result_exposes_full_stdout_source_checkout(tmp_path: Path)
     assert result.source_checkout == {"root": str(checkout.resolve())}
     assert len(result.stdout_tail) == smoke._TAIL_CHARS
     assert not result.stdout_tail.startswith("{")
+
+
+@pytest.mark.unit
+def test_source_setup_result_reports_absent_source_checkout_metadata(tmp_path: Path) -> None:
+    """Absent details.source_checkout has a distinct diagnostic from wrong root."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    command = smoke.CommandSpec(
+        argv=(
+            "awf",
+            "setup",
+            "--dry-run",
+            "--source-checkout",
+            str(checkout),
+            "--format",
+            "json",
+        ),
+        env={},
+        cwd=tmp_path / "outside",
+    )
+    payload = {"details": {"workspace": {"root": str(checkout.resolve())}}}
+    completed = subprocess.CompletedProcess(
+        args=command.argv,
+        returncode=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    result = smoke._source_setup_result(smoke.Lane.SOURCE_UV_RUN, command, completed, checkout)
+
+    assert result.status == "failed"
+    assert result.reason == "setup dry-run did not emit details.source_checkout as an object"
 
 
 @pytest.mark.unit

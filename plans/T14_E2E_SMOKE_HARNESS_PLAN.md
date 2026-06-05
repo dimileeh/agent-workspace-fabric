@@ -409,6 +409,60 @@ is a false positive because the original exception propagates before
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
 
+## Review-Level Repair Follow-Up: issue 4620148180 Diagnostic Clarity
+
+### Problem Statement And Scope
+
+Review-level comment `issue:4620148180` reports two remaining clarity issues in
+`scripts/first_run_smoke.py`:
+
+- `_source_setup_result` still reports the selected-checkout mismatch reason
+  when the parsed setup JSON omits `details.source_checkout` entirely.
+- `main()` prints in-memory results after the non-`--keep-temp`
+  `TemporaryDirectory` has already been removed, which obscures the intended
+  lifetime for future result printers that might reference temp artifacts.
+
+Scope is limited to clearer source-checkout metadata diagnostics, result-print
+placement, and focused unit coverage.
+
+### Requirements Checklist
+
+- Add focused regression coverage for setup JSON that omits
+  `details.source_checkout`.
+- Return a distinct failed smoke result reason when parsed setup JSON does not
+  contain source-checkout metadata.
+- Add focused coverage proving `main()` calls `_print_results` before the
+  temporary smoke root is removed when `--keep-temp` is not set.
+- Move result printing into both `main()` temp-root branches without changing
+  exit-code semantics.
+- Run only focused tests and targeted lint/format checks; broad AWF/GitHub
+  validation remains managed after agent completion.
+
+### Implementation Steps
+
+1. Add unit tests in `tests/unit/scripts/test_first_run_smoke.py` for absent
+   `details.source_checkout` metadata and temp-root lifetime during printing.
+2. Run those focused tests and confirm they fail before implementation.
+3. Update `_source_setup_result` to return a distinct missing-metadata failure
+   before comparing paths.
+4. Move `_print_results(results)` inside the `keep_temp` and
+   `TemporaryDirectory` branches in `main()`.
+5. Re-run the focused regressions, a small related unit slice, and
+   file-scoped lint/format checks.
+
+### Verification Commands And Pass Criteria
+
+- Pre-fix targeted regressions:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_absent_source_checkout_metadata tests/unit/scripts/test_first_run_smoke.py::test_main_prints_results_before_temporary_root_cleanup -q`
+  should fail before implementation.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_absent_source_checkout_metadata tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_missing_source_checkout_root tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_wrong_source_checkout_root tests/unit/scripts/test_first_run_smoke.py::test_main_prints_results_before_temporary_root_cleanup tests/unit/scripts/test_first_run_smoke.py::test_main_exits_zero_when_any_result_passes_without_failures -q`
+  must pass.
+- `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  must pass.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.
+
 ## Review-Level Repair Iteration: issue 4620148180 Source Checkout Metadata
 
 ### Problem Statement And Scope
