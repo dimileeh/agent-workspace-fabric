@@ -1265,7 +1265,7 @@ async def test_start_local_service_preserves_explicit_source_checkout_setup_chec
 ) -> None:
     from awf.mcp import setup_tools
 
-    checkout = tmp_path / "source checkout"
+    checkout = tmp_path / "model\\1"
     checkout.mkdir()
 
     def resolve_source_checkout(source_path: Path | None) -> object:
