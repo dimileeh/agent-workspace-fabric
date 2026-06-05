@@ -812,6 +812,15 @@ def _source_setup_result(
         )
     source_checkout = _payload_source_checkout(payload)
     selected = _source_checkout_root(source_checkout)
+    if source_checkout is not None and selected is None:
+        return SmokeResult(
+            lane=lane,
+            status="failed",
+            command=command.argv,
+            reason="setup dry-run did not emit source_checkout.root as a string",
+            stdout_tail=stdout_tail,
+            stderr_tail=stderr_tail,
+        )
     if selected != str(checkout.resolve()):
         return SmokeResult(
             lane=lane,

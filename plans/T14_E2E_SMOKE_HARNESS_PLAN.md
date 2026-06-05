@@ -408,3 +408,59 @@ is a false positive because the original exception propagates before
   must pass.
 - Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
   owns broad validation, provenance, logs, and merge gating after completion.
+
+## Review-Level Repair Iteration: issue 4620148180 Source Checkout Metadata
+
+### Problem Statement And Scope
+
+Review-level comment `issue:4620148180` reports two remaining harness
+readability/resilience issues:
+
+- `_source_setup_result` reports the same selected-checkout mismatch reason
+  when `details.source_checkout.root` is missing as it does when `root` is
+  present but wrong.
+- `test_installer_fixture_command_is_local_dry_run` asserts exact environment
+  equality, so it would fail if `scripts.release_smoke.smoke_invocation`
+  starts returning additional installer environment keys.
+
+Scope is limited to clearer source-checkout metadata diagnostics in
+`scripts/first_run_smoke.py` and the brittle unit-test assertion. No lane
+behavior, release gates, or installer command construction should change.
+
+### Requirements Checklist
+
+- Add focused regression coverage for setup JSON that includes
+  `source_checkout` metadata without a string `root`.
+- Return a distinct failed smoke result reason for missing or invalid
+  `source_checkout.root`.
+- Preserve the existing failure path for a present but wrong checkout root with
+  focused coverage.
+- Harden the installer fixture unit test to assert the required manifest env
+  key without requiring it to be the only env key.
+- Run only focused tests and targeted lint/format checks; broad AWF/GitHub
+  validation remains managed after agent completion.
+
+### Implementation Steps
+
+1. Add unit tests in `tests/unit/scripts/test_first_run_smoke.py` for setup
+   dry-run JSON payloads whose `details.source_checkout` lacks `root` and whose
+   `root` points at the wrong checkout.
+2. Run that focused test and confirm it fails before implementation.
+3. Update `_source_setup_result` to fail with a dedicated missing/invalid
+   `source_checkout.root` reason before comparing the selected checkout path.
+4. Change the installer fixture env assertion to a required-key assertion.
+5. Re-run the focused new regression, a small related unit slice, and
+   file-scoped lint/format checks.
+
+### Verification Commands And Pass Criteria
+
+- Pre-fix targeted regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_missing_source_checkout_root -q`
+  should fail before implementation.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_missing_source_checkout_root tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_wrong_source_checkout_root tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_exposes_full_stdout_source_checkout tests/unit/scripts/test_first_run_smoke.py::test_installer_fixture_command_is_local_dry_run -q`
+  must pass.
+- `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  must pass.
+- Full AWF/GitHub validation is intentionally not run in the agent phase; AWF
+  owns broad validation, provenance, logs, and merge gating after completion.

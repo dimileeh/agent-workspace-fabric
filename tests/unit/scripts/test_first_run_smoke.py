@@ -31,7 +31,7 @@ def test_installer_fixture_command_is_local_dry_run(tmp_path: Path, method: str)
         "--channel",
         "stable",
     )
-    assert command.env == {"AWF_INSTALL_MANIFEST": str(tmp_path / "fixture-manifest.json")}
+    assert command.env["AWF_INSTALL_MANIFEST"] == str(tmp_path / "fixture-manifest.json")
 
     manifest = json.loads((tmp_path / "fixture-manifest.json").read_text(encoding="utf-8"))
     wheel = tmp_path / "dist" / f"agent_workspace_fabric-{smoke._FIXTURE_VERSION}-py3-none-any.whl"
@@ -703,6 +703,70 @@ def test_source_setup_result_exposes_full_stdout_source_checkout(tmp_path: Path)
     assert result.source_checkout == {"root": str(checkout.resolve())}
     assert len(result.stdout_tail) == smoke._TAIL_CHARS
     assert not result.stdout_tail.startswith("{")
+
+
+@pytest.mark.unit
+def test_source_setup_result_reports_missing_source_checkout_root(tmp_path: Path) -> None:
+    """Missing source_checkout.root has a distinct diagnostic from wrong root."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    command = smoke.CommandSpec(
+        argv=(
+            "awf",
+            "setup",
+            "--dry-run",
+            "--source-checkout",
+            str(checkout),
+            "--format",
+            "json",
+        ),
+        env={},
+        cwd=tmp_path / "outside",
+    )
+    payload = {"details": {"source_checkout": {"mode": "editable"}}}
+    completed = subprocess.CompletedProcess(
+        args=command.argv,
+        returncode=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    result = smoke._source_setup_result(smoke.Lane.SOURCE_UV_RUN, command, completed, checkout)
+
+    assert result.status == "failed"
+    assert result.reason == "setup dry-run did not emit source_checkout.root as a string"
+
+
+@pytest.mark.unit
+def test_source_setup_result_reports_wrong_source_checkout_root(tmp_path: Path) -> None:
+    """Wrong source_checkout.root keeps the selected-checkout mismatch diagnostic."""
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    command = smoke.CommandSpec(
+        argv=(
+            "awf",
+            "setup",
+            "--dry-run",
+            "--source-checkout",
+            str(checkout),
+            "--format",
+            "json",
+        ),
+        env={},
+        cwd=tmp_path / "outside",
+    )
+    payload = {"details": {"source_checkout": {"root": str(tmp_path / "other")}}}
+    completed = subprocess.CompletedProcess(
+        args=command.argv,
+        returncode=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    result = smoke._source_setup_result(smoke.Lane.SOURCE_UV_RUN, command, completed, checkout)
+
+    assert result.status == "failed"
+    assert result.reason == f"setup dry-run did not identify selected source checkout {checkout}"
 
 
 @pytest.mark.unit

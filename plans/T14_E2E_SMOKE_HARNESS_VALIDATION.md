@@ -348,3 +348,39 @@ validation, provenance, logs, and merge gating after completion.
 
 Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
 validation, provenance, logs, and merge gating after completion.
+
+## Review-Level Repair Iteration: issue 4620148180 Source Checkout Metadata
+
+### Requirement Status
+
+- Complete: Added focused regression coverage in
+  `tests/unit/scripts/test_first_run_smoke.py` for setup JSON that includes
+  `details.source_checkout` without a string `root`.
+- Complete: `_source_setup_result` now returns a distinct failed result reason
+  when parsed source-checkout metadata omits `source_checkout.root` or emits it
+  as a non-string value.
+- Complete: Preserved the existing selected-checkout mismatch failure path for
+  absent metadata or a present-but-wrong root, with focused coverage for the
+  present-but-wrong case.
+- Complete: Hardened the installer fixture unit test to assert the required
+  `AWF_INSTALL_MANIFEST` env key without requiring it to be the only env key.
+- Complete: Only focused local checks were run.
+
+### Evidence
+
+- Confirmed pre-fix focused regression:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_missing_source_checkout_root -q`
+  failed because the result reason was the generic selected-checkout mismatch
+  message.
+- Post-fix focused command:
+  `uv run --python 3.12 --extra dev pytest tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_missing_source_checkout_root tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_reports_wrong_source_checkout_root tests/unit/scripts/test_first_run_smoke.py::test_source_setup_result_exposes_full_stdout_source_checkout tests/unit/scripts/test_first_run_smoke.py::test_installer_fixture_command_is_local_dry_run -q`
+  passed with `5 passed`.
+- File-scoped lint:
+  `uv run --python 3.12 --extra dev ruff check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+- File-scoped format check:
+  `uv run --python 3.12 --extra dev ruff format --check scripts/first_run_smoke.py tests/unit/scripts/test_first_run_smoke.py`
+  passed.
+
+Full AWF/GitHub validation was not run in the agent phase; AWF owns broad
+validation, provenance, logs, and merge gating after completion.
