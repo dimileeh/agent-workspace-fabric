@@ -53,6 +53,55 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Bootstrap Path Error Secrets
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve existing generic start bootstrap-execution failure payload shape:
+  Complete.
+- Pass selected start settings and service-env secret values to `safe_result` on
+  the `_start_bootstrap_path_error_result` path: Complete.
+- Add focused regression coverage for selected start secrets embedded in
+  migration metadata on that path: Complete.
+- Add the requested bridge testing note without changing bridge exports:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `src/awf/cli/first_run_mcp_bridge.py`
+- `tests/unit/mcp/test_setup_tools_start.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_path_failure_migration_secrets -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_selected_start_environment_secret_from_bootstrap_failure tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_path_failure_migration_secrets tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_selected_start_environment_secret_from_success_payload -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because the rendered
+  generic bootstrap-execution failure payload contained
+  `opaque-path-settings-secret` and `opaque-path-env-secret` from
+  `env_migration` metadata.
+- Regression test after the implementation change: 1 passed.
+- Focused adjacent start redaction tests: 3 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: Comment 4440090018 Client Instructions Env File Dry-Run
 
 ### Requirement Status

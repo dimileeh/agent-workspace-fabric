@@ -276,6 +276,54 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Bootstrap Path Error Secrets
+
+### Problem Statement And Scope
+
+The review reports that `awf_start_local_service` passes selected start
+settings and service-env secret values to `safe_result` on the start
+`ServiceBootstrapError` and success paths, but not on the generic bootstrap
+execution error path handled by `_start_bootstrap_path_error_result`. That path
+also forwards `inputs.env_migration` into the failure payload, so it should use
+the same defense-in-depth exact-secret redaction as the adjacent paths.
+
+The review also asks for a concrete bridge comment warning that monkeypatches to
+source CLI modules do not affect the already-captured bridge/setup-tools aliases.
+
+Scope is limited to the start generic bootstrap-execution error path, a focused
+redaction regression, and the bridge comment. Existing payload shapes and command
+rendering stay unchanged.
+
+### Requirements Checklist
+
+- Preserve existing generic start bootstrap-execution failure payload shape.
+- Pass selected start settings and service-env secret values to `safe_result` on
+  the `_start_bootstrap_path_error_result` path.
+- Add focused regression coverage for selected start secrets embedded in
+  migration metadata on that path.
+- Add the requested bridge testing note without changing bridge exports.
+
+### Implementation Steps
+
+1. Add a focused failing regression proving selected start secrets are redacted
+   from a generic bootstrap-execution failure payload that includes
+   `env_migration` metadata.
+2. Thread `extra_secrets` through `_start_bootstrap_path_error_result` and its
+   caller.
+3. Add the bridge testing warning comment.
+4. Run the targeted regression and focused lint/type checks for changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_path_failure_migration_secrets -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: python-coverage-shards (8) Setup Tools Line Limit
 
 ### Problem Statement And Scope

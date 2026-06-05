@@ -18,6 +18,9 @@ from awf.cli import start_commands as _start_commands
 # Keep this bridge in sync when refactoring setup/start/init command internals.
 # The assignments capture attribute values at bridge import time; they are not
 # live aliases if a command module later replaces a helper object in place.
+# TESTING NOTE: Monkeypatch the re-aliased symbols in awf.mcp.setup_tools, not
+# in awf.cli.setup_commands or here; source-module patches do not affect
+# already-captured references.
 DEFAULT_START_TIMEOUT_SECONDS = _start_commands._DEFAULT_START_TIMEOUT_SECONDS
 ClientEnvFileMissingError = _setup_commands.ClientEnvFileMissingError
 StartBootstrapInputs = _start_commands._StartBootstrapInputs

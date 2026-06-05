@@ -461,6 +461,7 @@ async def _start_local_service_result(
             skip_agent_runtime_build=skip_agent_runtime_build,
             timeout_seconds=timeout_seconds,
             source_checkout=source_path,
+            extra_secrets=_selected_start_secret_values(inputs),
         )
 
     return _first_run_result(
@@ -574,6 +575,7 @@ def _start_bootstrap_path_error_result(
     skip_agent_runtime_build: bool,
     timeout_seconds: float,
     source_checkout: Path | None = None,
+    extra_secrets: Iterable[str] = (),
 ) -> CallToolResult:
     failure = ServiceBootstrapError(
         reason_code=START_BOOTSTRAP_EXECUTION_FAILED,
@@ -590,6 +592,7 @@ def _start_bootstrap_path_error_result(
             source_checkout=source_checkout,
         ),
         is_error=True,
+        extra_secrets=extra_secrets,
     )
 
 
