@@ -94,8 +94,12 @@ NO_PATH_INIT_PROHIBITION_RE = re.compile(
     r"(?P<qualifier>no[- ]path|without a path)\s+`awf init`", re.IGNORECASE
 )
 # Flags that consume the following token as their value; everything else that
-# starts with "-" is treated as a valueless flag.
-VALUE_FLAGS = frozenset({"--project", "--format"})
+# starts with "-" is treated as a valueless flag. Covers every value-taking
+# `awf smoke run` option (src/awf/cli/profile_smoke_commands.py): `--project`,
+# `--format`, and `--demo-path` (the fallback project path). Omitting `--demo-path`
+# made `_parse_smoke_invocation` misread the path following `--demo-path` as a bare
+# positional, raising a spurious "bare positional path" R4 offense.
+VALUE_FLAGS = frozenset({"--project", "--format", "--demo-path"})
 # `awf init`'s own value-taking options (src/awf/cli/main.py). Tracked separately
 # so `_init_arg_status` does not misread an option's value token as the required
 # path: a no-path example like `awf init --template python --yes` must classify
@@ -584,6 +588,19 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
     assert dropped_value.has_project is False
     assert dropped_value.has_mocked_local is True
     assert dropped_value.positional_path is False
+
+    # `--demo-path` is a value-taking smoke option (the fallback project path),
+    # so the path token following it must be consumed as the flag's value rather
+    # than misread as a bare positional path — otherwise a documented
+    # `awf smoke run --project <p> --mocked-local --demo-path <q>` line would raise
+    # a spurious "bare positional path" R4 offense.
+    demo = _parse_smoke_invocation(
+        "awf smoke run --project /tmp/proj --mocked-local --demo-path /tmp/demo"
+    )
+    assert demo is not None
+    assert demo.has_project is True
+    assert demo.has_mocked_local is True
+    assert demo.positional_path is False
 
     # A mocked smoke run chained with a follow-up command must not read the
     # shell operator (or the continuation command) as a positional path, which
