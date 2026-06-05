@@ -54,7 +54,11 @@ _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE = "CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABL
 # (e.g. an ``upper`` tmpfs/filesystem without char-device support). Distinct from the
 # capability-missing case above: here the probe passed, so the failure would otherwise
 # be silent. The deletion is not forwarded — the credential stays visible (fail-safe) —
-# but the gap is surfaced so the un-forwarded deletion is diagnosable.
+# but the gap is surfaced so the un-forwarded deletion is diagnosable. Reserved for a
+# genuine *filesystem* refusal: an agent-planted intermediate symlink in ``upper`` that
+# would block :func:`_safe_overlay_whiteout`'s ``O_NOFOLLOW`` descent (``ELOOP``) is
+# instead caught earlier by the symlink-safe upper-entry guard and deferred to as agent
+# overlay state, so it never reaches — and never mis-fires — this signal.
 _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED = "CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED"
 # Logged once when the fallback-era *deletion* pass is skipped because the reused
 # legacy ``.claude`` copy carries no completeness marker — it may be a *partial*
@@ -155,8 +159,13 @@ def _forward_fallback_deletions_as_whiteouts(
     still-needed credential, so every ambiguous case fails safe toward leaving the
     base copy visible. A removal is whiteouted only when *all* hold:
 
-    - ``upper`` has no entry for the path (any type). The agent's overlay state is
-      otherwise authoritative — never double-handle it.
+    - ``upper`` has no entry for the path (any type) **and** no agent-planted
+      symlink/non-directory occupies one of the path's parent components in ``upper``
+      (checked symlink-safely via :func:`_legacy_path_confidently_absent`, not a plain
+      ``lstat`` that would follow an intermediate link). The agent's overlay state is
+      otherwise authoritative — defer, never double-handle it; this also keeps an
+      intermediate-symlink case from reaching (and being mis-logged by)
+      :func:`_safe_overlay_whiteout`.
     - The live host ``~/.claude`` still holds the path **unchanged** from ``base`` —
       same ``st_mtime_ns`` + ``st_size`` + ``st_mode`` **and** byte-for-byte identical
       content (see :func:`_safe_files_equal_content`). ``st_mode`` is base-significant
@@ -246,9 +255,27 @@ def _forward_fallback_deletions_as_whiteouts(
             # absent under a chain of *real* directories is a confident deletion.
             if not _legacy_path_confidently_absent(legacy, rel):
                 continue
-            # ``upper`` already holds an entry (file or whiteout): the agent's overlay
-            # state is authoritative — never double-handle it.
-            if _safe_stat(upper / rel, follow_symlinks=False) is not None:
+            # ``upper`` already holds an entry (file or whiteout), *or* an agent-planted
+            # symlink/non-directory occupies one of ``rel``'s parent components in
+            # ``upper``: either way the agent's overlay state is authoritative — defer,
+            # never double-handle it. A plain ``_safe_stat(upper / rel,
+            # follow_symlinks=False)`` is *not* enough here: ``lstat`` declines to follow
+            # only the *leaf*, so an agent-planted *intermediate* directory symlink
+            # (``upper/subdir -> /empty``) resolves ``subdir/secret.json`` *through* the
+            # link, sees it absent at the redirect target, and falls through to
+            # :func:`_safe_overlay_whiteout` — whose ``O_NOFOLLOW`` descent then correctly
+            # rejects the symlink (``ELOOP``) and returns ``False``, which would be
+            # *mis*-surfaced as ``CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED`` (a signal reserved
+            # for a genuine filesystem ``mknod`` refusal) and mislead an operator toward a
+            # filesystem problem. The fd-anchored :func:`_legacy_path_confidently_absent`
+            # descends ``upper``'s parents from the trusted root with ``O_NOFOLLOW`` and is
+            # *confidently absent* only when every parent is a real directory and the leaf
+            # is genuinely missing; an intermediate symlink/non-dir reads as "not
+            # confidently absent" → an agent overlay entry to defer to, symmetric with the
+            # legacy-absence guard above. (Its ``legacy`` name reflects only where it was
+            # first needed; it is a generic "absent under a chain of real dirs from a
+            # trusted root" probe.)
+            if not _legacy_path_confidently_absent(upper, rel):
                 continue
             # Host-divergence disambiguation: only a base still matched byte-for-byte
             # by the live host proves the legacy absence is a confident agent deletion.

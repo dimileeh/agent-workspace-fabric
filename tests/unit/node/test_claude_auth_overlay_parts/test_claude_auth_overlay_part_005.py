@@ -447,6 +447,69 @@ def test_reconcile_intermediate_legacy_dir_symlink_does_not_whiteout(
     assert not (upper / "subdir" / "hidden.json").exists()
 
 
+@pytest.mark.unit
+def test_reconcile_intermediate_upper_dir_symlink_defers_without_whiteout_failed_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #414 (issue:4627869350) regression: a confident agent deletion whose path has an
+    # agent-planted *intermediate directory symlink* in ``upper`` (``upper/subdir ->
+    # /empty``). The old upper-entry guard used ``_safe_stat(upper / rel,
+    # follow_symlinks=False)``, whose ``lstat`` follows *intermediate* components: it
+    # resolved ``subdir/hidden.json`` *through* the link, saw it absent at the redirect
+    # target, and fell through to ``_safe_overlay_whiteout`` — whose ``O_NOFOLLOW``
+    # descent then rejected the symlink (``ELOOP``) and returned ``False``, mis-logged as
+    # ``CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED`` (a signal reserved for a genuine filesystem
+    # ``mknod`` refusal). The symlink-safe upper-entry guard must instead treat the
+    # intermediate symlink as authoritative agent overlay state and defer: no whiteout
+    # attempt, and crucially no misleading ``WHITEOUT_FAILED`` diagnostic. A genuine
+    # root-level deletion in the same run is still forwarded (the fix is surgical).
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    empty = tmp_path / "empty"
+    _mkdirs(legacy, merged, upper, base, host, empty)
+
+    # Confident root-level deletion: present in base + host (unchanged), absent in legacy.
+    (base / "secret.json").write_text("token\n")
+    secret_stat = (base / "secret.json").stat()
+    (host / "secret.json").write_text("token\n")
+    os.utime(host / "secret.json", ns=(secret_stat.st_atime_ns, secret_stat.st_mtime_ns))
+
+    # A second confident deletion under a subdir the agent removed from ``legacy`` (so it
+    # is a deletion candidate) while planting that subdir as a directory symlink in
+    # ``upper``. host == base for it too, so *only* the intermediate ``upper`` symlink
+    # keeps it from being (wrongly) whiteouted — and from emitting WHITEOUT_FAILED.
+    (base / "subdir").mkdir()
+    (base / "subdir" / "hidden.json").write_text("token\n")
+    hidden_stat = (base / "subdir" / "hidden.json").stat()
+    (host / "subdir").mkdir()
+    (host / "subdir" / "hidden.json").write_text("token\n")
+    os.utime(host / "subdir" / "hidden.json", ns=(hidden_stat.st_atime_ns, hidden_stat.st_mtime_ns))
+    (upper / "subdir").symlink_to(empty)  # agent-planted intermediate dir symlink in upper
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    with capture_logs() as logs:
+        _reconcile_fallback_edits_into_upper(
+            legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        )
+
+    # Only the unambiguous root-level deletion is forwarded; the symlink-occluded path is
+    # deferred to as overlay state — never whiteouted (credential stays visible).
+    assert [entry["name"] for entry in recorded] == ["secret.json"]
+    assert (upper / "secret.json").exists()
+    assert not (empty / "hidden.json").exists()
+    # The diagnostic signal stays clean: a symlinked ``upper`` component must not be
+    # mistaken for a filesystem ``mknod`` refusal.
+    assert not any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED" for entry in logs
+    )
+
+
 # --- _legacy_path_confidently_absent primitive (#414 symlink-safe deletion check) ------
 
 
