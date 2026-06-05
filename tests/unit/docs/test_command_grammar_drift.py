@@ -78,7 +78,10 @@ HELP_FLAGS = frozenset({"--help", "-h"})
 
 # Prose/snippet shapes that (re)introduce no-path `awf init` as machine setup.
 # Keyed on `awf init` so the legitimate `awf service bootstrap` command is never
-# matched on its own.
+# matched on its own. The fenced-line pattern (last entry) requires an explicit
+# `# ...bootstrap...` comment so R3 stays complementary to R2: a *bare* no-path
+# `awf init` is R2's offender (`_init_arg_status` → "bare"), while R3 only fires
+# when the snippet additionally frames that no-path init as service bootstrap.
 INIT_AS_BOOTSTRAP_PATTERNS = (
     r"`awf init`\s+without a path",
     r"`awf init`\s+\(no path\)",
@@ -88,7 +91,7 @@ INIT_AS_BOOTSTRAP_PATTERNS = (
     r"run `awf init` to verify prerequisites and bootstrap",
     r"`awf init`\.\s+With no arguments it bootstraps",
     r"`awf init`[^.\n]*\bbootstraps?\b[^.\n]*\b(?:local )?(?:service|core)\b",
-    r"(?m)^\s*awf init\s*(?:#.*bootstrap.*)?$",
+    r"(?m)^\s*awf init\s*#.*bootstrap.*$",
 )
 
 
@@ -304,6 +307,12 @@ def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     assert _bootstrap_offenders("Run `awf service bootstrap` to start Postgres.") == []
     assert _bootstrap_offenders("awf init .") == []
     assert _bootstrap_offenders('awf init "$HOME/awf-eval-project"') == []
+    # A *bare* no-path `awf init` (no bootstrap comment) is R2's offender, not
+    # R3's: the fenced-line pattern requires an explicit `# ...bootstrap...`
+    # comment, so R3 stays complementary instead of double-flagging the same
+    # root cause that `_init_arg_status` already reports as "bare".
+    assert _bootstrap_offenders("awf init") == []
+    assert _init_arg_status("awf init") == "bare"
 
 
 # --------------------------------------------------------------------------- #
