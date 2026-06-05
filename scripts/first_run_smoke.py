@@ -366,6 +366,7 @@ def source_uv_run_commands(
         python,
         "awf",
     )
+    source_checkout = str(checkout.resolve())
     return (
         CommandSpec(argv=(*common, "--help"), env=env, cwd=outside_cwd),
         CommandSpec(argv=(*common, "setup", "--help"), env=env, cwd=outside_cwd),
@@ -376,7 +377,7 @@ def source_uv_run_commands(
                 "setup",
                 "--dry-run",
                 "--source-checkout",
-                str(checkout),
+                source_checkout,
                 "--format",
                 "json",
             ),
@@ -712,6 +713,7 @@ def _installed_awf_commands(
     outside_cwd: Path,
     env: Mapping[str, str],
 ) -> tuple[CommandSpec, ...]:
+    source_checkout = str(checkout.resolve())
     return (
         CommandSpec(argv=(str(awf_bin), "--help"), env=env, cwd=outside_cwd),
         CommandSpec(argv=(str(awf_bin), "setup", "--help"), env=env, cwd=outside_cwd),
@@ -722,7 +724,7 @@ def _installed_awf_commands(
                 "setup",
                 "--dry-run",
                 "--source-checkout",
-                str(checkout),
+                source_checkout,
                 "--format",
                 "json",
             ),

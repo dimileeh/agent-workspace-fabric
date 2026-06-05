@@ -450,7 +450,7 @@ def test_source_uv_run_commands_use_project_and_outside_cwd(tmp_path: Path) -> N
         "setup",
         "--dry-run",
         "--source-checkout",
-        str(checkout),
+        str(checkout.resolve()),
         "--format",
         "json",
     )
@@ -458,6 +458,40 @@ def test_source_uv_run_commands_use_project_and_outside_cwd(tmp_path: Path) -> N
         assert command.cwd == outside
         assert command.env["HOME"] == str(root / "home")
         assert "PYTHONPATH" not in command.env
+
+
+@pytest.mark.unit
+def test_source_dry_run_commands_use_resolved_source_checkout(tmp_path: Path) -> None:
+    """Dry-run proof argv matches the resolved checkout root used by setup validation."""
+    real_checkout = tmp_path / "real-checkout"
+    linked_checkout = tmp_path / "linked-checkout"
+    outside = tmp_path / "outside"
+    smoke_root = tmp_path / "smoke"
+    real_checkout.mkdir()
+    outside.mkdir()
+    try:
+        linked_checkout.symlink_to(real_checkout, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable in this environment: {exc}")
+
+    resolved_checkout = str(real_checkout.resolve())
+
+    source_uv_commands = smoke.source_uv_run_commands(
+        checkout=linked_checkout,
+        outside_cwd=outside,
+        smoke_root=smoke_root,
+    )
+    installed_commands = smoke._installed_awf_commands(
+        awf_bin=tmp_path / "bin" / "awf",
+        checkout=linked_checkout,
+        outside_cwd=outside,
+        env={},
+    )
+
+    assert str(linked_checkout) != resolved_checkout
+    for command in (source_uv_commands[-1], installed_commands[-1]):
+        source_checkout_index = command.argv.index("--source-checkout") + 1
+        assert command.argv[source_checkout_index] == resolved_checkout
 
 
 @pytest.mark.unit
