@@ -1048,6 +1048,14 @@ class WorkspaceRepository:
                     (stale_execution_claim, None),
                     else_=Workspace.execution_claim_expires_at,
                 ),
+                # D3: bump the fencing token when clearing a stale execution
+                # claim so a zombie worker whose owner string still matches is
+                # fenced on its next CAS write. Untouched when the claim is
+                # preserved (unexpired) so a live worker is never fenced.
+                execution_claim_epoch=case(
+                    (stale_execution_claim, Workspace.execution_claim_epoch + 1),
+                    else_=Workspace.execution_claim_epoch,
+                ),
             )
         result = await self._session.execute(
             update(Workspace)
@@ -1165,14 +1173,25 @@ class WorkspaceRepository:
         *,
         owner_id: str,
         lease_expires_at: datetime,
+        execution_claim_epoch: int | None = None,
     ) -> bool:
-        """Extend this worker's active-execution lease."""
+        """Extend this worker's active-execution lease.
+
+        When ``execution_claim_epoch`` is supplied (the provisioning fencing
+        path), the update also requires the row's epoch to still match: a later
+        claimant always holds a strictly higher epoch, so a stale worker's
+        heartbeat updates 0 rows and the caller knows it has been fenced.
+        ``None`` preserves the legacy owner-only behavior (the executor path).
+        """
+        conditions = [
+            Workspace.id == workspace_id,
+            Workspace.execution_claimed_by == owner_id,
+        ]
+        if execution_claim_epoch is not None:
+            conditions.append(Workspace.execution_claim_epoch == execution_claim_epoch)
         result = await self._session.execute(
             update(Workspace)
-            .where(
-                Workspace.id == workspace_id,
-                Workspace.execution_claimed_by == owner_id,
-            )
+            .where(*conditions)
             .values(
                 execution_claim_expires_at=lease_expires_at,
                 updated_at=Workspace.updated_at,
@@ -1186,14 +1205,24 @@ class WorkspaceRepository:
         workspace_id: str,
         *,
         owner_id: str,
+        execution_claim_epoch: int | None = None,
     ) -> bool:
-        """Release this worker's active-execution lease, if it still owns it."""
+        """Release this worker's active-execution lease, if it still owns it.
+
+        When ``execution_claim_epoch`` is supplied, the release is gated on the
+        epoch as well, so a release issued after a newer claimant has reclaimed
+        the row (advancing the epoch) updates 0 rows instead of clobbering the
+        new claimant's lease.
+        """
+        conditions = [
+            Workspace.id == workspace_id,
+            Workspace.execution_claimed_by == owner_id,
+        ]
+        if execution_claim_epoch is not None:
+            conditions.append(Workspace.execution_claim_epoch == execution_claim_epoch)
         result = await self._session.execute(
             update(Workspace)
-            .where(
-                Workspace.id == workspace_id,
-                Workspace.execution_claimed_by == owner_id,
-            )
+            .where(*conditions)
             .values(
                 execution_claimed_by=None,
                 execution_claim_expires_at=None,
@@ -1202,6 +1231,27 @@ class WorkspaceRepository:
             .returning(Workspace.id)
         )
         return result.scalar_one_or_none() is not None
+
+    async def read_execution_claim_epoch(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> int | None:
+        """Return the current execution-claim epoch if ``owner_id`` still owns it.
+
+        Returns ``None`` when the row is gone or the claim is no longer held by
+        ``owner_id`` (e.g. a newer claimant reclaimed it). The worker reads its
+        epoch back at provision start via this method and aborts when it is
+        ``None`` (D2).
+        """
+        result = await self._session.execute(
+            select(Workspace.execution_claim_epoch).where(
+                Workspace.id == workspace_id,
+                Workspace.execution_claimed_by == owner_id,
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def release_monitoring_pr_claim(
         self,
