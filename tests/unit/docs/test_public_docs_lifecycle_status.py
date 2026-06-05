@@ -179,15 +179,18 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         )
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"
-        checkout_refresh_index = section.index(checkout_refresh_line)
+        checkout_refresh_index = _required_index(section, checkout_refresh_line, label)
+        refresh_prereq_index = _required_index(section, refresh_prereq, label)
+        setup_index = _required_index(section, setup_line, label)
+        start_index = _required_index(section, start_line, label)
         assert (
             env_restore_start_index
             < env_restore_end_index
             < stop_end_index
             < checkout_refresh_index
-            < section.index(refresh_prereq)
-            < section.index(setup_line)
-            < section.index(start_line)
+            < refresh_prereq_index
+            < setup_index
+            < start_index
         ), f"{label} must stop Core before refreshing source files"
 
 
@@ -250,7 +253,11 @@ def test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over
         ]
         assert len(bash_fences) == 1, label
         body = bash_fences[0].body
-        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        restore_start = _required_index(
+            body,
+            DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
+            label,
+        )
         guarded_stop_index = body.find("if [ -f .env ]; then", restore_start)
         bare_stop_index = body.find(
             "docker compose --env-file .env -f docker/compose/local-service.yml stop",
@@ -338,8 +345,12 @@ def test_source_checkout_upgrade_without_persisted_database_url_drops_stale_shel
         ]
         assert len(bash_fences) == 1, label
         body = bash_fences[0].body
-        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
-        stop_start = body.index("if [ -f .env ]; then", restore_start)
+        restore_start = _required_index(
+            body,
+            DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
+            label,
+        )
+        stop_start = _required_index(body, "if [ -f .env ]; then", label, restore_start)
         stale_env = {
             **os.environ,
             "AWF_DATABASE_URL": "postgresql+asyncpg://awf:stale@localhost:5433/awf",
@@ -564,8 +575,12 @@ def test_lifecycle_env_restore_uses_last_dotenv_assignment(tmp_path: Path) -> No
         ]
         assert len(bash_fences) == 1, label
         body = bash_fences[0].body
-        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
-        stop_start = body.index("if [ -f .env ]; then", restore_start)
+        restore_start = _required_index(
+            body,
+            DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
+            label,
+        )
+        stop_start = _required_index(body, "if [ -f .env ]; then", label, restore_start)
         script = "\n".join(
             (
                 (
@@ -620,8 +635,12 @@ def test_lifecycle_env_restore_uses_last_dotenv_assignment(tmp_path: Path) -> No
         ]
         assert len(bash_fences) == 1, label
         body = bash_fences[0].body
-        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
-        stop_start = body.index("if [ -f .env ]; then", restore_start)
+        restore_start = _required_index(
+            body,
+            DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
+            label,
+        )
+        stop_start = _required_index(body, "if [ -f .env ]; then", label, restore_start)
         script = "\n".join(
             (
                 "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD",
@@ -714,8 +733,12 @@ def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
         ]
         assert len(bash_fences) == 1, label
         body = bash_fences[0].body
-        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
-        stop_start = body.index("if [ -f .env ]; then")
+        restore_start = _required_index(
+            body,
+            DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
+            label,
+        )
+        stop_start = _required_index(body, "if [ -f .env ]; then", label)
         scripts.append((label, body[restore_start:stop_start]))
 
     for label, restore_script in scripts:
@@ -808,8 +831,12 @@ def test_upgrade_env_restore_strips_quoted_inline_dotenv_comments(
         ]
         assert len(bash_fences) == 1, label
         body = bash_fences[0].body
-        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
-        stop_start = body.index("if [ -f .env ]; then")
+        restore_start = _required_index(
+            body,
+            DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
+            label,
+        )
+        stop_start = _required_index(body, "if [ -f .env ]; then", label)
         restore_script = body[restore_start:stop_start]
         scripts.append((label, restore_script, "AWF_PERSISTED_DATABASE_URL" in restore_script))
 
@@ -901,7 +928,11 @@ def test_quickstart_and_uninstall_restore_strip_quoted_inline_dotenv_comments(
             and "/path/to/replacement/aira-agent-workspace-fabric" in fence.body
         ]
         assert len(uninstall_fences) == 1, heading
-        restore_start = uninstall_fences[0].body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        restore_start = _required_index(
+            uninstall_fences[0].body,
+            DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
+            f"{heading} uninstall",
+        )
         scripts.append(
             (
                 f"{heading} uninstall",
@@ -933,7 +964,11 @@ def test_quickstart_and_uninstall_restore_strip_quoted_inline_dotenv_comments(
             if fence.language == "bash" and 'AWF_PERSISTED_API_TOKEN=""' in fence.body
         ]
         assert len(bash_fences) == 1, label
-        restore_start = bash_fences[0].body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        restore_start = _required_index(
+            bash_fences[0].body,
+            DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
+            label,
+        )
         scripts.append(
             (
                 label,
@@ -1068,7 +1103,11 @@ def test_uninstall_source_checkout_env_restore_strips_unquoted_inline_dotenv_com
         ]
         assert len(bash_fences) == 1, label
         restore_body = bash_fences[0].body
-        restore_start = restore_body.index("awf_decode_double_quoted_dotenv() {")
+        restore_start = _required_index(
+            restore_body,
+            "awf_decode_double_quoted_dotenv() {",
+            label,
+        )
         restore_script = restore_body[restore_start:].split("if [ -f .env ]; then", maxsplit=1)[0]
         script = "\n".join(
             (
@@ -1224,7 +1263,11 @@ def test_upgrade_source_checkout_restore_accepts_default_api_token(tmp_path: Pat
             if fence.language == "bash"
         ]
         assert len(bash_fences) == 1, label
-        token_restore_start = bash_fences[0].body.index('AWF_PERSISTED_API_TOKEN=""')
+        token_restore_start = _required_index(
+            bash_fences[0].body,
+            'AWF_PERSISTED_API_TOKEN=""',
+            label,
+        )
         token_restore_script = (
             bash_fences[0]
             .body[token_restore_start:]
@@ -1282,7 +1325,11 @@ def test_uninstall_source_checkout_restore_accepts_default_api_token(
             if fence.language == "bash" and 'AWF_PERSISTED_API_TOKEN=""' in fence.body
         ]
         assert len(bash_fences) == 1, label
-        token_restore_start = bash_fences[0].body.index('AWF_PERSISTED_API_TOKEN=""')
+        token_restore_start = _required_index(
+            bash_fences[0].body,
+            'AWF_PERSISTED_API_TOKEN=""',
+            label,
+        )
         token_restore_script = (
             bash_fences[0]
             .body[token_restore_start:]
@@ -1578,9 +1625,11 @@ def test_markdown_section_rejects_h3_or_deeper_headings(heading: str) -> None:
 def test_required_index_reports_missing_text_after_start_clearly() -> None:
     """Assert ordered doc checks report assertion failures, not ValueError."""
     text = "if [ -f docker/compose/.env ]; then\nfi\nfallback\n"
+    fallback_index = text.find("fallback")
+    assert fallback_index != -1, "test fixture is missing fallback marker"
 
     with pytest.raises(AssertionError, match="example is missing required text after offset"):
-        _required_index(text, "\nfi\n", "example", start=text.index("fallback"))
+        _required_index(text, "\nfi\n", "example", start=fallback_index)
 
 
 def test_quickstart_upgrade_section_requires_uninstall_after_upgrade() -> None:
