@@ -60,11 +60,16 @@ def _concurrent_provision_holding_overlay_lock(claude_root: Path) -> Iterator[No
 
     claude_root.mkdir(parents=True, exist_ok=True)
     holder_fd = os.open(claude_root / _LOCK_NAME, os.O_CREAT | os.O_WRONLY, 0o600)
-    fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    # Acquire inside the ``try`` (mirroring the production ``_overlay_provision_lock``)
+    # so a raise from ``flock`` itself — e.g. ``ENOTSUP`` on an exotic CI tmpfs — still
+    # reaches ``os.close`` in ``finally`` and never leaks ``holder_fd``.
     try:
-        yield
+        fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            fcntl.flock(holder_fd, fcntl.LOCK_UN)
     finally:
-        fcntl.flock(holder_fd, fcntl.LOCK_UN)
         os.close(holder_fd)
 
 
