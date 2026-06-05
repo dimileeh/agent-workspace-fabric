@@ -153,11 +153,25 @@ this shell before restarting. Restore the same `AWF_API_TOKEN` and
 replacement service secrets during upgrade:
 
 ```bash
-if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
+AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+case "$AWF_PERSISTED_API_TOKEN" in
+  \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
+  \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+esac
+if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
+  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
-if ! grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*[^[:space:]]' .env 2>/dev/null; then
+AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
+  \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
+  \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+esac
+if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
+  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
+else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
