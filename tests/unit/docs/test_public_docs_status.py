@@ -1703,12 +1703,22 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         "\nawf setup --source-checkout /path/to/replacement/aira-agent-workspace-fabric"
         not in intro_section
     )
-    assert intro_words.index(core_stop_guidance) < intro_words.index(intro_setup_line)
+    intro_setup_words_index = _required_index(
+        intro_words,
+        intro_setup_line,
+        "intro source-checkout uninstall summary",
+    )
+    assert intro_words.index(core_stop_guidance) < intro_setup_words_index
     assert checkout_cd_line in intro_section
     assert stop_guard_line in intro_section
     assert stop_env_file_line in intro_section
     assert stop_fallback_line in intro_section
     assert stop_guard_end_line in intro_section
+    intro_setup_index = _required_index(
+        intro_section,
+        intro_setup_line,
+        "intro source-checkout uninstall",
+    )
     intro_env_restore_start_index, intro_env_restore_end_index = (
         _assert_source_checkout_service_env_restore_before_stop(
             "intro source-checkout uninstall",
@@ -1730,7 +1740,7 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
             "intro source-checkout uninstall",
             start=intro_fallback_index,
         )
-        < intro_section.index(intro_setup_line)
+        < intro_setup_index
     ), "intro must provide guarded Core stop commands before metadata refresh"
     for label, section, setup_line in source_cases:
         section_words = " ".join(section.split())
