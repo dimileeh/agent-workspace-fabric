@@ -251,6 +251,7 @@ def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None
 
 def test_changelog_and_upgrade_guide_are_discoverable() -> None:
     readme_text = README_PATH.read_text(encoding="utf-8")
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
 
     assert (REPO_ROOT / "CHANGELOG.md").exists()
     assert (REPO_ROOT / "docs" / "UPGRADE.md").exists()
@@ -258,6 +259,9 @@ def test_changelog_and_upgrade_guide_are_discoverable() -> None:
     assert "[Changelog](CHANGELOG.md)" in readme_text
     assert "[Upgrade Guide](docs/UPGRADE.md)" in readme_text
     assert "[Release Checklist](RELEASING.md)" in readme_text
+    assert "[Local Service Upgrade](CONCEPTS.md#local-service-upgrade)" in upgrade_text
+    assert "[Local Service Rollback](CONCEPTS.md#local-service-rollback)" in upgrade_text
+    assert "pre-upgrade Postgres backup" in upgrade_text
 
 
 def test_public_oss_release_metadata_is_consistent() -> None:

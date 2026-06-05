@@ -10,8 +10,11 @@ reused from part 001.
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -48,6 +51,25 @@ from tests.unit.control.test_cleanup_auth_overlay_retry_parts.test_cleanup_auth_
 # --------------------------------------------------------------------------- #
 # 7. Candidate query + record helpers + counters against a real Postgres
 # --------------------------------------------------------------------------- #
+
+_AUTH_OVERLAY_BACKFILL_REVISION = "0f1e2d3c4b5a"
+_AUTH_OVERLAY_BACKFILL_FILENAME = (
+    f"{_AUTH_OVERLAY_BACKFILL_REVISION}_backfill_auth_overlay_unmount_pending.py"
+)
+
+
+def _load_auth_overlay_backfill_migration() -> ModuleType:
+    repo_root = Path(__file__).resolve().parents[4]
+    migration_path = repo_root / "migrations" / "versions" / _AUTH_OVERLAY_BACKFILL_FILENAME
+    spec = importlib.util.spec_from_file_location(
+        "awf_auth_overlay_unmount_backfill_migration",
+        migration_path,
+    )
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"could not load migration module from {migration_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture
@@ -86,6 +108,12 @@ def _sweeper(factory: async_sessionmaker[AsyncSession], node_id: str = "node-1")
             "_append_terminal_auth_overlay_unmount_pending": (
                 worker_overlay._append_terminal_auth_overlay_unmount_pending
             ),
+            "_retry_pending_terminal_auth_overlay_unmounts": (
+                worker_overlay._retry_pending_terminal_auth_overlay_unmounts
+            ),
+            "_retry_pending_terminal_auth_overlay_unmount_for_candidate": (
+                worker_overlay._retry_pending_terminal_auth_overlay_unmount_for_candidate
+            ),
         },
     )()
 
@@ -121,6 +149,286 @@ async def _event_types(session: AsyncSession, workspace_id: str) -> list[str]:
         )
     ).all()
     return [r[0] for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_auth_overlay_backfill_seeds_pre_upgrade_failed_release_and_retry_sweep_resolves(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-upgrade failed umount release gets a backfilled ``pending`` marker,
+    enters the existing deferred sweep, and is resolved using the same reason-coded
+    marker flow as post-upgrade failures."""
+    migration = _load_auth_overlay_backfill_migration()
+    sweeper = _sweeper(factory)
+    teardown_calls: list[str] = []
+
+    async def _teardown(_self: object, candidate: Any) -> bool:
+        teardown_calls.append(candidate.workspace_id)
+        return True
+
+    monkeypatch.setattr(worker_overlay, "_teardown_terminal_auth_overlay", _teardown)
+
+    ws_id = ""
+    release_order = 0
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            compose_project_name="awf_backfilled_retry",
+        )
+        ws_id = ws.id
+        release = await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            payload={
+                "auth_overlay_unmounted": False,
+                "compose_project_name": "awf_backfilled_retry",
+            },
+        )
+        assert release.event_order is not None
+        release_order = release.event_order
+        await session.commit()
+
+    async with factory() as session:
+        conn = await session.connection()
+        inserted = await conn.run_sync(migration.backfill_auth_overlay_unmount_pending)
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+        limit=None
+    )
+    backfilled_candidate = next(
+        candidate for candidate in candidates if candidate.workspace_id == ws_id
+    )
+    assert backfilled_candidate.release_cycle_floor == release_order
+    assert inserted == 1
+
+    await sweeper._retry_pending_terminal_auth_overlay_unmounts(limit=None)  # noqa: SLF001
+
+    async with factory() as session:
+        events = (
+            await session.execute(
+                sa.select(
+                    WorkspaceEvent.event_type,
+                    WorkspaceEvent.reason_code,
+                    WorkspaceEvent.payload,
+                    WorkspaceEvent.event_order,
+                )
+                .where(WorkspaceEvent.workspace_id == ws_id)
+                .where(
+                    WorkspaceEvent.event_type.in_(
+                        (
+                            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+                        )
+                    )
+                )
+                .order_by(WorkspaceEvent.event_order.asc())
+            )
+        ).all()
+
+    assert teardown_calls == [ws_id]
+    assert [row.event_type for row in events] == [
+        worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+        worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+    ]
+    pending, resolved = events
+    assert pending.reason_code == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE
+    assert pending.payload == {
+        "compose_project_name": "awf_backfilled_retry",
+        "workspace_status": WorkspaceStatus.failed.value,
+        "attempt": 1,
+    }
+    assert pending.event_order >= release_order
+    assert (
+        resolved.reason_code == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE
+    )
+    assert resolved.payload == {
+        "compose_project_name": "awf_backfilled_retry",
+        "workspace_status": WorkspaceStatus.failed.value,
+        "auth_overlay_unmounted": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_auth_overlay_backfill_null_order_release_retry_sweep_resolves(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backfilled pending marker for a NULL-order release still resolves after retry."""
+    migration = _load_auth_overlay_backfill_migration()
+    sweeper = _sweeper(factory)
+    teardown_calls: list[str] = []
+
+    async def _teardown(_self: object, candidate: Any) -> bool:
+        teardown_calls.append(candidate.workspace_id)
+        return True
+
+    monkeypatch.setattr(worker_overlay, "_teardown_terminal_auth_overlay", _teardown)
+
+    ws_id = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            compose_project_name="awf_backfilled_null_order_retry",
+        )
+        ws_id = ws.id
+        release = await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            payload={
+                "auth_overlay_unmounted": False,
+                "compose_project_name": "awf_backfilled_null_order_retry",
+            },
+        )
+        release.event_order = None
+        await session.commit()
+
+    async with factory() as session:
+        conn = await session.connection()
+        inserted = await conn.run_sync(migration.backfill_auth_overlay_unmount_pending)
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+        limit=None
+    )
+    backfilled_candidate = next(
+        candidate for candidate in candidates if candidate.workspace_id == ws_id
+    )
+    assert inserted == 1
+    assert backfilled_candidate.release_cycle_floor == -1
+
+    await sweeper._retry_pending_terminal_auth_overlay_unmounts(limit=None)  # noqa: SLF001
+
+    async with factory() as session:
+        events = (
+            await session.execute(
+                sa.select(
+                    WorkspaceEvent.event_type,
+                    WorkspaceEvent.reason_code,
+                    WorkspaceEvent.payload,
+                )
+                .where(WorkspaceEvent.workspace_id == ws_id)
+                .where(
+                    WorkspaceEvent.event_type.in_(
+                        (
+                            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+                        )
+                    )
+                )
+                .order_by(WorkspaceEvent.event_order.asc())
+            )
+        ).all()
+
+    assert teardown_calls == [ws_id]
+    assert [row.event_type for row in events] == [
+        worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+        worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+    ]
+    resolved = events[-1]
+    assert (
+        resolved.reason_code == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE
+    )
+    assert resolved.payload == {
+        "compose_project_name": "awf_backfilled_null_order_retry",
+        "workspace_status": WorkspaceStatus.failed.value,
+        "auth_overlay_unmounted": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pending_candidate_query_detects_legacy_null_order_pending_marker(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A NULL-order marker belongs to a NULL-order release cycle.
+
+    The backfill migration treats such a marker as current-cycle dedupe, so the
+    runtime sweep must also see it when the coalesced release floor is ``-1``.
+    """
+    sweeper = _sweeper(factory)
+    ws_id = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            compose_project_name="awf_legacy_null_pending",
+        )
+        ws_id = ws.id
+        release = await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        pending = await repo.add_event(
+            ws,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            payload={"attempt": 1},
+        )
+        release.event_order = None
+        pending.event_order = None
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+        limit=None
+    )
+    listed = next(candidate for candidate in candidates if candidate.workspace_id == ws_id)
+    assert listed.release_cycle_floor == -1
+    assert await sweeper._count_terminal_auth_overlay_unmount_pending_events(ws_id) == 1  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_terminal_marker_check_detects_legacy_null_order_marker(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A NULL-order terminal marker suppresses the NULL-order release cycle."""
+    sweeper = _sweeper(factory)
+    ws_id = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            compose_project_name="awf_legacy_null_resolved",
+        )
+        ws_id = ws.id
+        release = await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        pending = await repo.add_event(
+            ws,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+            payload={"attempt": 1},
+        )
+        resolved = await repo.add_event(
+            ws,
+            event_type=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+            reason_code=worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE,
+        )
+        release.event_order = None
+        pending.event_order = None
+        resolved.event_order = None
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+        limit=None
+    )
+    assert ws_id not in {candidate.workspace_id for candidate in candidates}
+    async with factory() as session:
+        assert (
+            await sweeper._has_terminal_auth_overlay_unmount_terminal_event(session, ws_id)  # noqa: SLF001
+        ) is True
 
 
 async def _mark_runtime_released(repo: WorkspaceRepository, ws: Workspace) -> None:
