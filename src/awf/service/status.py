@@ -121,10 +121,12 @@ def _mount_propagation_check_payload(
     propagation = environ.get(propagation_key)
     force_copy_raw = environ.get(force_copy_key)
 
-    if propagation is None and compose_env_file is not None:
+    if (propagation is None or force_copy_raw is None) and compose_env_file is not None:
         file_values = compose_env_file_values(compose_env_file)
-        propagation = file_values.get(propagation_key)
-        force_copy_raw = file_values.get(force_copy_key)
+        if propagation is None:
+            propagation = file_values.get(propagation_key)
+        if force_copy_raw is None:
+            force_copy_raw = file_values.get(force_copy_key)
 
     if propagation is not None:
         fc = force_copy_raw is not None and force_copy_raw.lower() in ("true", "1", "yes")
