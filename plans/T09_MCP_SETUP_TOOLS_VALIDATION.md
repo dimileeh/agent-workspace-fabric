@@ -53,6 +53,57 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HeS3M
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve the existing blocked payload shape, reason code, redaction, and MCP
+  error behavior: Complete.
+- Keep the top-level client-integration command and next-step rewriting
+  unchanged: Complete.
+- Rewrite issue remediation `related_command` values from generic setup
+  remediation commands to the rendered client-integration command, including
+  selected `--client` values and explicit `--source-checkout`: Complete.
+- Preserve issue remediation entries that do not carry a setup retry command:
+  Complete.
+- Add a focused regression proving the invalid CODEX_HOME path preserves client
+  context in issue remediation: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_codex_invalid_home_override_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_setup_error_is_structured tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_oserror_is_readiness_failure tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_success_transformation_failure_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["issues"][0]["remediation"]["related_command"]` was
+  `awf setup --dry-run` while the top-level command preserved the selected
+  client and explicit source checkout.
+- Regression test after the implementation change: 1 passed.
+- Adjacent focused client-integration failure tests: 3 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## CI Repair: PR393 Python Coverage Shard 2 Registry Smoke
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

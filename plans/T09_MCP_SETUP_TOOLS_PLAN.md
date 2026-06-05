@@ -84,6 +84,57 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HeS3M Preserve Client Issue Remediation Context
+
+### Problem Statement And Scope
+
+The PR review reports that client-integration reason-coded failures rewrite the
+top-level command and `next_steps` to include requested `--client` selectors and
+any explicit `--source-checkout`, but leave
+`issues[].remediation.related_command` at the generic catalog command. MCP
+clients following the issue remediation can therefore retry `awf setup --dry-run`
+instead of the failed client-integration flow.
+
+Scope is limited to reason-coded client-integration failure payloads built by
+`_client_instruction_reason_coded_payload` and a focused regression for the
+structured RuntimeError/invalid CODEX_HOME path.
+
+### Requirements Checklist
+
+- Preserve the existing blocked payload shape, reason code, redaction, and MCP
+  error behavior.
+- Keep the top-level client-integration command and next-step rewriting
+  unchanged.
+- Rewrite issue remediation `related_command` values from generic setup
+  remediation commands to the rendered client-integration command, including
+  selected `--client` values and explicit `--source-checkout`.
+- Preserve issue remediation entries that do not carry a setup retry command.
+- Add a focused regression proving the invalid CODEX_HOME path preserves client
+  context in issue remediation.
+
+### Implementation Steps
+
+1. Extend the invalid CODEX_HOME client-integration regression to expect the
+   issue remediation command with the selected client and source checkout, and
+   confirm it fails before implementation.
+2. Add a narrow helper that copies reason-coded issues and rewrites setup retry
+   remediation commands to the rendered client-integration command.
+3. Apply the helper only from `_client_instruction_reason_coded_payload`.
+4. Run the targeted regression, adjacent client-integration focused tests, and
+   focused lint/type checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_codex_invalid_home_override_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_setup_error_is_structured tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_oserror_is_readiness_failure tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_success_transformation_failure_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: Registry Smoke Stale Start-Test Reference
 
 ### Problem Statement And Scope

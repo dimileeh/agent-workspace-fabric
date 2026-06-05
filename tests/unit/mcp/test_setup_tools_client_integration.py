@@ -644,7 +644,8 @@ async def test_client_integration_instructions_codex_invalid_home_override_is_st
 ) -> None:
     from awf.mcp import setup_tools
 
-    env_file = tmp_path / ".env"
+    checkout = tmp_path / "source checkout"
+    env_file = checkout / "docker" / "compose" / ".env"
     home = tmp_path / "home"
     home.mkdir()
 
@@ -657,16 +658,19 @@ async def test_client_integration_instructions_codex_invalid_home_override_is_st
 
     result = await mcp.call_tool(
         "awf_get_client_integration_instructions",
-        {"clients": ["codex"]},
+        {"clients": ["codex"], "source_checkout": str(checkout)},
     )
     payload = _payload(result)
     rendered = _json_text(result)
+    expected_command = f"awf setup --client codex --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["command"] == expected_command
     assert payload["summary"] == "could not inspect local client integration environment"
     assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}
+    assert payload["issues"][0]["remediation"]["related_command"] == expected_command
     assert "Could not determine home directory" not in rendered
 
 
