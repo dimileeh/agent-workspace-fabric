@@ -255,6 +255,28 @@ async def read_execution_claim_epoch(
     return result.scalar_one_or_none()
 
 
+async def read_provisioning_execution_claim_epoch(
+    session: AsyncSession,
+    workspace_id: str,
+) -> int | None:
+    """Return the execution-claim epoch only while the row is still ``provisioning``.
+
+    A targeted point-read for the provisioner's pre-launch fencing verify
+    (D4): selects the single ``execution_claim_epoch`` column rather than
+    loading the full ORM row. Returns ``None`` when the workspace is gone or
+    has already left ``provisioning`` (in either case the claim no longer
+    applies), otherwise the current epoch — which the caller compares against
+    the value it was dispatched with.
+    """
+    result = await session.execute(
+        select(Workspace.execution_claim_epoch).where(
+            Workspace.id == workspace_id,
+            Workspace.status == WorkspaceStatus.provisioning.value,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def release_monitoring_pr_claim(
     session: AsyncSession,
     workspace_id: str,

@@ -376,12 +376,22 @@ async def test_verify_execution_claim_epoch_false_when_missing_or_not_provisioni
     # Missing workspace -> fenced.
     assert await provisioner._verify_execution_claim_epoch("ws_missing", 1) is False  # noqa: SLF001
 
+    # Still provisioning at the matching epoch -> not fenced.
+    ws_id = await _create_provisioning(session_factory, origin_repo, epoch=1)
+    assert await provisioner._verify_execution_claim_epoch(ws_id, 1) is True  # noqa: SLF001
+
+    # Still provisioning but a later claimant advanced the epoch -> fenced.
+    await _advance_epoch(session_factory, ws_id)
+    assert await provisioner._verify_execution_claim_epoch(ws_id, 1) is False  # noqa: SLF001
+
     # A workspace that has left ``provisioning`` -> fenced even if the epoch
     # matches (the claim no longer applies).
-    ws_id = await _create_provisioning(session_factory, origin_repo, epoch=1)
     async with session_factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
+        epoch_now = ws.execution_claim_epoch
         ws.status = WorkspaceStatus.failed.value
         await s.commit()
-    assert await provisioner._verify_execution_claim_epoch(ws_id, 1) is False  # noqa: SLF001
+    assert (
+        await provisioner._verify_execution_claim_epoch(ws_id, epoch_now) is False  # noqa: SLF001
+    )

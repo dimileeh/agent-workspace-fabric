@@ -64,6 +64,7 @@ from awf.db.repositories.workspace_repo_claims import (
     claim_monitoring_pr,
     claim_worker_restart_recovery_execution,
     read_execution_claim_epoch,
+    read_provisioning_execution_claim_epoch,
     refresh_execution_claim,
     refresh_monitoring_pr_claim,
     release_execution_claim,
@@ -1136,6 +1137,22 @@ class WorkspaceRepository:
             self._session,
             workspace_id,
             owner_id=owner_id,
+        )
+
+    async def read_provisioning_execution_claim_epoch(
+        self,
+        workspace_id: str,
+    ) -> int | None:
+        """Return the epoch only while the row is still ``provisioning`` (point-read).
+
+        Backs the provisioner's pre-launch fencing verify (D4): reads the
+        single ``execution_claim_epoch`` column instead of loading the full
+        workspace row. ``None`` means the row is gone or has left
+        ``provisioning``.
+        """
+        return await read_provisioning_execution_claim_epoch(
+            self._session,
+            workspace_id,
         )
 
     async def release_monitoring_pr_claim(

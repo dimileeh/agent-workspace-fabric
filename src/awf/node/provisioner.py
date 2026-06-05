@@ -1129,14 +1129,14 @@ class Provisioner(ProvisionerHostPortCheckMixin):
         value this provisioner was dispatched with — i.e. this worker has been
         fenced (D4). No row lock and no ``run_coroutine_threadsafe`` bridge: a
         single cheap indexed point-read on the event loop before ``launch()``.
+        Reads only ``execution_claim_epoch`` (gated on ``status =
+        'provisioning'``) instead of loading the full workspace row.
         """
         async with self._session_factory() as session:
-            ws = await WorkspaceRepository(session).get(workspace_id)
-            if ws is None:
-                return False
-            if ws.status != WorkspaceStatus.provisioning.value:
-                return False
-            return ws.execution_claim_epoch == execution_claim_epoch
+            epoch = await WorkspaceRepository(session).read_provisioning_execution_claim_epoch(
+                workspace_id
+            )
+            return epoch is not None and epoch == execution_claim_epoch
 
     async def _record_egress_audit_if_current(
         self,
