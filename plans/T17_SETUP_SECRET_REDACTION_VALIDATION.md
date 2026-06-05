@@ -2871,3 +2871,51 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/a
 uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
 # Success: no issues found in 4 source files
 ```
+
+## CI Shard 8 Maintainability Repair Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: all service-log redaction tests moved from part 002 remain covered
+  in `tests/unit/service/test_logs_parts/test_logs_part_003.py`.
+- Complete: `tests/unit/service/test_logs_parts/test_logs_part_002.py` is now
+  969 lines, below the 1,500-line first-party file limit.
+- Complete: `tests/unit/service/test_logs_parts/test_logs_part_003.py` is 649
+  lines, below the same first-party file limit.
+- Complete: focused tests, the exact failing maintainability guard, and ruff
+  passed. Broad AWF/GitHub validation, full coverage, OpenAPI drift, and
+  frontend builds were not run locally; AWF owns those gates after agent
+  completion.
+
+Additional files changed:
+
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_003.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+CI failure inspected:
+
+```text
+python-coverage-shards (8) failed in run 27016811799 because
+test_first_party_code_files_stay_under_line_limit reported
+tests/unit/service/test_logs_parts/test_logs_part_002.py at 1,586 lines.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_003.py -q --tb=short -ra
+# 16 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q --tb=short -ra
+# 1 passed
+
+uv run --python 3.12 --extra dev ruff check tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/service/test_logs_parts/test_logs_part_003.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q --tb=short -ra
+# 26 passed
+```

@@ -2479,3 +2479,46 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::
 uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py tests/unit/service/test_environment.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
 ```
+
+## CI Shard 8 Maintainability Repair Plan
+
+### Problem Statement And Scope
+
+CI shard 8 for PR 391 fails in
+`tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit`
+because `tests/unit/service/test_logs_parts/test_logs_part_002.py` grew to
+1,586 lines, above the repository's 1,500-line first-party file limit.
+
+This repair is limited to preserving the existing service-log redaction
+coverage while splitting a coherent subset of tests into a new service-log
+part file. It does not change the maintainability gate, workflow
+configuration, branch management, pushing, broad validation, full coverage,
+OpenAPI drift, frontend validation, or production behavior.
+
+### Requirements Checklist
+
+- Keep all existing service-log redaction behavior covered.
+- Reduce `tests/unit/service/test_logs_parts/test_logs_part_002.py` below the
+  1,500-line first-party file limit.
+- Keep any new first-party test file below the same 1,500-line limit.
+- Run only focused tests and narrow lint/maintainability checks for the moved
+  tests; leave broad AWF/GitHub validation and full coverage to AWF after
+  agent completion.
+
+### Implementation Steps
+
+1. Move a cohesive cluster of Compose-env and followed-stream service-log
+   redaction tests from `test_logs_part_002.py` into
+   `test_logs_part_003.py`.
+2. Copy only the imports and local fixture/helper needed by the moved tests.
+3. Verify the moved tests still pass from their new module.
+4. Run the maintainability line-limit test and narrow ruff checks for the
+   affected service-log test modules.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_003.py -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/service/test_logs_parts/test_logs_part_003.py
+```
