@@ -101,18 +101,7 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
                 os.mkdir(part, dir_fd=dir_fd)
             dir_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
             fds.append(dir_fd)
-        dst_fd = os.open(
-            rel.name,
-            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600,
-            dir_fd=dir_fd,
-        )
-        fds.append(dst_fd)
-        if not stat.S_ISREG(os.fstat(dst_fd).st_mode):
-            # A non-regular leaf the agent planted that still opened (e.g. a FIFO with a
-            # live reader): never write to it — refuse the structural conflict.
-            return
-        # Open the *source* with the same atomicity as the destination above. The
+        # Open and validate the *source* first, *before* the destination is created. The
         # caller's ``is_symlink()``/``is_file()`` guards in
         # :func:`~awf.node.auth_mounts_claude._reconcile_fallback_edits_into_upper` are
         # *not* atomic with this open, and the legacy copy is mounted ``rw`` for the
@@ -125,10 +114,29 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
         # reader-less FIFO fail (``ENXIO``) instead of blocking; and the ``S_ISREG``
         # ``fstat`` guard refuses any other non-regular leaf (e.g. a FIFO with a live
         # reader) before a byte is read — mirroring the destination protections.
+        #
+        # Source-before-destination ordering matters for correctness, not just security:
+        # opening the destination with ``O_CREAT`` *first* would materialise a 0-byte
+        # regular file in the overlay upper, and if the source open then failed (e.g. the
+        # legacy file was unlinked in the non-atomic window above) the best-effort
+        # ``except OSError`` return would leave that empty file shadowing the base
+        # entry — a Claude config could read as empty to the agent. Validating the source
+        # first means no destination is ever created unless there is real content to copy.
         src_fd = os.open(os.fspath(src), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         fds.append(src_fd)
         src_st = os.fstat(src_fd)
         if not stat.S_ISREG(src_st.st_mode):
+            return
+        dst_fd = os.open(
+            rel.name,
+            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+            dir_fd=dir_fd,
+        )
+        fds.append(dst_fd)
+        if not stat.S_ISREG(os.fstat(dst_fd).st_mode):
+            # A non-regular leaf the agent planted that still opened (e.g. a FIFO with a
+            # live reader): never write to it — refuse the structural conflict.
             return
         # The read fd on the source content is already held, so ``ftruncate`` (below)
         # only runs once that fd is open: if the legacy file is unlinked in this window

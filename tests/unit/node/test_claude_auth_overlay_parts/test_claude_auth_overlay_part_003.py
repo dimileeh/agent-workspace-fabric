@@ -308,6 +308,42 @@ def test_reconcile_preserves_destination_when_source_vanishes_after_stat(
 
 
 @pytest.mark.unit
+def test_reconcile_does_not_create_empty_destination_when_source_open_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for the source-before-destination open ordering: for a *new* fallback
+    # edit (no prior ``upper``/``merged`` entry) the destination must not be opened with
+    # ``O_CREAT`` before the source is validated. Otherwise a source-open failure (e.g.
+    # the legacy file unlinked in the non-atomic window after the caller's ``is_file()``
+    # pre-check) would leave a 0-byte regular file in the overlay upper that silently
+    # shadows the base entry — a Claude config could read as empty to the agent.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    for directory in (legacy, merged, upper, base):
+        directory.mkdir()
+    (legacy / "f").write_text("legacy edit\n")  # base/upper lack it -> new fallback edit
+
+    real_os_open = os.open
+
+    def _os_open_source_vanished(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        # Fail only the source read open (the dir descent uses ``O_DIRECTORY``; the
+        # destination open targets ``merged`` under ``dir_fd``). If the destination were
+        # opened first it would already have created the empty file before this fires.
+        if os.fspath(path) == os.fspath(legacy / "f") and not (flags & os.O_DIRECTORY):
+            raise OSError("source vanished")
+        return real_os_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(auth_mounts_mod.os, "open", _os_open_source_vanished)
+
+    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+
+    # No empty file was materialised in the overlay upper to shadow the base entry.
+    assert not (merged / "f").exists()
+
+
+@pytest.mark.unit
 def test_reconcile_writes_through_merged_not_directly_into_upper(tmp_path: Path) -> None:
     # A genuine fallback edit (absent from base, absent from upper) is forwarded
     # *through* the live ``merged`` mount, not poked straight into the underlying
@@ -605,10 +641,10 @@ def test_safe_overlay_copy_refuses_source_symlink_swapped_after_caller_checks(
 
     auth_mounts_mod._safe_overlay_copy(merged, Path("f"), src_link)
 
-    # The link target's contents are never read into the destination tree (the leaf may
-    # exist as an empty file from the dest ``O_CREAT`` before the source open failed —
-    # never any content), and the out-of-tree secret is untouched.
-    assert (merged / "f").read_text() == ""
+    # The link target's contents are never read into the destination tree. With the
+    # source validated *before* the destination is opened, the refused source leaves no
+    # 0-byte leaf behind at all, and the out-of-tree secret is untouched.
+    assert not (merged / "f").exists()
     assert secret.read_text() == "root-only contents\n"
 
 
@@ -627,6 +663,7 @@ def test_safe_overlay_copy_refuses_source_fifo_swapped_after_caller_checks(
 
     auth_mounts_mod._safe_overlay_copy(merged, Path("f"), src_fifo)
 
-    # Nothing was read from the FIFO; an empty dest leaf at most, never blocking.
-    assert (merged / "f").read_text() == ""
+    # Nothing was read from the FIFO and it never blocked. The source is refused before
+    # the destination is opened, so no dest leaf is created at all.
+    assert not (merged / "f").exists()
     assert stat.S_ISFIFO(os.lstat(src_fifo).st_mode)
