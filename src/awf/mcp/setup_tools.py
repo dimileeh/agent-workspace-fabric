@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import Annotated, Any, Protocol, cast
@@ -52,6 +52,7 @@ from awf.service.bootstrap import (
     ServiceBootstrapOptions,
     run_service_bootstrap,
 )
+from awf.service.provider_readiness import is_secret_env_key
 
 _DEFAULT_START_TIMEOUT_SECONDS = _first_run_mcp_bridge.DEFAULT_START_TIMEOUT_SECONDS
 _ClientEnvFileMissingError = _first_run_mcp_bridge.ClientEnvFileMissingError
@@ -111,7 +112,13 @@ _SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN = re.compile(
 class SafeResult(Protocol):
     """Protocol for constructing redacted MCP tool result objects."""
 
-    def __call__(self, payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+    def __call__(
+        self,
+        payload: dict[str, Any],
+        *,
+        is_error: bool = False,
+        extra_secrets: Iterable[str] = (),
+    ) -> CallToolResult:
         """Build a safe MCP tool result from a JSON payload."""
         ...
 
@@ -438,6 +445,7 @@ async def _start_local_service_result(
                 source_checkout=source_path,
             ),
             is_error=True,
+            extra_secrets=_selected_start_secret_values(inputs),
         )
     except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
         return _start_bootstrap_path_error_result(
@@ -471,6 +479,29 @@ def _resolve_start_bootstrap_inputs_for_mcp(
 ) -> _StartBootstrapInputs:
     verified = _resolve_start_source_checkout(source_path)
     return _resolve_start_bootstrap_inputs(verified)
+
+
+def _selected_start_secret_values(inputs: _StartBootstrapInputs) -> tuple[str, ...]:
+    """Return exact secrets from the resolved start environment."""
+    return _unique_secret_values(
+        (
+            *_selected_start_settings_secret_values(inputs.settings),
+            *(value for key, value in inputs.service_env.items() if is_secret_env_key(key)),
+        )
+    )
+
+
+def _selected_start_settings_secret_values(settings: object) -> tuple[str, ...]:
+    values: list[str] = []
+    for field_name in ("api_token", "github_token"):
+        value = getattr(settings, field_name, None)
+        if isinstance(value, str):
+            values.append(value)
+    return tuple(values)
+
+
+def _unique_secret_values(values: Iterable[str | None]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(value for value in values if value and len(value) >= 4))
 
 
 def _start_input_resolution_error_result(
@@ -910,8 +941,13 @@ def _first_run_result(
     payload: FirstRunPayload,
     *,
     is_error: bool = False,
+    extra_secrets: Iterable[str] = (),
 ) -> CallToolResult:
-    return safe_result(render_first_run_json(payload), is_error=is_error)
+    return safe_result(
+        render_first_run_json(payload),
+        is_error=is_error,
+        extra_secrets=extra_secrets,
+    )
 
 
 def _error_result(

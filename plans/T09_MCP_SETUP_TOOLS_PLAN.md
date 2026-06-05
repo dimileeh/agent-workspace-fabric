@@ -84,6 +84,59 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HZNUj
+
+### Problem Statement And Scope
+
+The review reports that `awf_start_local_service` can embed raw
+`ServiceBootstrapError` diagnostics from a selected source-checkout startup
+environment whose `.env` values differ from the MCP server startup settings.
+The existing MCP redaction closure only knows the server-level secrets captured
+when `build_mcp_server(...)` was called, so a bootstrap stderr/stdout message
+that echoes a non-token-shaped selected `.env` secret could be returned.
+
+Scope is limited to the MCP setup-tool start failure path for resolved
+bootstrap inputs. It should not change bootstrap behavior, first-run payload
+classification, or CLI output.
+
+### Requirements Checklist
+
+- Preserve the existing `awf_start_local_service` failure payload shape and
+  contextual command rewrite behavior.
+- Include resolved start `inputs.settings` token fields in MCP redaction for
+  bootstrap failure payloads.
+- Include secret-keyed values from the selected start `inputs.service_env` in
+  MCP redaction for bootstrap failure payloads.
+- Add a focused regression using a non-token-shaped custom secret that would
+  not be caught by generic provider-token patterns.
+- Run focused tests/checks only; broad AWF/GitHub validation remains managed by
+  AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing regression where `run_service_bootstrap(...)` raises a
+   `ServiceBootstrapError` whose stderr contains one selected settings token
+   and one selected secret-keyed environment value not present in the
+   server-level MCP settings.
+2. Extend the MCP `safe_result` callback to accept optional per-call exact
+   secrets while keeping existing call sites compatible.
+3. Collect selected start secrets from resolved `inputs.settings` and
+   `inputs.service_env`, and pass them only when rendering the bootstrap
+   failure result.
+4. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_redacts_selected_start_environment_secret_from_bootstrap_failure -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/mcp/server.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/mcp/server.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: python-coverage-shards (8) Test File Line Limit
 
 ### Problem Statement And Scope
