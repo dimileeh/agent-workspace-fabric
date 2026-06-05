@@ -84,6 +84,43 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Empty Client Command
+
+### Problem Statement And Scope
+
+The review reports that the explicit empty-client path in
+`awf_get_client_integration_instructions` returns `command="awf setup --client"`.
+That string is not a valid CLI invocation because `--client` requires an
+argument. Scope is limited to the empty-client early return and its focused
+regression.
+
+### Requirements Checklist
+
+- Preserve the explicit empty-client fast return and avoid source checkout or
+  env-file resolution.
+- Return a valid no-client command hint for the empty-client response.
+- Keep the existing payload status, client list, env-file omission, and next
+  steps unchanged.
+- Add a focused regression assertion for the returned command field.
+
+### Implementation Steps
+
+1. Extend the existing explicit empty-client regression to assert the returned
+   command.
+2. Change only the empty-client payload command to the valid no-client setup
+   command.
+3. Run the targeted regression and focused client-integration checks.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_preserves_explicit_empty_clients -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HO7lM
 
 ### Problem Statement And Scope

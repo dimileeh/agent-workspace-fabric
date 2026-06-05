@@ -534,7 +534,7 @@ def _client_integration_instructions_result(
         if not selected:
             empty_payload: dict[str, Any] = {
                 "status": "success",
-                "command": "awf setup --client",
+                "command": _client_instruction_command([], source_checkout=None),
                 "summary": _client_instructions_summary([], blocked=False),
                 "clients": [],
                 "next_steps": _client_instruction_next_steps(
