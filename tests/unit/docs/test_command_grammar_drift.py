@@ -108,6 +108,15 @@ INIT_VALUE_FLAGS = VALUE_FLAGS | frozenset(
 # Help flags are always allowed after `awf init` even though they carry no path.
 HELP_FLAGS = frozenset({"--help", "-h"})
 
+# An ungated remote-script installer pipes a `curl` download straight into an
+# interpreter (`curl ... | bash`/`| sh`/`| zsh`). R5 keys on that pipe-to-shell
+# shape rather than on the bare `curl -fsSL` download flag: `curl -fsSL <url>` is
+# a legitimate idiom for fetching a checksum or release asset, so matching the
+# flag alone would false-positive on such prose (and on a cautionary note that
+# explains why the public installer is release-gated). Matched per line so a
+# `curl` on one line and an unrelated interpreter token on another never combine.
+CURL_PIPE_INSTALLER_RE = re.compile(r"curl\b.*\|\s*(?:bash|sh|zsh)\b")
+
 # Prose/snippet shapes that (re)introduce no-path `awf init` as machine setup.
 # Keyed on `awf init` so the legitimate `awf service bootstrap` command is never
 # matched on its own. The fenced-line pattern (last entry) requires an explicit
@@ -138,7 +147,22 @@ class SmokeInvocation:
 
 
 def _read(rel_path: str) -> str:
-    return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+    """Read a first-run doc, failing with a drift-specific message if it is gone.
+
+    The R1-R4 sweeps read every entry in ``FIRST_RUN_DOCS`` (and the per-rule doc
+    tuples) in a loop, so a raw ``FileNotFoundError`` would surface a bare
+    filesystem path with no hint of which contract tuple to update. Converting it
+    to a ``pytest.fail`` keeps the failure actionable — a renamed/removed doc
+    points the reader straight at the tuple to fix.
+    """
+    path = REPO_ROOT / rel_path
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pytest.fail(
+            f"{rel_path}: first-run doc not found — update FIRST_RUN_DOCS "
+            "(or the per-rule doc tuples) when a doc is renamed or removed."
+        )
 
 
 def _strip_shell_comment(line: str) -> str:
@@ -342,8 +366,16 @@ def _init_arg_status(line: str) -> str | None:
 
 
 def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
-    """Parse an ``awf smoke run`` command line, or ``None`` if it is not one."""
-    match = re.search(r"awf smoke run\b(?P<tail>.*)", line)
+    """Parse an ``awf smoke run`` command line, or ``None`` if it is not one.
+
+    The match is anchored at the start of ``line`` (``re.match``, not
+    ``re.search``) so only a span that *begins with* ``awf smoke run`` is read as
+    an invocation. R4 feeds inline backtick spans through here, so a prose mention
+    that merely references the command mid-sentence (e.g. ``the awf smoke run
+    command``) would otherwise be parsed with the trailing prose as a positional
+    path and flagged as a spurious ``bare positional path`` offender.
+    """
+    match = re.match(r"awf smoke run\b(?P<tail>.*)", line)
     if match is None:
         return None
     tail = match.group("tail")
@@ -459,6 +491,34 @@ def test_helper_flags_bare_awf_init_command() -> None:
     # The legitimate lower-level command and project-init alias are not flagged.
     assert _init_arg_status("awf service bootstrap") is None
     assert _init_arg_status("awf profile init . --write") is None
+
+
+def test_helper_read_missing_doc_fails_with_actionable_message() -> None:
+    # A renamed/removed first-run doc must surface a drift-specific failure that
+    # points at the contract tuple, not a raw FileNotFoundError with a bare path.
+    with pytest.raises(pytest.fail.Exception, match="first-run doc not found"):
+        _read("docs/__definitely_not_a_real_doc__.md")
+
+
+def test_helper_smoke_parser_requires_command_at_span_start() -> None:
+    # Only a span that *begins with* `awf smoke run` is parsed as an invocation, so
+    # a prose backtick span that merely references the command mid-sentence is not
+    # misread (with the trailing prose as a path) as a positional-path offender.
+    assert _parse_smoke_invocation("the awf smoke run command verifies the stack") is None
+    assert _parse_smoke_invocation("see awf smoke run --mocked-local below") is None
+    # A span that does start with the command is still parsed as before.
+    assert _parse_smoke_invocation("awf smoke run --mocked-local") is not None
+
+
+def test_helper_curl_installer_pattern_targets_pipe_to_interpreter() -> None:
+    # The actual grammar violation is piping a remote `curl` download into a shell.
+    assert CURL_PIPE_INSTALLER_RE.search("curl -fsSL https://example.com/install.sh | bash")
+    assert CURL_PIPE_INSTALLER_RE.search("curl -fsSL https://example.com/i | sh")
+    # A bare `curl -fsSL` download (no pipe to an interpreter) is a legitimate
+    # idiom — fetching a checksum or release asset — and must not be flagged, nor
+    # should release-gating prose that merely names the curl installer lane.
+    assert not CURL_PIPE_INSTALLER_RE.search("curl -fsSL https://example.com/SHA256SUMS -o sums")
+    assert not CURL_PIPE_INSTALLER_RE.search("The public curl installer lane is release-gated")
 
 
 def test_helper_extracts_awf_smoke_invocations() -> None:
@@ -750,7 +810,10 @@ def test_first_run_install_lanes_present_and_curl_gated() -> None:
     version (`--python 3.12`) so a docs bump to a newer interpreter does not report
     an intact lane as missing, while `awf` keeps it distinct from non-`awf`
     `uv run` commands. The expected markers are tracked per file so the
-    per-document independence holds.
+    per-document independence holds. The ungated-installer check keys on the
+    pipe-to-interpreter shape (`curl ... | bash`, see `CURL_PIPE_INSTALLER_RE`)
+    rather than the bare `curl -fsSL` download flag, so a legitimate non-installer
+    `curl -fsSL` download or release-gating prose note does not false-positive.
     """
     expected_lane_markers = {
         "README.md": (
@@ -778,7 +841,7 @@ def test_first_run_install_lanes_present_and_curl_gated() -> None:
             for expected in markers
             if expected not in text
         )
-        if "curl -fsSL" in text or "curl | bash" in text or "curl | sh" in text:
+        if any(CURL_PIPE_INSTALLER_RE.search(line) for line in text.splitlines()):
             curl_offenders.append(f"{rel_path}: documents an ungated curl installer lane")
 
     assert not missing, missing
