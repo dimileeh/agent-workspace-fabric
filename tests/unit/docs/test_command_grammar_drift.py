@@ -54,6 +54,18 @@ SETUP_START_DOCS = (
     "docs/MCP_SETUP.md",
 )
 
+# First-run contexts that must each demonstrate at least one valid
+# `awf init <path>` example (R2). T18 requires `awf init <repo>` examples in the
+# right contexts, so these are tracked per-doc — a first-run page dropping its
+# init snippet fails even if another doc still carries one. Upgrade/uninstall
+# flows reference init without re-teaching onboarding, so they stay out.
+INIT_CONTEXT_DOCS = (
+    "README.md",
+    "docs/QUICKSTART.md",
+    "docs/GETTING_STARTED.md",
+    "docs/MCP_SETUP.md",
+)
+
 FENCE_RE = re.compile(r"^ {0,3}```")
 # Inline (single-backtick) code spans in prose / numbered steps. R2 scans these
 # alongside fenced commands so a no-path `awf init` documented inline is caught.
@@ -313,25 +325,35 @@ def test_first_run_docs_use_setup_and_start_grammar() -> None:
 
 
 def test_documented_awf_init_always_takes_a_path() -> None:
-    """R2: every documented `awf init` command carries a path/repo arg.
+    """R2: every documented `awf init` command carries a path/repo arg, and each
+    first-run init context demonstrates at least one valid example.
 
     Covers both fenced examples and inline backticked mentions in prose/list
-    steps so a no-path regression in either shape is flagged.
+    steps so a no-path regression in either shape is flagged. The per-context
+    tally (not a single global counter) keeps the T18 requirement to show
+    `awf init <repo>` in the right contexts enforced: a first-run page that drops
+    its `awf init <path>` snippet fails even if another doc still carries one.
     """
     offenders: list[str] = []
-    init_lines_seen = 0
+    init_examples_by_context = dict.fromkeys(INIT_CONTEXT_DOCS, 0)
     for rel_path in FIRST_RUN_DOCS:
         text = _read(rel_path)
         for line in _fenced_command_lines(text) + _inline_command_mentions(text):
             status = _init_arg_status(line)
             if status is None:
                 continue
-            init_lines_seen += 1
             if status != "ok":
                 offenders.append(f"{rel_path}: `{line}` ({status})")
+            elif rel_path in init_examples_by_context:
+                init_examples_by_context[rel_path] += 1
 
+    missing_contexts = sorted(
+        rel_path for rel_path, count in init_examples_by_context.items() if count == 0
+    )
     assert not offenders, offenders
-    assert init_lines_seen, "Expected at least one documented `awf init` command line."
+    assert not missing_contexts, (
+        f"first-run init contexts missing a valid `awf init <path>` example: {missing_contexts}"
+    )
 
 
 def test_no_path_init_is_not_described_as_service_bootstrap() -> None:
