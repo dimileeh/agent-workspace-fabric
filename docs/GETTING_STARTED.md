@@ -36,6 +36,17 @@ docker compose version
 
 ### Installation
 
+AWF currently has three runnable first-run lanes:
+
+- `uv tool` / `pipx` for a release-installed package.
+- Source checkout with a global tool install for inspectable source plus an
+  `awf` executable on `PATH`.
+- Source checkout with no global install for inspectable source run through
+  `uv run`.
+
+The public curl installer lane is release-gated until the hosted installer URL,
+manifest, checksums, and release artifacts are published and verified.
+
 The recommended primary path is to install AWF as an isolated CLI tool via `uv tool`:
 
 ```bash
@@ -76,10 +87,13 @@ root `.env` so the CLI, worker, MCP server, and raw Docker Compose lane all read
 the same configuration:
 
 ```bash
+mkdir -p "$HOME/awf-eval-project"
 cp .env.example .env
 awf setup
 awf start
 awf service status --format pretty
+awf init "$HOME/awf-eval-project"
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
 
 `awf setup` checks host readiness, imports any legacy `docker/compose/.env`
@@ -89,6 +103,26 @@ requested. `awf start` starts the local AWF Core stack, and
 disk, provider, and cleanup health. The lower-level
 `awf service bootstrap` command remains available for service-only development
 and is what `awf start` delegates to.
+
+For the source checkout with global tool install lane, run from the checkout:
+
+```bash
+awf setup --source-checkout "$PWD"
+awf start --source-checkout "$PWD"
+awf service status --format pretty
+awf init "$HOME/awf-eval-project"
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
+```
+
+For the source checkout with no global install lane, run from the checkout:
+
+```bash
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf service status --format pretty
+uv run --python 3.12 --extra dev awf init "$HOME/awf-eval-project"
+uv run --python 3.12 --extra dev awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
+```
 
 For source checkouts or raw Docker installs, root Compose can bring up the full
 local stack with safe loopback-only defaults:

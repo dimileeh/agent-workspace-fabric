@@ -106,24 +106,30 @@ def test_quickstart_is_canonical_and_not_a_stub() -> None:
     start_here_text = (REPO_ROOT / "docs" / "START_HERE.md").read_text(encoding="utf-8")
 
     assert "docs/QUICKSTART.md" in readme_text
+    assert "docs/UNINSTALL.md" in readme_text
     assert "docs/START_HERE.md" not in readme_text
     assert "currently a stub" not in quickstart_text.lower()
-    assert "awf init" in quickstart_text
-    assert "awf smoke run --mocked-local --format pretty" in quickstart_text
+    assert "awf init <path>" in quickstart_text
+    assert "awf smoke run --project" in quickstart_text
+    assert "--mocked-local --format pretty" in quickstart_text
     assert "[Quickstart](QUICKSTART.md)" in start_here_text
 
 
 def test_quickstart_uses_runnable_startup_path() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
-    startup_section = quickstart_text.split("## Set Up And Start AWF", maxsplit=1)[1].split(
-        "## Open The Console",
+    startup_section = quickstart_text.split("## Lane 1: uv tool or pipx", maxsplit=1)[1].split(
+        "## Lane 2:",
         maxsplit=1,
     )[0]
 
-    assert "cp .env.example .env" in startup_section
     assert "persists\nCompose-interpolated service values" not in startup_section
     assert re.search(r"(?m)^awf setup\s*$", startup_section)
     assert re.search(r"(?m)^awf start\s*$", startup_section)
+    assert 'awf init "$HOME/awf-eval-project"' in startup_section
+    assert (
+        'awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty'
+        in startup_section
+    )
     assert "AWF_SETUP_PLACEHOLDER" not in startup_section
     assert "AWF_START_PLACEHOLDER" not in startup_section
 
@@ -136,10 +142,16 @@ def test_raw_docker_compose_source_path_is_single_command() -> None:
         ("QUICKSTART.md", quickstart_text),
         ("GETTING_STARTED.md", getting_started_text),
     ):
-        section = text.split(
-            "For source checkouts or raw Docker installs",
-            maxsplit=1,
-        )[1].split("If ", maxsplit=1)[0]
+        if doc_name == "QUICKSTART.md":
+            section = text.split("## Raw Docker Compose", maxsplit=1)[1].split(
+                "## When Something Fails",
+                maxsplit=1,
+            )[0]
+        else:
+            section = text.split(
+                "For source checkouts or raw Docker installs",
+                maxsplit=1,
+            )[1].split("If ", maxsplit=1)[0]
         assert "docker compose up --build" in section, doc_name
         assert "cp .env.example .env" not in section, doc_name
         assert "docker build -t awf-agent-runtime:latest" not in section, doc_name
@@ -165,6 +177,8 @@ def test_getting_started_uses_runnable_startup_path() -> None:
     assert "AWF_SETUP_PLACEHOLDER" not in startup_section
     assert "AWF_START_PLACEHOLDER" not in startup_section
     assert "awf init <path> --write-profile --yes" in startup_section
+    assert "awf smoke run --project" in startup_section
+    assert "--mocked-local --format pretty" in startup_section
     assert "root `.env` is the single local runtime env file" in configure_section.lower()
     assert "docker/compose/.env" in configure_section
     assert "migration source" in configure_section
@@ -212,7 +226,8 @@ def test_project_onboarding_docs_make_awf_init_primary() -> None:
 
     assert "awf setup" in quickstart_text
     assert "awf start" in quickstart_text
-    assert "awf init . --write-profile --yes" in quickstart_text
+    assert "awf init <path>" in quickstart_text
+    assert 'awf init "$HOME/awf-eval-project"' in quickstart_text
     assert "awf setup" in getting_started_text
     assert "awf start" in getting_started_text
     assert "awf init <path> --write-profile --yes" in getting_started_text
@@ -252,16 +267,21 @@ def test_public_docs_do_not_describe_no_path_init_as_service_bootstrap() -> None
 def test_changelog_and_upgrade_guide_are_discoverable() -> None:
     readme_text = README_PATH.read_text(encoding="utf-8")
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
 
     assert (REPO_ROOT / "CHANGELOG.md").exists()
     assert (REPO_ROOT / "docs" / "UPGRADE.md").exists()
+    assert (REPO_ROOT / "docs" / "UNINSTALL.md").exists()
     assert (REPO_ROOT / "RELEASING.md").exists()
     assert "[Changelog](CHANGELOG.md)" in readme_text
     assert "[Upgrade Guide](docs/UPGRADE.md)" in readme_text
+    assert "[Uninstall Guide](docs/UNINSTALL.md)" in readme_text
     assert "[Release Checklist](RELEASING.md)" in readme_text
     assert "[Local Service Upgrade](CONCEPTS.md#local-service-upgrade)" in upgrade_text
     assert "[Local Service Rollback](CONCEPTS.md#local-service-rollback)" in upgrade_text
     assert "pre-upgrade Postgres backup" in upgrade_text
+    assert "uv tool uninstall agent-workspace-fabric" in uninstall_text
+    assert "pipx uninstall agent-workspace-fabric" in uninstall_text
 
 
 def test_public_oss_release_metadata_is_consistent() -> None:
@@ -287,6 +307,7 @@ def test_public_docs_describe_supported_release_install_channels() -> None:
             REPO_ROOT / "docs" / "QUICKSTART.md",
             REPO_ROOT / "docs" / "GETTING_STARTED.md",
             REPO_ROOT / "docs" / "UPGRADE.md",
+            REPO_ROOT / "docs" / "UNINSTALL.md",
             REPO_ROOT / "RELEASING.md",
         )
     )
@@ -296,9 +317,101 @@ def test_public_docs_describe_supported_release_install_channels() -> None:
     assert "python -m venv .venv" in public_text
     assert "pip install agent-workspace-fabric" in public_text
     assert "uv tool install . --force" in public_text
+    assert "uv tool uninstall agent-workspace-fabric" in public_text
+    assert "pipx uninstall agent-workspace-fabric" in public_text
     assert "PyPI Trusted Publishing" in public_text
     assert "brew install agent-workspace-fabric" not in public_text
     assert "Homebrew is planned" in public_text
+
+
+def test_first_run_docs_present_current_lanes_and_gate_curl() -> None:
+    public_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            README_PATH,
+            REPO_ROOT / "docs" / "QUICKSTART.md",
+            REPO_ROOT / "docs" / "GETTING_STARTED.md",
+            REPO_ROOT / "docs" / "UPGRADE.md",
+            REPO_ROOT / "docs" / "UNINSTALL.md",
+            REPO_ROOT / "RELEASING.md",
+        )
+    )
+
+    for expected in (
+        "release-installed",
+        "package-manager",
+        "Source Checkout With Global Tool Install",
+        "Source Checkout With No Global Install",
+        "awf setup --source-checkout",
+        "uv run --python 3.12 --extra dev awf setup --source-checkout",
+        "awf smoke run --project",
+        "public curl installer lane is release-gated",
+    ):
+        assert expected in public_text
+    assert "curl -fsSL" not in public_text
+    assert "curl | bash" not in public_text
+
+
+def test_quickstart_lane_sections_include_lifecycle_commands() -> None:
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    lanes = {
+        "## Lane 1: uv tool or pipx": (
+            "uv tool install agent-workspace-fabric",
+            "pipx install agent-workspace-fabric",
+            "awf setup",
+            "awf start",
+            'awf init "$HOME/awf-eval-project"',
+            "awf smoke run --project",
+            "uv tool upgrade agent-workspace-fabric",
+            "pipx upgrade agent-workspace-fabric",
+            "uv tool uninstall agent-workspace-fabric",
+            "pipx uninstall agent-workspace-fabric",
+        ),
+        "## Lane 2: Source Checkout With Global Tool Install": (
+            "uv tool install . --force",
+            'awf setup --source-checkout "$PWD"',
+            'awf start --source-checkout "$PWD"',
+            'awf init "$HOME/awf-eval-project"',
+            "awf smoke run --project",
+            "git pull --ff-only",
+            "uv tool uninstall agent-workspace-fabric",
+        ),
+        "## Lane 3: Source Checkout With No Global Install": (
+            "uv sync --extra dev",
+            'uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"',
+            'uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"',
+            'uv run --python 3.12 --extra dev awf init "$HOME/awf-eval-project"',
+            "uv run --python 3.12 --extra dev awf smoke run --project",
+            "git pull --ff-only",
+            "There is no global executable to uninstall",
+        ),
+    }
+
+    for heading, expected_fragments in lanes.items():
+        section = _markdown_section(quickstart_text, heading)
+        for fragment in expected_fragments:
+            assert fragment in section
+
+
+def test_first_run_docs_do_not_embed_dotenv_parser_scripts() -> None:
+    docs = (
+        REPO_ROOT / "docs" / "QUICKSTART.md",
+        REPO_ROOT / "docs" / "UPGRADE.md",
+        REPO_ROOT / "docs" / "UNINSTALL.md",
+    )
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in docs)
+
+    forbidden_fragments = (
+        "awf_decode_double_quoted_dotenv",
+        "awf_strip_unquoted_dotenv_inline_comment",
+        "AWF_PERSISTED_API_TOKEN",
+        "AWF_PERSISTED_POSTGRES_PASSWORD",
+        "python3 - <<",
+        "sed -n 's/^[[:space:]]*",
+    )
+
+    for fragment in forbidden_fragments:
+        assert fragment not in combined
 
 
 def test_primary_public_docs_use_public_brand_and_not_internal_backlog() -> None:
@@ -466,6 +579,14 @@ def test_awf_command_mentions_ignore_missing_readme_linked_docs(
 
     assert _public_docs() == {"docs/MISSING.md"}
     assert _awf_command_mentions(paths) == []
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    start = text.index(heading)
+    next_heading = re.search(r"(?m)^## ", text[start + len(heading) :])
+    if next_heading is None:
+        return text[start:]
+    return text[start : start + len(heading) + next_heading.start()]
 
 
 def _public_docs() -> set[str]:
