@@ -45,6 +45,7 @@ def _make_push_result(reason_code: str) -> _GitPushResult:
         "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED",
         "PRE_PUSH_VALIDATION_FIX_FAILED",
         "PRE_PUSH_VALIDATION_ROLLBACK_FAILED",
+        "PRE_PUSH_VALIDATION_REPARENT_FAILED",
     ],
 )
 @pytest.mark.unit
@@ -65,6 +66,14 @@ def test_git_push_failure_outcome_maps_toolchain_missing_separately() -> None:
 def test_git_push_terminal_monitor_failure_maps_rollback_failed_as_terminal() -> None:
     """Roll-back failure on pre-push validation should remain terminal."""
     assert _make_push_result("PRE_PUSH_VALIDATION_ROLLBACK_FAILED").terminal_monitor_failure is True
+
+
+@pytest.mark.unit
+def test_git_push_terminal_monitor_failure_maps_reparent_failed_as_terminal() -> None:
+    """Re-parent failure leaves HEAD on a non-descendant commit with no rollback, so it
+    must end monitor recovery rather than let a later iteration push the orphaning HEAD
+    and mask the error as a non-fast-forward (PR #422 thread)."""
+    assert _make_push_result("PRE_PUSH_VALIDATION_REPARENT_FAILED").terminal_monitor_failure is True
 
 
 @pytest.mark.unit

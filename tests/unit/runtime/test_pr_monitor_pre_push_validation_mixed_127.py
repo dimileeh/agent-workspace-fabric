@@ -123,6 +123,8 @@ async def test_mixed_127_fix_pass_exhaustion_reports_real_pre_push_details(
     cmd.queue_result(returncode=0, stdout=f"{'5' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'6' * 40}\n")
     cmd.queue_result(returncode=0, stdout=f"{'7' * 40}\n")
+    # merge-base --is-ancestor: the dirty commit still descends from fix_start_head.
+    cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout=f"{'8' * 40}\n")
     first_mixed = ValidationResult(
         commands=[
