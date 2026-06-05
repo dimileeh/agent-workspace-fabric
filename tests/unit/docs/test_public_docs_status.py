@@ -2110,10 +2110,13 @@ def _assert_source_checkout_api_token_restore(
         "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
     )
     token_init_line = 'AWF_PERSISTED_API_TOKEN=""'
-    legacy_token_loop_line = "for env_file in docker/compose/.env .env; do"
+    legacy_first_token_loop_line = "for env_file in docker/compose/.env .env; do"
+    root_first_token_loop_line = "for env_file in .env docker/compose/.env; do"
     root_token_loop_line = "for env_file in .env; do"
     token_loop_line = (
-        legacy_token_loop_line if legacy_token_loop_line in section else root_token_loop_line
+        root_first_token_loop_line
+        if root_first_token_loop_line in section
+        else root_token_loop_line
     )
     token_file_guard_line = '  [ -f "$env_file" ] || continue'
     token_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_API_TOKEN"]
@@ -2123,17 +2126,21 @@ def _assert_source_checkout_api_token_restore(
     token_guard_line = 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then'
     token_persisted_export_line = '  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"'
     token_else_line = "else"
-    legacy_token_require_line = (
+    legacy_first_token_require_line = (
         '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
         "or persist it in docker/compose/.env or .env before " + lifecycle + '}"'
+    )
+    root_first_token_require_line = (
+        '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
+        "or persist it in .env or docker/compose/.env before " + lifecycle + '}"'
     )
     root_token_require_line = (
         '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
         "or persist it in .env before " + lifecycle + '}"'
     )
     token_require_line = (
-        legacy_token_require_line
-        if legacy_token_require_line in section
+        root_first_token_require_line
+        if root_first_token_require_line in section
         else root_token_require_line
     )
     token_shell_export_line = "  export AWF_API_TOKEN"
@@ -2141,6 +2148,12 @@ def _assert_source_checkout_api_token_restore(
     assert unsafe_default_line not in section, f"{label} must not regenerate AWF_API_TOKEN"
     assert unsafe_shared_guard_line not in section, (
         f"{label} must not let root .env satisfy the compose env guard without export"
+    )
+    assert legacy_first_token_loop_line not in section, (
+        f"{label} must prefer root .env over legacy docker/compose/.env"
+    )
+    assert legacy_first_token_require_line not in section, (
+        f"{label} must describe root .env before legacy docker/compose/.env"
     )
     assert token_init_line in section, f"{label} must initialize persisted API token lookup"
     assert token_loop_line in section, f"{label} must inspect source checkout env files"
@@ -2249,11 +2262,12 @@ def _assert_source_checkout_postgres_password_restore(
     """Assert source-checkout snippets preserve persisted Postgres passwords."""
     unsafe_default_line = 'export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"'
     password_init_line = 'AWF_PERSISTED_POSTGRES_PASSWORD=""'
-    legacy_password_loop_line = "for env_file in docker/compose/.env .env; do"
+    legacy_first_password_loop_line = "for env_file in docker/compose/.env .env; do"
+    root_first_password_loop_line = "for env_file in .env docker/compose/.env; do"
     root_password_loop_line = "for env_file in .env; do"
     password_loop_line = (
-        legacy_password_loop_line
-        if legacy_password_loop_line in section
+        root_first_password_loop_line
+        if root_first_password_loop_line in section
         else root_password_loop_line
     )
     password_file_guard_line = '  [ -f "$env_file" ] || continue'
@@ -2266,9 +2280,15 @@ def _assert_source_checkout_postgres_password_restore(
         '  export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"'
     )
     password_else_line = "else"
-    legacy_password_require_line = (
+    legacy_first_password_require_line = (
         '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
         "the running local Core or persist it in docker/compose/.env or .env before "
+        + lifecycle
+        + '}"'
+    )
+    root_first_password_require_line = (
+        '  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for '
+        "the running local Core or persist it in .env or docker/compose/.env before "
         + lifecycle
         + '}"'
     )
@@ -2277,13 +2297,19 @@ def _assert_source_checkout_postgres_password_restore(
         "the running local Core or persist it in .env before " + lifecycle + '}"'
     )
     password_require_line = (
-        legacy_password_require_line
-        if legacy_password_require_line in section
+        root_first_password_require_line
+        if root_first_password_require_line in section
         else root_password_require_line
     )
     password_shell_export_line = "  export AWF_POSTGRES_PASSWORD"
 
     assert unsafe_default_line not in section, f"{label} must not default to awf_dev"
+    assert legacy_first_password_loop_line not in section, (
+        f"{label} must prefer root .env over legacy docker/compose/.env"
+    )
+    assert legacy_first_password_require_line not in section, (
+        f"{label} must describe root .env before legacy docker/compose/.env"
+    )
     assert password_init_line in section, f"{label} must initialize persisted password lookup"
     assert password_loop_line in section, f"{label} must inspect source checkout env files"
     assert password_file_guard_line in section, f"{label} must skip absent env files"

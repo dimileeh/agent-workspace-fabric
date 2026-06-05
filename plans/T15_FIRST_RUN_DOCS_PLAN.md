@@ -523,6 +523,22 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HODkj`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_upgrade_accepts_default_api_token -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HODkm`: source-checkout
+upgrade, rollback, and uninstall snippets must prefer the checkout root `.env`
+over legacy `docker/compose/.env` when restoring `AWF_API_TOKEN` and
+`AWF_POSTGRES_PASSWORD`. Keep legacy Compose env as a fallback for older
+checkouts, but do not let a stale legacy value override the current root env
+that `awf setup --source-checkout` and `awf start --source-checkout` would read.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HODkm`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_env_restore_strips_quoted_dotenv_entries tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_env_restore_accepts_exported_dotenv_entries -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.

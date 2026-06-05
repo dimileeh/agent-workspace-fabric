@@ -22,7 +22,7 @@ deleting a recorded checkout, either refresh the persisted path:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -34,11 +34,11 @@ done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -50,7 +50,7 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
 if [ -f docker/compose/.env ]; then
@@ -112,7 +112,7 @@ holds them. Then run:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -124,11 +124,11 @@ done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -140,7 +140,7 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
 if [ -f docker/compose/.env ]; then
@@ -179,7 +179,7 @@ them. Then run:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 AWF_PERSISTED_API_TOKEN=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
@@ -191,11 +191,11 @@ done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
 else
-  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
-for env_file in docker/compose/.env .env; do
+for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
@@ -207,7 +207,7 @@ done
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
 else
-  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in docker/compose/.env or .env before refreshing source-checkout metadata}"
+  : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env or docker/compose/.env before refreshing source-checkout metadata}"
   export AWF_POSTGRES_PASSWORD
 fi
 if [ -f docker/compose/.env ]; then

@@ -2186,6 +2186,40 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HODkm`:
+
+- `docs/UPGRADE.md` now says source-checkout lanes read checkout-root `.env`
+  first and legacy `docker/compose/.env` only as a fallback.
+- Source-checkout upgrade and rollback snippets in `docs/UPGRADE.md` now
+  restore `AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD` from `.env` before
+  falling back to `docker/compose/.env`.
+- Source-checkout metadata-refresh snippets in `docs/UNINSTALL.md` use the
+  same root-first restore order.
+- `tests/unit/docs/test_public_docs_status.py` now rejects legacy-first
+  source-checkout restore loops and legacy-first prompt text.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+```
+
+Red-phase result after tightening the focused regression: failed with the
+expected assertions that the source-checkout upgrade, rollback, and uninstall
+snippets still preferred legacy `docker/compose/.env` over root `.env`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_env_restore_strips_quoted_dotenv_entries tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_env_restore_accepts_exported_dotenv_entries -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `4 passed in 0.74s`; `4 passed in 0.84s`;
+`All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.
