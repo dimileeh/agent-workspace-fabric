@@ -50,7 +50,7 @@ from awf.db.repositories.base import (
 )
 from awf.profiles.models import ProfileAppEndpoint
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
-from awf.runtime.logs import read_log_chunk
+from awf.runtime.logs import read_log_chunk, read_log_chunk_bytes
 from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
 )
@@ -1043,6 +1043,7 @@ class WorkspaceService:
         *,
         offset: int = 0,
         limit_bytes: int = 65_536,
+        include_bytes: bool = False,
     ) -> dict[str, Any] | None:
         """Read a bounded chunk from an indexed durable log stream."""
         async with self._factory() as s:
@@ -1061,18 +1062,31 @@ class WorkspaceService:
             return None
         if not path.is_file():
             return None
-        data, next_offset, eof = await read_log_chunk(
-            path=path,
-            offset=offset,
-            limit_bytes=limit_bytes,
-        )
-        return {
+        if include_bytes:
+            data_bytes, next_offset, eof = await read_log_chunk_bytes(
+                path=path,
+                offset=offset,
+                limit_bytes=limit_bytes,
+            )
+            data = data_bytes.decode("utf-8", errors="replace")
+        else:
+            data, next_offset, eof = await read_log_chunk(
+                path=path,
+                offset=offset,
+                limit_bytes=limit_bytes,
+            )
+            data_bytes = b""
+
+        result = {
             "stream_id": stream_id,
             "offset": offset,
             "next_offset": next_offset,
             "eof": eof,
             "text": data,
         }
+        if include_bytes:
+            result["raw_bytes"] = data_bytes
+        return result
 
     def _controls(self, session: AsyncSession) -> WorkspaceControlService:
         """Create a ``WorkspaceControlService`` bound to the given session."""

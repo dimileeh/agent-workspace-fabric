@@ -11,6 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from awf.cli.main import app
+from awf.service import config as service_config
 
 _runner = CliRunner()
 
@@ -103,8 +104,14 @@ def test_mcp_serve_disposes_engine_when_server_build_fails(
         calls["session_factory"] = object()
         return calls["session_factory"]
 
-    def _build_mcp_server(*, service: object, settings: object) -> object:
+    def _build_mcp_server(
+        *,
+        service: object,
+        settings: object,
+        compose_env_file: object,
+    ) -> object:
         """Build MCP server."""
+        calls["compose_env_file"] = compose_env_file
         raise RuntimeError("boom")
 
     monkeypatch.setattr("awf.db.session.make_engine", _make_engine)
@@ -173,10 +180,16 @@ def test_mcp_serve_runs_stdio_with_env_file(
         calls["session_factory"] = object()
         return calls["session_factory"]
 
-    def _build_mcp_server(*, service: object, settings: object) -> _FakeMcpServer:
+    def _build_mcp_server(
+        *,
+        service: object,
+        settings: object,
+        compose_env_file: object,
+    ) -> _FakeMcpServer:
         """Build MCP server."""
         calls["service"] = service
         calls["settings"] = settings
+        calls["compose_env_file"] = compose_env_file
         return _FakeMcpServer()
 
     monkeypatch.setattr("awf.db.session.make_engine", _make_engine)
@@ -196,6 +209,7 @@ def test_mcp_serve_runs_stdio_with_env_file(
     assert service.session_factory is calls["session_factory"]
     assert settings.database_url == database_url
     assert settings.work_dir == "/tmp/awf-mcp-test"
+    assert calls["compose_env_file"] == env_file.resolve()
 
 
 @pytest.mark.unit
@@ -251,10 +265,16 @@ def test_mcp_serve_runs_stdio_without_env_file(monkeypatch: pytest.MonkeyPatch) 
         calls["session_factory"] = object()
         return calls["session_factory"]
 
-    def _build_mcp_server(*, service: object, settings: object) -> _FakeMcpServer:
+    def _build_mcp_server(
+        *,
+        service: object,
+        settings: object,
+        compose_env_file: object,
+    ) -> _FakeMcpServer:
         """Build MCP server."""
         calls["service"] = service
         calls["settings"] = settings
+        calls["compose_env_file"] = compose_env_file
         return _FakeMcpServer()
 
     monkeypatch.setattr("awf.db.session.make_engine", _make_engine)
@@ -272,5 +292,6 @@ def test_mcp_serve_runs_stdio_without_env_file(monkeypatch: pytest.MonkeyPatch) 
     service = cast(Any, calls["service"])
     settings = cast(Any, calls["settings"])
     assert service.session_factory is calls["session_factory"]
+    assert calls["compose_env_file"] is service_config.COMPOSE_ENV_FILE_OMITTED
     assert settings.database_url == database_url
     assert settings.work_dir == "/tmp/awf-mcp-no-env-test"

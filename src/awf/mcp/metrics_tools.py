@@ -12,7 +12,9 @@ cleanly when they show up alongside other MCP servers.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import os
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
@@ -28,6 +30,8 @@ from awf.api.schemas import (
     WorkspaceOverlapGraphResponse,
 )
 from awf.common.config import Settings, get_settings
+from awf.common.redaction import REDACTION_MARKER, redact_secrets_byte_slice
+from awf.common.token_patterns import compile_token_assignment_re
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -46,8 +50,10 @@ from awf.mcp.server import (
     _provided_runtime_health,
     _tool_result,
 )
+from awf.service import config as service_config
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
+from awf.service.environment import compose_env_file_quoted_multiline_secret_context
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
@@ -64,7 +70,7 @@ from awf.service.metrics import (
 from awf.service.operations import build_operation_list_response
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
-from awf.service.provider_readiness import ProviderName
+from awf.service.provider_readiness import ProviderName, is_secret_env_key
 from awf.service.resource_capacity import LocalCapacityLimits
 from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
@@ -99,6 +105,12 @@ RuntimeHealthSummaryProvider = Callable[
 _IDEMPOTENCY_KEY_REQUIRED_MESSAGE = "Idempotency-Key header is required for this endpoint."
 _OPERATION_TYPE_FILTER_ALIAS = AliasChoices("type", "operation_type")
 _MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
+_LOG_REDACTION_CONTEXT_BYTES = 4096
+_LOG_REDACTION_ASSIGNMENT_LOOKBACK_BYTES = 65_536
+_LOG_REDACTION_VALUE_DELIMITER_BYTES = frozenset(b" \t\r\n\v\f\"'`,;)}]")
+_UTF8_CONTINUATION_BYTE_MASK = 0b1100_0000
+_UTF8_CONTINUATION_BYTE_VALUE = 0b1000_0000
+_LOG_TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
 # sync_release_pr omits base_branch -> target the release branch (main), not the
 # legacy development default, so the release PR is opened development -> main
 # instead of degenerating to development -> development (NO_CHANGES_TO_SYNC).
@@ -130,6 +142,273 @@ def _resolve_settings(settings: Settings | None) -> Settings:
     return settings or get_settings()
 
 
+def _workspace_log_redaction_secrets(
+    settings: Settings,
+    *,
+    service_settings: service_config.ServiceSettings,
+    compose_env_file: service_config.ComposeEnvFileInput = (
+        service_config.COMPOSE_ENV_FILE_OMITTED
+    ),
+) -> tuple[str, ...]:
+    """Return exact secret values that need context-aware log slice redaction."""
+    secrets: list[str] = []
+    for secret in (
+        settings.api_token,
+        settings.github_token,
+        service_settings.api_token,
+        service_settings.github_token,
+    ):
+        if secret and len(secret) >= 4:
+            secrets.append(secret)
+    resolved_secret_env_file = _workspace_log_redaction_compose_env_secret_file(compose_env_file)
+    (
+        quoted_multiline_values,
+        quoted_multiline_first_line_values,
+    ) = compose_env_file_quoted_multiline_secret_context(
+        resolved_secret_env_file,
+        is_secret_key=is_secret_env_key,
+    )
+    provider_environ = _workspace_log_redaction_provider_environ(
+        compose_env_file=compose_env_file,
+    )
+    for key, value in provider_environ.items():
+        if (
+            is_secret_env_key(key)
+            and len(value) >= 4
+            and (key, value) not in quoted_multiline_first_line_values
+        ):
+            secrets.append(value)
+    secrets.extend(quoted_multiline_values)
+    return tuple(dict.fromkeys(secrets))
+
+
+def _workspace_log_redaction_compose_env_secret_file(
+    compose_env_file: service_config.ComposeEnvFileInput,
+) -> Path | None:
+    """Return the Compose env file used for standalone log exact-secret collection."""
+    if isinstance(compose_env_file, service_config.ComposeEnvFileOmitted):
+        compose_env_file = service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    if compose_env_file is None:
+        return None
+    return service_config.resolve_local_service_compose_env_file(compose_env_file)
+
+
+def _workspace_log_redaction_provider_environ(
+    *,
+    compose_file: Path | None = None,
+    compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
+) -> Mapping[str, str]:
+    """Return local provider env values whose exact secrets must be redacted."""
+    resolved_compose_env_file: service_config.ComposeEnvFileInput
+    if isinstance(compose_env_file, service_config.ComposeEnvFileOmitted):
+        resolved_compose_env_file = service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    else:
+        resolved_compose_env_file = compose_env_file
+
+    return service_config.resolve_local_service_provider_environ(
+        provider_environ=None,
+        environ=os.environ,
+        compose_file=(
+            compose_file if compose_file is not None else service_config.LOCAL_SERVICE_COMPOSE_FILE
+        ),
+        compose_env_file=resolved_compose_env_file,
+    )
+
+
+def _workspace_log_redaction_context_bytes(extra_secrets: tuple[str, ...]) -> int:
+    """Return surrounding bytes to read before applying slice redaction."""
+    return max(
+        (len(secret.encode("utf-8")) + _LOG_REDACTION_CONTEXT_BYTES for secret in extra_secrets),
+        default=_LOG_REDACTION_CONTEXT_BYTES,
+    )
+
+
+def _workspace_log_read_offset(*, requested_offset: int, redaction_context: int) -> int:
+    """Return the expanded log read offset, retaining one byte to identify boundaries."""
+    if requested_offset <= redaction_context:
+        return 0
+    return requested_offset - redaction_context - 1
+
+
+def _leading_utf8_continuation_byte_count(data: bytes) -> int:
+    """Return bytes to skip so decoding starts on a UTF-8 boundary."""
+    for index, value in enumerate(data[:3]):
+        if value & _UTF8_CONTINUATION_BYTE_MASK != _UTF8_CONTINUATION_BYTE_VALUE:
+            return index
+    return min(len(data), 3)
+
+
+def _workspace_log_projection_text(
+    result: dict[str, Any],
+    *,
+    result_offset: int,
+) -> tuple[str, int]:
+    """Return text and absolute byte offset for byte-window projection."""
+    raw_bytes = result.get("raw_bytes")
+    if not isinstance(raw_bytes, bytes):
+        return str(result["text"]), result_offset
+
+    boundary_shift = _leading_utf8_continuation_byte_count(raw_bytes) if result_offset > 0 else 0
+    return raw_bytes[boundary_shift:].decode("utf-8", errors="surrogateescape"), (
+        result_offset + boundary_shift
+    )
+
+
+def _unknown_leading_log_value_fragment_end(text: str, *, result_offset: int) -> int:
+    """Return the byte end of a possibly mid-token leading fragment."""
+    if result_offset <= 0 or not text:
+        return 0
+
+    characters = iter(text)
+    first_bytes = next(characters).encode("utf-8", errors="surrogateescape")
+    if not first_bytes or first_bytes[0] in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
+        return 0
+
+    fragment_end = len(first_bytes)
+    for char in characters:
+        char_bytes = char.encode("utf-8", errors="surrogateescape")
+        if char_bytes[0] in _LOG_REDACTION_VALUE_DELIMITER_BYTES:
+            return fragment_end
+        fragment_end += len(char_bytes)
+    return fragment_end
+
+
+def _workspace_log_slice_starts_in_unknown_leading_fragment(
+    text: str,
+    start: int,
+    *,
+    result_offset: int,
+) -> bool:
+    """Return whether the caller slice starts inside an unknown leading token."""
+    fragment_end = _unknown_leading_log_value_fragment_end(text, result_offset=result_offset)
+    return 0 <= start < fragment_end
+
+
+def _workspace_log_assignment_value_covers_byte(text: str, start: int) -> bool:
+    """Return whether visible assignment context already redacts ``start``."""
+    if start < 0:
+        return False
+    for match in _LOG_TOKEN_ASSIGNMENT_RE.finditer(text):
+        value_start = len(text[: match.start("value")].encode("utf-8", errors="surrogateescape"))
+        if value_start > start:
+            break
+        value_end = value_start + len(
+            match.group("value").encode("utf-8", errors="surrogateescape")
+        )
+        if value_start <= start < value_end:
+            return True
+    return False
+
+
+async def _workspace_log_assignment_lookback_projection(
+    service: WorkspaceService,
+    workspace_id: str,
+    stream_id: str,
+    *,
+    requested_offset: int,
+    requested_limit_bytes: int,
+    result: dict[str, Any],
+    result_text: str,
+    projection_offset: int,
+) -> tuple[str, int, bool]:
+    """Return a projection plus whether a failed lookback left a fragment untrusted."""
+    slice_start = requested_offset - projection_offset
+    if not _workspace_log_slice_starts_in_unknown_leading_fragment(
+        result_text,
+        slice_start,
+        result_offset=projection_offset,
+    ):
+        return result_text, projection_offset, False
+    if _workspace_log_assignment_value_covers_byte(result_text, slice_start):
+        return result_text, projection_offset, False
+
+    result_offset = int(result["offset"])
+    if result_offset <= 0:
+        return result_text, projection_offset, False
+
+    lookback_offset = max(0, result_offset - _LOG_REDACTION_ASSIGNMENT_LOOKBACK_BYTES)
+    read_limit = int(result["next_offset"]) - lookback_offset
+    if read_limit <= 0:
+        return result_text, projection_offset, True
+
+    try:
+        lookback_result = await service.read_log(
+            workspace_id,
+            stream_id,
+            offset=lookback_offset,
+            limit_bytes=read_limit,
+            include_bytes=True,
+        )
+    except Exception:
+        return result_text, projection_offset, True
+    required_next_offset = min(
+        requested_offset + requested_limit_bytes,
+        int(result["next_offset"]),
+    )
+    if lookback_result is None or int(lookback_result["next_offset"]) < required_next_offset:
+        return result_text, projection_offset, True
+
+    lookback_text, lookback_projection_offset = _workspace_log_projection_text(
+        lookback_result,
+        result_offset=int(lookback_result["offset"]),
+    )
+    lookback_slice_start = requested_offset - lookback_projection_offset
+    still_unknown_fragment = _workspace_log_slice_starts_in_unknown_leading_fragment(
+        lookback_text,
+        lookback_slice_start,
+        result_offset=lookback_projection_offset,
+    )
+    if still_unknown_fragment and not _workspace_log_assignment_value_covers_byte(
+        lookback_text,
+        lookback_slice_start,
+    ):
+        return lookback_text, lookback_projection_offset, True
+    return lookback_text, lookback_projection_offset, False
+
+
+def _redact_workspace_log_byte_slice(
+    text: str,
+    start: int,
+    end: int,
+    *,
+    extra_secrets: tuple[str, ...],
+    redact_unknown_leading_fragment: bool = False,
+    result_offset: int = 0,
+) -> str:
+    """Redact a requested log byte slice using visible redaction context."""
+    if redact_unknown_leading_fragment:
+        fragment_end = _unknown_leading_log_value_fragment_end(text, result_offset=result_offset)
+        if start < fragment_end:
+            if end <= fragment_end:
+                return REDACTION_MARKER
+            return REDACTION_MARKER + redact_secrets_byte_slice(
+                text,
+                fragment_end,
+                end,
+                extra_secrets=extra_secrets,
+            )
+    return redact_secrets_byte_slice(text, start, end, extra_secrets=extra_secrets)
+
+
+def _requested_log_window_offsets(
+    *,
+    requested_offset: int,
+    limit_bytes: int,
+    expanded_next_offset: int,
+    expanded_eof: bool,
+) -> tuple[int, bool]:
+    """Project an expanded read result back to the caller's requested byte window."""
+    if expanded_eof:
+        file_size = expanded_next_offset
+        safe_offset = min(requested_offset, file_size)
+        next_offset = min(safe_offset + limit_bytes, file_size)
+        return next_offset, next_offset >= file_size
+    # If the expanded read is short without EOF, advance only through the
+    # returned bytes so callers can poll again without skipping growing logs.
+    covered_next_offset = min(requested_offset + limit_bytes, expanded_next_offset)
+    return max(requested_offset, covered_next_offset), False
+
+
 def register_metrics_tools(
     mcp: FastMCP,
     service: WorkspaceService,
@@ -141,8 +420,27 @@ def register_metrics_tools(
     runtime_health_summary_provider: RuntimeHealthSummaryProvider | None,
     readiness_provider: ReadinessProvider | None,
     health_provider: HealthProvider | None,
+    compose_env_file: service_config.ComposeEnvFileInput = service_config.COMPOSE_ENV_FILE_OMITTED,
+    service_settings: service_config.ServiceSettings | None = None,
+    extra_secrets: Iterable[str] | None = None,
 ) -> None:
     _safe_result = safe_result
+    # Exact secret values are snapshotted when MCP tools are registered so log
+    # polling does not reread settings or Compose env files on every request.
+    # After credential rotation, restart the MCP server so newly configured bare
+    # exact values join this list; pattern and assignment redaction still applies
+    # to each returned log slice.
+    if extra_secrets is None:
+        service_settings_value = service_settings or service_config.resolve_service_settings(
+            settings_value
+        )
+        extra_secret_values = _workspace_log_redaction_secrets(
+            settings_value,
+            service_settings=service_settings_value,
+            compose_env_file=compose_env_file,
+        )
+    else:
+        extra_secret_values = tuple(extra_secrets)
 
     @mcp.tool(name="awf_get_failure_analysis_summary")
     async def awf_get_failure_analysis_summary(
@@ -310,20 +608,63 @@ def register_metrics_tools(
         ),
     ) -> dict[str, Any] | None:
         """Read a bounded chunk from an indexed durable log stream."""
+        redaction_context = _workspace_log_redaction_context_bytes(extra_secret_values)
+        read_offset = _workspace_log_read_offset(
+            requested_offset=offset,
+            redaction_context=redaction_context,
+        )
+        read_limit = offset - read_offset + limit_bytes + redaction_context
         result = await service.read_log(
             workspace_id,
             stream_id,
-            offset=offset,
-            limit_bytes=limit_bytes,
+            offset=read_offset,
+            limit_bytes=read_limit,
+            include_bytes=True,
         )
         if result is None:
             return None
+        result_offset = int(result["offset"])
+        result_next_offset = int(result["next_offset"])
+        requested_next_offset, requested_eof = _requested_log_window_offsets(
+            requested_offset=offset,
+            limit_bytes=limit_bytes,
+            expanded_next_offset=result_next_offset,
+            expanded_eof=bool(result["eof"]),
+        )
+        result_text, projection_offset = _workspace_log_projection_text(
+            result,
+            result_offset=result_offset,
+        )
+        (
+            result_text,
+            projection_offset,
+            redact_unknown_leading_fragment,
+        ) = await _workspace_log_assignment_lookback_projection(
+            service,
+            workspace_id,
+            stream_id,
+            requested_offset=offset,
+            requested_limit_bytes=limit_bytes,
+            result=result,
+            result_text=result_text,
+            projection_offset=projection_offset,
+        )
+        # The requested end can exceed available bytes when EOF falls inside the window;
+        # redact_secrets_byte_slice clamps that to the decoded text via safe_end.
+        data = _redact_workspace_log_byte_slice(
+            result_text,
+            offset - projection_offset,
+            offset - projection_offset + limit_bytes,
+            extra_secrets=extra_secret_values,
+            redact_unknown_leading_fragment=redact_unknown_leading_fragment,
+            result_offset=projection_offset,
+        )
         return WorkspaceLogReadResponse(
             stream_id=str(result["stream_id"]),
-            offset=int(result["offset"]),
-            next_offset=int(result["next_offset"]),
-            eof=bool(result["eof"]),
-            data=str(result["text"]),
+            offset=offset,
+            next_offset=requested_next_offset,
+            eof=requested_eof,
+            data=data,
         ).model_dump(mode="json")
 
     @mcp.tool(name="awf_list_tasks")
