@@ -53,6 +53,55 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HQ9mO
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve existing start option validation before input resolution: Complete.
+- Preserve the sanitized error detail shape by exposing only the exception type:
+  Complete.
+- Return a first-run start payload instead of a generic MCP `ErrorResponse`:
+  Complete.
+- Render the retry command with accepted `rebuild`, `skip_agent_runtime_build`,
+  `timeout_seconds`, and `source_checkout` context: Complete.
+- Keep bootstrap execution skipped when input resolution fails: Complete.
+- Add focused regression coverage for the repaired branch: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_input_resolution_failure_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_runtime_input_resolution_failure_is_structured tests/unit/mcp/test_setup_tools.py::test_start_local_service_called_process_input_resolution_failure_is_structured tests/unit/mcp/test_setup_tools.py::test_start_local_service_source_checkout_value_error_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because the guarded
+  input-resolution branch returned a generic MCP `ErrorResponse` without
+  `payload["status"]` or `payload["command"]`.
+- Targeted regression after the implementation change: 1 passed.
+- Adjacent input-resolution regressions after the implementation change:
+  3 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Private CLI Import Contract
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

@@ -84,6 +84,54 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HQ9mO
+
+### Problem Statement And Scope
+
+The PR review reports that the guarded `awf_start_local_service` input
+resolution error branch returns a generic MCP `ErrorResponse` when
+`_resolve_start_bootstrap_inputs_for_mcp` raises `CalledProcessError`,
+`HostSetupConfigError`, `OSError`, `RuntimeError`, or `ValueError`. The adjacent
+start failure branches already return first-run payloads with the rendered
+retry command, so this branch drops accepted start options such as `--rebuild`,
+custom timeouts, and explicit `--source-checkout`.
+
+Scope is limited to this guarded start input-resolution failure branch and its
+focused regressions. The response must remain credential-safe and must not run
+the bootstrap when input resolution fails.
+
+### Requirements Checklist
+
+- Preserve existing start option validation before input resolution.
+- Preserve the sanitized error detail shape by exposing only the exception type.
+- Return a first-run start payload instead of a generic MCP `ErrorResponse`.
+- Render the retry command with accepted `rebuild`, `skip_agent_runtime_build`,
+  `timeout_seconds`, and `source_checkout` context.
+- Keep bootstrap execution skipped when input resolution fails.
+- Add focused regression coverage for the repaired branch.
+
+### Implementation Steps
+
+1. Update the focused start input-resolution regression to require a first-run
+   payload with the caller's start command context.
+2. Change `_start_input_resolution_error_result` to build a credential-safe
+   first-run payload with `START_INPUT_RESOLUTION_FAILED`.
+3. Thread the accepted start options into the guarded input-resolution failure
+   branch.
+4. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_input_resolution_failure_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Private CLI Import Contract
 
 ### Problem Statement And Scope

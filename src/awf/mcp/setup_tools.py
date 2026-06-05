@@ -38,7 +38,9 @@ from awf.host_setup.rendering import (
     SETUP_CLIENT_UNKNOWN,
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
+    FirstRunIssue,
     FirstRunPayload,
+    FirstRunRemediation,
     render_first_run_json,
 )
 from awf.host_setup.source_assets import SourceCheckoutError
@@ -383,7 +385,14 @@ async def _start_local_service_result(
             is_error=True,
         )
     except (CalledProcessError, HostSetupConfigError, OSError, RuntimeError, ValueError) as exc:
-        return _start_input_resolution_error_result(safe_result, exc)
+        return _start_input_resolution_error_result(
+            safe_result,
+            exc,
+            rebuild=rebuild,
+            skip_agent_runtime_build=skip_agent_runtime_build,
+            timeout_seconds=timeout_seconds,
+            source_checkout=source_path,
+        )
 
     options = ServiceBootstrapOptions(
         timeout_seconds=timeout_seconds,
@@ -448,12 +457,43 @@ def _resolve_start_bootstrap_inputs_for_mcp(
 def _start_input_resolution_error_result(
     safe_result: SafeResult,
     exc: CalledProcessError | HostSetupConfigError | OSError | RuntimeError | ValueError,
+    *,
+    rebuild: bool,
+    skip_agent_runtime_build: bool,
+    timeout_seconds: float,
+    source_checkout: Path | None = None,
 ) -> CallToolResult:
-    return _error_result(
+    command = _start_command(
+        rebuild=rebuild,
+        skip_agent_runtime_build=skip_agent_runtime_build,
+        timeout_seconds=timeout_seconds,
+        source_checkout=source_checkout,
+    )
+    issue = FirstRunIssue(
+        reason_code=START_INPUT_RESOLUTION_FAILED,
+        severity="blocked",
+        remediation=FirstRunRemediation(
+            problem="AWF could not resolve local service startup inputs.",
+            cause=(
+                "A local startup asset, host setup configuration, or source-checkout path "
+                "could not be resolved."
+            ),
+            fix=f"Inspect the selected local-service inputs, then retry {command}.",
+            docs_link="docs/MCP_SETUP.md",
+            related_command=command,
+        ),
+        details={"error_type": type(exc).__name__},
+    )
+    return _first_run_result(
         safe_result,
-        START_INPUT_RESOLUTION_FAILED,
-        "could not resolve local service startup inputs",
-        detail={"error_type": type(exc).__name__},
+        FirstRunPayload(
+            status="blocked",
+            command=command,
+            summary="could not resolve local service startup inputs",
+            reason_code=START_INPUT_RESOLUTION_FAILED,
+            issues=(issue,),
+        ),
+        is_error=True,
     )
 
 
