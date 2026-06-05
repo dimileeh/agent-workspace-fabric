@@ -186,8 +186,8 @@ local stack with safe loopback-only defaults:
 docker compose up --build
 ```
 
-Open <http://localhost:3000> for the console, or call the API at
-<http://localhost:8000>. Protected local API calls use
+Open <http://127.0.0.1:3000> for the console, or call the API at
+<http://127.0.0.1:8000>. Protected local API calls use
 `Authorization: Bearer local-dev-token` unless you set `AWF_API_TOKEN`.
 
 If setup, startup, or first-run health checks fail, use the

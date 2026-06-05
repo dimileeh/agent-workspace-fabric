@@ -856,15 +856,19 @@ def test_getting_started_first_run_urls_match_smoke_defaults() -> None:
     assert re.search(r"current smoke\s+defaults", startup_section)
 
 
-def test_getting_started_direct_local_api_urls_use_localhost() -> None:
-    """Assert host-facing local API/console URLs use the public docs style."""
+def test_getting_started_manual_local_api_urls_use_localhost() -> None:
+    """Assert manual host-side URL override examples keep the public docs style."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
         encoding="utf-8",
     )
+    manual_url_section = getting_started_text.split(
+        "For host-side `awf` workspace commands and manual HTTP checks",
+        maxsplit=1,
+    )[1].split("`AWF_API_BASE_URL` is different", maxsplit=1)[0]
 
-    assert not re.search(r"http://127\.0\.0\.1:(?:3000|8000)\b", getting_started_text)
-    assert "http://localhost:8000" in getting_started_text
-    assert "http://localhost:3000" in getting_started_text
+    assert not re.search(r"http://127\.0\.0\.1:(?:3000|8000)\b", manual_url_section)
+    assert "http://localhost:<port>" in manual_url_section
+    assert "http://localhost:${AWF_API_HOST_PORT}" in manual_url_section
 
 
 def test_markdown_section_accepts_trailing_heading_whitespace() -> None:
@@ -972,14 +976,10 @@ def test_raw_docker_compose_source_path_is_single_command() -> None:
         assert "docker compose up --build" in section, doc_name
         assert "cp .env.example .env" not in section, doc_name
         assert "docker build -t awf-agent-runtime:latest" not in section, doc_name
-        if doc_name == "QUICKSTART.md":
-            assert "127.0.0.1:3000" in section, doc_name
-            assert "127.0.0.1:8000" in section, doc_name
-            assert "localhost:3000" not in section, doc_name
-            assert "localhost:8000" not in section, doc_name
-        else:
-            assert "localhost:3000" in section, doc_name
-            assert "localhost:8000" in section, doc_name
+        assert "127.0.0.1:3000" in section, doc_name
+        assert "127.0.0.1:8000" in section, doc_name
+        assert "localhost:3000" not in section, doc_name
+        assert "localhost:8000" not in section, doc_name
         assert "local-dev-token" in section, doc_name
 
 
