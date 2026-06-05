@@ -438,6 +438,63 @@ def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
         assert result.stdout == "token-from-env\nawf_dev\n", label
 
 
+@pytest.mark.parametrize(
+    "heading",
+    (
+        "## Lane 2: Source Checkout With Global Tool Install",
+        "## Lane 3: Source Checkout With No Global Install",
+    ),
+)
+def test_quickstart_source_checkout_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
+    heading: str,
+    tmp_path: Path,
+) -> None:
+    """Assert Quickstart source upgrades restore the same unquoted dotenv bytes as Compose."""
+    env_file = tmp_path / ".env"
+    persisted_database_url = "postgresql+asyncpg://awf:awf_dev@localhost:5432/awf"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=token-from-env # local token",
+                "AWF_POSTGRES_PASSWORD=awf_dev # local password",
+                f"AWF_DATABASE_URL={persisted_database_url} # local database",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    upgrade_section = _quickstart_upgrade_section(quickstart_text, heading)
+    bash_fences = [
+        fence
+        for fence in _markdown_fences("docs/QUICKSTART.md", upgrade_section)
+        if fence.language == "bash"
+    ]
+    assert len(bash_fences) == 1
+    restore_script = bash_fences[0].body.split("if [ -f .env ]; then", maxsplit=1)[0]
+    script = "\n".join(
+        (
+            "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD AWF_DATABASE_URL",
+            restore_script,
+            (
+                'printf "%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
+                '"$AWF_POSTGRES_PASSWORD" "$AWF_DATABASE_URL"'
+            ),
+        )
+    )
+
+    result = subprocess.run(  # noqa: S602
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"{heading}: {result.stderr}"
+    assert result.stdout == f"token-from-env\nawf_dev\n{persisted_database_url}\n", heading
+
+
 @pytest.mark.parametrize("doc_name", ("QUICKSTART.md", "UNINSTALL.md", "UPGRADE.md"))
 def test_source_checkout_env_restore_decodes_quoted_dotenv_entries(
     doc_name: str,

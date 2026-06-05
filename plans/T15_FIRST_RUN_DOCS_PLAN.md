@@ -776,3 +776,21 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lif
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py
 git diff --check
 ```
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HZQot`:
+Quickstart source-checkout upgrade snippets must strip valid unquoted dotenv
+inline comments from restored `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and
+`AWF_DATABASE_URL` before exporting them. Mirror the standalone Upgrade parser
+path while preserving root `.env` before legacy `docker/compose/.env`
+precedence and quoted dotenv decoding.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HZQot`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_source_checkout_upgrade_env_restore_strips_unquoted_inline_dotenv_comments -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py
+git diff --check
+```

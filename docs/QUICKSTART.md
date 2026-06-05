@@ -284,10 +284,18 @@ awf_decode_double_quoted_dotenv() {
 replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
 print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
 }
+awf_strip_unquoted_dotenv_inline_comment() {
+  case "$1" in
+    \"*|\'*) printf "%s" "$1" ;;
+    \#*) printf "%s" "" ;;
+    *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
+  esac
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
   case "$AWF_PERSISTED_API_TOKEN" in
     \"*\")
       AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
@@ -313,6 +321,7 @@ AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
     \"*\")
       AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
@@ -336,6 +345,7 @@ AWF_PERSISTED_DATABASE_URL=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
   case "$AWF_PERSISTED_DATABASE_URL" in
     \"*\")
       AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
@@ -496,10 +506,18 @@ awf_decode_double_quoted_dotenv() {
 replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
 print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
 }
+awf_strip_unquoted_dotenv_inline_comment() {
+  case "$1" in
+    \"*|\'*) printf "%s" "$1" ;;
+    \#*) printf "%s" "" ;;
+    *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
+  esac
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
   case "$AWF_PERSISTED_API_TOKEN" in
     \"*\")
       AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
@@ -525,6 +543,7 @@ AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
     \"*\")
       AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
@@ -548,6 +567,7 @@ AWF_PERSISTED_DATABASE_URL=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
   case "$AWF_PERSISTED_DATABASE_URL" in
     \"*\")
       AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
