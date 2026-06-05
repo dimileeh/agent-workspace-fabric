@@ -338,20 +338,31 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
     assert persist_target in first_run_section
     assert unsafe_persist_target not in first_run_section
     assert setup_command in first_run_section
-    assert (
-        first_run_section.index(api_export)
-        < first_run_section.index(password_export)
-        < first_run_section.index(host_port_export)
-        < first_run_section.index(database_url_export)
-        < first_run_section.index(env_tmp)
-        < first_run_section.index(api_persist)
-        < first_run_section.index(password_persist)
-        < first_run_section.index(host_port_persist)
-        < first_run_section.index(database_url_persist)
-        < first_run_section.index(preserve_existing_env)
-        < first_run_section.index(persist_target)
-        < first_run_section.index(setup_command)
+    ordered_steps = (
+        ("API token export", api_export),
+        ("Postgres password export", password_export),
+        ("Postgres host port export", host_port_export),
+        ("database URL export", database_url_export),
+        ("temporary env file creation", env_tmp),
+        ("API token persist", api_persist),
+        ("Postgres password persist", password_persist),
+        ("Postgres host port persist", host_port_persist),
+        ("database URL persist", database_url_persist),
+        ("existing env preservation", preserve_existing_env),
+        ("env file replacement", persist_target),
+        ("setup command", setup_command),
     )
+    for (previous_label, previous_text), (next_label, next_text) in zip(
+        ordered_steps,
+        ordered_steps[1:],
+        strict=False,
+    ):
+        previous_index = first_run_section.index(previous_text)
+        next_index = first_run_section.index(next_text)
+        assert previous_index < next_index, (
+            "Quickstart package first-run service env steps are out of order: "
+            f"{previous_label} at {previous_index} must precede {next_label} at {next_index}"
+        )
 
 
 def test_quickstart_package_first_run_strips_exported_awf_env_entries(
@@ -727,7 +738,10 @@ def test_source_checkout_env_restore_strips_quoted_dotenv_entries(
         ("AWF_POSTGRES_PASSWORD", "AWF_PERSISTED_POSTGRES_PASSWORD"),
     ):
         expressions = set(re.findall(rf"sed -n '([^']*{key}[^']*)'", doc_text))
-        assert len(expressions) == 1
+        assert len(expressions) == 1, (
+            f"Expected one unique sed expression for {key!r} in {doc_name}, "
+            f"found: {sorted(expressions)!r}"
+        )
         expression = expressions.pop()
         script = "\n".join(
             [
