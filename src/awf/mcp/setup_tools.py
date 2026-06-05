@@ -84,6 +84,19 @@ PROJECT_INIT_INVALID_PATH = "PROJECT_INIT_INVALID_PATH"
 PROJECT_PROFILE_EXISTS = "PROJECT_PROFILE_EXISTS"
 PROJECT_INIT_FAILED = "PROJECT_INIT_FAILED"
 _LOGGER = logging.getLogger(__name__)
+_START_REASON_CODED_CLIENT_VALUE_PATTERN = "|".join(
+    re.escape(client) for client in sorted(CLIENT_DESCRIPTORS, key=len, reverse=True)
+)
+_START_REASON_CODED_PROVIDER_VALUE_PATTERN = (
+    r"(?:<provider>|[A-Za-z0-9_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_][A-Za-z0-9_-]*)*)"
+)
+_START_REASON_CODED_SETUP_COMMAND_PATTERN = re.compile(
+    rf"\bawf setup(?:"
+    rf"\s+--dry-run(?:\s+--provider\s+{_START_REASON_CODED_PROVIDER_VALUE_PATTERN})?"
+    rf"|\s+--provider\s+{_START_REASON_CODED_PROVIDER_VALUE_PATTERN}"
+    rf"|\s+--client(?:\s+(?:<client>|{_START_REASON_CODED_CLIENT_VALUE_PATTERN}))?"
+    rf")?"
+)
 _SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN = re.compile(
     r"(?P<setup>\bawf setup --dry-run(?P<setup_suffix>[.,;):]|$|\s+to\b))"
     r"|(?P<start_source>\bawf start\s+--source-checkout(?:=|\s+)"
@@ -558,9 +571,7 @@ def _start_reason_coded_next_steps(
 
 
 def _start_reason_coded_next_step(step: str, *, command: str) -> str:
-    if "awf setup --dry-run" in step:
-        return step.replace("awf setup --dry-run", command, 1)
-    return step.replace("awf setup", command, 1)
+    return _START_REASON_CODED_SETUP_COMMAND_PATTERN.sub(command, step, count=1)
 
 
 def _start_command(

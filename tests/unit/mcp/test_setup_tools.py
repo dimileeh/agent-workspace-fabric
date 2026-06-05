@@ -52,6 +52,37 @@ SETUP_TOOL_NAMES = {
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("step", "command", "expected"),
+    [
+        (
+            "Re-run awf setup --client claude after correcting config; keep awf setup as reference.",
+            "awf start --rebuild",
+            "Re-run awf start --rebuild after correcting config; keep awf setup as reference.",
+        ),
+        (
+            "Fix GitHub auth, then re-run awf setup --dry-run --provider github.",
+            "awf start --timeout-seconds 42",
+            "Fix GitHub auth, then re-run awf start --timeout-seconds 42.",
+        ),
+        (
+            "Re-run awf setup --client without --allow-plain-secrets; keep awf setup as reference.",
+            "awf start",
+            "Re-run awf start without --allow-plain-secrets; keep awf setup as reference.",
+        ),
+    ],
+)
+def test_start_reason_coded_next_step_strips_setup_only_selectors(
+    step: str,
+    command: str,
+    expected: str,
+) -> None:
+    from awf.mcp import setup_tools
+
+    assert setup_tools._start_reason_coded_next_step(step, command=command) == expected
+
+
+@pytest.mark.unit
 async def test_setup_tools_are_registered(tmp_path: Path) -> None:
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
