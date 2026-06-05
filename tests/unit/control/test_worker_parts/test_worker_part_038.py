@@ -1411,6 +1411,77 @@ async def test_safe_worker_paths_swallow_runtime_failures(
 
 
 @pytest.mark.unit
+async def test_safely_provision_isolates_epoch_read_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A transient failure on the fencing epoch read must not abort the batch.
+
+    ``run_once`` gathers provision tasks with ``return_exceptions=False``, so an
+    exception escaping ``_safely_provision_claimed`` would propagate and wedge
+    the rest of the cycle. The epoch read (D2) sits outside the inner provision
+    try/except, so it must be isolated like a provision failure — logged and
+    swallowed — and the claim released so the next poll re-claims and retries.
+    """
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _raising_read(workspace_id: str) -> int | None:
+        assert workspace_id == "ws_epoch"
+        raise RuntimeError("transient db disconnect")
+
+    released: list[str] = []
+
+    async def _release(workspace_id: str) -> None:
+        released.append(workspace_id)
+
+    worker._read_execution_claim_epoch = _raising_read  # type: ignore[method-assign]
+    worker._release_execution_claim_after_cancellation = _release  # type: ignore[method-assign]
+
+    # Must not raise: the failure is isolated, not propagated to the gather().
+    await worker._safely_provision_claimed("ws_epoch")  # noqa: SLF001
+
+    # The claim was still released so the next poll re-claims and retries.
+    assert released == ["ws_epoch"]
+    assert "ws_epoch" not in worker._execution_claim_epochs  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_safely_provision_propagates_cancel_on_epoch_read(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An external cancel during the epoch read must still propagate.
+
+    Only non-cancellation failures are isolated; cooperative cancellation (e.g.
+    worker shutdown cancelling ``run_once``'s gather) must never be suppressed,
+    and the claim is still released via the outer ``finally``.
+    """
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=object(),  # type: ignore[arg-type]
+        config=WorkerConfig(poll_interval_seconds=0.01),
+    )
+
+    async def _cancelled_read(workspace_id: str) -> int | None:
+        raise asyncio.CancelledError
+
+    released: list[str] = []
+
+    async def _release(workspace_id: str) -> None:
+        released.append(workspace_id)
+
+    worker._read_execution_claim_epoch = _cancelled_read  # type: ignore[method-assign]
+    worker._release_execution_claim_after_cancellation = _release  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker._safely_provision_claimed("ws_cancel")  # noqa: SLF001
+
+    assert released == ["ws_cancel"]
+
+
+@pytest.mark.unit
 async def test_claim_monitoring_pr_ids_respects_limit_and_existing_tasks(
     worker: ControlWorker,
 ) -> None:

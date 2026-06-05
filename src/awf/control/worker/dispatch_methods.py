@@ -288,6 +288,17 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
+    except Exception:
+        # The fencing epoch read and claim-task setup above sit *outside* the
+        # inner provision try/except, yet ``run_once`` gathers us with
+        # ``return_exceptions=False``: a transient failure here (e.g. a DB
+        # disconnect on the D2 read) would propagate out and abort the rest of
+        # the provision batch instead of being isolated like a provision
+        # failure. Swallow it so one bad workspace can't wedge the cycle; an
+        # external cancel still propagates (``CancelledError`` is not an
+        # ``Exception``) and the outer ``finally`` releases the claim either way
+        # so the next poll re-claims and retries.
+        _log.exception("worker.provision_claim_setup_failed", workspace_id=workspace_id)
     finally:
         # Release CAS on the stored epoch so a release issued after a newer
         # claimant reclaimed the row cannot clobber it (D6). This finally runs
