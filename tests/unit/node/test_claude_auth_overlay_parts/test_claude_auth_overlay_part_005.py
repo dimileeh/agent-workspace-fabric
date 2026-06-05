@@ -98,6 +98,48 @@ def test_reconcile_same_size_mtime_but_changed_content_is_not_whiteouted(
 
 
 @pytest.mark.unit
+def test_reconcile_same_size_mtime_content_but_changed_mode_is_not_whiteouted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host ran a post-build ``chmod`` on the credential: ``st_mtime_ns``, ``st_size``
+    # and the *bytes* are all identical to base (``chmod`` bumps ``ctime`` only), but the
+    # mode bits diverge. ``st_mode`` is base-significant — the base is built with
+    # ``copytree(copy2)`` (mode-preserving) and ``_host_claude_signature`` keys on mode —
+    # so a mode change means the host modified the path since the base was built. The
+    # legacy absence is no longer a confident agent deletion: fail safe (never whiteout).
+    # This is the reviewer's #414 mode-drift case.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (base / "secret.json").write_text("token\n")
+    (base / "secret.json").chmod(0o600)
+    base_stat = (base / "secret.json").stat()
+    # Identical bytes; restore base's mtime/size; only the mode bits differ.
+    (host / "secret.json").write_text("token\n")
+    (host / "secret.json").chmod(0o644)
+    os.utime(host / "secret.json", ns=(base_stat.st_atime_ns, base_stat.st_mtime_ns))
+    host_stat = (host / "secret.json").stat()
+    assert host_stat.st_size == base_stat.st_size
+    assert host_stat.st_mtime_ns == base_stat.st_mtime_ns
+    assert host_stat.st_mode != base_stat.st_mode
+    # ``legacy`` LACKS ``secret.json`` -> looks like an agent deletion by stat alone.
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    assert recorded == []
+    assert not (upper / "secret.json").exists()
+
+
+@pytest.mark.unit
 def test_safe_files_equal_content_compares_bytes_and_fails_safe(tmp_path: Path) -> None:
     # Direct coverage for the content-equality primitive backing the whiteout guard:
     # byte-identical files compare equal; same-length-different-bytes do not; and an

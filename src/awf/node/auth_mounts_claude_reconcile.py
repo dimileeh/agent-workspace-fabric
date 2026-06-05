@@ -158,8 +158,12 @@ def _forward_fallback_deletions_as_whiteouts(
     - ``upper`` has no entry for the path (any type). The agent's overlay state is
       otherwise authoritative — never double-handle it.
     - The live host ``~/.claude`` still holds the path **unchanged** from ``base`` —
-      same ``st_mtime_ns`` + ``st_size`` **and** byte-for-byte identical content (see
-      :func:`_safe_files_equal_content`). That proves the base copy is current, so the
+      same ``st_mtime_ns`` + ``st_size`` + ``st_mode`` **and** byte-for-byte identical
+      content (see :func:`_safe_files_equal_content`). ``st_mode`` is base-significant
+      (the copy is ``copytree(copy2)``, which preserves permission bits, and
+      :func:`_host_claude_signature` keys on mode too), so a post-build ``chmod`` —
+      which bumps ``ctime`` only, leaving size/mtime/content identical — must read as a
+      host change. That proves the base copy is current, so the
       legacy copy's absence is a genuine agent deletion — mirroring normal overlay
       semantics where an agent deletion through ``merged`` hides the lower. The content
       check is not redundant with mtime + size: a host that rotates a credential to
@@ -172,7 +176,7 @@ def _forward_fallback_deletions_as_whiteouts(
     Every other shape is ambiguous and **not** whiteouted: the host *lacking* the
     path (the host may itself have removed it — the legacy absence is then
     host-explained, not agent-attributable), the host holding a *changed* version
-    (re-added / edited — detected by a differing mtime, size, *or* content), or a
+    (re-added / edited — detected by a differing mtime, size, mode, *or* content), or a
     missing capability. In each case the deletion is simply not forwarded and the
     base's copy stays visible — the only safe direction.
 
@@ -257,9 +261,19 @@ def _forward_fallback_deletions_as_whiteouts(
             if (
                 host_stat.st_mtime_ns != base_stat.st_mtime_ns
                 or host_stat.st_size != base_stat.st_size
+                or host_stat.st_mode != base_stat.st_mode
             ):
                 # Host changed the path since the base was built (re-added / edited):
                 # the legacy absence is no longer a confident agent deletion. Fail safe.
+                # ``st_mode`` is base-significant: the base copy is built with
+                # ``copytree(copy2)``, which preserves permission bits, and
+                # :func:`_host_claude_signature` already treats a mode change as a fresh
+                # base. A post-build ``chmod`` on the host leaves ``st_mtime_ns`` and
+                # ``st_size`` untouched (it bumps ``ctime`` only) with byte-identical
+                # content, so mtime+size+content alone would read "host == base" and
+                # whiteout a path the host actively modified. Including the mode keeps
+                # this guard symmetric with the signature and biases toward keeping the
+                # live credential visible.
                 continue
             if not _safe_files_equal_content(base / rel, host_claude / rel):
                 # mtime + size matched but the *bytes* differ: the host rotated the
