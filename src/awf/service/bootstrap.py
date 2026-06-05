@@ -271,6 +271,7 @@ class PersistedPropagationPosture:
 def _persist_work_dir_propagation_result(
     env_file: Path,
     result: WorkDirPropagationResult,
+    environ: Mapping[str, str] | None = None,
 ) -> None:
     """Persist the propagation posture into the compose env-file (#398).
 
@@ -278,6 +279,13 @@ def _persist_work_dir_propagation_result(
     and ``AWF_WORK_DIR_PROPAGATION_TIMESTAMP`` into the compose env-file so a
     later non-bootstrap ``docker compose up`` recreates containers with the
     same posture the preflight decided.
+
+    When *environ* is supplied it is the in-process environment that
+    ``_apply_work_dir_propagation_env`` already folded the operator override
+    into.  The effective ``AWF_CLAUDE_AUTH_FORCE_COPY`` for the env-file is
+    the preflight result OR any operator request found in either the
+    existing env-file **or** the in-process environment — matching the
+    monotonic-raise guarantee of ``_apply_work_dir_propagation_env``.
 
     Best-effort: ``OSError`` on write is caught and logged (redacted), never
     fatal. The env-file is written atomically via a temp file in the same
@@ -287,7 +295,11 @@ def _persist_work_dir_propagation_result(
     effective_force_copy = result.force_copy
     try:
         pre_existing_env = compose_env_file_values(env_file) if env_file.exists() else {}
-        effective_force_copy = result.force_copy or _force_copy_already_requested(pre_existing_env)
+        effective_force_copy = (
+            result.force_copy
+            or _force_copy_already_requested(pre_existing_env)
+            or (environ is not None and _force_copy_already_requested(environ))
+        )
     except OSError:
         pre_existing_env = {}
     new_posture = PersistedPropagationPosture(
@@ -726,7 +738,7 @@ async def run_service_bootstrap(
         service_env = _apply_work_dir_propagation_env(service_env, propagation)
         if resolved_env_file is not None:
             await asyncio.to_thread(
-                _persist_work_dir_propagation_result, resolved_env_file, propagation
+                _persist_work_dir_propagation_result, resolved_env_file, propagation, subprocess_env
             )
 
     for stage in _bootstrap_stages(

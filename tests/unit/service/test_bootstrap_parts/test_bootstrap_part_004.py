@@ -925,6 +925,29 @@ def test_persist_preserves_operator_force_copy_override(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_persist_preserves_operator_force_copy_from_environ(tmp_path: Path) -> None:
+    """When the operator sets AWF_CLAUDE_AUTH_FORCE_COPY in the process
+    environment (not the env-file) and preflight decides rshared / no
+    force-copy, _persist_work_dir_propagation_result must still write
+    ``true`` so a later non-bootstrap compose recreate sees the override
+    (#398 regression)."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    environ = {"AWF_CLAUDE_AUTH_FORCE_COPY": "true"}
+    bootstrap._persist_work_dir_propagation_result(env_file, result, environ=environ)  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+
+
+@pytest.mark.unit
 def test_bootstrap_persist_called_after_preflight(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
