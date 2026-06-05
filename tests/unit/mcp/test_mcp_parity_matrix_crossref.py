@@ -196,6 +196,10 @@ def _normalize_path(path: str) -> str:
     return path.rstrip("/")
 
 
+def _is_local_first_run_contract(rest_cell: str) -> bool:
+    return _normalize_cell(rest_cell) == "Local first-run setup contract (REST unchanged)"
+
+
 @pytest.mark.unit
 def test_parity_matrix_rest_endpoints_exist_in_api_routes() -> None:
     rows = _parity_rows()
@@ -260,7 +264,10 @@ def test_parity_matrix_implemented_status_is_backed_by_real_surfaces() -> None:
                     failures.append(
                         f"{capability}: REST endpoint {method} {path} is not registered"
                     )
-        elif not _normalize_cell(rest_cell).startswith("If-Match"):
+        elif not (
+            _normalize_cell(rest_cell).startswith("If-Match")
+            or _is_local_first_run_contract(rest_cell)
+        ):
             failures.append(
                 f"{capability}: implemented row must name REST endpoints or a documented cross-cutting REST contract"
             )

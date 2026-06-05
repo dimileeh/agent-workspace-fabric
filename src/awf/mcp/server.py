@@ -144,18 +144,24 @@ def build_mcp_server(
         compose_env_file=compose_env_file,
     )
 
-    def _safe_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+    def _safe_result(
+        payload: dict[str, Any],
+        *,
+        is_error: bool = False,
+        extra_secrets: Iterable[str] = (),
+    ) -> CallToolResult:
         """Redact sensitive data from *payload* and wrap in a ``CallToolResult``."""
         redacted = _redact_sensitive_payload(
             payload,
             settings_value,
             service_settings=service_settings_value,
-            extra_secrets=extra_secret_values,
+            extra_secrets=(*extra_secret_values, *tuple(extra_secrets)),
         )
         return _tool_result(redacted, is_error=is_error)
 
     from awf.mcp.control_tools import register_control_tools
     from awf.mcp.metrics_tools import register_metrics_tools
+    from awf.mcp.setup_tools import register_setup_tools
     from awf.mcp.workspace_tools import register_workspace_tools
 
     register_workspace_tools(
@@ -185,6 +191,11 @@ def build_mcp_server(
         mcp=mcp,
         service=service,
         safe_result=_safe_result,
+    )
+    register_setup_tools(
+        mcp=mcp,
+        safe_result=_safe_result,
+        settings_value=settings_value,
     )
 
     return mcp
