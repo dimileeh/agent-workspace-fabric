@@ -67,6 +67,78 @@ def _safe_mtime_ns(path: Path, *, follow_symlinks: bool = True) -> int | None:
         return None
 
 
+def _legacy_path_confidently_absent(root: Path, rel: Path) -> bool:
+    """True only when ``root / rel`` is genuinely absent under a chain of *real* dirs.
+
+    The #402 deletion-forwarding pass treats a path present in ``base`` but absent from
+    the agent-writable legacy copy as a confident agent deletion (eligible for a
+    whiteout once the host still matches ``base``). The naive
+    ``_safe_stat(root / rel, follow_symlinks=False)`` check is **not** symmetric with the
+    edit walk's ``os.walk(legacy, followlinks=False)``: ``lstat`` only declines to follow
+    the *leaf* symlink — every *intermediate* component of ``root / rel`` is still
+    resolved by the OS. So if the agent replaced a subdirectory with a symlink during the
+    fallback session (e.g. ``legacy/subdir -> /empty_dir``), the lstat for
+    ``rel = subdir/secret.json`` resolves *through* that link and stats
+    ``/empty_dir/secret.json``; its absence then reads as a "deletion" and a whiteout
+    would *hide* a credential the agent never explicitly removed.
+
+    This descends ``rel``'s parents from the trusted ``root`` component-by-component with
+    ``openat(O_NOFOLLOW | O_DIRECTORY)`` — the same fd-anchored descent
+    :func:`_safe_overlay_copy` / :func:`_safe_overlay_whiteout` use — and only then
+    ``lstat``s the leaf relative to the final parent ``dir_fd``. The path is *confidently
+    absent* (returns ``True``) only when:
+
+    - every parent component is a **real directory** (so an agent-planted intermediate
+      symlink or a directory-replaced-by-a-file is *not* walked), **and**
+    - the leaf does not exist there (``lstat`` raises ``ENOENT``).
+
+    A parent that is genuinely missing (``ENOENT``) means the whole subtree was removed
+    (a whole-directory deletion the pass forwards file-by-file), so it counts as
+    confidently absent. Every other shape — the leaf present (any type, including a
+    symlink), an intermediate symlink/non-directory (``ELOOP`` / ``ENOTDIR``), or any
+    other stat/open error — returns ``False`` ("not a confident deletion"), so the caller
+    fails safe and keeps the credential visible. ``root`` itself is the trusted legacy
+    copy root the caller passes (opened with ``O_NOFOLLOW`` for symmetry).
+    """
+
+    fds: list[int] = []
+    try:
+        dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(dir_fd)
+        for part in rel.parent.parts:
+            try:
+                dir_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            except FileNotFoundError:
+                # The parent subtree is genuinely gone (a whole-directory deletion): the
+                # leaf is absent too. Confidently absent — the per-file whiteout pass owns
+                # forwarding it.
+                return True
+            except OSError:
+                # ``ELOOP`` (an agent-planted intermediate symlink), ``ENOTDIR`` (a parent
+                # replaced with a non-directory), or any other open failure: the path
+                # *through* this component cannot be walked as real directories, so the
+                # leaf's apparent absence cannot be attributed to a deletion. Not
+                # confidently absent — fail safe (keep the credential visible).
+                return False
+            fds.append(dir_fd)
+        try:
+            os.stat(rel.name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            # Any other leaf stat failure is ambiguous, not a proven deletion. Fail safe.
+            return False
+        # The leaf exists (any type, including a symlink/FIFO): present, not a deletion.
+        return False
+    except OSError:
+        # ``root`` itself unopenable (absent or symlinked): ambiguous. Fail safe.
+        return False
+    finally:
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
 def _streams_equal_bytes(fa: IO[bytes], fb: IO[bytes]) -> bool:
     """True iff two already-open binary streams yield identical bytes through EOF.
 

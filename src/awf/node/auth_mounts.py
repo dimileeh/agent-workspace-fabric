@@ -41,6 +41,9 @@ from awf.node.auth_mounts_claude import _has_cap_mknod as _has_cap_mknod
 from awf.node.auth_mounts_claude import _has_cap_sys_admin as _has_cap_sys_admin
 from awf.node.auth_mounts_claude import _host_claude_signature as _host_claude_signature
 from awf.node.auth_mounts_claude import (
+    _legacy_path_confidently_absent as _legacy_path_confidently_absent,
+)
+from awf.node.auth_mounts_claude import (
     _overlay_filesystem_available as _overlay_filesystem_available,
 )
 from awf.node.auth_mounts_claude import _overlay_upper_has_data as _overlay_upper_has_data

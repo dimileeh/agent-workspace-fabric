@@ -1468,3 +1468,142 @@ def test_reconcile_skips_legacy_file_that_becomes_unstattable(
 
     assert not (merged / "f").exists()
     assert not (upper / "f").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_intermediate_legacy_dir_symlink_does_not_whiteout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #414 regression: the agent replaced a *subdirectory* with a symlink in the ``rw``
+    # legacy copy during the fallback session (``legacy/subdir -> /empty``). A plain
+    # ``lstat(legacy/subdir/hidden.json)`` would resolve *through* that intermediate link
+    # (``lstat`` only declines to follow the *leaf*), see the file absent at the redirect
+    # target, and — host still matching base — synthesise a whiteout that HIDES a
+    # credential the agent never explicitly removed. The symlink-safe descent must treat
+    # the redirected path as ambiguous (keep visible), symmetric with the edit walk's
+    # ``os.walk(legacy, followlinks=False)``. A genuine root-level deletion in the same
+    # run is still forwarded, proving the fix is surgical rather than blanket.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    empty = tmp_path / "empty"
+    _mkdirs(legacy, merged, upper, base, host, empty)
+
+    # Confident root-level deletion: present in base + host (unchanged), absent in legacy.
+    (base / "secret.json").write_text("token\n")
+    secret_stat = (base / "secret.json").stat()
+    (host / "secret.json").write_text("token\n")
+    os.utime(host / "secret.json", ns=(secret_stat.st_atime_ns, secret_stat.st_mtime_ns))
+
+    # A credential under a subdir the agent redirected via a directory symlink in legacy.
+    # host == base for it too, so *only* the intermediate symlink keeps it from being
+    # (wrongly) whiteouted.
+    (base / "subdir").mkdir()
+    (base / "subdir" / "hidden.json").write_text("token\n")
+    hidden_stat = (base / "subdir" / "hidden.json").stat()
+    (host / "subdir").mkdir()
+    (host / "subdir" / "hidden.json").write_text("token\n")
+    os.utime(host / "subdir" / "hidden.json", ns=(hidden_stat.st_atime_ns, hidden_stat.st_mtime_ns))
+    (legacy / "subdir").symlink_to(empty)  # agent-planted directory symlink
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # Only the unambiguous root-level deletion is forwarded; the symlink-occluded path is
+    # never whiteouted (the credential stays visible after the remount).
+    assert [entry["name"] for entry in recorded] == ["secret.json"]
+    assert (upper / "secret.json").exists()
+    assert not (upper / "subdir" / "hidden.json").exists()
+
+
+# --- _legacy_path_confidently_absent primitive (#414 symlink-safe deletion check) ------
+
+
+@pytest.mark.unit
+def test_legacy_path_confidently_absent_true_for_absent_leaf_under_real_dirs(
+    tmp_path: Path,
+) -> None:
+    # A leaf genuinely missing under a chain of real directories is a confident deletion.
+    root = tmp_path / "legacy"
+    (root / "sub").mkdir(parents=True)
+    assert overlay_copy_mod._legacy_path_confidently_absent(root, Path("sub/secret.json")) is True
+
+
+@pytest.mark.unit
+def test_legacy_path_confidently_absent_false_when_leaf_present(tmp_path: Path) -> None:
+    # The leaf exists (a regular file): present, not a deletion.
+    root = tmp_path / "legacy"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "secret.json").write_text("x")
+    assert overlay_copy_mod._legacy_path_confidently_absent(root, Path("sub/secret.json")) is False
+
+
+@pytest.mark.unit
+def test_legacy_path_confidently_absent_false_for_intermediate_symlink(tmp_path: Path) -> None:
+    # The bug shape: an agent-planted *intermediate* directory symlink. ``lstat`` would
+    # resolve through it and misread the leaf as absent; the safe descent rejects it
+    # (``ELOOP``) and returns False (ambiguous -> keep visible).
+    root = tmp_path / "legacy"
+    root.mkdir()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (root / "sub").symlink_to(empty)
+    assert overlay_copy_mod._legacy_path_confidently_absent(root, Path("sub/secret.json")) is False
+
+
+@pytest.mark.unit
+def test_legacy_path_confidently_absent_true_for_missing_parent_subtree(tmp_path: Path) -> None:
+    # The whole parent subtree is gone (a whole-directory deletion): the leaf is absent
+    # too, and the pass forwards it file-by-file. Confidently absent.
+    root = tmp_path / "legacy"
+    root.mkdir()
+    assert overlay_copy_mod._legacy_path_confidently_absent(root, Path("sub/secret.json")) is True
+
+
+@pytest.mark.unit
+def test_legacy_path_confidently_absent_false_for_non_directory_parent(tmp_path: Path) -> None:
+    # A parent component replaced with a regular file (``ENOTDIR``): the path cannot be
+    # walked as real directories, so the absence is ambiguous -> keep visible.
+    root = tmp_path / "legacy"
+    root.mkdir()
+    (root / "sub").write_text("not a dir")
+    assert overlay_copy_mod._legacy_path_confidently_absent(root, Path("sub/secret.json")) is False
+
+
+@pytest.mark.unit
+def test_legacy_path_confidently_absent_false_when_leaf_is_symlink(tmp_path: Path) -> None:
+    # A symlink leaf (even dangling) is ``lstat``ed as itself: present, not a deletion.
+    root = tmp_path / "legacy"
+    root.mkdir()
+    (root / "secret.json").symlink_to(tmp_path / "elsewhere")
+    assert overlay_copy_mod._legacy_path_confidently_absent(root, Path("secret.json")) is False
+
+
+@pytest.mark.unit
+def test_legacy_path_confidently_absent_false_when_root_missing(tmp_path: Path) -> None:
+    # The ``root`` itself is unopenable (absent): ambiguous -> not a confident deletion.
+    assert overlay_copy_mod._legacy_path_confidently_absent(tmp_path / "nope", Path("x")) is False
+
+
+@pytest.mark.unit
+def test_legacy_path_confidently_absent_false_when_leaf_stat_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-``ENOENT`` leaf ``stat`` failure (e.g. a racing permission error) is ambiguous,
+    # not a proven deletion -> fail safe to False.
+    root = tmp_path / "legacy"
+    root.mkdir()
+    (root / "secret.json").write_text("x")
+
+    def _raise_eacces(*args: object, **kwargs: object) -> os.stat_result:
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(overlay_copy_mod.os, "stat", _raise_eacces)
+    assert overlay_copy_mod._legacy_path_confidently_absent(root, Path("secret.json")) is False

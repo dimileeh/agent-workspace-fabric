@@ -23,6 +23,9 @@ from pathlib import Path
 from awf.common.logging import get_logger
 from awf.node.auth_mounts_caps import _has_cap_mknod
 from awf.node.auth_mounts_overlay_copy import (
+    _legacy_path_confidently_absent as _legacy_path_confidently_absent,
+)
+from awf.node.auth_mounts_overlay_copy import (
     _safe_agent_file_equal_content as _safe_agent_file_equal_content,
 )
 from awf.node.auth_mounts_overlay_copy import _safe_files_equal_content as _safe_files_equal_content
@@ -150,7 +153,13 @@ def _forward_fallback_deletions_as_whiteouts(
     ``os.walk`` here uses the default ``followlinks=False`` and the base tree holds no
     symlinks (it is built via ``copytree(symlinks=False)``), so no agent-controlled
     link is ever traversed; the whiteout itself is created with a symlink-safe,
-    ``CAP_MKNOD``-guarded descent in :func:`_safe_overlay_whiteout`. Best-effort: a
+    ``CAP_MKNOD``-guarded descent in :func:`_safe_overlay_whiteout`. The "present in
+    legacy" check that classifies a base entry as deleted is likewise symlink-safe
+    (:func:`_legacy_path_confidently_absent`): a plain ``lstat`` of ``legacy / rel`` would
+    follow an agent-planted *intermediate* directory symlink and misread files under a
+    redirected subdir as deleted — symmetric now with the edit walk's
+    ``followlinks=False``, so only a leaf absent under a chain of real directories is
+    forwarded. Best-effort: a
     capability-less worker that *would* have whiteouted at least one confident
     deletion logs once (``CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE``), and a worker that
     *has* ``CAP_MKNOD`` yet still has ``mknod`` refused by the filesystem logs once too
@@ -182,7 +191,16 @@ def _forward_fallback_deletions_as_whiteouts(
         for name in files:
             rel = (root_path / name).relative_to(base)
             # Present in legacy (as anything) → not a deletion; the edit walk owns it.
-            if _safe_stat(legacy / rel, follow_symlinks=False) is not None:
+            # Use a symlink-safe descent rather than ``_safe_stat(legacy / rel,
+            # follow_symlinks=False)``: ``lstat`` declines to follow only the *leaf*
+            # symlink, while every intermediate component is still resolved by the OS. An
+            # agent-planted directory symlink in the legacy copy (e.g. ``legacy/subdir ->
+            # /empty_dir``) would otherwise make ``subdir/secret.json`` read as absent and
+            # be whiteouted — hiding a credential the agent never explicitly removed,
+            # breaking the ambiguous-→-keep-visible guarantee and inverting the edit walk's
+            # ``os.walk(legacy, followlinks=False)`` protection. Only a leaf genuinely
+            # absent under a chain of *real* directories is a confident deletion.
+            if not _legacy_path_confidently_absent(legacy, rel):
                 continue
             # ``upper`` already holds an entry (file or whiteout): the agent's overlay
             # state is authoritative — never double-handle it.

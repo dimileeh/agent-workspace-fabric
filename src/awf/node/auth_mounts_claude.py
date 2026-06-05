@@ -47,6 +47,9 @@ from awf.node.auth_mounts_overlay import (
     _unescape_proc_mount_field as _unescape_proc_mount_field,
 )
 from awf.node.auth_mounts_overlay import iter_overlay_lowerdirs as iter_overlay_lowerdirs
+from awf.node.auth_mounts_overlay_copy import (
+    _legacy_path_confidently_absent as _legacy_path_confidently_absent,
+)
 from awf.node.auth_mounts_overlay_copy import _safe_mtime_ns as _safe_mtime_ns
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_copy as _safe_overlay_copy
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_whiteout as _safe_overlay_whiteout
