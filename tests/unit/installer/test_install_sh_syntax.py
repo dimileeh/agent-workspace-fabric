@@ -17,6 +17,8 @@ DOCUMENTED_FLAGS = (
     "--dry-run",
     "--uninstall",
     "--shell",
+    "--bootstrap-uv",
+    "--non-interactive",
     "--help",
 )
 
