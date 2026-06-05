@@ -1318,13 +1318,18 @@ def _client_source_checkout_blocked_payload_with_explicit_command(
     source_checkout: Path | None,
 ) -> FirstRunPayload:
     command = _client_instruction_command(selected_clients, source_checkout=source_checkout)
+    update: dict[str, Any] = {
+        "command": command,
+        "next_steps": (f"Fix the reported --source-checkout path above, then re-run {command}.",),
+    }
+    if source_checkout is not None and payload.issues:
+        update["issues"] = _start_issues_with_command(
+            payload.issues,
+            command=command,
+            source_checkout=source_checkout,
+        )
     return payload.model_copy(
-        update={
-            "command": command,
-            "next_steps": (
-                f"Fix the reported --source-checkout path above, then re-run {command}.",
-            ),
-        },
+        update=update,
     )
 
 

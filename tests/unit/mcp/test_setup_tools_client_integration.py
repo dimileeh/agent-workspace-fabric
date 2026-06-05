@@ -154,6 +154,7 @@ async def test_client_integration_instructions_source_checkout_failure_preserves
     assert payload["next_steps"] == [
         f"Fix the reported --source-checkout path above, then re-run {expected_command}.",
     ]
+    assert payload["issues"][0]["remediation"]["related_command"] == expected_command
     assert payload["issues"][0]["details"]["root"] == str(checkout)
     assert payload["issues"][0]["details"]["missing_markers"] == ["pyproject.toml"]
 
