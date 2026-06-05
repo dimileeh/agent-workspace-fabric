@@ -33,6 +33,7 @@ from awf.node.auth_mounts import (
     claude_auth_isolation_label,
     default_overlay_mounter,
     force_copy_isolation_requested,
+    overlay_path_has_reserved_chars,
     resolve_service_auth_mounts,
     teardown_workspace_auth_overlay,
 )
@@ -818,6 +819,39 @@ def test_isolation_label_reports_copy_under_force_copy_request() -> None:
         )
         == "per_workspace_overlay"
     )
+
+
+@pytest.mark.unit
+def test_isolation_label_reports_copy_when_overlay_path_unsupported() -> None:
+    # On a host whose work dir carries a ``,`` or ``:`` the overlay ``-o`` payload
+    # cannot encode it, so *every* mount degrades to the per-workspace copy. The
+    # label must fold in that deterministic host-level signal — exactly as it does
+    # force-copy — or readiness/status would overstate per_workspace_overlay while
+    # the worker actually uses per-workspace copies.
+    assert (
+        claude_auth_isolation_label(
+            overlay_filesystem_available=lambda: True,
+            overlay_path_unsupported=lambda: True,
+        )
+        == "per_workspace_copy"
+    )
+    assert (
+        claude_auth_isolation_label(
+            overlay_filesystem_available=lambda: True,
+            overlay_path_unsupported=lambda: False,
+        )
+        == "per_workspace_overlay"
+    )
+
+
+@pytest.mark.unit
+def test_overlay_path_has_reserved_chars_public_wrapper() -> None:
+    # The public wrapper is the stable cross-package entrypoint (used by
+    # ``service.provider_readiness`` to fold the reserved-chars fallback into the
+    # isolation label); it mirrors the private probe's truthiness.
+    assert overlay_path_has_reserved_chars(Path("/srv/awf,work")) is True
+    assert overlay_path_has_reserved_chars(Path("/srv/awf:work")) is True
+    assert overlay_path_has_reserved_chars(Path("/srv/awf/work")) is False
 
 
 @pytest.mark.unit

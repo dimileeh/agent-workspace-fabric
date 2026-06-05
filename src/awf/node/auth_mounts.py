@@ -52,6 +52,9 @@ from awf.node.auth_mounts_claude import (
 )
 from awf.node.auth_mounts_claude import iter_overlay_lowerdirs as iter_overlay_lowerdirs
 from awf.node.auth_mounts_claude import (
+    overlay_path_has_reserved_chars as overlay_path_has_reserved_chars,
+)
+from awf.node.auth_mounts_claude import (
     teardown_workspace_auth_overlay as teardown_workspace_auth_overlay,
 )
 from awf.node.compose_manager import AuthMount

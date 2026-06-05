@@ -191,6 +191,18 @@ def _overlay_path_has_reserved_chars(path: Path) -> bool:
     return any(char in text for char in _OVERLAY_OPTION_RESERVED_CHARS)
 
 
+def overlay_path_has_reserved_chars(path: Path) -> bool:
+    """Public API: whether ``path`` carries a char overlayfs's ``-o`` cannot encode.
+
+    A stable wrapper over the module-private probe so callers outside this
+    package (e.g. ``service.provider_readiness``, which folds the same signal
+    into :func:`claude_auth_isolation_label`) depend on a public symbol rather
+    than coupling to the underscore-prefixed implementation detail.
+    """
+
+    return _overlay_path_has_reserved_chars(path)
+
+
 class OverlayMounter(Protocol):
     """Set up and tear down the per-workspace ``~/.claude`` overlay mount.
 
@@ -276,6 +288,7 @@ def claude_auth_isolation_label(
     *,
     overlay_filesystem_available: Callable[[], bool] | None = None,
     force_copy_requested: Callable[[], bool] | None = None,
+    overlay_path_unsupported: Callable[[], bool] | None = None,
 ) -> str:
     """Return the isolation posture label for Claude file auth on this host.
 
@@ -301,13 +314,27 @@ def claude_auth_isolation_label(
     fallback even while overlayfs stays advertised. The label must fold in the same
     signal or readiness/status would report ``per_workspace_overlay`` while the
     worker actually uses per-workspace copies, misstating the isolation/disk posture.
+
+    ``overlay_path_unsupported`` folds in the same deterministic, host-level copy
+    fallback that ``_prepare_claude_overlay_mount`` takes when the workspace auth
+    path (inherited from ``AWF_WORK_DIR`` / ``AWF_HOST_WORK_DIR``) carries a ``,``
+    or ``:`` that overlayfs's unescapable ``-o`` payload cannot encode. On such a
+    host *every* overlay mount degrades to the per-workspace copy, so — like the
+    force-copy signal — the label must report ``per_workspace_copy`` rather than
+    overstate overlay isolation. Defaults to a no-op (no path-derived signal) so
+    callers without a work-dir context keep the kernel-availability-only behavior.
     """
 
     probe = overlay_filesystem_available or _overlay_filesystem_available
     force_copy = force_copy_requested or _force_copy_isolation_requested
+    path_unsupported = overlay_path_unsupported or (lambda: False)
     if force_copy():
         return _ISOLATION_COPY
-    return _ISOLATION_OVERLAY if probe() else _ISOLATION_COPY
+    if not probe():
+        return _ISOLATION_COPY
+    if path_unsupported():
+        return _ISOLATION_COPY
+    return _ISOLATION_OVERLAY
 
 
 def _shared_claude_base_dir(work_dir: Path, signature: str) -> Path:
