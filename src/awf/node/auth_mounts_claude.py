@@ -920,7 +920,12 @@ def _overlay_provision_lock(claude_root: Path) -> Iterator[_OverlayLockState]:
         # lock on this ``close`` and on process death.
         with contextlib.suppress(OSError):
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        # Suppress ``OSError`` on close too (e.g. ``EIO`` on a flush-on-close over
+        # NFS): a raise from this ``finally`` would mask any exception already
+        # propagating from the ``with`` body. The kernel frees the lock and the fd on
+        # process death regardless.
+        with contextlib.suppress(OSError):
+            os.close(lock_fd)
 
 
 def _prepare_claude_overlay_mount(

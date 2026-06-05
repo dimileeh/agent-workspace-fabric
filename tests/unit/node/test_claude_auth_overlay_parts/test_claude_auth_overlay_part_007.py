@@ -350,3 +350,38 @@ def test_flock_unsupported_proceeds_best_effort_not_contended(
     # The unavailability is logged exactly once, and contention was NOT reported.
     assert sum(1 for entry in logs if entry.get("reason_code") == _UNAVAILABLE) == 1
     assert not any(entry.get("reason_code") == _CONTENDED for entry in logs)
+
+
+@pytest.mark.unit
+def test_close_oserror_does_not_mask_body_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If ``os.close`` raises ``OSError`` in the lock's ``finally`` (e.g. ``EIO`` on a
+    # flush-on-close over NFS), it must NOT mask an exception already propagating from
+    # the ``with`` body — the close is suppressed exactly like the ``flock(LOCK_UN)``
+    # release above it (PRRT_kwDOSJAM6s6HX0fq).
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir(parents=True)
+
+    real_os_close = os.close
+    closed_fds: list[int] = []
+
+    def _close_raising(fd: int) -> None:
+        # Close for real so the descriptor does not leak, then raise to model a
+        # flush-on-close fault surfacing from the ``finally``.
+        real_os_close(fd)
+        closed_fds.append(fd)
+        raise OSError(errno.EIO, "input/output error")
+
+    monkeypatch.setattr(auth_mounts_mod.os, "close", _close_raising)
+
+    with (
+        pytest.raises(RuntimeError, match="body boom"),
+        auth_mounts_mod._overlay_provision_lock(claude_root) as state,
+    ):
+        assert state == "acquired"
+        raise RuntimeError("body boom")
+
+    # The close ran (and raised, then was suppressed) — the body's RuntimeError, not
+    # the swallowed OSError, is what propagated.
+    assert len(closed_fds) == 1
