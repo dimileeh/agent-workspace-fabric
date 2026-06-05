@@ -1013,6 +1013,41 @@ def test_persist_preserves_operator_force_copy_from_environ(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
+def test_persist_ignores_stale_force_copy_in_environ_when_env_file_stale(
+    tmp_path: Path,
+) -> None:
+    """When the env-file has a stale bootstrap-generated
+    AWF_CLAUDE_AUTH_FORCE_COPY=true plus AWF_WORK_DIR_PROPAGATION_TIMESTAMP,
+    the in-process environ likely inherited that stale value from the
+    env-file (via local_service_environ).  Passing such an environ to
+    _persist_work_dir_propagation_result must not treat the stale value
+    as an operator override — otherwise a fresh preflight returning
+    force_copy=False writes true back and bootstrap cannot return to
+    overlay mode (#413)."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_WORK_DIR_BIND_PROPAGATION=rprivate\n"
+        "AWF_CLAUDE_AUTH_FORCE_COPY=true\n"
+        "AWF_WORK_DIR_PROPAGATION_TIMESTAMP=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    environ_with_stale_force_copy = {"AWF_CLAUDE_AUTH_FORCE_COPY": "true"}
+    bootstrap._persist_work_dir_propagation_result(
+        env_file, result, environ=environ_with_stale_force_copy
+    )  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "false"
+
+
+@pytest.mark.unit
 def test_bootstrap_persist_called_after_preflight(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

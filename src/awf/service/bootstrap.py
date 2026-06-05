@@ -296,6 +296,10 @@ def _persist_work_dir_propagation_result(
     example when the work dir moves to a shared mount).  Only a
     ``AWF_CLAUDE_AUTH_FORCE_COPY`` in the env-file **without** a
     co-persisted timestamp is preserved as an operator override.
+    Stale detection also gates the *environ* check: when the env-file
+    has a co-persisted timestamp, any ``AWF_CLAUDE_AUTH_FORCE_COPY`` in
+    *environ* is assumed to have been loaded from the stale env-file
+    (not set by the operator), and is not treated as an override (#413).
 
     Best-effort: ``OSError`` on write is caught and logged (redacted), never
     fatal. The env-file is written atomically via a temp file in the same
@@ -309,10 +313,13 @@ def _persist_work_dir_propagation_result(
         env_file_force_copy_is_operator_override = (
             _force_copy_already_requested(pre_existing_env) and not stale_generated
         )
+        environ_force_copy_is_operator_override = (
+            not stale_generated and environ is not None and _force_copy_already_requested(environ)
+        )
         effective_force_copy = (
             result.force_copy
             or env_file_force_copy_is_operator_override
-            or (environ is not None and _force_copy_already_requested(environ))
+            or environ_force_copy_is_operator_override
         )
     except (OSError, UnicodeDecodeError):
         pass
