@@ -285,6 +285,7 @@ class WorkspaceGCResult:
     status: WorkspaceCleanupExecutionStatus
     reason_code: str
     companion_image_prune: dict[str, object] | None = None
+    claude_base_reap: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         deleted_paths = set(self.deleted_paths)
@@ -311,6 +312,8 @@ class WorkspaceGCResult:
         )
         if self.companion_image_prune is not None:
             payload["companion_image_prune"] = self.companion_image_prune
+        if self.claude_base_reap is not None:
+            payload["claude_base_reap"] = self.claude_base_reap
         payload["candidates"] = [
             candidate.to_dict(
                 deleted_paths=deleted_paths,

@@ -8,7 +8,7 @@ log streams.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Iterable
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from inspect import isawaitable
@@ -47,18 +47,22 @@ from awf.service.gc_classify import (
 # Re-exported for backward-compatible import surface (referenced via
 # ``awf.service.gc.<name>`` by callers/tests, not used inside this module).
 from awf.service.gc_classify import PATH_DELETE_PERMISSION_DENIED as PATH_DELETE_PERMISSION_DENIED
-from awf.service.gc_classify import (
-    PROTECTED_WORKSPACE_GC_STATUSES as PROTECTED_WORKSPACE_GC_STATUSES,
-)
-from awf.service.gc_classify import (
-    TERMINAL_WORKSPACE_GC_STATUSES as TERMINAL_WORKSPACE_GC_STATUSES,
-)
 from awf.service.gc_classify import WorkspaceGCPath as WorkspaceGCPath
 from awf.service.gc_classify import _agent_service_has_no_work as _agent_service_has_no_work
 from awf.service.gc_classify import _container_command_is_idle as _container_command_is_idle
 from awf.service.gc_classify import _estimate_bytes as _estimate_bytes
 from awf.service.gc_classify import _is_safe_gc_path as _is_safe_gc_path
+from awf.service.gc_claude_base import reap_superseded_claude_bases as reap_superseded_claude_bases
 from awf.service.gc_companions import companion_worktree_paths_for_gc
+from awf.service.gc_models import PROTECTED_WORKSPACE_GC_STATUSES as PROTECTED_WORKSPACE_GC_STATUSES
+from awf.service.gc_models import TERMINAL_WORKSPACE_GC_STATUSES as TERMINAL_WORKSPACE_GC_STATUSES
+from awf.service.gc_models import ClaudeBaseReap as ClaudeBaseReap
+from awf.service.gc_models import CompanionImagePrune as CompanionImagePrune
+from awf.service.gc_models import WorkspaceGCCandidate as WorkspaceGCCandidate
+from awf.service.gc_models import WorkspaceGCComposeTeardown as WorkspaceGCComposeTeardown
+from awf.service.gc_models import WorkspaceGCPlan as WorkspaceGCPlan
+from awf.service.gc_models import WorkspaceGCResult as WorkspaceGCResult
+from awf.service.gc_models import WorkspaceGCWorktreeRemove as WorkspaceGCWorktreeRemove
 from awf.service.gc_time import normalize_statuses as _normalize_statuses
 from awf.service.gc_time import to_utc as _to_utc
 from awf.service.secret_leases import (
@@ -86,13 +90,10 @@ _FAILED_NO_WORK_TERMINAL_STATUSES = _gc_classify.FAILED_NO_WORK_TERMINAL_STATUSE
 # re-exported so the historical ``awf.service.gc.<name>`` surface is unchanged.
 WorkspaceCleanupExecutionStatus = _gc_results.WorkspaceCleanupExecutionStatus
 WorkspaceCleanupPathStatus = _gc_results.WorkspaceCleanupPathStatus
-WorkspaceGCCandidate = _gc_results.WorkspaceGCCandidate
 WorkspaceGCComposeTeardownResult = _gc_results.WorkspaceGCComposeTeardownResult
 WorkspaceGCDeleteError = _gc_results.WorkspaceGCDeleteError
-WorkspaceGCPlan = _gc_results.WorkspaceGCPlan
 WorkspaceGCPathOutcome = _gc_results.WorkspaceGCPathOutcome
 WorkspaceGCPreserved = _gc_results.WorkspaceGCPreserved
-WorkspaceGCResult = _gc_results.WorkspaceGCResult
 
 # SQL predicate builders live in ``gc_predicates`` (file-size budget); re-aliased
 # under their historical ``_workspace_*`` names for callers/tests.
@@ -146,17 +147,6 @@ _COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR = "_awf_compose_teardown_result"
 _RUNTIME_INSPECTOR = RuntimeInspector()
 
 
-WorkspaceGCComposeTeardown = Callable[
-    [WorkspaceGCCandidate],
-    WorkspaceGCComposeTeardownResult | Awaitable[WorkspaceGCComposeTeardownResult],
-]
-
-WorkspaceGCWorktreeRemove = Callable[
-    [WorkspaceGCCandidate],
-    WorkspaceGCWorktreeRemoveResult | Awaitable[WorkspaceGCWorktreeRemoveResult],
-]
-
-
 def compose_teardown_result_for_exception(exc: Exception) -> WorkspaceGCComposeTeardownResult:
     """Return the stable failed compose teardown result for a callback exception.
 
@@ -178,11 +168,6 @@ def compose_teardown_result_for_exception(exc: Exception) -> WorkspaceGCComposeT
     with suppress(Exception):
         setattr(exc, _COMPOSE_TEARDOWN_EXCEPTION_RESULT_ATTR, result)
     return result
-
-
-# Prunes stale cached companion images once per GC run (independent of the
-# per-workspace candidates). Returns a small report dict for the GC payload.
-CompanionImagePrune = Callable[[], Awaitable[dict[str, object]]]
 
 
 async def plan_terminal_workspace_gc(
@@ -373,6 +358,7 @@ async def run_terminal_workspace_gc(
     compose_teardown: WorkspaceGCComposeTeardown | None = None,
     worktree_remover: WorkspaceGCWorktreeRemove | None = None,
     companion_image_prune: CompanionImagePrune | None = None,
+    claude_base_reap: ClaudeBaseReap | None = None,
     now: datetime | None = None,
 ) -> WorkspaceGCResult:
     """Plan terminal workspace GC and optionally delete selected directories."""
@@ -389,7 +375,18 @@ async def run_terminal_workspace_gc(
         max_preserved_failed_hours=max_preserved_failed_hours,
         now=current_time,
     )
+    # The shared-base reaper is a host-wide step independent of the per-workspace
+    # candidates. On execute the candidate auth dirs (and their ``base.signature``
+    # pins) are deleted *before* the reaper runs (see below), so a base pinned only by
+    # a candidate is reaped in the same pass. A dry run deletes nothing, so the pins
+    # are still on disk; tell the reaper to treat those candidate auth dirs as already
+    # pruned so a base the matching execute pass would free is previewed as ``planned``
+    # rather than mislabeled ``protected`` (PRRT_kwDOSJAM6s6HIepf).
     if not execute:
+        pruned_auth_dirs = frozenset(candidate.auth.path for candidate in plan.candidates)
+        claude_base_reap_result = (
+            await claude_base_reap(pruned_auth_dirs) if claude_base_reap is not None else None
+        )
         return _gc_result(
             plan=plan,
             dry_run=True,
@@ -399,6 +396,7 @@ async def run_terminal_workspace_gc(
             compose_teardowns={},
             worktree_removes={},
             reservation_releases={},
+            claude_base_reap=claude_base_reap_result,
         )
 
     resolved_worktree_remover = _resolve_worktree_remover(
@@ -431,6 +429,15 @@ async def run_terminal_workspace_gc(
     companion_image_prune_result = (
         await companion_image_prune() if companion_image_prune is not None else None
     )
+    # Reap superseded shared bases *after* the candidate auth dirs (and their
+    # ``base.signature`` pins) are deleted above, so a base pinned only by a workspace
+    # just reclaimed in this pass is reaped now instead of leaking until the next GC
+    # (PRRT_kwDOSJAM6s6HIHN6). The pins are already gone from disk here, so no auth dirs
+    # are pruned explicitly: relying on the actual on-disk state means a base whose
+    # candidate delete failed stays protected (its ``upper`` must not be stranded).
+    claude_base_reap_result = (
+        await claude_base_reap(frozenset()) if claude_base_reap is not None else None
+    )
     return _gc_result(
         plan=plan,
         dry_run=False,
@@ -442,6 +449,7 @@ async def run_terminal_workspace_gc(
         worktree_removes=worktree_removes,
         reservation_releases=reservation_releases,
         companion_image_prune=companion_image_prune_result,
+        claude_base_reap=claude_base_reap_result,
     )
 
 
@@ -504,6 +512,8 @@ async def run_service_workspace_gc(
     max_preserved_failed_hours: float = DEFAULT_MAX_PRESERVED_FAILED_HOURS,
     companion_image_cache_enabled: bool = False,
     companion_image_retention_hours: int = DEFAULT_MIN_AGE_HOURS,
+    host_home: Path | str | None = None,
+    reap_claude_bases: bool = False,
     compose_manager: ComposeManager | None = None,
     now: datetime | None = None,
 ) -> WorkspaceGCResult:
@@ -514,6 +524,10 @@ async def run_service_workspace_gc(
     deletion here actually removes root-owned auth dirs (the host CLI, running as
     uid 1000, silently could not) and a volume-removing compose teardown reaps
     the per-workspace Docker volumes that GC previously leaked.
+
+    With ``reap_claude_bases`` enabled (and ``host_home`` provided) a host-wide
+    GC-B step (#389) also reaps superseded shared ``~/.claude`` overlay bases,
+    preserving the current signature and any live-mounted or pinned base.
     """
     normalized_work_dir = Path(work_dir).expanduser().resolve()
     manager = compose_manager
@@ -538,6 +552,28 @@ async def run_service_workspace_gc(
             return await run_companion_image_prune(companion_image_retention_hours)
 
         companion_image_prune = _prune
+    claude_base_reap: ClaudeBaseReap | None = None
+    if reap_claude_bases and host_home is not None:
+        resolved_host_home = Path(host_home).expanduser()
+
+        async def _reap_bases(pruned_auth_dirs: frozenset[Path]) -> dict[str, object]:
+            return await asyncio.to_thread(
+                reap_superseded_claude_bases,
+                work_dir=normalized_work_dir,
+                host_home=resolved_host_home,
+                execute=execute,
+                pruned_auth_dirs=pruned_auth_dirs,
+            )
+
+        claude_base_reap = _reap_bases
+    elif reap_claude_bases:
+        # ``reap_claude_bases`` is on but no ``host_home`` was supplied, so GC-B has no
+        # host ``~/.claude`` signature to protect the current base with — running it
+        # blind could reap a live base, so it is skipped. The production route always
+        # threads ``settings.host_home`` (default ``"~"``), so this only fires for a
+        # programmatic caller that set the flag without a home; log it so the otherwise
+        # silent no-op is diagnosable.
+        _log.warning("service_gc_claude_base_reap_skipped_no_host_home")
     return await run_terminal_workspace_gc(
         session_factory,
         work_dir=normalized_work_dir,
@@ -550,6 +586,7 @@ async def run_service_workspace_gc(
         max_preserved_failed_hours=max_preserved_failed_hours,
         compose_teardown=compose_teardown,
         companion_image_prune=companion_image_prune,
+        claude_base_reap=claude_base_reap,
         now=now,
     )
 
@@ -1119,6 +1156,7 @@ def _gc_result(
     worktree_removes: dict[str, WorkspaceGCWorktreeRemoveResult] | None = None,
     reservation_releases: dict[str, dict[str, object]] | None = None,
     companion_image_prune: dict[str, object] | None = None,
+    claude_base_reap: dict[str, object] | None = None,
 ) -> WorkspaceGCResult:
     lease_revocations = secret_lease_revocations or {}
     wt_removes = worktree_removes or {}
@@ -1136,9 +1174,16 @@ def _gc_result(
             reservation_releases=res_releases,
             status="dry_run",
             reason_code=CLEANUP_DRY_RUN,
+            claude_base_reap=claude_base_reap,
         )
     companion_prune_failed = (
         companion_image_prune is not None and companion_image_prune.get("status") == "failed"
+    )
+    # A ``partial`` shared-base reap (a permission-denied removal) drives the whole
+    # run partial too — it leaked disk it could not reclaim, so the run must not
+    # report a clean success.
+    claude_base_reap_partial = (
+        claude_base_reap is not None and claude_base_reap.get("status") == "partial"
     )
     # Candidate teardown failures are also reflected in delete_errors by the
     # path loop, but fallback compose teardowns never enter that loop.
@@ -1148,6 +1193,7 @@ def _gc_result(
         or compose_teardown_failed
         or any(v.get("error") is not None for v in res_releases.values())
         or companion_prune_failed
+        or claude_base_reap_partial
     )
     status: WorkspaceCleanupExecutionStatus = "partial" if has_errors else "succeeded"
     return WorkspaceGCResult(
@@ -1163,6 +1209,7 @@ def _gc_result(
         status=status,
         reason_code=(CLEANUP_EXECUTION_PARTIAL if has_errors else CLEANUP_EXECUTION_SUCCEEDED),
         companion_image_prune=companion_image_prune,
+        claude_base_reap=claude_base_reap,
     )
 
 

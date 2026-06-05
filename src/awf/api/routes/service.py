@@ -59,5 +59,7 @@ async def trigger_service_gc(
         cleanup_enabled=settings.workspace_cleanup_enabled,
         companion_image_cache_enabled=settings.companion_image_cache_enabled,
         companion_image_retention_hours=settings.companion_image_retention_hours,
+        host_home=Path(settings.host_home).expanduser(),
+        reap_claude_bases=settings.claude_base_gc_enabled,
     )
     return ServiceGCResponse.model_validate(result.to_dict())

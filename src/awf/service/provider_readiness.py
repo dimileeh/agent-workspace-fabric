@@ -15,6 +15,7 @@ from awf.db.enums import AgentRuntime
 from awf.node.auth_mounts import (
     claude_auth_isolation_label,
     force_copy_isolation_requested,
+    overlay_path_has_reserved_chars,
 )
 from awf.service.config import ServiceSettings
 from awf.service.workspace_observability import effective_agent_identity
@@ -430,6 +431,7 @@ def _check_provider_readiness(
         return _check_claude(
             environ=environ,
             host_home=host_home,
+            work_dir=Path(settings.work_dir).expanduser(),
             strict=strict,
             secrets=secrets,
         )
@@ -908,6 +910,7 @@ def _check_claude(
     *,
     environ: Mapping[str, str],
     host_home: Path,
+    work_dir: Path,
     strict: bool,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
@@ -924,8 +927,16 @@ def _check_claude(
     # worker provisions with the copy fallback) rather than the CLI process
     # environment, so a default probe over ``os.environ`` would miss it and report
     # ``per_workspace_overlay`` while the worker actually uses per-workspace copies.
+    #
+    # The reserved-chars probe folds in the same deterministic, host-level copy
+    # fallback the worker takes when ``work_dir`` (the overlay auth root, inherited
+    # from ``AWF_WORK_DIR`` / ``AWF_HOST_WORK_DIR``) carries a ``,`` or ``:`` that
+    # overlayfs's unescapable ``-o`` payload cannot encode. Every overlay mount
+    # degrades to per-workspace copy there, so the label must report copy rather
+    # than overstate overlay isolation.
     directory_isolation = claude_auth_isolation_label(
         force_copy_requested=lambda: force_copy_isolation_requested(environ),
+        overlay_path_unsupported=lambda: overlay_path_has_reserved_chars(work_dir),
     )
     file_sources: list[dict[str, str]] = []
     if (host_home / ".claude").exists():
