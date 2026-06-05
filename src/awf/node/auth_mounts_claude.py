@@ -13,6 +13,7 @@ tests.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import os
@@ -105,6 +106,20 @@ _CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_MARKER_WRITE_FAI
 # later capability-less GC distinguish "the worker already released this overlay"
 # (safe to remove) from "still mounted elsewhere" (must not remove).
 _OVERLAY_UNMOUNTED_MARKER = ".overlay-unmounted"
+# Sibling marker written under ``auth/<id>/claude`` once a per-workspace legacy
+# ``.claude`` copy has been materialized as a *complete* atomic copy (staging dir +
+# atomic ``replace``). The #402 deletion-whiteout pass reads a base-present /
+# legacy-absent file as a *confident* agent deletion and whiteouts the lower
+# credential; that inference is only sound when the legacy copy is whole. Atomic
+# staging guarantees completeness for copies this code newly materializes, but a
+# ``.claude`` left *partial* by a pre-atomic-staging provision (an interrupted plain
+# ``copytree`` that landed straight in ``.claude``) is still reused by the bare
+# ``exists()`` guards with no completeness check and no host-signature invalidation —
+# its never-copied files would read as deletions and whiteout still-valid credentials
+# (PRRT_kwDOSJAM6s6HRNkk). Only a copy materialized through the atomic path drops this
+# marker; the reconcile path forwards deletions as whiteouts only when it is present,
+# and otherwise fails safe (edits are still forwarded, lower credentials stay visible).
+_CLAUDE_LEGACY_COMPLETE_MARKER = ".claude-complete"
 # When truthy in the worker environment, force the per-workspace copy fallback
 # even where overlayfs + CAP_SYS_ADMIN are present. The bootstrap mount-propagation
 # preflight sets this on hosts whose work dir cannot be made an ``rshared`` mount
@@ -515,6 +530,23 @@ def _overlay_upper_has_data(upper: Path) -> bool:
         return False
 
 
+def _write_legacy_complete_marker(target_root: Path) -> None:
+    """Drop the per-workspace ``.claude`` completeness marker (best-effort).
+
+    Called only *after* an atomic legacy-copy materialization, so the marker's
+    presence proves the copy is whole (see :data:`_CLAUDE_LEGACY_COMPLETE_MARKER`).
+    Written strictly after the ``replace`` so a crash between the rename and this
+    write yields a complete copy with *no* marker — the reconcile path then skips the
+    destructive whiteout pass (over-conservative but safe); the inverse, a marker over
+    a partial copy, is impossible. A failed write (ENOSPC, transient FS error) is
+    swallowed for the same reason: a missing marker only forgoes whiteouting confident
+    deletions, never blocks provisioning and never hides a credential.
+    """
+
+    with contextlib.suppress(OSError):
+        (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).touch()
+
+
 def _prepare_isolated_claude_auth(
     *,
     host_home: Path,
@@ -619,12 +651,23 @@ def _prepare_isolated_claude_auth(
                         workspace_auth_root=str(target_root),
                     )
                 else:
+                    # Forward fallback-era *deletions* as whiteouts only when this
+                    # legacy copy is proven complete (the completeness marker is
+                    # present): only then is a base-present / legacy-absent file a
+                    # confident agent deletion rather than a never-copied file of a
+                    # partial pre-atomic-staging copy. A partial copy reused by the
+                    # ``exists()`` guard above carries no marker, so its absences are
+                    # left visible. Edits are always forwarded regardless — they only
+                    # add/overwrite under ``upper`` and so can never hide a lower
+                    # credential.
+                    legacy_complete = (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).exists()
                     _reconcile_fallback_edits_into_upper(
                         legacy=legacy_claude_copy,
                         merged=Path(mount.source),
                         upper=upper,
                         base=base,
                         host_claude=source_dir,
+                        forward_deletions=legacy_complete,
                     )
                     shutil.rmtree(legacy_claude_copy, ignore_errors=True)
         else:
@@ -668,6 +711,16 @@ def _prepare_isolated_claude_auth(
                             raise
                 finally:
                     shutil.rmtree(staging, ignore_errors=True)
+                # ``.claude`` now exists as a *complete* atomic copy — either this
+                # provision's ``replace`` landed it, or a concurrent provision of the
+                # same workspace won the race and materialized its own whole copy (the
+                # re-raise above only lets us fall through when ``target_dir`` exists).
+                # Drop the completeness marker so a later overlay-reconcile may treat
+                # this copy's absences as confident agent deletions. A pre-atomic-staging
+                # *partial* copy is adopted by the ``not target_dir.exists()`` guard
+                # above and never reaches this block, so it never gets the marker and the
+                # reconcile path fails safe (keeps lower credentials visible).
+                _write_legacy_complete_marker(target_root)
             mounts.append(
                 AuthMount(
                     source=str(target_dir),

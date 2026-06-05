@@ -489,3 +489,97 @@ def test_legacy_path_confidently_absent_false_when_leaf_stat_errors(
 
     monkeypatch.setattr(overlay_copy_mod.os, "stat", _raise_eacces)
     assert overlay_copy_mod._legacy_path_confidently_absent(root, Path("secret.json")) is False
+
+
+# --- forward_deletions gate (#414 PRRT_kwDOSJAM6s6HRNkk incomplete-legacy guard) --------
+
+
+@pytest.mark.unit
+def test_reconcile_forward_deletions_false_skips_whiteout_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A textbook *confident* agent deletion (in base + host unchanged, absent from
+    # legacy, CAP_MKNOD present) that WOULD be whiteouted — but the caller could not
+    # prove the legacy copy complete (``forward_deletions=False``), e.g. a partial
+    # pre-atomic-staging copy whose never-copied files merely *look* deleted. The
+    # destructive pass must be skipped entirely so the still-valid lower credential
+    # stays visible, while the always-safe edit forwarding still runs. The skip is
+    # logged once for diagnosability.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    # Confident-deletion shape for ``secret.json``: base == host, absent from legacy.
+    (base / "secret.json").write_text("token\n")
+    secret_stat = (base / "secret.json").stat()
+    (host / "secret.json").write_text("token\n")
+    os.utime(host / "secret.json", ns=(secret_stat.st_atime_ns, secret_stat.st_mtime_ns))
+    # A genuine fallback edit (absent from base) that the edit pass must still forward.
+    (legacy / "edited.json").write_text('{"fallback": "edit"}\n')
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    with capture_logs() as logs:
+        _reconcile_fallback_edits_into_upper(
+            legacy=legacy,
+            merged=merged,
+            upper=upper,
+            base=base,
+            host_claude=host,
+            forward_deletions=False,
+        )
+
+    # No whiteout attempted at all — the deletion pass never ran.
+    assert recorded == []
+    assert not (upper / "secret.json").exists()
+    # The edit pass still forwarded the genuine fallback edit (writes through merged).
+    assert (merged / "edited.json").read_text() == '{"fallback": "edit"}\n'
+    # The skip is surfaced once with its own reason code.
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
+        for entry in logs
+    )
+
+
+@pytest.mark.unit
+def test_reconcile_forward_deletions_true_still_whiteouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The complementary case: an identical confident deletion with the caller proving
+    # the copy complete (``forward_deletions=True``, the default) still whiteouts the
+    # removal — the gate suppresses the pass only for unproven copies, never for a
+    # proven one (no regression to the #402 deletion-forwarding behaviour).
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (base / "secret.json").write_text("token\n")
+    secret_stat = (base / "secret.json").stat()
+    (host / "secret.json").write_text("token\n")
+    os.utime(host / "secret.json", ns=(secret_stat.st_atime_ns, secret_stat.st_mtime_ns))
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    with capture_logs() as logs:
+        _reconcile_fallback_edits_into_upper(
+            legacy=legacy,
+            merged=merged,
+            upper=upper,
+            base=base,
+            host_claude=host,
+            forward_deletions=True,
+        )
+
+    assert [entry["name"] for entry in recorded] == ["secret.json"]
+    assert not any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
+        for entry in logs
+    )

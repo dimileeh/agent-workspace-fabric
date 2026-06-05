@@ -21,11 +21,36 @@ from structlog.testing import capture_logs
 # ``auth_mounts`` re-exports them. Patch the module that *defines* the helpers so
 # the consumers (which resolve them in that namespace) observe the override.
 from awf.node import auth_mounts_claude as auth_mounts_mod
+from awf.node import auth_mounts_claude_reconcile as reconcile_mod
+from awf.node import auth_mounts_overlay_copy as overlay_copy_mod
 from awf.node.auth_mounts import (
     _host_claude_signature,
     _shared_claude_base_dir,
     resolve_service_auth_mounts,
 )
+
+
+def _recording_mknod(recorded: list[dict[str, object]]):
+    """Return a fake ``os.mknod`` recording its args and creating a placeholder.
+
+    A real overlayfs whiteout is a char device 0,0 that ``mknod`` can only create with
+    ``CAP_MKNOD``/root — unavailable in unit tests. The fake records the leaf name the
+    production code requested and materializes a 0-byte placeholder at the same
+    ``dir_fd``-relative location so callers can assert the whiteout landed in ``upper``
+    without real privileges. Defined locally (not imported from part_003) because that
+    module imports this one — importing back would form a circular import.
+    """
+
+    real_open = os.open
+
+    def _fake_mknod(
+        path: object, mode: int = 0o600, device: int = 0, *, dir_fd: int | None = None
+    ) -> None:
+        recorded.append({"name": os.fspath(path), "mode": mode, "device": device})
+        fd = real_open(os.fspath(path), os.O_WRONLY | os.O_CREAT, 0o000, dir_fd=dir_fd)
+        os.close(fd)
+
+    return _fake_mknod
 
 
 class FakeOverlayMounter:
@@ -1185,3 +1210,178 @@ def test_live_mount_reuse_pins_when_work_dir_is_symlinked(tmp_path: Path) -> Non
     # ``_shared_claude_base_dir`` path diverge string-wise: both sides are resolved
     # before comparing, so the symlinked ``work_dir`` no longer drops a valid base.
     assert (claude_root / "base.signature").read_text() == signature
+
+
+# --- legacy-copy completeness marker (#414 PRRT_kwDOSJAM6s6HRNkk) -------------------------
+
+
+@pytest.mark.unit
+def test_legacy_fallback_copy_writes_completeness_marker(tmp_path: Path) -> None:
+    # When overlayfs is unavailable the legacy full-copy branch materializes ``.claude``
+    # atomically (staging dir + ``replace``) and, because that copy is provably whole,
+    # drops the completeness marker. A later overlay-reconcile consults the marker to
+    # decide whether the copy's absences are confident agent deletions (safe to whiteout)
+    # or possibly never-copied files of a partial copy (must stay visible).
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_fallback_marker",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=False),
+    )
+
+    claude_root = work_dir / "auth" / "ws_fallback_marker" / "claude"
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert (claude_root / ".claude").is_dir()
+    assert (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).is_file()
+
+
+@pytest.mark.unit
+def test_write_legacy_complete_marker_swallows_oserror(tmp_path: Path) -> None:
+    # ``touch`` on a marker whose parent directory does not exist raises OSError. The
+    # helper swallows it: a missing marker only forgoes whiteouting confident deletions
+    # (fail-safe — the credential stays visible), so a write fault must never propagate
+    # and break provisioning.
+    missing_root = tmp_path / "does-not-exist"
+
+    auth_mounts_mod._write_legacy_complete_marker(missing_root)  # must not raise
+
+    assert not (missing_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).exists()
+
+
+def _seed_overlay_reuse_with_deletion_shaped_legacy(
+    tmp_path: Path, workspace_id: str
+) -> tuple[Path, Path, Path]:
+    """Provision an overlay, then stage a legacy ``.claude`` missing a base credential.
+
+    Leaves the workspace one step before a second provision: a surviving non-empty
+    ``upper`` (so the legacy-copy guard is overridden and the live overlay remounted),
+    a legacy copy that *lacks* ``secret.json`` (present in base + on the unchanged host,
+    so its absence reads as a confident agent deletion to the #402 pass), plus a genuine
+    fallback edit. Whether that absence is a real deletion (complete copy) or a
+    never-copied file (partial copy) is exactly what the completeness marker — which the
+    caller writes or omits — disambiguates. Returns ``(host_home, work_dir, claude_root)``.
+    """
+
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    # A credential present at provision time becomes part of base A and stays on the
+    # unchanged host, so the deletion guard's "host == base" precondition holds for it.
+    (host_home / ".claude" / "secret.json").write_text("token\n")
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / workspace_id / "claude"
+    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+
+    # Agent accumulated writable overlay data → non-empty ``upper`` overrides the
+    # legacy-copy guard so the surviving overlay is remounted and reconciled on retry.
+    (claude_root / "upper" / "agent.json").write_text('{"agent": true}\n')
+
+    # A prior transient-fallback provision left a legacy ``.claude`` the agent mutated.
+    # Build it as a faithful copy of base A (``copy2`` preserves mtimes so the edit pass
+    # skips the unchanged baseline) with exactly ONE difference that reads as a confident
+    # deletion: ``secret.json`` removed (present in base + on the unchanged host). Add a
+    # genuine fallback edit too. The completeness marker the caller writes/omits decides
+    # whether that single absence is forwarded as a whiteout or kept visible.
+    legacy = claude_root / ".claude"
+    shutil.copytree(base_a, legacy)
+    (legacy / "secret.json").unlink()
+    (legacy / "edited.json").write_text('{"fallback": "edit"}\n')
+
+    # Worker killed after ``mount()`` (against base A) but before the pin write, so the
+    # retry recovers base A from the live mount and reconciles against it.
+    (claude_root / "base.signature").unlink()
+    return host_home, work_dir, claude_root
+
+
+@pytest.mark.unit
+def test_reconcile_skips_deletions_for_unmarked_partial_legacy_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reviewer's #414 case end-to-end: a reused legacy ``.claude`` with NO completeness
+    # marker (it may be a partial pre-atomic-staging copy) whose missing ``secret.json``
+    # would otherwise read as a confident deletion. The reconcile must skip the destructive
+    # whiteout pass so the still-valid lower credential stays visible, while the always-safe
+    # edit forwarding still runs.
+    host_home, work_dir, claude_root = _seed_overlay_reuse_with_deletion_shaped_legacy(
+        tmp_path, "ws_unmarked_recon"
+    )
+    assert not (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).exists()
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    with capture_logs() as logs:
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_unmarked_recon",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+
+    upper = claude_root / "upper"
+    # No whiteout was attempted at all — the never-copied credential is NOT hidden.
+    assert recorded == []
+    assert not (upper / "secret.json").exists()
+    # Edits are always forwarded (they can never hide a lower credential).
+    assert (claude_root / "merged" / "edited.json").read_text() == '{"fallback": "edit"}\n'
+    # The conservative skip is surfaced once for diagnosability.
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
+        for entry in logs
+    )
+    # The legacy copy is still reaped once reconciled.
+    assert not (claude_root / ".claude").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_forwards_deletions_for_marked_complete_legacy_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The complement: an identical setup but the legacy copy carries the completeness
+    # marker (it was materialized atomically, so it is provably whole and its missing
+    # ``secret.json`` is a genuine agent deletion). The reconcile forwards the deletion as
+    # a whiteout — the gate suppresses the pass only for unproven copies, never regressing
+    # the #402 deletion-forwarding for a proven-complete one.
+    host_home, work_dir, claude_root = _seed_overlay_reuse_with_deletion_shaped_legacy(
+        tmp_path, "ws_marked_recon"
+    )
+    (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).touch()
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    with capture_logs() as logs:
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_marked_recon",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+
+    upper = claude_root / "upper"
+    # The genuine agent deletion is forwarded as an overlayfs whiteout.
+    assert [entry["name"] for entry in recorded] == ["secret.json"]
+    assert (upper / "secret.json").exists()
+    # The skip path did not fire for a proven-complete copy.
+    assert not any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
+        for entry in logs
+    )

@@ -56,6 +56,15 @@ _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE = "CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABL
 # be silent. The deletion is not forwarded — the credential stays visible (fail-safe) —
 # but the gap is surfaced so the un-forwarded deletion is diagnosable.
 _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED = "CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED"
+# Logged once when the fallback-era *deletion* pass is skipped because the reused
+# legacy ``.claude`` copy carries no completeness marker — it may be a *partial*
+# pre-atomic-staging copy whose never-copied files would otherwise read as confident
+# agent deletions and whiteout still-valid lower credentials. Skipping forwards no
+# deletions (the credential stays visible — fail-safe); the edit pass still runs. The
+# gap is surfaced so a copy that *should* have been marked complete is diagnosable.
+_CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY = (
+    "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
+)
 
 
 def _legacy_is_unedited_host_copy(
@@ -128,11 +137,19 @@ def _forward_fallback_deletions_as_whiteouts(
     This rests on the legacy copy being *complete*: ``base``-present/``legacy``-absent
     is read as an agent deletion, so a legacy tree truncated by an interrupted copy
     would falsely flag every never-copied file as deleted and whiteout still-valid
-    lower credentials. The caller materializes the legacy copy atomically — ``copytree``
-    into a staging dir then an atomic ``replace`` into ``.claude`` — so ``.claude`` only
-    ever exists as a whole copy and a partial tree is never reused (see the legacy
-    branch of :func:`resolve_service_auth_mounts`). Without that guarantee the
-    confident-deletion inference below would be unsound.
+    lower credentials. Completeness is enforced two ways. (1) The caller materializes
+    *new* legacy copies atomically — ``copytree`` into a staging dir then an atomic
+    ``replace`` into ``.claude`` — so a freshly-built ``.claude`` only ever exists as a
+    whole copy. (2) Atomic staging cannot retroactively complete a ``.claude`` left
+    *partial* by a pre-atomic-staging provision (an interrupted plain ``copytree`` that
+    landed straight in ``.claude``); the ``exists()`` reuse guard adopts such a tree
+    with no completeness check. So this pass runs **only when the caller proves the copy
+    complete** — it passes ``forward_deletions`` to
+    :func:`_reconcile_fallback_edits_into_upper` gated on the completeness marker dropped
+    after an atomic materialization (see the legacy branch of
+    :func:`resolve_service_auth_mounts`). An unmarked copy skips this pass entirely and
+    its absences stay visible (fail-safe). Without that gate the confident-deletion
+    inference below would be unsound for a reused partial tree.
 
     Credential safety is paramount: a misclassified deletion must never *hide* a
     still-needed credential, so every ambiguous case fails safe toward leaving the
@@ -280,7 +297,13 @@ def _forward_fallback_deletions_as_whiteouts(
 
 
 def _reconcile_fallback_edits_into_upper(
-    *, legacy: Path, merged: Path, upper: Path, base: Path, host_claude: Path
+    *,
+    legacy: Path,
+    merged: Path,
+    upper: Path,
+    base: Path,
+    host_claude: Path,
+    forward_deletions: bool = True,
 ) -> None:
     """Forward fallback-era legacy edits into the overlay before reaping it.
 
@@ -350,14 +373,27 @@ def _reconcile_fallback_edits_into_upper(
     set); the mtime comparison is intentionally conservative toward preserving edits.
 
     Fallback-era *deletions* (#402): a separate pass,
-    :func:`_forward_fallback_deletions_as_whiteouts`, runs after this edit walk. It
-    diffs ``base`` against ``legacy`` and synthesizes an overlayfs whiteout in
-    ``upper`` for each file the agent confidently removed (the live host still matches
-    ``base`` by mtime, size, *and* content), so the removal survives the next remount
-    instead of the lower re-exposing it. Ambiguous removals (host lacks the path, or
-    host changed it — including a same-length, timestamp-preserving credential
-    rotation) and a missing ``CAP_MKNOD`` fail safe toward keeping the credential
-    visible — a misclassified deletion can never *hide* a still-needed credential.
+    :func:`_forward_fallback_deletions_as_whiteouts`, runs after this edit walk **only
+    when** ``forward_deletions`` is true. It diffs ``base`` against ``legacy`` and
+    synthesizes an overlayfs whiteout in ``upper`` for each file the agent confidently
+    removed (the live host still matches ``base`` by mtime, size, *and* content), so the
+    removal survives the next remount instead of the lower re-exposing it. Ambiguous
+    removals (host lacks the path, or host changed it — including a same-length,
+    timestamp-preserving credential rotation) and a missing ``CAP_MKNOD`` fail safe
+    toward keeping the credential visible — a misclassified deletion can never *hide* a
+    still-needed credential.
+
+    ``forward_deletions`` is the caller's proof that ``legacy`` is a *complete* copy.
+    A base-present / legacy-absent file is read as a confident agent deletion, which is
+    sound only when every host file was copied into ``legacy`` to begin with. The caller
+    passes ``False`` for a reused legacy copy whose completeness it cannot prove (a
+    partial tree left by a pre-atomic-staging provision and adopted by the ``exists()``
+    reuse guard): the deletion pass is then skipped — its never-copied files would
+    otherwise read as deletions and whiteout still-valid credentials — and only the
+    always-safe edit/addition forwarding above runs. The skip is logged once
+    (``CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY``) so an unexpectedly
+    unmarked copy is diagnosable. Edits never hide a lower credential, so they are
+    forwarded unconditionally.
 
     Known limitation (edits inside an agent-planted directory symlink are not
     forwarded): ``os.walk`` runs with the default ``followlinks=False``, so if the
@@ -456,7 +492,17 @@ def _reconcile_fallback_edits_into_upper(
             # swallows any structural conflict or ``OSError`` and drops just this file.
             _safe_overlay_copy(merged, rel, legacy)
 
-    # Second pass (#402): forward fallback-era *deletions* as overlayfs whiteouts.
+    # Second pass (#402): forward fallback-era *deletions* as overlayfs whiteouts —
+    # but only when the caller proved ``legacy`` is a *complete* copy. For an unproven
+    # (possibly partial) copy, never-copied files would read as confident deletions and
+    # whiteout still-valid lower credentials, so skip the pass and keep them visible.
+    if not forward_deletions:
+        _log.info(
+            "claude_auth_overlay_deletion_reconcile_skipped_incomplete_legacy",
+            reason_code=_CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY,
+            workspace_auth_root=str(upper.parent),
+        )
+        return
     _forward_fallback_deletions_as_whiteouts(
         legacy=legacy, upper=upper, base=base, host_claude=host_claude
     )
