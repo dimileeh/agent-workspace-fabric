@@ -115,6 +115,7 @@ def test_mount_propagation_check_force_copy_none_when_missing() -> None:
     assert payload["status"] == "ok"
     assert payload["propagation"] == "rshared"
     assert payload["force_copy"] is None
+    assert "force_copy=unknown" in payload["detail"]
 
 
 @pytest.mark.unit
@@ -129,6 +130,7 @@ def test_mount_propagation_check_force_copy_none_from_partial_env_file(tmp_path:
     assert payload["status"] == "ok"
     assert payload["propagation"] == "rprivate"
     assert payload["force_copy"] is None
+    assert "force_copy=unknown" in payload["detail"]
 
 
 @pytest.mark.unit

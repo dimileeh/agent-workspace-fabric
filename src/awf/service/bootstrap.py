@@ -331,7 +331,11 @@ def _persist_work_dir_propagation_result(
     try:
         lines: list[str] = []
         if env_file.exists():
-            for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            try:
+                existing_text = env_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                existing_text = ""
+            for raw_line in existing_text.splitlines():
                 stripped = raw_line.lstrip()
                 if not stripped or stripped.startswith("#"):
                     lines.append(raw_line)

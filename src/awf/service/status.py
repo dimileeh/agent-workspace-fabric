@@ -142,7 +142,7 @@ def _mount_propagation_check_payload(
             "reason": "MOUNT_PROPAGATION_AVAILABLE",
             "propagation": propagation,
             "force_copy": fc,
-            "detail": f"propagation={propagation}, force_copy={fc}",
+            "detail": f"propagation={propagation}, force_copy={fc if fc is not None else 'unknown'}",
         }
     return {
         "ok": True,
