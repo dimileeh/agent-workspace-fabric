@@ -82,7 +82,7 @@ async def test_client_integration_instructions_preserves_explicit_empty_clients(
 
     assert result.isError is False
     assert payload["status"] == "success"
-    assert payload["command"] == "awf setup"
+    assert "command" not in payload
     assert payload["clients"] == []
     assert "env_file" not in payload
     assert payload["next_steps"] == ["No client config changes are needed."]

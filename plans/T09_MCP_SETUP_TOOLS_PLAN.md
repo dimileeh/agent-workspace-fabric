@@ -84,6 +84,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HRklw
+
+### Problem Statement And Scope
+
+The review reports that `awf_get_client_integration_instructions` returns a
+generic `command="awf setup"` for explicit `clients: []` requests. That response
+is intentionally a zero-client no-op that skips source-checkout and env-file
+resolution, so a copied setup command would run the normal provider setup flow
+instead of reproducing the no-op request.
+
+Scope is limited to the explicit empty-client success payload and its focused
+regression assertion.
+
+### Requirements Checklist
+
+- Preserve the explicit empty-client fast return and avoid source-checkout or
+  env-file resolution.
+- Do not return a generic mutating setup command for the no-op zero-client
+  response.
+- Keep the existing payload status, client list, env-file omission, and next
+  steps unchanged.
+- Add a focused regression assertion for the no-op command behavior.
+
+### Implementation Steps
+
+1. Update the existing explicit empty-client regression to reject the generic
+   setup command.
+2. Omit the `command` field from the explicit empty-client success payload.
+3. Run the targeted regression and focused client-integration checks.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_preserves_explicit_empty_clients -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HRcKZ
 
 ### Problem Statement And Scope
