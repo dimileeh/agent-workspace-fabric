@@ -737,6 +737,17 @@ def _initialize_project_profile_result(
                 f"could not write project profile: {type(exc).__name__}",
                 detail={"project_path": str(repository), "force": force},
             )
+        except Exception:
+            _LOGGER.exception(
+                "could not write project profile for MCP project initialization",
+                extra={"project_path": str(repository), "force": force},
+            )
+            return _error_result(
+                safe_result,
+                PROJECT_INIT_FAILED,
+                "could not write project profile",
+                detail={"project_path": str(repository), "force": force},
+            )
         if planned_written_path is not None and written_path != planned_written_path:
             payload["written_path"] = str(written_path)
     return safe_result(cast(dict[str, Any], payload))

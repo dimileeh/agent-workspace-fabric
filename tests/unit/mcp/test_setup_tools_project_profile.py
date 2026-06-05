@@ -217,6 +217,67 @@ async def test_initialize_project_profile_write_runtime_and_value_errors_are_str
 
 
 @pytest.mark.unit
+async def test_initialize_project_profile_unexpected_write_failure_is_structured(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    raw_token = "sk-proj-" + "f" * 40
+    leaked_detail = f"{project}/draft.yaml contains {raw_token}"
+    preview = SimpleNamespace(
+        path=project,
+        draft=SimpleNamespace(template="generic"),
+        to_dict=lambda: {
+            "path": str(project),
+            "inspection": {"detected_template": "generic"},
+            "draft": {"template": "generic", "yaml": "name: generic\n"},
+            "diagnostics": {},
+        },
+    )
+
+    def fail_write(_preview: Any, *, force: bool) -> Path:
+        _ = force
+        raise TypeError(leaked_detail)
+
+    monkeypatch.setattr(setup_tools, "preview_project_onboarding", lambda *_a, **_k: preview)
+    monkeypatch.setattr(setup_tools, "write_workspace_profile", fail_write)
+    caplog.set_level(logging.ERROR, logger="awf.mcp.setup_tools")
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "write_profile": True, "force": True},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_FAILED"
+    assert payload["message"] == "could not write project profile"
+    assert payload["detail"] == {
+        "project_path": str(project.resolve()),
+        "force": True,
+    }
+    assert leaked_detail not in rendered
+    assert raw_token not in rendered
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "awf.mcp.setup_tools"
+        and record.message == "could not write project profile for MCP project initialization"
+    ]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].project_path == str(project.resolve())
+    assert records[0].force is True
+
+
+@pytest.mark.unit
 async def test_initialize_project_profile_path_expanduser_failure_returns_structured_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

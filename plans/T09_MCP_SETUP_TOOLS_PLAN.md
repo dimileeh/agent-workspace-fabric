@@ -84,6 +84,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Write Exception Guard
+
+### Problem Statement And Scope
+
+The review reports that `_initialize_project_profile_result` defensively wraps
+existing profile probing, onboarding preview, and onboarding payload assembly,
+but the `write_workspace_profile(...)` branch only handles known writer
+exceptions. Unexpected serialization or YAML failures could therefore escape the
+MCP tool instead of returning a structured, redacted project-init error.
+
+The review also notes that `first_run_mcp_bridge` re-export assignments capture
+attributes at import time rather than acting as live aliases. Scope is limited
+to documenting that maintenance constraint beside the existing bridge note.
+
+### Requirements Checklist
+
+- Preserve `FileExistsError` handling as `PROJECT_PROFILE_EXISTS`.
+- Preserve known writer exception messages that include the exception type only.
+- Convert unexpected writer exceptions into a generic `PROJECT_INIT_FAILED`
+  response with safe `project_path` and `force` details.
+- Log unexpected writer exceptions with project path and force context.
+- Document that bridge re-export assignments are import-time attribute captures.
+- Add focused regression coverage for the repaired writer failure path.
+
+### Implementation Steps
+
+1. Add a focused failing regression that makes `write_workspace_profile(...)`
+   raise an unexpected exception after payload construction succeeds.
+2. Add a catch-all writer exception handler that logs and returns the generic
+   safe project-init error response.
+3. Add the bridge maintenance comment about import-time attribute capture.
+4. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_unexpected_write_failure_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HYP7k Start Remediation Command
 
 ### Problem Statement And Scope
