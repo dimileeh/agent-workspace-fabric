@@ -2919,3 +2919,51 @@ uv run --python 3.12 --extra dev ruff check tests/unit/service/test_logs_parts/t
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py -q --tb=short -ra
 # 26 passed
 ```
+
+## Review-Level Comment `issue:4620175517` Standalone Metrics Multiline Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: standalone `register_metrics_tools()` exact-secret discovery now
+  includes full quoted multiline Compose env-file provider secrets via
+  `compose_env_file_quoted_multiline_secret_context()`.
+- Complete: incomplete first-line fragments from quoted multiline Compose
+  secrets are filtered out of the exact-secret set so public mentions are not
+  redacted as standalone secrets.
+- Complete: existing production `build_mcp_server()` multiline behavior remains
+  covered by the surrounding MCP multiline redaction tests.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/mcp/test_mcp_multiline_compose_redaction.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q -k register_metrics_tools_redacts_multiline
+# 1 failed: standalone metrics registration redacted the public first-line fragment and leaked the remaining multiline secret lines
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q -k register_metrics_tools_redacts_multiline
+# 1 passed, 4 deselected
+
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q
+# 5 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
+# Success: no issues found in 1 source file
+```

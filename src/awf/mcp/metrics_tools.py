@@ -53,6 +53,7 @@ from awf.mcp.server import (
 from awf.service import config as service_config
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck
+from awf.service.environment import compose_env_file_quoted_multiline_secret_context
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
@@ -159,13 +160,37 @@ def _workspace_log_redaction_secrets(
     ):
         if secret and len(secret) >= 4:
             secrets.append(secret)
+    resolved_secret_env_file = _workspace_log_redaction_compose_env_secret_file(compose_env_file)
+    (
+        quoted_multiline_values,
+        quoted_multiline_first_line_values,
+    ) = compose_env_file_quoted_multiline_secret_context(
+        resolved_secret_env_file,
+        is_secret_key=is_secret_env_key,
+    )
     provider_environ = _workspace_log_redaction_provider_environ(
         compose_env_file=compose_env_file,
     )
     for key, value in provider_environ.items():
-        if is_secret_env_key(key) and len(value) >= 4:
+        if (
+            is_secret_env_key(key)
+            and len(value) >= 4
+            and (key, value) not in quoted_multiline_first_line_values
+        ):
             secrets.append(value)
+    secrets.extend(quoted_multiline_values)
     return tuple(dict.fromkeys(secrets))
+
+
+def _workspace_log_redaction_compose_env_secret_file(
+    compose_env_file: service_config.ComposeEnvFileInput,
+) -> Path | None:
+    """Return the Compose env file used for standalone log exact-secret collection."""
+    if isinstance(compose_env_file, service_config.ComposeEnvFileOmitted):
+        compose_env_file = service_config.LOCAL_SERVICE_COMPOSE_ENV_FILE
+    if compose_env_file is None:
+        return None
+    return service_config.resolve_local_service_compose_env_file(compose_env_file)
 
 
 def _workspace_log_redaction_provider_environ(

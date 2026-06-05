@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -14,6 +15,7 @@ from awf.common.config import Settings
 from awf.common.redaction import REDACTION_MARKER
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.mcp import metrics_tools as metrics_tools_mod
 from awf.mcp import server as mcp_server_mod
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.logs import LogStore
@@ -187,6 +189,75 @@ async def test_read_workspace_log_does_not_redact_multiline_first_line_fragment_
             repo_url="git@github.com:example/app.git",
             branch_base="main",
             task_title="Log multiline first-line fragment",
+            task_prompt="Read logs.",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+    raw_text = f"public mention {first_line}\nprovider emitted\n{secret}\ndone\n"
+    store = LogStore(root=tmp_path / "logs", session_factory=factory)
+    sink = await store.open_stream(
+        workspace_id=workspace.id,
+        stream_id="setup.stdout",
+        source="setup",
+        name="Setup stdout",
+        kind="stdout",
+    )
+    await sink.write(raw_text)
+    await sink.close()
+
+    chunk = await _call(
+        mcp,
+        "awf_read_workspace_log",
+        {
+            "workspace_id": workspace.id,
+            "stream_id": "setup.stdout",
+            "offset": 0,
+            "limit_bytes": len(raw_text),
+        },
+    )
+
+    assert isinstance(chunk, dict)
+    data = chunk["data"]
+    assert first_line in data
+    for fragment in secret.splitlines()[1:]:
+        assert fragment not in data
+    assert data == f"public mention {first_line}\nprovider emitted\n{REDACTION_MARKER}\ndone\n"
+
+
+@pytest.mark.unit
+async def test_register_metrics_tools_redacts_multiline_compose_env_file_provider_secret(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Standalone metrics registration collects full multiline Compose secrets."""
+    _clear_known_secret_env(monkeypatch)
+    first_line = "standalone-first-fragment"
+    secret = f"{first_line}\nstandalone-second-fragment\nstandalone-third-fragment"
+    compose_env_file = _write_multiline_secret_env_file(tmp_path, secret)
+    settings = Settings(_env_file=None, work_dir=str(tmp_path))
+    service = WorkspaceService(factory, log_root=tmp_path / "logs", settings=settings)
+    mcp = FastMCP(name="awf-test")
+    metrics_tools_mod.register_metrics_tools(
+        mcp=mcp,
+        service=service,
+        safe_result=mcp_server_mod._tool_result,  # noqa: SLF001
+        settings_value=settings,
+        disk_check_provider=None,
+        local_capacity_provider=None,
+        orphan_resource_summary_provider=None,
+        runtime_health_summary_provider=None,
+        readiness_provider=None,
+        health_provider=None,
+        compose_env_file=compose_env_file,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            task_title="Standalone metrics multiline redaction",
             task_prompt="Read logs.",
             agent="codex",
             test_commands=[],

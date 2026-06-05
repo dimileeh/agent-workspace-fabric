@@ -145,6 +145,13 @@ credential entry, or unrelated refactors are included.
   and only centralizes the shared context helper, adds the startup snapshot
   comment, preserves the Compose escaped-quote parser behavior, runs focused
   regressions, and updates this plan/validation evidence.
+- Review-level comment `issue:4620175517` identified a remaining standalone
+  metrics-tool registration gap: `_workspace_log_redaction_secrets` does not
+  reconstruct quoted multiline Compose env-file provider secrets when callers
+  invoke `register_metrics_tools` without precomputed `extra_secrets`.
+- This repair remains inside the existing T17 MCP log-redaction scope and only
+  aligns standalone metrics-tool exact-secret discovery with the shared
+  multiline Compose context helper plus a focused regression.
 
 ## Requirements Checklist
 
@@ -182,6 +189,9 @@ credential entry, or unrelated refactors are included.
   Compose env file when the service is started with a custom `--env-file`.
 - Quoted multiline Compose env-file secret context is computed by one shared
   helper so MCP and service-log first-line-fragment filtering cannot drift.
+- Standalone `register_metrics_tools` exact-secret discovery reconstructs
+  quoted multiline Compose env-file provider secrets and filters incomplete
+  first-line fragments.
 - MCP startup-time exact-secret snapshots are documented as requiring MCP
   restart after credential rotation for newly configured bare exact values.
 - Captured and followed service-log output redact exact provider credential
@@ -2521,4 +2531,49 @@ OpenAPI drift, frontend validation, or production behavior.
 uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_003.py -q --tb=short -ra
 uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q --tb=short -ra
 uv run --python 3.12 --extra dev ruff check tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/service/test_logs_parts/test_logs_part_003.py
+```
+
+## Review-Level Comment `issue:4620175517` Standalone Metrics Multiline Plan
+
+### Problem Statement And Scope
+
+Standalone callers can invoke `register_metrics_tools()` without passing the
+precomputed `extra_secrets` assembled by `build_mcp_server()`. In that path,
+`_workspace_log_redaction_secrets()` must collect the same quoted multiline
+Compose env-file provider secrets as the production MCP startup path, otherwise
+a workspace log containing a bare multiline secret can expose lines after the
+parsed first-line fragment.
+
+This repair is limited to standalone MCP metrics-tool exact-secret discovery
+and a focused MCP workspace-log regression. It does not change branch
+management, pushing, broad validation, full coverage, OpenAPI drift, frontend
+validation, or per-request MCP secret refresh behavior.
+
+### Requirements Checklist
+
+- Standalone `register_metrics_tools()` exact-secret discovery must include
+  full quoted multiline Compose env-file provider secrets.
+- Standalone discovery must exclude incomplete first-line fragments from the
+  exact-secret set so benign public mentions of that fragment are not masked.
+- Existing production `build_mcp_server()` multiline redaction behavior must
+  remain covered.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression that registers metrics tools directly
+   without `extra_secrets`.
+2. Align `_workspace_log_redaction_secrets()` with the shared quoted multiline
+   Compose secret-context helper.
+3. Re-run the focused regression, surrounding MCP multiline tests, and narrow
+   ruff/mypy checks.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q -k register_metrics_tools_redacts_multiline
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/metrics_tools.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/metrics_tools.py
 ```
