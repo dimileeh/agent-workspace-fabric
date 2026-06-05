@@ -895,10 +895,14 @@ def _client_integration_instructions_result(
             is_error=True,
         )
     except _ClientEnvFileMissingError as exc:
+        missing_env_source_checkout = _client_env_file_missing_source_checkout(
+            source_path,
+            exc.env_file,
+        )
         blocked_payload = _client_env_file_missing_payload_with_explicit_command(
             _client_env_file_missing_payload(exc.env_file),
             selected_clients=selected,
-            source_checkout=source_path,
+            source_checkout=missing_env_source_checkout,
         )
         return _first_run_result(
             safe_result,
@@ -1348,6 +1352,25 @@ def _client_env_file_missing_payload_with_explicit_command(
     return payload.model_copy(update=update)
 
 
+def _client_env_file_missing_source_checkout(
+    source_checkout: Path | None,
+    env_file: Path,
+) -> Path | None:
+    if source_checkout is not None:
+        return source_checkout
+    try:
+        config = read_host_setup_config()
+    except HostSetupConfigError:
+        return None
+    if config.source_checkout is None:
+        return None
+    persisted_root = _resolve_user_supplied_path(config.source_checkout.root)
+    env_root = _resolve_user_supplied_path(env_file.parent)
+    if persisted_root != env_root:
+        return None
+    return persisted_root
+
+
 def _client_instruction_reason_coded_payload(
     reason_code: str,
     summary: str,
@@ -1421,7 +1444,7 @@ def _resolve_client_source_checkout_path(source_checkout: str | None) -> Path | 
     return _resolve_user_supplied_path(source_checkout)
 
 
-def _resolve_user_supplied_path(raw_path: str) -> Path:
+def _resolve_user_supplied_path(raw_path: str | Path) -> Path:
     candidate = Path(raw_path)
     try:
         expanded = candidate.expanduser()

@@ -215,6 +215,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HceGm Persisted Missing Env Remediation
+
+### Problem Statement And Scope
+
+The review reports that when MCP client instruction setup relies on persisted
+source-checkout metadata and the checkout root `.env` is missing,
+`_resolve_client_env_file(None, True)` raises `ClientEnvFileMissingError` while
+the MCP-layer `source_path` remains `None`. The missing-env payload then keeps
+the catalog `awf start --source-checkout .` remediation command instead of
+pointing at the persisted checkout whose env file is missing.
+
+Scope is limited to the client-integration missing-env error path and its
+focused regression.
+
+### Requirements Checklist
+
+- Preserve the existing missing-env blocked payload status, reason code,
+  summary, details, and absence of apply commands.
+- Preserve explicit `source_checkout` behavior for missing-env payloads.
+- When the missing env file belongs to the persisted source checkout, render
+  setup retry and start remediation commands with that checkout root.
+- Avoid inferring a persisted source checkout when host config has no matching
+  source-checkout metadata.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression for a persisted source checkout with a
+   missing root `.env`.
+2. Resolve the missing-env payload checkout from the explicit source path or
+   matching persisted host-setup metadata.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_persisted_source_env_rewrites_start_remediation tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_unmatched_env_keeps_default_remediation tests/unit/mcp/test_setup_tools_client_integration.py::test_client_env_file_missing_source_checkout_ignores_absent_or_unreadable_config tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_source_env_blocks_before_apply_commands -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: python-coverage-shards (2) Stale MCP Coverage Node
 
 ### Problem Statement And Scope

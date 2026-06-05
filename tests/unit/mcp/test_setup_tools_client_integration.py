@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from awf.common.audit import REDACTION_MARKER
+from awf.host_setup.config import HOST_SETUP_CONFIG_CORRUPT, HostSetupConfig, HostSetupConfigError
 from awf.host_setup.rendering import (
     CLIENT_CONFIG_CONFLICT,
     SETUP_CLIENT_UNKNOWN,
@@ -20,6 +21,7 @@ from awf.host_setup.source_assets import (
     SOURCE_CHECKOUT_ASSETS_STALE,
     SOURCE_CHECKOUT_INVALID,
     SOURCE_CHECKOUT_MARKERS,
+    SourceCheckoutAssetMetadata,
     SourceCheckoutError,
 )
 from awf.host_setup.system_checks import SetupCheckError
@@ -321,6 +323,131 @@ async def test_client_integration_instructions_missing_source_env_blocks_before_
     )
     assert "clients" not in payload
     assert "apply_command" not in rendered
+
+
+@pytest.mark.unit
+async def test_client_integration_instructions_missing_persisted_source_env_rewrites_start_remediation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = _make_source_checkout(tmp_path / "persisted source checkout")
+    root_env = checkout / ".env"
+    assert not root_env.exists()
+    resolve_calls: list[tuple[Path | None, bool]] = []
+
+    def fail_env_file(source_checkout: Path | None, require_existing: bool = False) -> Path:
+        resolve_calls.append((source_checkout, require_existing))
+        raise setup_tools._ClientEnvFileMissingError(root_env)
+
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", fail_env_file)
+    monkeypatch.setattr(
+        setup_tools,
+        "read_host_setup_config",
+        lambda: HostSetupConfig(
+            source_checkout=SourceCheckoutAssetMetadata(
+                root=checkout,
+                verified_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        ),
+    )
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"]},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+    expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
+
+    assert result.isError is True
+    assert resolve_calls == [(None, True)]
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == START_COMPOSE_ASSETS_MISSING
+    assert payload["command"] == expected_command
+    assert payload["issues"][0]["details"] == {
+        "check": "client_env_file",
+        "env_file": str(root_env),
+    }
+    assert payload["next_steps"] == [
+        f"Run awf service bootstrap to create the env file, then re-run {expected_command}.",
+    ]
+    assert payload["issues"][0]["remediation"]["related_command"] == (
+        f"awf start --source-checkout '{checkout}'"
+    )
+    assert "clients" not in payload
+    assert "apply_command" not in rendered
+
+
+@pytest.mark.unit
+async def test_client_integration_instructions_missing_unmatched_env_keeps_default_remediation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = _make_source_checkout(tmp_path / "persisted source checkout")
+    env_file = tmp_path / "packaged" / ".env"
+
+    def fail_env_file(source_checkout: Path | None, require_existing: bool = False) -> Path:
+        assert source_checkout is None
+        assert require_existing is True
+        raise setup_tools._ClientEnvFileMissingError(env_file)
+
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", fail_env_file)
+    monkeypatch.setattr(
+        setup_tools,
+        "read_host_setup_config",
+        lambda: HostSetupConfig(
+            source_checkout=SourceCheckoutAssetMetadata(
+                root=checkout,
+                verified_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+        ),
+    )
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"]},
+    )
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == START_COMPOSE_ASSETS_MISSING
+    assert payload["command"] == "awf setup --client claude"
+    assert payload["next_steps"] == [
+        "Run awf service bootstrap to create the env file, then re-run awf setup --client claude.",
+    ]
+    assert payload["issues"][0]["remediation"]["related_command"] == (
+        "awf start --source-checkout ."
+    )
+
+
+@pytest.mark.unit
+def test_client_env_file_missing_source_checkout_ignores_absent_or_unreadable_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    env_file = tmp_path / "packaged" / ".env"
+
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", lambda: HostSetupConfig())
+    assert setup_tools._client_env_file_missing_source_checkout(None, env_file) is None
+
+    def fail_config() -> HostSetupConfig:
+        raise HostSetupConfigError(
+            reason_code=HOST_SETUP_CONFIG_CORRUPT,
+            message="Host setup config is corrupt or unsupported.",
+            path=tmp_path / "config.yml",
+        )
+
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", fail_config)
+    assert setup_tools._client_env_file_missing_source_checkout(None, env_file) is None
 
 
 @pytest.mark.unit

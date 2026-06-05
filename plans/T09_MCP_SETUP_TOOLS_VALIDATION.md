@@ -53,6 +53,54 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HceGm
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve the existing missing-env blocked payload status, reason code,
+  summary, details, and absence of apply commands: Complete.
+- Preserve explicit `source_checkout` behavior for missing-env payloads:
+  Complete.
+- When the missing env file belongs to the persisted source checkout, render
+  setup retry and start remediation commands with that checkout root: Complete.
+- Avoid inferring a persisted source checkout when host config has no matching
+  source-checkout metadata: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_persisted_source_env_rewrites_start_remediation -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_persisted_source_env_rewrites_start_remediation tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_unmatched_env_keeps_default_remediation tests/unit/mcp/test_setup_tools_client_integration.py::test_client_env_file_missing_source_checkout_ignores_absent_or_unreadable_config tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_source_env_blocks_before_apply_commands -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["command"]` remained `awf setup --client claude` instead of carrying
+  the persisted checkout.
+- Focused missing-env tests after the implementation change: 4 passed.
+- Focused ruff: passed.
+- Focused ruff format check: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HcTJa
 
 Plan reference: `T09_MCP_SETUP_TOOLS_PLAN.md`
