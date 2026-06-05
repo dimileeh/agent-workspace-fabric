@@ -82,6 +82,7 @@ def test_environmental_skip_helper_fails_when_later_result_failed() -> None:
 
 
 def _assert_no_environmental_skip(results: tuple[smoke.SmokeResult, ...]) -> None:
+    """Fail on source lane failures and skip only on environmental blockers."""
     failed = [result for result in results if result.status == "failed"]
     if failed:
         pytest.fail("; ".join(result.reason for result in failed))

@@ -659,6 +659,7 @@ def run_harness(config: SmokeConfig, *, smoke_root: Path) -> tuple[SmokeResult, 
 
 
 def _parse_args(argv: Sequence[str] | None) -> SmokeConfig:
+    """Parse CLI flags into the smoke harness configuration."""
     parser = argparse.ArgumentParser(description="Run AWF first-run smoke lanes.")
     parser.add_argument(
         "--lane",
@@ -697,6 +698,7 @@ def _parse_args(argv: Sequence[str] | None) -> SmokeConfig:
 
 
 def _prepare_source_lane_dirs(checkout_root: Path, smoke_root: Path) -> tuple[Path, Path]:
+    """Copy a source checkout and create the outside working directory."""
     smoke_root.mkdir(parents=True, exist_ok=True)
     # uv walks project ancestors while building a path dependency. Keep a valid
     # boundary here so unrelated /tmp/pyproject.toml files cannot poison lanes.
@@ -714,6 +716,7 @@ def _installed_awf_commands(
     outside_cwd: Path,
     env: Mapping[str, str],
 ) -> tuple[CommandSpec, ...]:
+    """Build post-install AWF commands that prove source checkout selection."""
     source_checkout = str(checkout.resolve())
     return (
         CommandSpec(argv=(str(awf_bin), "--help"), env=env, cwd=outside_cwd),
@@ -743,6 +746,7 @@ def _run_source_command_sequence(
     timeout_seconds: float,
     runner: Runner,
 ) -> tuple[SmokeResult, ...]:
+    """Run source lane commands and stop only after hard command failures."""
     results: list[SmokeResult] = []
     for command in commands:
         completed = runner(command, timeout_seconds)
@@ -759,6 +763,7 @@ def _source_command_result(
     completed: subprocess.CompletedProcess[str],
     checkout: Path,
 ) -> SmokeResult:
+    """Classify a source lane command result, including setup proof commands."""
     if _is_setup_dry_run_json(command):
         return _source_setup_result(lane, command, completed, checkout)
     return _basic_result(lane, command, completed)
@@ -770,6 +775,7 @@ def _source_setup_result(
     completed: subprocess.CompletedProcess[str],
     checkout: Path,
 ) -> SmokeResult:
+    """Validate setup dry-run JSON proves the selected source checkout."""
     stdout_tail = _tail(completed.stdout)
     stderr_tail = _tail(completed.stderr)
     combined = _combined_output(completed)
@@ -857,6 +863,7 @@ def _installer_result(
     *,
     require_checksum_marker: bool,
 ) -> SmokeResult:
+    """Convert installer command output into a structured smoke result."""
     if completed.returncode != 0:
         return _failed_completed(lane, command, completed, f"command exited {completed.returncode}")
     if require_checksum_marker and CHECKSUM_VERIFIED_MARKER not in completed.stdout:
@@ -875,6 +882,7 @@ def _tool_install_result(
     command: CommandSpec,
     completed: subprocess.CompletedProcess[str],
 ) -> SmokeResult:
+    """Convert tool-install command output into a structured smoke result."""
     combined = _combined_output(completed)
     if completed.returncode == 0:
         return SmokeResult(
@@ -901,6 +909,7 @@ def _basic_result(
     command: CommandSpec,
     completed: subprocess.CompletedProcess[str],
 ) -> SmokeResult:
+    """Convert a generic command completion into a smoke result."""
     if completed.returncode == 0:
         return SmokeResult(
             lane=lane,
@@ -919,6 +928,7 @@ def _environmental_skip_result(
     command: CommandSpec,
     completed: subprocess.CompletedProcess[str],
 ) -> SmokeResult:
+    """Return a skipped result for dependency/environmental command failures."""
     return SmokeResult(
         lane=lane,
         status="skipped",
@@ -935,6 +945,7 @@ def _failed_completed(
     completed: subprocess.CompletedProcess[str],
     reason: str,
 ) -> SmokeResult:
+    """Return a failed result with captured stdout and stderr tails."""
     return SmokeResult(
         lane=lane,
         status="failed",
@@ -946,6 +957,7 @@ def _failed_completed(
 
 
 def _source_checkout_prepare_failure(lane: Lane, exc: Exception) -> SmokeResult:
+    """Return the structured failure for source checkout preparation errors."""
     detail = str(exc)
     return SmokeResult(
         lane=lane,
@@ -956,10 +968,12 @@ def _source_checkout_prepare_failure(lane: Lane, exc: Exception) -> SmokeResult:
 
 
 def _skip(lane: Lane, reason: str) -> SmokeResult:
+    """Return a skipped lane result with the supplied reason."""
     return SmokeResult(lane=lane, status="skipped", reason=reason)
 
 
 def _tool_install_argv(method: str, wheel: Path, *, python: str) -> tuple[str, ...]:
+    """Build the install argv for the requested tool installer."""
     if method == "uv":
         return ("uv", "tool", "install", "--force", "--python", python, str(wheel))
     if method == "pipx":
@@ -968,6 +982,7 @@ def _tool_install_argv(method: str, wheel: Path, *, python: str) -> tuple[str, .
 
 
 def _timeout_output_text(output: str | bytes | None) -> str:
+    """Normalize timeout-captured subprocess output to text."""
     if output is None:
         return ""
     if isinstance(output, bytes):
@@ -976,6 +991,7 @@ def _timeout_output_text(output: str | bytes | None) -> str:
 
 
 def _is_setup_dry_run_json(command: CommandSpec) -> bool:
+    """Return whether a command is the setup dry-run JSON proof command."""
     try:
         fmt_idx = command.argv.index("--format")
     except ValueError:
@@ -989,6 +1005,7 @@ def _is_setup_dry_run_json(command: CommandSpec) -> bool:
 
 
 def _payload_reason_codes(payload: object) -> set[str]:
+    """Extract top-level and issue reason codes from a setup JSON payload."""
     if not isinstance(payload, dict):
         return set()
     codes: set[str] = set()
@@ -1004,6 +1021,7 @@ def _payload_reason_codes(payload: object) -> set[str]:
 
 
 def _payload_source_checkout(payload: object) -> dict[str, object] | None:
+    """Extract string-keyed source checkout metadata from setup JSON."""
     if not isinstance(payload, dict):
         return None
     details = payload.get("details")
@@ -1020,6 +1038,7 @@ def _payload_source_checkout(payload: object) -> dict[str, object] | None:
 
 
 def _source_checkout_root(source_checkout: Mapping[str, object] | None) -> str | None:
+    """Return the source checkout root metadata when it is a string."""
     if source_checkout is None:
         return None
     root = source_checkout.get("root")
@@ -1027,19 +1046,23 @@ def _source_checkout_root(source_checkout: Mapping[str, object] | None) -> str |
 
 
 def _is_environmental_failure(output: str) -> bool:
+    """Return whether output matches known local dependency failure signatures."""
     lowered = output.lower()
     return any(signature in lowered for signature in _ENVIRONMENTAL_FAILURE_SIGNATURES)
 
 
 def _combined_output(completed: subprocess.CompletedProcess[str]) -> str:
+    """Join stderr and stdout for failure classification."""
     return "\n".join(part for part in (completed.stderr, completed.stdout) if part)
 
 
 def _ignore_source_names(_directory: str, names: list[str]) -> set[str]:
+    """Return source checkout entries that should not be copied."""
     return {name for name in names if name in _IGNORED_SOURCE_NAMES or name.endswith(".egg-info")}
 
 
 def _clean_base_env(base_env: Mapping[str, str] | None) -> dict[str, str]:
+    """Return a subprocess environment without Python path injection."""
     env = dict(os.environ if base_env is None else base_env)
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
@@ -1047,12 +1070,14 @@ def _clean_base_env(base_env: Mapping[str, str] | None) -> dict[str, str]:
 
 
 def _prepend_path(path: Path, current_path: str) -> str:
+    """Prepend a path entry to an existing PATH string."""
     if current_path:
         return f"{path}{os.pathsep}{current_path}"
     return str(path)
 
 
 def _manifest_channel(manifest: Mapping[str, object]) -> str:
+    """Read and validate the release manifest channel."""
     channel = manifest.get("channel", "stable")
     if not isinstance(channel, str) or not channel:
         raise ValueError(f"manifest channel must be a non-empty string: {channel!r}")
@@ -1060,6 +1085,7 @@ def _manifest_channel(manifest: Mapping[str, object]) -> str:
 
 
 def _load_json_object(path: Path) -> dict[str, object]:
+    """Load a JSON file and require an object payload."""
     loaded = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):
         raise ValueError(f"expected JSON object: {path}")
@@ -1067,15 +1093,18 @@ def _load_json_object(path: Path) -> dict[str, object]:
 
 
 def _write_json(payload: Mapping[str, object], path: Path) -> None:
+    """Write a formatted JSON object to disk."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _tail(text: str) -> str:
+    """Return the bounded diagnostic tail for command output."""
     return text[-_TAIL_CHARS:]
 
 
 def _print_results(results: Sequence[SmokeResult]) -> None:
+    """Print smoke results with output tails for failures."""
     for result in results:
         prefix = result.status.upper()
         command = " ".join(result.command) if result.command else result.reason
@@ -1092,6 +1121,7 @@ def _print_results(results: Sequence[SmokeResult]) -> None:
 
 
 def _indent(text: str) -> str:
+    """Indent multiline output for CLI diagnostics."""
     return "\n".join(f"    {line}" for line in text.splitlines())
 
 

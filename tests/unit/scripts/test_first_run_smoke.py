@@ -196,6 +196,7 @@ def test_main_exits_nonzero_when_all_results_are_skipped(
         *,
         smoke_root: Path,
     ) -> tuple[smoke.SmokeResult, ...]:
+        """Return only skipped results while asserting the temp root exists."""
         assert smoke_root.exists()
         return (
             smoke.SmokeResult(
@@ -221,6 +222,7 @@ def test_main_exits_zero_when_any_result_passes_without_failures(
         *,
         smoke_root: Path,
     ) -> tuple[smoke.SmokeResult, ...]:
+        """Return a passing result plus a skipped lane for exit-code testing."""
         assert smoke_root.exists()
         return (
             smoke.SmokeResult(
@@ -252,6 +254,7 @@ def test_main_prints_results_before_temporary_root_cleanup(
         *,
         smoke_root: Path,
     ) -> tuple[smoke.SmokeResult, ...]:
+        """Capture the temporary smoke root before result printing."""
         nonlocal observed_root
         assert smoke_root.exists()
         observed_root = smoke_root
@@ -264,6 +267,7 @@ def test_main_prints_results_before_temporary_root_cleanup(
         )
 
     def assert_root_exists_during_print(_results: tuple[smoke.SmokeResult, ...]) -> None:
+        """Assert result printing happens before temporary-root cleanup."""
         assert observed_root is not None
         assert observed_root.exists()
 
@@ -290,6 +294,7 @@ def test_tool_install_lane_stops_after_first_post_install_failure(
         command: smoke.CommandSpec,
         _timeout_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
+        """Simulate build/install success followed by AWF probe failure."""
         if command.argv[:3] == ("uv", "build", "--wheel"):
             dist_dir = Path(command.argv[4])
             dist_dir.mkdir(parents=True, exist_ok=True)
@@ -341,6 +346,7 @@ def test_tool_install_lane_describes_environmental_build_failure(
         command: smoke.CommandSpec,
         _timeout_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
+        """Simulate an environmental dependency failure for every command."""
         return subprocess.CompletedProcess(
             args=command.argv,
             returncode=1,
@@ -420,12 +426,14 @@ def test_source_lanes_report_checkout_copy_errors(
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
 
     def failing_copy(_source: Path, _destination: Path) -> Path:
+        """Raise the parametrized source checkout copy error."""
         raise copy_error
 
     def unexpected_run(
         _command: smoke.CommandSpec,
         _timeout_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
+        """Fail the test if source lanes run commands after copy failure."""
         pytest.fail("source lane should stop before running commands")
 
     monkeypatch.setattr(smoke, "copy_source_checkout", failing_copy)
@@ -597,6 +605,7 @@ def test_source_command_sequence_runs_setup_proof_after_environmental_skip(
         command: smoke.CommandSpec,
         _timeout_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
+        """Skip the help command but return valid setup proof JSON."""
         calls.append(command)
         if command.argv == help_command.argv:
             return subprocess.CompletedProcess(
@@ -664,6 +673,7 @@ def test_run_command_reports_timeout_as_failed_process(
     """Timeouts are reported as smoke command failures instead of crashing."""
 
     def timeout_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Raise TimeoutExpired with byte output for normalization coverage."""
         raise subprocess.TimeoutExpired(
             cmd=("awf", "--help"),
             timeout=2.5,
@@ -690,6 +700,7 @@ def test_run_command_reports_oserror_as_failed_process(
     """Command spawn failures are reported instead of crashing the harness."""
 
     def missing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Raise a spawn error for command-not-found classification."""
         raise FileNotFoundError("missing executable")
 
     monkeypatch.setattr(smoke.subprocess, "run", missing_run)
@@ -918,6 +929,7 @@ def _record_run(
     command: smoke.CommandSpec,
     timeout_seconds: float,
 ) -> subprocess.CompletedProcess[str]:
+    """Record a command and return a successful dry-run completion."""
     calls.append(command)
     return subprocess.CompletedProcess(
         args=command.argv,
@@ -928,6 +940,7 @@ def _record_run(
 
 
 def _write_release_fixture(dist_dir: Path) -> Path:
+    """Write a local release manifest fixture with one wheel artifact."""
     dist_dir.mkdir(parents=True)
     wheel = dist_dir / "agent_workspace_fabric-0.1.0-py3-none-any.whl"
     wheel.write_bytes(b"fixture wheel\n")
@@ -959,6 +972,7 @@ def _write_release_fixture(dist_dir: Path) -> Path:
 
 
 def _write_source_checkout(root: Path) -> Path:
+    """Write the minimal marker files required for a source checkout."""
     for marker in SOURCE_CHECKOUT_MARKERS:
         target = root / marker.path
         if marker.kind == "dir":

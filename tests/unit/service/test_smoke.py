@@ -922,6 +922,7 @@ class TestCollectSmokeReportExceptionPaths:
         assert result["status"] == "ok"
 
     def test_default_profile_preview_direct_call(self, tmp_path: Path) -> None:
+        """Call the profile preview helper directly and return a preview."""
         (tmp_path / "pyproject.toml").write_text("[project]\nname='test'\n")
         with patch(
             "awf.profiles.onboarding.preview_project_onboarding",
