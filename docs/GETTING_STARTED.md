@@ -430,7 +430,7 @@ uv run --python 3.12 --extra dev awf service status --format pretty
 uv run --python 3.12 --extra dev awf service status --provider claude_code --format pretty
 uv run --python 3.12 --extra dev awf service status --provider codex --format pretty
 uv run --python 3.12 --extra dev awf service status --provider cursor --format pretty
-curl 'http://127.0.0.1:8000/readyz?provider=opencode'
+curl 'http://localhost:8000/readyz?provider=opencode'
 ```
 
 Default agent models and effort are centralized in
@@ -462,7 +462,7 @@ uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
 Open API docs:
 
 ```text
-http://127.0.0.1:8000/docs
+http://localhost:8000/docs
 ```
 
 ### Run a Full Local AWF Task

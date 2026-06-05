@@ -1214,6 +1214,17 @@ def test_getting_started_first_run_urls_match_smoke_defaults() -> None:
     assert re.search(r"current smoke\s+defaults", startup_section)
 
 
+def test_getting_started_direct_local_api_urls_use_localhost() -> None:
+    """Assert host-facing local API/console URLs use the public docs style."""
+    getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
+        encoding="utf-8",
+    )
+
+    assert not re.search(r"http://127\.0\.0\.1:(?:3000|8000)\b", getting_started_text)
+    assert "http://localhost:8000" in getting_started_text
+    assert "http://localhost:3000" in getting_started_text
+
+
 def test_markdown_section_accepts_trailing_heading_whitespace() -> None:
     """Assert section extraction tolerates harmless heading whitespace."""
     text = "Intro\n## Target \t\nbody\n## Next\nother\n"
@@ -2220,7 +2231,8 @@ def test_awf_command_mentions_ignore_missing_readme_linked_docs(
 def _markdown_section(text: str, heading: str) -> str:
     """Return the body of the first matching H2 heading up to the next H2.
 
-    Only H2 (``##``) headings are supported as the stop sentinel.
+    Callers must pass an H2 (``##``) heading; H3 or deeper headings are
+    intentionally rejected instead of being over-captured by the H2 sentinel.
     """
     if not re.match(r"^##(?!#)(?:[ \t]|$)", heading):
         raise ValueError(f"Only H2 headings are supported: {heading!r}")
