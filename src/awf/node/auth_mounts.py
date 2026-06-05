@@ -15,6 +15,12 @@ from awf.node.auth_mounts_claude import (
 from awf.node.auth_mounts_claude import (
     _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE as _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
 )
+from awf.node.auth_mounts_claude import (
+    _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED as _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED,
+)
+from awf.node.auth_mounts_claude import (
+    _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE as _CLAUDE_AUTH_OVERLAY_WHITEOUT_INCAPABLE,
+)
 from awf.node.auth_mounts_claude import _CLAUDE_BASE_BUILD_LOCK_NAME as _CLAUDE_BASE_BUILD_LOCK_NAME
 from awf.node.auth_mounts_claude import _CLAUDE_BASE_DIRNAME as _CLAUDE_BASE_DIRNAME
 from awf.node.auth_mounts_claude import _OVERLAY_UNMOUNTED_MARKER as _OVERLAY_UNMOUNTED_MARKER
@@ -31,8 +37,12 @@ from awf.node.auth_mounts_claude import (
 from awf.node.auth_mounts_claude import (
     _claude_base_staging_build_is_live as _claude_base_staging_build_is_live,
 )
+from awf.node.auth_mounts_claude import _has_cap_mknod as _has_cap_mknod
 from awf.node.auth_mounts_claude import _has_cap_sys_admin as _has_cap_sys_admin
 from awf.node.auth_mounts_claude import _host_claude_signature as _host_claude_signature
+from awf.node.auth_mounts_claude import (
+    _legacy_path_confidently_absent as _legacy_path_confidently_absent,
+)
 from awf.node.auth_mounts_claude import (
     _overlay_filesystem_available as _overlay_filesystem_available,
 )
@@ -43,6 +53,8 @@ from awf.node.auth_mounts_claude import (
 from awf.node.auth_mounts_claude import (
     _reconcile_fallback_edits_into_upper as _reconcile_fallback_edits_into_upper,
 )
+from awf.node.auth_mounts_claude import _safe_overlay_whiteout as _safe_overlay_whiteout
+from awf.node.auth_mounts_claude import _safe_stat as _safe_stat
 from awf.node.auth_mounts_claude import _shared_claude_base_dir as _shared_claude_base_dir
 from awf.node.auth_mounts_claude import _SubprocessOverlayMounter as _SubprocessOverlayMounter
 from awf.node.auth_mounts_claude import claude_auth_isolation_label as claude_auth_isolation_label
