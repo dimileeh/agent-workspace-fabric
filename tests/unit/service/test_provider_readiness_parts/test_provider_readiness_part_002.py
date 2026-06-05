@@ -25,6 +25,7 @@ def _settings(
     github_token: str | None = None,
     docker_host: str | None = None,
     host_home: str | None = None,
+    work_dir: str | None = None,
 ) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
@@ -33,7 +34,7 @@ def _settings(
         database_url="postgresql+asyncpg://awf:awf_dev@localhost:5433/awf",
         docker_host=f"unix://{tmp_path / 'docker.sock'}" if docker_host is None else docker_host,
         agent_runtime_image="awf-agent-runtime:latest",
-        work_dir=str(tmp_path / "work"),
+        work_dir=str(tmp_path / "work") if work_dir is None else work_dir,
         api_token=None,
         github_token=github_token,
         worker_poll_interval_seconds=0.1,
@@ -375,12 +376,14 @@ def test_provider_readiness_claude_honors_preflighted_force_copy_env(
     overlayfs is advertised as available, so the label only flips to copy when the
     passed env requests it.
     """
-    import awf.node.auth_mounts as auth_mounts
+    # ``claude_auth_isolation_label`` resolves ``_overlay_filesystem_available`` in
+    # the ``auth_mounts_claude`` namespace that defines it, so patch it there.
+    import awf.node.auth_mounts_claude as auth_mounts_claude
 
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
-    monkeypatch.setattr(auth_mounts, "_overlay_filesystem_available", lambda: True)
+    monkeypatch.setattr(auth_mounts_claude, "_overlay_filesystem_available", lambda: True)
     # The process environment must NOT carry the request; only the passed env does.
     monkeypatch.delenv("AWF_CLAUDE_AUTH_FORCE_COPY", raising=False)
 
@@ -395,6 +398,45 @@ def test_provider_readiness_claude_honors_preflighted_force_copy_env(
     assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
     assert claude["isolation"] == expected
     assert all(source["isolation"] == expected for source in claude["credential_sources"])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reserved_char", [",", ":"])
+def test_provider_readiness_claude_reports_copy_for_reserved_char_work_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reserved_char: str
+) -> None:
+    """A ``,``/``:`` in the work dir forces the copy fallback for every mount.
+
+    ``_prepare_claude_overlay_mount`` degrades to the per-workspace copy when the
+    overlay auth root carries a char overlayfs's unescapable ``-o`` payload cannot
+    encode. The readiness label must fold in that deterministic host-level signal —
+    just like force-copy — so it reports ``per_workspace_copy`` instead of
+    overstating overlay isolation, even while overlayfs stays advertised.
+    """
+    import awf.node.auth_mounts_claude as auth_mounts_claude
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
+    # Overlayfs is advertised and no force-copy request is in play; only the
+    # reserved char in the work dir should flip the posture to copy.
+    monkeypatch.setattr(auth_mounts_claude, "_overlay_filesystem_available", lambda: True)
+
+    work_dir = tmp_path / f"work{reserved_char}root"
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path, host_home=str(home), work_dir=str(work_dir)),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["ok"] is True
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert claude["isolation"] == "per_workspace_copy"
+    assert all(
+        source["isolation"] == "per_workspace_copy" for source in claude["credential_sources"]
+    )
 
 
 @pytest.mark.unit
