@@ -41,6 +41,10 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces. See
 | `awf_list_locks` | List owned-path reservations and overlap-risk summaries. |
 | `awf_get_service_readiness` | Fetch service readiness checks. |
 | `awf_get_service_health` | Fetch service liveness. |
+| `awf_get_setup_status` | Run read-only first-run setup status and return safe status/ref metadata only. |
+| `awf_start_local_service` | Start local AWF Core through the existing idempotent bootstrap engine. |
+| `awf_initialize_project_profile` | Preview or write `.awf/workspace.yml` with the same onboarding writer as `awf init`. |
+| `awf_get_client_integration_instructions` | Return secret-free Claude/Codex MCP client integration instructions. |
 | `awf_cancel_workspace` | Operator control: request cancellation for a workspace. |
 | `awf_stop_workspace` | Operator control: stop a workspace stack. |
 | `awf_destroy_workspace` | Operator control: destroy AWF-managed workspace resources. |
@@ -79,6 +83,17 @@ the `WorkspaceLogListResponse` envelope, and `awf_list_workspace_operations`
 now returns the `OperationListResponse` envelope. Clients that consumed the old
 top-level lists should iterate `items` and honor `has_more`, `limit`, and
 `cursor`.
+
+**First-run setup tools:** `awf_get_setup_status` returns setup status,
+selected provider names, check levels, provider/client status, and credential
+reference metadata such as whether a ref exists and its scheme. It never
+returns raw credential values or env-file contents. `awf_start_local_service`
+delegates to the same bootstrap engine as `awf start`; repeated calls are
+allowed and failures return structured first-run payloads. `awf_initialize_project_profile`
+uses the onboarding preview/writer shared with `awf init`. `awf_get_client_integration_instructions`
+builds Claude/Codex plans from the same client descriptors as `awf setup
+--client` and returns command/args/config-path instructions without reading
+the referenced env file.
 
 Example `awf_create_workspace` arguments:
 
