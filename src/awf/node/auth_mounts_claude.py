@@ -723,6 +723,26 @@ def _prepare_isolated_claude_auth(
             target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)
             if not target_dir.exists():
+                # No live legacy copy exists, so any ``.claude-complete`` marker still
+                # sitting beside it is stale — it can only have been left dangling by an
+                # interrupted older-code reap (one that removed ``.claude`` without
+                # clearing its marker first, the inverse of the clear-before-rmtree
+                # ordering this module now enforces). ``staged_replace_won`` only stops
+                # *this* provision from *adding* a marker; it never neutralizes a
+                # pre-existing one. Clear it before racing to materialize a new copy so
+                # the build starts neutral: if our atomic ``replace`` below loses to a
+                # concurrent *partial* pre-atomic ``.claude`` winner we would otherwise
+                # leave that stale marker vouching for the winner's incomplete tree,
+                # re-enabling the destructive deletion whiteouts the completeness gate
+                # exists to suppress. A winning writer re-asserts the marker after its own
+                # atomic replace lands; clearing here only ever forgoes a destructive
+                # pass (the safe direction), never hides a credential. Best-effort: a
+                # transient unlink fault must not fail provisioning — the worst case is a
+                # surviving stale marker, which the reconcile already treats conservatively
+                # only when paired with a reused (never freshly built) copy.
+                with contextlib.suppress(OSError):
+                    (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).unlink(missing_ok=True)
+
                 # Materialize the legacy copy atomically: ``copytree`` into a sibling
                 # staging dir, then ``replace`` it into ``.claude`` only once the copy
                 # is complete. A plain ``copytree`` straight into ``.claude`` that is

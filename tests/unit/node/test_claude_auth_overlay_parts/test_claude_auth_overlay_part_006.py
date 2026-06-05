@@ -25,6 +25,7 @@ from awf.node.auth_mounts import resolve_service_auth_mounts
 from .test_claude_auth_overlay_part_001 import (
     FakeOverlayMounter,
     _recording_mknod,
+    _seed_host_claude,
     _seed_overlay_reuse_with_deletion_shaped_legacy,
 )
 
@@ -170,3 +171,60 @@ def test_overlay_reap_deferred_when_marker_unlink_fails(
     assert any(
         entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_LEGACY_REAP_DEFERRED" for entry in logs
     )
+
+
+@pytest.mark.unit
+def test_legacy_build_clears_stale_marker_before_losing_replace_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reviewer's #414 comment 4434390617 case: the legacy-copy *build* branch must
+    # start neutral. A stale ``.claude-complete`` marker (dangling beside an absent
+    # ``.claude`` — only an interrupted older-code reap could leave that) must be cleared
+    # before racing to materialize a fresh copy. ``staged_replace_won`` only gates *adding*
+    # a marker, never neutralizes a pre-existing one, so if our atomic ``replace`` loses to
+    # a concurrent *partial* pre-atomic ``.claude`` winner the stale marker would otherwise
+    # survive and vouch for that incomplete tree, re-enabling the destructive deletion
+    # whiteouts the completeness gate exists to suppress.
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    # A dangling stale marker from a prior interrupted run sits beside an absent ``.claude``.
+    claude_root = work_dir / "auth" / "ws_build_race" / "claude"
+    claude_root.mkdir(parents=True)
+    marker = claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER
+    marker.touch()
+    legacy_copy = claude_root / ".claude"
+    assert not legacy_copy.exists()
+
+    real_replace = Path.replace
+
+    def _losing_replace(self: Path, target: object, *args: object, **kwargs: object) -> object:
+        # Simulate a concurrent partial pre-atomic winner: a non-empty ``.claude`` already
+        # landed at the destination, so our atomic rename onto it fails with OSError and the
+        # build reuses the winner's (incomplete) copy without writing a fresh marker.
+        if self.name == ".claude" and self.parent.name.startswith(".claude-legacy-"):
+            dest = Path(str(target))
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "partial.json").write_text("{}\n")
+            raise OSError("Directory not empty")
+        return real_replace(self, target, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "replace", _losing_replace)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_build_race",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=False),
+    )
+
+    # The race was lost: the partial winner's ``.claude`` is reused for the mount, and no
+    # fresh completeness marker was written (``staged_replace_won`` was False)...
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(legacy_copy)
+    assert (legacy_copy / "partial.json").exists()
+    # ...but the pre-existing stale marker was cleared before the build, so it does NOT
+    # survive to falsely vouch for the partial winner.
+    assert not marker.exists()
