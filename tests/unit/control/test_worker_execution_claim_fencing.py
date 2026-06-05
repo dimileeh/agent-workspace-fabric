@@ -27,6 +27,22 @@ from awf.node.provisioner import Provisioner, ProvisionerConfig
 from tests.postgres import postgres_test_engine
 
 
+@pytest.mark.unit
+def test_fence_reason_code_is_in_lockstep_across_layers() -> None:
+    """The node-local fence reason code must equal the worker's exported constant.
+
+    ``awf.node.provisioner`` keeps its own literal so it need not import
+    ``awf.control`` (a layering inversion), but the string is the end-to-end
+    contract that monitoring alerts and log parsers key on. Nothing else
+    enforces the two stay equal, so a rename on either side would silently
+    break that contract — this assert locks them together.
+    """
+    from awf.control.worker.constants import EXECUTION_CLAIM_FENCED
+    from awf.node.provisioner import _EXECUTION_CLAIM_FENCED_REASON_CODE
+
+    assert _EXECUTION_CLAIM_FENCED_REASON_CODE == EXECUTION_CLAIM_FENCED
+
+
 def _git(args: list[str], cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 

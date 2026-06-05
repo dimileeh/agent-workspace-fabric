@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
@@ -25,6 +26,8 @@ from awf.service.workspaces import (
 if TYPE_CHECKING:
     from awf.profiles.models import WorkspaceProfile
     from awf.profiles.resolver import ProfileResolution
+
+_log = get_logger(__name__)
 
 
 async def _check_auto_resolved_profile_host_ports(
@@ -140,6 +143,7 @@ async def _check_auto_resolved_profile_host_ports(
             ws is not None
             and profile_resolution is not None
             and ws.status == WorkspaceStatus.provisioning.value
+        ):
             # Fence (row-locked): a later claimant that superseded us after
             # profile resolution advanced ``execution_claim_epoch`` while the
             # row stayed ``provisioning``. The status guard alone cannot see
@@ -152,9 +156,24 @@ async def _check_auto_resolved_profile_host_ports(
             # The SELECT FOR UPDATE makes this read-and-write atomic against the
             # reclaim. Keep this predicate in lockstep with the pre-launch
             # commit guard in ``provisioner.provision_claimed``.
-            and (execution_claim_epoch is None or ws.execution_claim_epoch == execution_claim_epoch)
-        ):
-            ws.resolved_profile = resolved_profile_dict
+            if execution_claim_epoch is None or ws.execution_claim_epoch == execution_claim_epoch:
+                ws.resolved_profile = resolved_profile_dict
+            else:
+                # Fenced: skip the publish (a no-op commit follows). Emit a log
+                # here so the timeline shows the fence at the publish site rather
+                # than only at the later D4 pre-launch verify a few awaits on.
+                # Local import avoids the ``awf.node.provisioner`` import cycle
+                # while keeping a single source of truth for the reason code.
+                from awf.node.provisioner import _EXECUTION_CLAIM_FENCED_REASON_CODE
+
+                _log.warning(
+                    "provisioner.execution_claim_fenced",
+                    workspace_id=workspace_id,
+                    phase="auto_profile_publish",
+                    reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
+                    claimed_epoch=execution_claim_epoch,
+                    current_epoch=ws.execution_claim_epoch,
+                )
         await session.commit()
 
 
