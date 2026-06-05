@@ -657,12 +657,15 @@ def _reconcile_fallback_edits_into_upper(
             upper_mtime_ns = _safe_mtime_ns(upper_file, follow_symlinks=False)
             if upper_mtime_ns is not None and legacy_mtime_ns <= upper_mtime_ns:
                 continue
-            # Copy via :func:`_safe_overlay_copy`, which descends with ``O_NOFOLLOW`` file
-            # descriptors and opens the leaf relative to the parent ``dir_fd`` — so an
-            # agent-planted symlink at *any* component cannot redirect this root copy
-            # outside the ``.claude`` tree (no name-based check/use gap). Best-effort: it
+            # Copy via :func:`_safe_overlay_copy`, which descends *both* the destination
+            # (under ``merged``) and the source (under the trusted ``legacy`` root) with
+            # ``O_NOFOLLOW`` file descriptors and opens each leaf relative to its parent
+            # ``dir_fd`` — so an agent-planted symlink at *any* component of either path
+            # cannot redirect this root copy outside the ``.claude`` tree (no name-based
+            # check/use gap). Passing ``legacy`` (not ``legacy_file``) lets the source be
+            # descended component-by-component from a trusted anchor. Best-effort: it
             # swallows any structural conflict or ``OSError`` and drops just this file.
-            _safe_overlay_copy(merged, rel, legacy_file)
+            _safe_overlay_copy(merged, rel, legacy)
 
 
 def _prepare_isolated_claude_auth(

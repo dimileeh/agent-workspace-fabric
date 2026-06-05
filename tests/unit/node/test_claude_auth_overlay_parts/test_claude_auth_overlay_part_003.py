@@ -292,9 +292,10 @@ def test_reconcile_preserves_destination_when_source_vanishes_after_stat(
 
     def _os_open_source_vanished(path: object, flags: int, *args: object, **kwargs: object) -> int:
         # Simulate the source being removed in the window before its read fd is held.
-        # The source is the only non-directory ``os.open`` of ``legacy/f`` (the dir
-        # descent uses ``O_DIRECTORY``); the destination open targets ``merged``.
-        if os.fspath(path) == os.fspath(legacy / "f") and not (flags & os.O_DIRECTORY):
+        # The source leaf is opened by bare name (``rel.name``) relative to its descended
+        # parent ``dir_fd``: it is the only read-only, non-directory ``os.open`` of ``f``
+        # (the dir descents use ``O_DIRECTORY``; the destination leaf open uses ``O_CREAT``).
+        if os.fspath(path) == "f" and not (flags & (os.O_DIRECTORY | os.O_CREAT)):
             raise OSError("source vanished")
         return real_os_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -328,10 +329,11 @@ def test_reconcile_does_not_create_empty_destination_when_source_open_fails(
     real_os_open = os.open
 
     def _os_open_source_vanished(path: object, flags: int, *args: object, **kwargs: object) -> int:
-        # Fail only the source read open (the dir descent uses ``O_DIRECTORY``; the
-        # destination open targets ``merged`` under ``dir_fd``). If the destination were
-        # opened first it would already have created the empty file before this fires.
-        if os.fspath(path) == os.fspath(legacy / "f") and not (flags & os.O_DIRECTORY):
+        # Fail only the source read leaf open — opened by bare name (``rel.name``) relative
+        # to its descended parent ``dir_fd`` (the dir descents use ``O_DIRECTORY``; the
+        # destination leaf open uses ``O_CREAT``). If the destination were opened first it
+        # would already have created the empty file before this fires.
+        if os.fspath(path) == "f" and not (flags & (os.O_DIRECTORY | os.O_CREAT)):
             raise OSError("source vanished")
         return real_os_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -632,14 +634,17 @@ def test_safe_overlay_copy_refuses_source_symlink_swapped_after_caller_checks(
     # never follows the link to read an arbitrary host path into the agent-visible tree.
     merged = tmp_path / "merged"
     merged.mkdir()
+    src_root = tmp_path / "legacy"
+    src_root.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     secret = outside / "root-only-secret"
     secret.write_text("root-only contents\n")
-    src_link = tmp_path / "src"
-    src_link.symlink_to(secret)
+    # The agent swapped the checked-clean ``src_root/f`` leaf for a symlink to an
+    # out-of-tree secret after the caller's checks but before this open.
+    (src_root / "f").symlink_to(secret)
 
-    auth_mounts_mod._safe_overlay_copy(merged, Path("f"), src_link)
+    auth_mounts_mod._safe_overlay_copy(merged, Path("f"), src_root)
 
     # The link target's contents are never read into the destination tree. With the
     # source validated *before* the destination is opened, the refused source leaves no
@@ -658,12 +663,46 @@ def test_safe_overlay_copy_refuses_source_fifo_swapped_after_caller_checks(
     # (If this regressed, the test itself would hang — there is no peer writer.)
     merged = tmp_path / "merged"
     merged.mkdir()
-    src_fifo = tmp_path / "pipe"
+    src_root = tmp_path / "legacy"
+    src_root.mkdir()
+    src_fifo = src_root / "f"
     os.mkfifo(src_fifo)
 
-    auth_mounts_mod._safe_overlay_copy(merged, Path("f"), src_fifo)
+    auth_mounts_mod._safe_overlay_copy(merged, Path("f"), src_root)
 
     # Nothing was read from the FIFO and it never blocked. The source is refused before
     # the destination is opened, so no dest leaf is created at all.
     assert not (merged / "f").exists()
     assert stat.S_ISFIFO(os.lstat(src_fifo).st_mode)
+
+
+@pytest.mark.unit
+def test_safe_overlay_copy_refuses_symlinked_source_parent_component(
+    tmp_path: Path,
+) -> None:
+    # Source-side TOCTOU guard, one level up (PRRT_kwDOSJAM6s6HOvV4): the caller walks a
+    # *real* directory ``src_root/nested`` and yields ``nested/f``, but the legacy copy is
+    # ``rw`` for the agent, which can swap ``nested`` for ``nested -> /outside`` before the
+    # source is read. Opening ``src_root / rel`` by full path would apply ``O_NOFOLLOW``
+    # only to the ``f`` leaf, so the redirected ``nested`` parent would still resolve by
+    # name and the root worker would read ``/outside/f`` into the agent-visible overlay —
+    # an arbitrary root-read primitive. The component-by-component ``O_NOFOLLOW`` descent
+    # of the source must refuse the symlinked parent (``ELOOP``) and copy nothing.
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    src_root = tmp_path / "legacy"
+    src_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "f"
+    secret.write_text("root-only contents\n")
+    # The agent planted ``nested`` as a symlink to the out-of-tree dir; the leaf ``f``
+    # behind it is a genuine regular file, so only the parent guard can catch this.
+    (src_root / "nested").symlink_to(outside)
+
+    auth_mounts_mod._safe_overlay_copy(merged, Path("nested/f"), src_root)
+
+    # The out-of-tree file is never read into the destination tree, and no dest leaf
+    # (nor its parent) is materialized through the escaped parent.
+    assert not (merged / "nested" / "f").exists()
+    assert secret.read_text() == "root-only contents\n"

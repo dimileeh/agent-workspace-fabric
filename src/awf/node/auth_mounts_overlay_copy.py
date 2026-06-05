@@ -6,9 +6,10 @@ first-party line limit. Holds the two provider-neutral helpers that
 forward fallback-era legacy edits into a live overlay without trusting an
 agent-controlled tree: :func:`_safe_mtime_ns` reads a generation timestamp without
 raising, and :func:`_safe_overlay_copy` copies a single file through the live
-``merged`` mount with ``O_NOFOLLOW`` file descriptors so an agent-planted symlink
-at any path component can never redirect the root write outside the ``.claude``
-tree. :mod:`awf.node.auth_mounts_claude` re-imports both so its existing call sites
+``merged`` mount with ``O_NOFOLLOW`` file descriptors on *both* the source and the
+destination paths so an agent-planted symlink at any path component can never redirect
+the root write outside — nor the root read in from outside — the ``.claude`` tree.
+:mod:`awf.node.auth_mounts_claude` re-imports both so its existing call sites
 and ``awf.node.auth_mounts_claude.<name>`` test references stay unchanged.
 """
 
@@ -44,9 +45,10 @@ def _safe_mtime_ns(path: Path, *, follow_symlinks: bool = True) -> int | None:
         return None
 
 
-def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
-    """Copy ``src`` into ``merged / rel`` as root, never following an agent-planted
-    symlink at *any* component — closing a TOCTOU symlink-injection escape.
+def _safe_overlay_copy(merged: Path, rel: Path, src_root: Path) -> None:
+    """Copy ``src_root / rel`` into ``merged / rel`` as root, never following an
+    agent-planted symlink at *any* component of *either* path — closing a TOCTOU
+    symlink-injection escape on the destination *and* the source.
 
     The destination lives under the live ``merged`` overlay whose upper layer is written
     by the (untrusted) agent. Resolving it by *name* — an ``is_symlink()``/``is_dir()``
@@ -75,13 +77,23 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
       the root worker forever; the ``S_ISREG`` ``fstat`` guard rejects any other special
       file (e.g. a FIFO with a live reader) before a byte is written.
 
-    The *source* (``src``) gets the symmetric treatment: the caller's
+    The *source* gets the fully symmetric treatment, anchored at the trusted
+    ``src_root`` (the legacy copy root the caller walked). The caller's
     ``is_symlink()``/``is_file()`` pre-checks are not atomic with this read, and the
-    legacy copy is ``rw`` for the agent, so ``src`` is opened with ``O_RDONLY |
-    O_NOFOLLOW | O_NONBLOCK`` and an ``S_ISREG`` ``fstat`` guard rather than a
-    symlink-following ``src.open("rb")``. This closes the mirror-image escape — an
-    agent-planted symlink would otherwise let the root worker read an arbitrary host
-    path into the agent-visible overlay, and a FIFO would block it indefinitely.
+    legacy copy is ``rw`` for the agent, so the source is *also* descended
+    component-by-component with ``openat(O_NOFOLLOW | O_DIRECTORY)`` from ``src_root``
+    rather than opened by full path. Opening ``src_root / rel`` by name would apply
+    ``O_NOFOLLOW`` only to the *leaf*: a parent component such as ``src_root/a`` would
+    still be resolved by name, so an agent that swaps a real walked directory
+    ``a`` for ``a -> /outside`` between the caller's ``os.walk``/``is_file()`` and this
+    read would redirect the root worker to ``/outside/<file>`` and surface it in the
+    agent-visible overlay — the same arbitrary root-read primitive the leaf guard
+    blocks, one level up. After the safe descent the leaf is opened relative to its
+    parent ``dir_fd`` with ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK`` and an ``S_ISREG``
+    ``fstat`` guard rather than a symlink-following ``open("rb")``. This closes the
+    mirror-image escape — an agent-planted symlink at *any* source component would
+    otherwise let the root worker read an arbitrary host path into the agent-visible
+    overlay, and a FIFO would block it indefinitely.
 
     Best-effort: any structural conflict or ``OSError`` skips just this file and never
     raises, so reconciliation never blocks provisioning. Mode and mtime are preserved
@@ -105,12 +117,20 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
         # caller's ``is_symlink()``/``is_file()`` guards in
         # :func:`~awf.node.auth_mounts_claude._reconcile_fallback_edits_into_upper` are
         # *not* atomic with this open, and the legacy copy is mounted ``rw`` for the
-        # (untrusted) agent: it can swap the checked-clean regular file for a symlink or
-        # FIFO in that window. A bare ``src.stat()`` + ``src.open("rb")`` follows symlinks
-        # and blocks on FIFOs, so it would let the root worker (a) read an arbitrary host
-        # path through an agent-planted ``ln -sf /etc/shadow src`` and surface it in the
-        # agent-visible overlay, or (b) hang forever on a reader-less ``mkfifo src``.
-        # ``O_NOFOLLOW`` rejects a planted symlink leaf (``ELOOP``); ``O_NONBLOCK`` makes a
+        # (untrusted) agent: it can swap the checked-clean regular file — or one of its
+        # *parent* directories — for a symlink or FIFO in that window. A bare
+        # ``src.stat()`` + ``src.open("rb")`` follows symlinks and blocks on FIFOs, so it
+        # would let the root worker (a) read an arbitrary host path through an agent-planted
+        # ``ln -sf /etc/shadow src`` and surface it in the agent-visible overlay, or
+        # (b) hang forever on a reader-less ``mkfifo src``. Opening ``src_root / rel`` by
+        # full path is not enough: ``O_NOFOLLOW`` would then only guard the *leaf*, leaving
+        # every parent component (``src_root/a`` in ``src_root/a/file``) resolved by name —
+        # so a swapped ``a -> /outside`` parent would still redirect the read out of tree.
+        # Descend from the trusted ``src_root`` component-by-component with
+        # ``openat(O_NOFOLLOW | O_DIRECTORY)`` (no parent is ever created — the source must
+        # already exist), then open the leaf relative to its parent ``dir_fd`` with
+        # ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK``: ``O_NOFOLLOW`` rejects a planted symlink
+        # at the leaf or any descended parent (``ELOOP``); ``O_NONBLOCK`` makes a
         # reader-less FIFO fail (``ENXIO``) instead of blocking; and the ``S_ISREG``
         # ``fstat`` guard refuses any other non-regular leaf (e.g. a FIFO with a live
         # reader) before a byte is read — mirroring the destination protections.
@@ -122,7 +142,14 @@ def _safe_overlay_copy(merged: Path, rel: Path, src: Path) -> None:
         # ``except OSError`` return would leave that empty file shadowing the base
         # entry — a Claude config could read as empty to the agent. Validating the source
         # first means no destination is ever created unless there is real content to copy.
-        src_fd = os.open(os.fspath(src), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        src_dir_fd = os.open(src_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(src_dir_fd)
+        for part in rel.parent.parts:
+            src_dir_fd = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=src_dir_fd
+            )
+            fds.append(src_dir_fd)
+        src_fd = os.open(rel.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=src_dir_fd)
         fds.append(src_fd)
         src_st = os.fstat(src_fd)
         if not stat.S_ISREG(src_st.st_mode):
