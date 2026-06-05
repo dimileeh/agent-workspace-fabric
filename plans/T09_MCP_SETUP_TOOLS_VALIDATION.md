@@ -3655,6 +3655,56 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6Hc4Vi
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve the top-level explicit `awf start --source-checkout ...` command on
+  source-checkout validation failures: Complete.
+- Preserve the setup recovery path in
+  `issues[].remediation.related_command` for source-checkout validation
+  failures, using the resolved explicit checkout path when available: Complete.
+- Continue rewriting ordinary start remediation commands to the rendered start
+  command: Complete.
+- Preserve the existing START_COMPOSE_ASSETS_MISSING behavior when no explicit
+  `source_checkout` is supplied: Complete.
+- Update the focused regression for the structured issue remediation command:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_rewrites_reason_coded_bootstrap_remediation_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_asset_missing_source_checkout_remediation_without_source_checkout -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `issues[0].remediation.related_command` was
+  `awf start --source-checkout ...` instead of the setup recovery command.
+- Regression test after the implementation change: 1 passed.
+- Adjacent focused remediation tests: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-HM
 
 ### Requirement Status

@@ -634,8 +634,15 @@ def _start_issue_with_command(
         return issue
     if not _should_rewrite_start_issue_remediation(issue, source_checkout=source_checkout):
         return issue
+    related_command = command
+    if (
+        source_checkout is not None
+        and issue.reason_code in _SOURCE_CHECKOUT_REMEDIATION_REASON_CODES
+        and _is_source_checkout_remediation_command(remediation.related_command)
+    ):
+        related_command = _setup_source_checkout_command(source_checkout)
     return issue.model_copy(
-        update={"remediation": remediation.model_copy(update={"related_command": command})}
+        update={"remediation": remediation.model_copy(update={"related_command": related_command})}
     )
 
 
@@ -1259,6 +1266,10 @@ def _setup_status_dry_run_command(
 
 def _start_source_checkout_command(source_checkout: Path) -> str:
     return shlex.join(["awf", "start", "--source-checkout", str(source_checkout)])
+
+
+def _setup_source_checkout_command(source_checkout: Path) -> str:
+    return shlex.join(["awf", "setup", "--source-checkout", str(source_checkout)])
 
 
 def _client_instruction_payload(

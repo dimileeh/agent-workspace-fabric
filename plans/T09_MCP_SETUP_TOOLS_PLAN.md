@@ -3519,6 +3519,56 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6Hc4Vi Preserve Start Source-Checkout Setup Remediation
+
+### Problem Statement And Scope
+
+The review reports that `awf_start_local_service` source-checkout validation
+failures currently rewrite the source-checkout catalog remediation from
+`awf setup --source-checkout .` to the same failing `awf start --source-checkout
+...` command. That loses the setup recovery path operators need to verify and
+refresh source-checkout metadata.
+
+Scope is limited to start-tool issue remediation rewriting for
+SOURCE_CHECKOUT_INVALID / SOURCE_CHECKOUT_ASSETS_STALE issues. The top-level
+start command, ordinary start failure remediation rewrites, and the
+START_COMPOSE_ASSETS_MISSING no-source-checkout exception stay unchanged.
+
+### Requirements Checklist
+
+- Preserve the top-level explicit `awf start --source-checkout ...` command on
+  source-checkout validation failures.
+- Preserve the setup recovery path in
+  `issues[].remediation.related_command` for source-checkout validation
+  failures, using the resolved explicit checkout path when available.
+- Continue rewriting ordinary start remediation commands to the rendered start
+  command.
+- Preserve the existing START_COMPOSE_ASSETS_MISSING behavior when no explicit
+  `source_checkout` is supplied.
+- Update the focused regression for the structured issue remediation command.
+
+### Implementation Steps
+
+1. Update the explicit source-checkout validation-failure regression to expect
+   the setup recovery remediation and confirm it fails before implementation.
+2. Change the start issue remediation rewrite helper so source-checkout setup
+   remediations rewrite to `awf setup --source-checkout <path>` instead of the
+   failing start command.
+3. Run the targeted regression, adjacent focused remediation tests, and focused
+   lint/type checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_validation_failure_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_rewrites_reason_coded_bootstrap_remediation_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_asset_missing_source_checkout_remediation_without_source_checkout -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6G_-HM
 
 ### Problem Statement And Scope
