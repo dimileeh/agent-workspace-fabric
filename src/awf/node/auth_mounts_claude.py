@@ -14,6 +14,7 @@ tests.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import os
 import shutil
@@ -119,6 +120,12 @@ _CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT = (
 # wholesale and take it with them. The kernel frees the lock on ``close``/process
 # death, mirroring the shared-base build lock's crash semantics.
 _OVERLAY_PROVISION_LOCK_NAME = ".overlay.lock"
+# Errnos that mean "the lock is held by someone else" for a non-blocking ``flock``.
+# ``EAGAIN``/``EWOULDBLOCK`` normally surface as ``BlockingIOError``, but some
+# systems/filesystems report the conflict as ``EACCES`` (Python's ``fcntl`` docs call
+# out both forms), which arrives as a plain ``OSError``. All three are genuine
+# contention, not an unsupported-locking signal.
+_FLOCK_WOULD_BLOCK_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK})
 # Logged when the unpinned-upper discard *and* a fresh off-lock mount are both
 # skipped because a concurrent same-workspace provision holds the overlay lock
 # (the narrow stale-lease window). The racing duplicate either reuses the holder's
@@ -860,7 +867,9 @@ def _overlay_provision_lock(claude_root: Path) -> Iterator[_OverlayLockState]:
       (``is_mounted``-recheck + ``rmtree``) is atomic against any other
       same-workspace provision's overlay ``mount()`` (which must also take this lock).
     - ``"contended"`` — a concurrent same-workspace provision already holds the lock
-      (``EWOULDBLOCK``/``EAGAIN`` from a non-blocking ``flock``). This is the narrow
+      (``EWOULDBLOCK``/``EAGAIN`` — or ``EACCES`` on systems that report a
+      non-blocking ``flock`` conflict that way — from a non-blocking ``flock``).
+      This is the narrow
       stale-lease-recovery window the DB-CAS claim does not cover; the caller must
       neither ``rmtree`` the (in-use) upper nor issue a fresh off-lock mount.
     - ``"unavailable"`` — the lock file could not be created (an FS fault: ENOSPC,
@@ -871,9 +880,12 @@ def _overlay_provision_lock(claude_root: Path) -> Iterator[_OverlayLockState]:
     Acquisition is strictly non-blocking (``LOCK_NB``) so it never wedges the worker;
     the kernel releases the lock on ``close``/process death, matching the shared-base
     build lock's crash semantics (:func:`_ensure_shared_claude_base`). ``flock``
-    contention surfaces as ``BlockingIOError`` (``"contended"``); any other ``OSError``
-    means locking is unsupported (``"unavailable"``). Only ``OSError``/``BlockingIOError``
-    are caught — never a bare ``Exception`` (AGENTS.md rule).
+    contention surfaces as ``BlockingIOError`` — or, on systems that report it as
+    ``EACCES``, an ``OSError`` whose ``errno`` is in
+    :data:`_FLOCK_WOULD_BLOCK_ERRNOS` — both mapped to ``"contended"``; any other
+    ``OSError`` means locking is unsupported (``"unavailable"``). Only
+    ``OSError``/``BlockingIOError`` are caught — never a bare ``Exception``
+    (AGENTS.md rule).
     """
 
     lock_path = claude_root / _OVERLAY_PROVISION_LOCK_NAME
@@ -901,6 +913,17 @@ def _overlay_provision_lock(claude_root: Path) -> Iterator[_OverlayLockState]:
             yield "contended"
             return
         except OSError as exc:
+            if exc.errno in _FLOCK_WOULD_BLOCK_ERRNOS:
+                # Some systems/filesystems report a non-blocking ``flock`` conflict as
+                # ``EACCES`` rather than ``EAGAIN``/``EWOULDBLOCK`` (Python's ``fcntl``
+                # docs call out both forms), so it surfaces here as a plain ``OSError``
+                # instead of ``BlockingIOError``. This is still genuine contention — a
+                # concurrent same-workspace provision holds the lock — so treat it like
+                # the ``BlockingIOError`` path above and yield ``"contended"`` rather
+                # than reopening the stale-lease discard-vs-mount race by proceeding
+                # unserialized.
+                yield "contended"
+                return
             # The FS does not support advisory locking (``ENOTSUP``/``ENOSYS``/
             # ``EINVAL``). Treat the lock as unavailable and proceed best-effort
             # (unserialized) rather than degrading every provision to the legacy copy

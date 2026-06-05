@@ -385,3 +385,40 @@ def test_close_oserror_does_not_mask_body_exception(
     # The close ran (and raised, then was suppressed) — the body's RuntimeError, not
     # the swallowed OSError, is what propagated.
     assert len(closed_fds) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "would_block_errno",
+    [errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK],
+)
+def test_flock_eacces_treated_as_contended_not_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, would_block_errno: int
+) -> None:
+    # Some systems/filesystems report a non-blocking ``flock`` conflict as ``EACCES``
+    # (and Python's ``fcntl`` docs call out both ``EACCES`` and ``EAGAIN``). Such a
+    # conflict arrives as a plain ``OSError`` rather than ``BlockingIOError``, so it
+    # must still be treated as genuine contention (``"contended"``) — NOT
+    # ``"unavailable"`` — otherwise the caller proceeds unserialized and reopens the
+    # stale-lease discard-vs-mount race the lock exists to close
+    # (PRRT_kwDOSJAM6s6HYm1i).
+    claude_root = tmp_path / "claude"
+    claude_root.mkdir(parents=True)
+
+    real_flock = fcntl.flock
+
+    def _flock_would_block(fd: int, operation: int) -> None:
+        if operation == (fcntl.LOCK_EX | fcntl.LOCK_NB):
+            raise OSError(would_block_errno, os.strerror(would_block_errno))
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(auth_mounts_mod.fcntl, "flock", _flock_would_block)
+
+    with (
+        capture_logs() as logs,
+        auth_mounts_mod._overlay_provision_lock(claude_root) as state,
+    ):
+        assert state == "contended"
+
+    # Contention must not be misreported as the unsupported/unavailable path.
+    assert not any(entry.get("reason_code") == _UNAVAILABLE for entry in logs)
