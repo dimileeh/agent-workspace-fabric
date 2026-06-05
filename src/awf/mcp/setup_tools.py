@@ -326,13 +326,19 @@ async def _start_local_service_result(
     source_path = _resolve_client_source_checkout_path(source_checkout)
     try:
         inputs = await asyncio.to_thread(_resolve_start_bootstrap_inputs_for_mcp, source_path)
+    except SetupCheckError as exc:
+        return _first_run_result(
+            safe_result,
+            _reason_coded_payload(exc.reason_code, str(exc), exc.details),
+            is_error=True,
+        )
     except SourceCheckoutError as exc:
         return _first_run_result(
             safe_result,
             _source_checkout_failure_payload(exc),
             is_error=True,
         )
-    except (HostSetupConfigError, OSError, RuntimeError, ValueError) as exc:
+    except (CalledProcessError, HostSetupConfigError, OSError, RuntimeError, ValueError) as exc:
         return _start_input_resolution_error_result(safe_result, exc)
 
     options = ServiceBootstrapOptions(
@@ -381,7 +387,7 @@ def _resolve_start_bootstrap_inputs_for_mcp(
 
 def _start_input_resolution_error_result(
     safe_result: SafeResult,
-    exc: HostSetupConfigError | OSError | RuntimeError | ValueError,
+    exc: CalledProcessError | HostSetupConfigError | OSError | RuntimeError | ValueError,
 ) -> CallToolResult:
     return _error_result(
         safe_result,

@@ -84,6 +84,54 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523
+
+### Problem Statement And Scope
+
+The PR review reports that the input-resolution phase of
+`_start_local_service_result` catches a narrower exception set than comparable
+MCP setup tools. In particular, a `SetupCheckError` or `CalledProcessError`
+raised while resolving startup inputs can either lose reason-coded first-run
+context or escape the MCP tool boundary instead of returning the intended
+structured, redacted response.
+
+Scope is limited to the pre-bootstrap `awf_start_local_service` input
+resolution error boundary and focused regressions for the two omitted exception
+types.
+
+### Requirements Checklist
+
+- Preserve existing structured handling for source-checkout conflicts and
+  ordinary input-resolution `HostSetupConfigError`, `OSError`, `RuntimeError`,
+  and `ValueError` failures.
+- Convert input-resolution `SetupCheckError` failures into reason-coded,
+  redacted first-run MCP errors.
+- Convert input-resolution `CalledProcessError` failures into the existing
+  generic `START_INPUT_RESOLUTION_FAILED` MCP error without surfacing raw command
+  text or stderr.
+- Ensure pre-bootstrap failures do not call `run_service_bootstrap`.
+
+### Implementation Steps
+
+1. Add focused regressions for `SetupCheckError` and `CalledProcessError` thrown
+   during start input resolution.
+2. Extend `_start_local_service_result`'s input-resolution exception handling to
+   cover those exception types using the existing safe payload helpers.
+3. Run the targeted regressions and focused checks for the changed setup-tools
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_setup_check_input_resolution_failure_is_reason_coded tests/unit/mcp/test_setup_tools.py::test_start_local_service_called_process_input_resolution_failure_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HOuPN
 
 ### Problem Statement And Scope

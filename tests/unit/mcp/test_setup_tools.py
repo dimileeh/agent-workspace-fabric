@@ -28,6 +28,7 @@ from awf.host_setup.rendering import (
     first_run_success_payload,
 )
 from awf.host_setup.source_assets import SOURCE_CHECKOUT_ASSETS_STALE, SourceCheckoutAssetMetadata
+from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
 from awf.service.bootstrap import (
     SERVICE_BOOTSTRAP_TIMEOUT,
@@ -1195,6 +1196,82 @@ async def test_start_local_service_runtime_input_resolution_failure_is_structure
     assert payload["detail"] == {"error_type": "RuntimeError"}
     assert bootstrap_calls == []
     assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
+async def test_start_local_service_setup_check_input_resolution_failure_is_reason_coded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "e" * 40
+
+    def fail_bootstrap_inputs(_verified: object) -> SimpleNamespace:
+        raise SetupCheckError(
+            f"startup readiness failed with provider secret {raw_token}",
+            reason_code=SETUP_READINESS_FAILED,
+            details={"check": "docker", "raw": raw_token},
+        )
+
+    bootstrap_calls: list[bool] = []
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        bootstrap_calls.append(True)
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", fail_bootstrap_inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["issues"][0]["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["issues"][0]["details"]["check"] == "docker"
+    assert bootstrap_calls == []
+    assert raw_token not in rendered
+    assert REDACTION_MARKER in rendered
+
+
+@pytest.mark.unit
+async def test_start_local_service_called_process_input_resolution_failure_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "f" * 40
+
+    def fail_bootstrap_inputs(_verified: object) -> SimpleNamespace:
+        raise CalledProcessError(18, ["docker", "compose", raw_token], stderr=raw_token)
+
+    bootstrap_calls: list[bool] = []
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        bootstrap_calls.append(True)
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", fail_bootstrap_inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {})
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "START_INPUT_RESOLUTION_FAILED"
+    assert payload["message"] == "could not resolve local service startup inputs"
+    assert payload["detail"] == {"error_type": "CalledProcessError"}
+    assert bootstrap_calls == []
+    assert raw_token not in rendered
 
 
 @pytest.mark.unit
