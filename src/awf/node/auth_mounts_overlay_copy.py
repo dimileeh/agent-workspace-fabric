@@ -1,15 +1,18 @@
 """Symlink-safe overlay write primitives for Claude fallback-edit reconciliation.
 
 Split out of :mod:`awf.node.auth_mounts_claude` to keep that module under the
-first-party line limit. Holds the two provider-neutral helpers that
+first-party line limit. Holds the provider-neutral helpers that
 :func:`~awf.node.auth_mounts_claude._reconcile_fallback_edits_into_upper` uses to
-forward fallback-era legacy edits into a live overlay without trusting an
-agent-controlled tree: :func:`_safe_mtime_ns` reads a generation timestamp without
-raising, and :func:`_safe_overlay_copy` copies a single file through the live
-``merged`` mount with ``O_NOFOLLOW`` file descriptors on *both* the source and the
-destination paths so an agent-planted symlink at any path component can never redirect
-the root write outside — nor the root read in from outside — the ``.claude`` tree.
-:mod:`awf.node.auth_mounts_claude` re-imports both so its existing call sites
+forward fallback-era legacy edits and deletions into a live overlay without trusting
+an agent-controlled tree: :func:`_safe_mtime_ns` / :func:`_safe_stat` read a
+generation timestamp (and size) without raising, :func:`_safe_overlay_copy` copies a
+single file through the live ``merged`` mount with ``O_NOFOLLOW`` file descriptors on
+*both* the source and the destination paths so an agent-planted symlink at any path
+component can never redirect the root write outside — nor the root read in from
+outside — the ``.claude`` tree, and :func:`_safe_overlay_whiteout` creates an
+overlayfs whiteout device directly in the ``upper`` layer with the same symlink-safe
+descent so a fallback-era deletion survives the next remount.
+:mod:`awf.node.auth_mounts_claude` re-imports them so its existing call sites
 and ``awf.node.auth_mounts_claude.<name>`` test references stay unchanged.
 """
 
@@ -20,6 +23,24 @@ import os
 import shutil
 import stat
 from pathlib import Path
+
+
+def _safe_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result | None:
+    """Return ``path``'s :class:`os.stat_result`, or ``None`` if it is absent/unstattable.
+
+    A superset of :func:`_safe_mtime_ns` used where the reconcile needs both the
+    generation timestamp *and* the size of an entry (the host-divergence
+    disambiguation for #402/#404): the legacy ``~/.claude`` copy is materialized via
+    ``copytree(symlinks=False)`` using ``copy2``, which preserves the host's
+    ``st_mtime_ns`` and ``st_size``, so a legacy file still byte/mtime-identical to
+    the live host is an unedited host-origin copy. Never raises — a missing entry in
+    one tree but not another reads as ``None`` so the caller can fail safe.
+    """
+
+    try:
+        return path.stat(follow_symlinks=follow_symlinks)
+    except OSError:
+        return None
 
 
 def _safe_mtime_ns(path: Path, *, follow_symlinks: bool = True) -> int | None:
@@ -187,3 +208,68 @@ def _safe_overlay_copy(merged: Path, rel: Path, src_root: Path) -> None:
             # "never blocks provisioning" contract above.
             with contextlib.suppress(OSError):
                 os.close(fd)
+
+
+def _safe_overlay_whiteout(upper: Path, rel: Path) -> bool:
+    """Create an overlayfs whiteout for ``rel`` in the overlay ``upper`` layer.
+
+    An overlayfs whiteout is a character device with device number ``0,0``; it
+    hides the same-named entry in the lower (``base``) layer. The reconcile uses it
+    to preserve a fallback-era *deletion* of a Claude auth/config file (#402): once
+    the overlay remounts, ``upper`` over ``base`` would otherwise re-expose the file
+    the agent removed. Unlike :func:`_safe_overlay_copy` (which writes *through* the
+    live ``merged`` mount so the kernel copies up coherently), a whiteout is
+    meaningful only in the ``upper`` layer itself — overlayfs reads whiteouts there,
+    and there is no ``merged``-routed equivalent — so it is created directly under
+    ``upper``. The reconcile runs at provision time *before* the agent attaches, and
+    a not-yet-coherent whiteout merely fails to hide (the safe direction), so the
+    direct ``upper`` write is acceptable here.
+
+    The descent mirrors :func:`_safe_overlay_copy`'s destination handling: each
+    component of ``rel.parent`` is created (if missing) and re-opened under
+    ``openat(O_NOFOLLOW | O_DIRECTORY)`` so an agent-planted symlink at *any*
+    component (the overlay ``upper`` is agent-controlled) can never redirect the
+    ``mknod`` outside the ``.claude`` tree. The leaf device is created relative to
+    the validated parent ``dir_fd`` so it, too, cannot escape via a swapped name.
+
+    Requires ``CAP_MKNOD``. **Fail-safe toward keeping the credential visible:** any
+    ``OSError`` — a missing capability or unsupported filesystem (``EPERM`` /
+    ``ENOSYS``), a symlinked/non-dir component (``ELOOP`` / ``ENOTDIR``), or an
+    already-present leaf (``EEXIST``) — skips the whiteout and returns ``False``
+    without raising. A deletion that cannot be safely forwarded therefore degrades
+    to "the lower's copy stays visible", never to "a still-needed credential is
+    hidden". Returns ``True`` only when the whiteout device was actually created.
+    """
+
+    fds: list[int] = []
+    try:
+        dir_fd = os.open(upper, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(dir_fd)
+        for part in rel.parent.parts:
+            # ``FileExistsError`` means the parent already exists; re-open it under
+            # ``O_NOFOLLOW`` below so a symlink occupying the component is still
+            # rejected (``ELOOP``), exactly as in :func:`_safe_overlay_copy`.
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(part, dir_fd=dir_fd)
+            dir_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            fds.append(dir_fd)
+        # The overlayfs whiteout marker: a char device 0,0 with no permission bits.
+        # Created relative to the validated parent ``dir_fd`` so a name swapped for a
+        # symlink mid-descent cannot redirect it. ``EEXIST`` (a leaf the agent already
+        # planted) is part of the fail-safe ``OSError`` catch — never clobber it.
+        os.mknod(
+            rel.name,
+            mode=stat.S_IFCHR | 0o000,
+            device=os.makedev(0, 0),
+            dir_fd=dir_fd,
+        )
+    except OSError:
+        # Best-effort fail-safe: a missing ``CAP_MKNOD`` (``EPERM``), an unsupported
+        # filesystem (``ENOSYS``), a symlinked/non-dir component (``ELOOP`` /
+        # ``ENOTDIR``), or an existing leaf (``EEXIST``) all degrade to "not hidden".
+        return False
+    finally:
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+    return True

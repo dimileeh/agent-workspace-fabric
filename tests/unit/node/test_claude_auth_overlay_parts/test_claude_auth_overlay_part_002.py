@@ -24,6 +24,7 @@ from awf.node.auth_mounts import (
     _OVERLAY_UNMOUNTED_MARKER,
     OverlayUnmountUnverifiableError,
     _claude_base_staging_build_is_live,
+    _has_cap_mknod,
     _has_cap_sys_admin,
     _host_claude_signature,
     _overlay_filesystem_available,
@@ -895,6 +896,25 @@ def test_has_cap_sys_admin_parses_proc_status(tmp_path: Path) -> None:
     assert _has_cap_sys_admin(no_line) is False
     assert _has_cap_sys_admin(bad_hex) is False
     assert _has_cap_sys_admin(tmp_path / "missing") is False
+
+
+@pytest.mark.unit
+def test_has_cap_mknod_parses_proc_status(tmp_path: Path) -> None:
+    # CAP_MKNOD is capability bit 27; mirror the CAP_SYS_ADMIN probe. ``0xfffffff``
+    # (28 low bits set) holds bit 27; ``0x7ffffff`` (27 low bits) does not.
+    granted = tmp_path / "granted"
+    granted.write_text("Name:\tworker\nCapEff:\t000000000fffffff\n")
+    denied = tmp_path / "denied"
+    denied.write_text("Name:\tagent\nCapEff:\t0000000007ffffff\n")
+    no_line = tmp_path / "no-line"
+    no_line.write_text("Name:\tagent\n")
+    bad_hex = tmp_path / "bad-hex"
+    bad_hex.write_text("CapEff:\tnot-hex\n")
+    assert _has_cap_mknod(granted) is True
+    assert _has_cap_mknod(denied) is False
+    assert _has_cap_mknod(no_line) is False
+    assert _has_cap_mknod(bad_hex) is False
+    assert _has_cap_mknod(tmp_path / "missing") is False
 
 
 @pytest.mark.unit

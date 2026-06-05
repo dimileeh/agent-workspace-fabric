@@ -623,13 +623,16 @@ def test_overlay_signature_write_oserror_keeps_live_overlay(
 
     monkeypatch.setattr(auth_mounts_mod.Path, "write_text", _write_fails)
 
+    # A single shared mounter so the live overlay this provision mounts survives into
+    # the second provision below (#405: the pin must become durable on the *next* run).
+    mounter = FakeOverlayMounter(supported=True)
     with capture_logs() as logs:
         mounts = resolve_service_auth_mounts(
             host_home=host_home,
             work_dir=work_dir,
             workspace_id="ws_sig_fail",
             host_env={},
-            overlay_mounter=FakeOverlayMounter(supported=True),
+            overlay_mounter=mounter,
         )
 
     by_target = {m.target: m for m in mounts}
@@ -650,6 +653,35 @@ def test_overlay_signature_write_oserror_keeps_live_overlay(
         for entry in logs
     )
     assert not any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+
+    # #405: keep-live is non-negotiable, but the residual cross-reboot wrong-base risk
+    # of an absent pin is mitigated on the *next* provision rather than by failing over
+    # at write time. The agent accumulated overlay data; the disk-full condition then
+    # clears. A second provision reuses the still-live overlay and re-pins ``base.signature``
+    # to the base it is actually mounted against — never hard-failing, never dropping the
+    # agent's upper data.
+    # Clear the disk-full condition first (the patch shadows *all* ``Path.write_text``,
+    # including this test's own writes and the next provision's re-pin).
+    monkeypatch.undo()
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+
+    second = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_sig_fail",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target_2 = {m.target: m for m in second}
+    assert by_target_2["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The live mount was reused (no remount onto the busy mountpoint) ...
+    assert len(mounter.mounts) == 1
+    # ... the pin is now durable, so a later teardown+remount reuses the correct base ...
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
+    # ... and the agent's overlay data was preserved throughout.
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
 
 
 @pytest.mark.unit
