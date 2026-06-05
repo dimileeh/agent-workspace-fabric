@@ -1,4 +1,4 @@
-"""Work-dir mount-propagation preflight tests (#376/#388).
+"""Work-dir mount-propagation preflight tests (#376/#388/#398/#400).
 
 The preflight ensures the host work dir is an ``rshared`` mount so a
 worker-mounted ``~/.claude`` overlay propagates into the sibling agent
@@ -6,12 +6,16 @@ container, or forces the per-workspace copy fallback on non-propagating hosts
 (Docker Desktop / virtiofs / grpcfuse). These exercise the standalone helper
 with a fake mount table + runner and the bootstrap integration that folds the
 result into the stage env.
+
+Extended for #398: persisting the posture into the compose env-file and #400:
+surfacing it in status/doctor.
 """
 
 from __future__ import annotations
 
 import asyncio
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -756,3 +760,244 @@ def test_apply_propagation_env_raises_force_copy_but_never_lowers_it() -> None:
         apply({"AWF_CLAUDE_AUTH_FORCE_COPY": "false"}, shared)["AWF_CLAUDE_AUTH_FORCE_COPY"]
         == "false"
     )
+
+
+# ---------------------------------------------------------------------------
+# Persist work-dir propagation posture to compose env-file (#398)
+# ---------------------------------------------------------------------------
+
+
+def _read_env_file_values(path: Path) -> dict[str, str]:
+    from awf.service.environment import compose_env_file_values
+
+    return compose_env_file_values(path)
+
+
+@pytest.mark.unit
+def test_persist_writes_propagation_to_env_file(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rshared"
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "false"
+    assert "AWF_WORK_DIR_PROPAGATION_TIMESTAMP" in values
+
+
+@pytest.mark.unit
+def test_persist_writes_force_copy_to_env_file(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    result = WorkDirPropagationResult(
+        propagation="rprivate",
+        force_copy=True,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE",
+        detail="docker desktop bridge",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rprivate"
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+    assert "AWF_WORK_DIR_PROPAGATION_TIMESTAMP" in values
+
+
+@pytest.mark.unit
+def test_persist_preserves_existing_env_file_entries(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("SOME_OTHER_VAR=foo\n", encoding="utf-8")
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["SOME_OTHER_VAR"] == "foo"
+    assert values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rshared"
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "false"
+
+
+@pytest.mark.unit
+def test_persist_is_best_effort_non_fatal(tmp_path: Path) -> None:
+    unwritable = tmp_path / "noperm" / ".env"
+    unwritable.parent.mkdir()
+    unwritable.parent.chmod(0o444)
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    try:
+        bootstrap._persist_work_dir_propagation_result(unwritable, result)  # noqa: SLF001
+    finally:
+        unwritable.parent.chmod(0o755)
+
+
+@pytest.mark.unit
+def test_persist_overwrites_stale_posture(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_WORK_DIR_BIND_PROPAGATION=rshared\n"
+        "AWF_CLAUDE_AUTH_FORCE_COPY=false\n"
+        "AWF_WORK_DIR_PROPAGATION_TIMESTAMP=2020-01-01T00:00:00+00:00\n",
+        encoding="utf-8",
+    )
+
+    result = WorkDirPropagationResult(
+        propagation="rprivate",
+        force_copy=True,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE",
+        detail="docker desktop bridge",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rprivate"
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+    ts = values["AWF_WORK_DIR_PROPAGATION_TIMESTAMP"]
+    parsed_ts = datetime.fromisoformat(ts)
+    assert parsed_ts.year >= 2025
+
+
+@pytest.mark.unit
+def test_persist_creates_env_file_if_absent(tmp_path: Path) -> None:
+    env_file = tmp_path / "subdir" / ".env"
+    assert not env_file.exists()
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    assert env_file.exists()
+    values = _read_env_file_values(env_file)
+    assert values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rshared"
+
+
+@pytest.mark.unit
+def test_persist_env_values_match_compose_interpolation(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    result = WorkDirPropagationResult(
+        propagation="rprivate",
+        force_copy=True,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE",
+        detail="docker desktop bridge",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    from awf.service.environment import compose_env_file_values
+
+    merged = compose_env_file_values(env_file)
+    assert merged["AWF_WORK_DIR_BIND_PROPAGATION"] == "rprivate"
+    assert merged["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+    assert "AWF_WORK_DIR_PROPAGATION_TIMESTAMP" in merged
+
+
+@pytest.mark.unit
+def test_bootstrap_persist_called_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After run_service_bootstrap, the compose env-file has the persisted
+    posture values — not just in-process env injection, but actually written
+    to the env-file so a subsequent docker compose up --force-recreate
+    preserves the preflight-chosen posture (#398)."""
+    root = _write_source_checkout(tmp_path / "checkout")
+    env_file = tmp_path / "persist-test.env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", "/host/work")
+
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_work_dir_mount_propagation",
+        lambda *_a, **_k: WorkDirPropagationResult(
+            propagation="rprivate",
+            force_copy=True,
+            reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE",
+            detail="docker desktop bridge",
+        ),
+    )
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+            asset_root=root,
+            env_file=env_file,
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rprivate"
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+    assert "AWF_WORK_DIR_PROPAGATION_TIMESTAMP" in values
+
+
+@pytest.mark.unit
+def test_compose_recreate_uses_persisted_posture(tmp_path: Path) -> None:
+    """A non-bootstrap ``docker compose up --force-recreate`` must use the
+    persisted env-file posture rather than the compose-file defaults.  When
+    Docker Compose interpolates ``${AWF_WORK_DIR_BIND_PROPAGATION:-rshared}``
+    in the YAML, it reads the env-file first — so persisted values override
+    the YAML defaults (``rshared`` / ``force_copy=false``).  This test verifies
+    the env-file carries the posture and that those values differ from the
+    compose-file defaults, proving a recreate would use the persisted posture."""
+    from awf.service.environment import compose_env_file_values, compose_interpolation_environ
+
+    env_file = tmp_path / ".env"
+    compose_file = tmp_path / "compose" / "local-service.yml"
+    compose_file.parent.mkdir(parents=True, exist_ok=True)
+    compose_file.write_text(
+        "services:\n"
+        "  worker:\n"
+        "    image: test\n"
+        "    environment:\n"
+        "      - AWF_WORK_DIR_BIND_PROPAGATION=${AWF_WORK_DIR_BIND_PROPAGATION:-rshared}\n"
+        "      - AWF_CLAUDE_AUTH_FORCE_COPY=${AWF_CLAUDE_AUTH_FORCE_COPY:-false}\n",
+        encoding="utf-8",
+    )
+
+    result = WorkDirPropagationResult(
+        propagation="rprivate",
+        force_copy=True,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE",
+        detail="docker desktop bridge",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    env_file_values = compose_env_file_values(env_file)
+    assert env_file_values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rprivate"
+    assert env_file_values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+
+    service_env = {
+        "AWF_WORK_DIR_BIND_PROPAGATION": "rprivate",
+        "AWF_CLAUDE_AUTH_FORCE_COPY": "true",
+    }
+    interpolation = compose_interpolation_environ(
+        service_env,
+        compose_file=compose_file,
+        compose_env_file=env_file,
+    )
+    assert interpolation.get("AWF_WORK_DIR_BIND_PROPAGATION") != "rshared"
+    assert interpolation.get("AWF_CLAUDE_AUTH_FORCE_COPY") != "false"

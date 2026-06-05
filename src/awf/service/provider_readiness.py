@@ -938,6 +938,7 @@ def _check_claude(
         force_copy_requested=lambda: force_copy_isolation_requested(environ),
         overlay_path_unsupported=lambda: overlay_path_has_reserved_chars(work_dir),
     )
+    propagation_posture = environ.get("AWF_WORK_DIR_BIND_PROPAGATION")
     file_sources: list[dict[str, str]] = []
     if (host_home / ".claude").exists():
         file_sources.append(
@@ -958,7 +959,7 @@ def _check_claude(
             )
         )
     if file_sources:
-        return _provider_result(
+        result = _provider_result(
             ok=True,
             strict=strict,
             reason="CLAUDE_FILE_AUTH_PRESENT",
@@ -970,10 +971,8 @@ def _check_claude(
             isolation=file_sources[0]["isolation"],
             warnings=[],
         )
-
-    signal = _first_present_env(environ, _CLAUDE_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
+    elif (signal := _first_present_env(environ, _CLAUDE_ENV_KEYS)) is not None:
+        result = _provider_result(
             ok=True,
             strict=strict,
             reason="CLAUDE_ENV_AUTH_PRESENT",
@@ -997,19 +996,22 @@ def _check_claude(
                 )
             ],
         )
-
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="CLAUDE_AUTH_MISSING",
-        message=(
-            "No Claude Code auth signal was visible. Set ANTHROPIC_API_KEY, "
-            "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, or mount ~/.claude."
-        ),
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
+    else:
+        result = _provider_result(
+            ok=False,
+            strict=strict,
+            reason="CLAUDE_AUTH_MISSING",
+            message=(
+                "No Claude Code auth signal was visible. Set ANTHROPIC_API_KEY, "
+                "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, or mount ~/.claude."
+            ),
+            secrets=secrets,
+            credential_scope="not_observed",
+            isolation="none",
+        )
+    if propagation_posture is not None:
+        result["mount_propagation"] = propagation_posture
+    return result
 
 
 def _check_cursor(

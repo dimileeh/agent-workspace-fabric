@@ -9,13 +9,16 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from typing import Literal, NotRequired, Protocol, TypedDict
 
+from awf.common.audit import redact_audit_text
 from awf.node.auth_mounts import force_copy_isolation_requested
 from awf.service.config import (
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
@@ -27,6 +30,7 @@ from awf.service.config import (
 )
 from awf.service.environment import (
     cleared_docker_cli_client_keys,
+    compose_env_file_values,
     env_lookup,
     non_empty_env_value,
 )
@@ -54,6 +58,7 @@ SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_UNAVAILABLE = (
 # and src/awf/node/auth_mounts.py).
 AWF_WORK_DIR_BIND_PROPAGATION_ENV = "AWF_WORK_DIR_BIND_PROPAGATION"
 AWF_CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
+AWF_WORK_DIR_PROPAGATION_TIMESTAMP_ENV = "AWF_WORK_DIR_PROPAGATION_TIMESTAMP"
 
 # Compose binds ``${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}`` (see
 # docker/compose/local-service.yml), so this is the deterministic default host
@@ -253,6 +258,89 @@ class WorkDirPropagationResult:
             returncode=0,
             stdout=self.reason_code,
             stderr=self.detail,
+        )
+
+
+@dataclass(frozen=True)
+class PersistedPropagationPosture:
+    propagation: str
+    force_copy: str
+    timestamp: str
+
+
+def _persist_work_dir_propagation_result(
+    env_file: Path,
+    result: WorkDirPropagationResult,
+) -> None:
+    """Persist the propagation posture into the compose env-file (#398).
+
+    Writes ``AWF_WORK_DIR_BIND_PROPAGATION``, ``AWF_CLAUDE_AUTH_FORCE_COPY``,
+    and ``AWF_WORK_DIR_PROPAGATION_TIMESTAMP`` into the compose env-file so a
+    later non-bootstrap ``docker compose up`` recreates containers with the
+    same posture the preflight decided.
+
+    Best-effort: ``OSError`` on write is caught and logged (redacted), never
+    fatal. The env-file is written atomically via a temp file in the same
+    directory and ``os.replace()``.
+    """
+    now_iso = datetime.now(tz=UTC).isoformat()
+    new_posture = PersistedPropagationPosture(
+        propagation=result.propagation,
+        force_copy="true" if result.force_copy else "false",
+        timestamp=now_iso,
+    )
+    try:
+        existing = compose_env_file_values(env_file) if env_file.exists() else {}
+        existing[AWF_WORK_DIR_BIND_PROPAGATION_ENV] = new_posture.propagation
+        existing[AWF_CLAUDE_AUTH_FORCE_COPY_ENV] = new_posture.force_copy
+        existing[AWF_WORK_DIR_PROPAGATION_TIMESTAMP_ENV] = new_posture.timestamp
+        lines: list[str] = []
+        if env_file.exists():
+            for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+                stripped = raw_line.lstrip()
+                if not stripped or stripped.startswith("#"):
+                    lines.append(raw_line)
+                    continue
+                eq_pos = stripped.find("=")
+                if eq_pos < 1:
+                    lines.append(raw_line)
+                    continue
+                key = stripped[:eq_pos].strip()
+                if key in (
+                    AWF_WORK_DIR_BIND_PROPAGATION_ENV,
+                    AWF_CLAUDE_AUTH_FORCE_COPY_ENV,
+                    AWF_WORK_DIR_PROPAGATION_TIMESTAMP_ENV,
+                ):
+                    continue
+                lines.append(raw_line)
+        for key, value in (
+            (AWF_WORK_DIR_BIND_PROPAGATION_ENV, new_posture.propagation),
+            (AWF_CLAUDE_AUTH_FORCE_COPY_ENV, new_posture.force_copy),
+            (AWF_WORK_DIR_PROPAGATION_TIMESTAMP_ENV, new_posture.timestamp),
+        ):
+            lines.append(f"{key}={value}")
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(env_file.parent),
+            prefix=".awf-env-",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines))
+                fh.write("\n")
+            Path(tmp_path).replace(env_file)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                Path(tmp_path).unlink()
+            raise
+    except OSError as exc:
+        redacted = redact_audit_text(str(exc))
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "best-effort persist of work-dir propagation posture failed: %s",
+            redacted,
         )
 
 
@@ -630,6 +718,10 @@ async def run_service_bootstrap(
         completed.append(propagation.to_stage_result())
         subprocess_env = _apply_work_dir_propagation_env(subprocess_env, propagation)
         service_env = _apply_work_dir_propagation_env(service_env, propagation)
+        if resolved_env_file is not None:
+            await asyncio.to_thread(
+                _persist_work_dir_propagation_result, resolved_env_file, propagation
+            )
 
     for stage in _bootstrap_stages(
         settings,

@@ -27,6 +27,7 @@ from awf.service.config import (
     resolve_local_service_provider_environ,
 )
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
+from awf.service.environment import compose_env_file_values
 from awf.service.gc import plan_terminal_workspace_gc
 from awf.service.orphan_resources import (
     ORPHAN_REAPING_ACTION,
@@ -100,6 +101,49 @@ class CompletedProcessLike(Protocol):
     returncode: int
     stdout: str
     stderr: str
+
+
+def _mount_propagation_check_payload(
+    *,
+    environ: Mapping[str, str],
+    compose_env_file: Path | None,
+) -> CheckPayload:
+    """Return a status check describing the mount-propagation posture (#400).
+
+    Reads ``AWF_WORK_DIR_BIND_PROPAGATION`` and ``AWF_CLAUDE_AUTH_FORCE_COPY``
+    from the passed environ first (the live-truth source during bootstrap), then
+    falls back to the compose env-file (when status runs outside bootstrap).
+    Reports ``unknown`` when neither source has the posture keys.
+    """
+    propagation_key = "AWF_WORK_DIR_BIND_PROPAGATION"
+    force_copy_key = "AWF_CLAUDE_AUTH_FORCE_COPY"
+
+    propagation = environ.get(propagation_key)
+    force_copy_raw = environ.get(force_copy_key)
+
+    if propagation is None and compose_env_file is not None:
+        file_values = compose_env_file_values(compose_env_file)
+        propagation = file_values.get(propagation_key)
+        force_copy_raw = file_values.get(force_copy_key)
+
+    if propagation is not None:
+        fc = force_copy_raw is not None and force_copy_raw.lower() in ("true", "1", "yes")
+        return {
+            "ok": True,
+            "status": "ok",
+            "reason": "MOUNT_PROPAGATION_AVAILABLE",
+            "propagation": propagation,
+            "force_copy": fc,
+            "detail": f"propagation={propagation}, force_copy={fc}",
+        }
+    return {
+        "ok": True,
+        "status": "unknown",
+        "reason": "MOUNT_PROPAGATION_UNKNOWN",
+        "propagation": None,
+        "force_copy": None,
+        "detail": "mount-propagation posture not yet persisted",
+    }
 
 
 async def collect_service_status(
@@ -227,6 +271,10 @@ async def collect_service_status(
         runtime_docker_scan,
     )
     network_posture_check = _network_posture_check_payload(workspace_view)
+    mount_propagation_check = _mount_propagation_check_payload(
+        environ=provider_environ,
+        compose_env_file=compose_env_file if isinstance(compose_env_file, Path) else None,
+    )
     checks = {
         "api": api_check,
         "db": db_check,
@@ -234,6 +282,7 @@ async def collect_service_status(
         "agent_runtime_image": image_check,
         "disk": disk_check.to_dict(),
         "network_posture": network_posture_check,
+        "mount_propagation": mount_propagation_check,
         "egress_audit": egress_audit_check,
         "stranded_workspaces": stranded_workspaces_check,
         "orphan_resources": orphan_resources_check,
