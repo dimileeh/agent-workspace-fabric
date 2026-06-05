@@ -53,6 +53,54 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: Python Coverage Shard 8 File-Line Guard
+
+### Requirement Status
+
+- Keep all existing setup-tools test assertions and behavior coverage intact:
+  Complete.
+- Move a coherent subset of setup-status source-checkout tests into a separate
+  owned test module so no first-party file exceeds 1500 lines: Complete.
+- Do not weaken or edit the maintainability guard: Complete.
+- Run the focused maintainability guard and the affected MCP setup-tools tests:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `tests/unit/mcp/test_setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py
+```
+
+Latest results:
+
+- Focused line-limit guard: 1 passed.
+- Affected MCP setup-tools test modules: 37 passed.
+- Focused ruff: passed.
+
+CI evidence:
+
+- GitHub Actions run `26993845467`, job `python-coverage-shards (8)`, failed
+  because `tests/unit/mcp/test_setup_tools.py` had 1770 lines and exceeded
+  `MAX_FIRST_PARTY_FILE_LINES = 1500`.
+- After the split, `tests/unit/mcp/test_setup_tools.py` has 1270 lines and
+  `tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py` has 527
+  lines.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HQJ6B
 
 ### Requirement Status

@@ -84,6 +84,45 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: Python Coverage Shard 8 File-Line Guard
+
+### Problem Statement And Scope
+
+GitHub Actions run `26993845467` failed `python-coverage-shards (8)` in
+`tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit`
+because `tests/unit/mcp/test_setup_tools.py` grew to 1770 lines, exceeding the
+first-party file limit of 1500 lines.
+
+Scope is limited to splitting the oversized MCP setup-tools test module into
+focused test modules under `tests/unit/mcp` while preserving existing behavior
+coverage and assertions.
+
+### Requirements Checklist
+
+- Keep all existing setup-tools test assertions and behavior coverage intact.
+- Move a coherent subset of setup-status source-checkout tests into a separate
+  owned test module so no first-party file exceeds 1500 lines.
+- Do not weaken or edit the maintainability guard.
+- Run the focused maintainability guard and the affected MCP setup-tools tests.
+
+### Implementation Steps
+
+1. Move setup-status source-checkout focused tests from
+   `tests/unit/mcp/test_setup_tools.py` into a new focused module under
+   `tests/unit/mcp`.
+2. Keep imports minimal in both modules after the split.
+3. Run the line-limit guard and the affected setup-tools test modules.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HQJ6B
 
 ### Problem Statement And Scope
