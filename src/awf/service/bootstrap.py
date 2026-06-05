@@ -264,6 +264,8 @@ class WorkDirPropagationResult:
 
 @dataclass(frozen=True)
 class PersistedPropagationPosture:
+    """Snapshot of the mount-propagation posture persisted to the compose env-file."""
+
     propagation: str
     force_copy: str
     timestamp: str
