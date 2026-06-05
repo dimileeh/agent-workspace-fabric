@@ -53,6 +53,54 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Private CLI Import Contract
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Stop importing underscore-prefixed symbols from `awf.cli.*` modules in
+  `src/awf/mcp/setup_tools.py`: Complete.
+- Expose explicit public bridge names for the CLI helper behavior the MCP layer
+  intentionally shares: Complete.
+- Preserve existing MCP setup-tools behavior and monkeypatch seams: Complete.
+- Add a focused regression preventing private CLI imports from returning to the
+  MCP setup-tools module: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/cli/first_run_mcp_bridge.py`
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_import_contract.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_import_contract.py tests/unit/mcp/test_setup_tools.py::test_setup_tools_are_registered -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_setup_status_init_and_client_tools_offload_blocking_work -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py tests/unit/mcp/test_setup_tools_import_contract.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py
+```
+
+Latest results:
+
+- New import-contract regression failed before the implementation change with
+  18 private CLI imports from `src/awf/mcp/setup_tools.py`.
+- Import-contract regression after the implementation change: 1 passed.
+- Import-contract plus setup-tool registration test: 2 passed.
+- Focused helper-seam test: 1 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HQoJN
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

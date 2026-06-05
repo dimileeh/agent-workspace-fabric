@@ -16,30 +16,7 @@ from mcp.types import CallToolResult
 from pydantic import Field
 
 from awf.api.schemas import ErrorResponse
-from awf.cli.init_ops import (
-    _existing_project_profile_path,
-    _init_project_onboarding_payload,
-)
-from awf.cli.setup_commands import (
-    _client_env,
-    _client_home,
-    _client_now,
-    _client_source_checkout_blocked_payload,
-    _client_which,
-    _config_error_details,
-    _reason_coded_payload,
-    _resolve_client_env_file,
-    _run_setup,
-)
-from awf.cli.start_commands import (
-    _DEFAULT_START_TIMEOUT_SECONDS,
-    _resolve_start_bootstrap_inputs,
-    _resolve_start_source_checkout,
-    _source_checkout_failure_payload,
-    _start_failure_payload,
-    _start_success_payload,
-    _StartBootstrapInputs,
-)
+from awf.cli import first_run_mcp_bridge as _first_run_mcp_bridge
 from awf.common.config import Settings
 from awf.host_setup.clients import (
     AWF_MCP_SERVER_KEY,
@@ -72,6 +49,27 @@ from awf.service.bootstrap import (
     ServiceBootstrapOptions,
     run_service_bootstrap,
 )
+
+_DEFAULT_START_TIMEOUT_SECONDS = _first_run_mcp_bridge.DEFAULT_START_TIMEOUT_SECONDS
+_StartBootstrapInputs = _first_run_mcp_bridge.StartBootstrapInputs
+_client_env = _first_run_mcp_bridge.client_setup_environ
+_client_home = _first_run_mcp_bridge.client_setup_home
+_client_now = _first_run_mcp_bridge.client_setup_now
+_client_source_checkout_blocked_payload = (
+    _first_run_mcp_bridge.client_source_checkout_blocked_payload
+)
+_client_which = _first_run_mcp_bridge.client_setup_which
+_config_error_details = _first_run_mcp_bridge.setup_config_error_details
+_existing_project_profile_path = _first_run_mcp_bridge.existing_project_profile_path
+_init_project_onboarding_payload = _first_run_mcp_bridge.build_init_project_onboarding_payload
+_reason_coded_payload = _first_run_mcp_bridge.setup_reason_coded_payload
+_resolve_client_env_file = _first_run_mcp_bridge.resolve_client_env_file
+_resolve_start_bootstrap_inputs = _first_run_mcp_bridge.resolve_start_bootstrap_inputs
+_resolve_start_source_checkout = _first_run_mcp_bridge.resolve_start_source_checkout
+_run_setup = _first_run_mcp_bridge.run_setup_readiness
+_source_checkout_failure_payload = _first_run_mcp_bridge.source_checkout_failure_payload
+_start_failure_payload = _first_run_mcp_bridge.start_failure_payload
+_start_success_payload = _first_run_mcp_bridge.start_success_payload
 
 StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 

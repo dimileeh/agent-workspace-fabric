@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Private CLI Import Contract
+
+### Problem Statement And Scope
+
+The review notes that `src/awf/mcp/setup_tools.py` imports underscore-prefixed
+helpers from CLI modules. That makes the MCP first-run surface depend on private
+CLI implementation details, so a future CLI refactor could break MCP without a
+clear compatibility contract.
+
+Scope is limited to the MCP setup-tools dependency boundary. The MCP tools must
+continue to delegate to the same first-run setup/start/init/client behavior and
+preserve existing test seams, response payloads, and redaction behavior.
+
+### Requirements Checklist
+
+- Stop importing underscore-prefixed symbols from `awf.cli.*` modules in
+  `src/awf/mcp/setup_tools.py`.
+- Expose explicit public bridge names for the CLI helper behavior the MCP layer
+  intentionally shares.
+- Preserve existing MCP setup-tools behavior and monkeypatch seams.
+- Add a focused regression preventing private CLI imports from returning to the
+  MCP setup-tools module.
+
+### Implementation Steps
+
+1. Add a focused failing import-contract regression for
+   `src/awf/mcp/setup_tools.py`.
+2. Add a public bridge module in the CLI package for the shared first-run helper
+   behavior used by MCP.
+3. Update `setup_tools.py` to import the public bridge names while keeping its
+   local helper seams stable.
+4. Run the targeted import-contract regression and focused lint/type checks for
+   the touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_setup_tools_are_registered tests/unit/mcp/test_setup_tools.py::test_setup_status_init_and_client_tools_offload_blocking_work -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py tests/unit/mcp/test_setup_tools_import_contract.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HQoJN
 
 ### Problem Statement And Scope
