@@ -930,6 +930,57 @@ git diff --check
 # No whitespace errors.
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbUIQ`
+
+Problem statement and scope:
+Quickstart Lane 1 URL-encodes only the persisted host-side
+`AWF_DATABASE_URL`, while `docker/compose/local-service.yml` still builds the
+Core container database URL with the raw `AWF_POSTGRES_PASSWORD`. Because that
+Compose configuration is outside this repair's owned paths, keep the fix scoped
+to restricting the Quickstart package-lane snippet to URL-safe custom Postgres
+passwords, the focused Quickstart docs regression, and these T15 plan artifacts.
+
+Requirements checklist:
+
+- Quickstart Lane 1 must tell package-lane users that custom
+  `AWF_POSTGRES_PASSWORD` values are limited to URL-safe unreserved characters
+  until the Compose-side URL construction supports escaping.
+- The first-run snippet must reject unsafe password characters such as `/`,
+  `#`, or `@` before writing `.env` or starting Core.
+- The existing default password and URL-safe custom passwords must continue to
+  persist `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`,
+  `AWF_POSTGRES_HOST_PORT`, and `AWF_DATABASE_URL` for upgrades.
+- Do not edit unowned protected Compose configuration, run full AWF/GitHub-owned
+  validation, full coverage, frontend builds, pushes, rebases, or
+  branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Update the focused Quickstart package-lane regression to prove URL-safe
+   custom passwords still persist and Compose-unsafe URL characters are
+   rejected before `.env` is written.
+2. Add a Quickstart Lane 1 preflight that rejects non-URL-safe
+   `AWF_POSTGRES_PASSWORD` values before the existing URL and dotenv
+   persistence steps.
+3. Run the targeted Quickstart docs regression, copy-paste snippet syntax
+   check, focused ruff check for the touched test file, and `git diff --check`.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_rejects_compose_url_unsafe_password -q
+# Red phase fails before the Quickstart update; final result passes.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_rejects_compose_url_unsafe_password tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# Focused Quickstart docs checks pass.
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+# All checks pass.
+
+git diff --check
+# No whitespace errors.
+```
+
 ## CI Repair: docs lifecycle test file line limit
 
 Problem statement and scope:

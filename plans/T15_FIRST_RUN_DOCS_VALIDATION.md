@@ -2626,6 +2626,48 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbUIQ`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `docs/QUICKSTART.md` Lane 1 now says custom package-lane
+  `AWF_POSTGRES_PASSWORD` values must use URL-safe unreserved characters because
+  the current Compose service URL embeds that same password.
+- Complete: The Lane 1 first-run snippet now rejects values requiring URL
+  escaping, including examples such as `/`, `#`, or `@`, before it writes
+  `.env` or reaches `awf start`.
+- Complete: URL-safe custom passwords still persist the package-lane service
+  values needed for later upgrades.
+- Complete: Full AWF/GitHub validation, full coverage, protected Compose config
+  edits, frontend builds, pushes, and PR lifecycle actions were intentionally
+  not run in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `tests/unit/docs/test_public_docs_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_rejects_compose_url_unsafe_password -q
+# Red phase before Quickstart update: failed because the unsafe password script
+# returned 0 instead of being rejected.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_persists_service_env_for_upgrade tests/unit/docs/test_public_docs_status.py::test_quickstart_package_first_run_rejects_compose_url_unsafe_password tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 3 passed in 0.83s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+# All checks passed!
+
+git diff --check
+# no output
+```
+
 ## CI Repair: docs lifecycle test file line limit
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
