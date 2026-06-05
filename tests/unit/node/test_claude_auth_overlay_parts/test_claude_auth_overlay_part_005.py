@@ -318,7 +318,7 @@ def test_safe_overlay_whiteout_creates_char_device_in_nested_upper(
 
     assert (upper / "nested" / "deep").is_dir()
     assert (upper / "nested" / "deep" / "secret.json").exists()
-    assert recorded[0]["mode"] == stat.S_IFCHR
+    assert recorded[0]["mode"] == stat.S_IFCHR | 0o000
     assert recorded[0]["device"] == os.makedev(0, 0)
 
 
