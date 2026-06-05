@@ -83,15 +83,32 @@ SHELL_FENCE_LANGS = frozenset({"", "bash", "sh", "shell", "console", "zsh"})
 # alongside fenced commands so a no-path `awf init` documented inline is caught.
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 # A prose *prohibition* that explicitly labels a backticked `awf init` as the
-# disallowed no-path form (qualifier-before, e.g. RELEASING.md's "Do not use
+# disallowed no-path form (qualifier-*before*, e.g. RELEASING.md's "Do not use
 # no-path `awf init` for service setup"). Such a mention is teaching the reader
 # *not* to run no-path init, so R2 must not read it as a no-path command example.
-# The qualifier sits before the span, so this never collides with R3's
+# The qualifier sits before the span, so this form never collides with R3's
 # bootstrap-framing patterns (which key on `awf init` *followed by* "without a
-# path"). A path-bearing `awf init <path>` span has its backtick after the path,
-# not after `init`, so it is left untouched.
+# path"); the sibling AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE below handles the
+# qualifier-*after* wording that does. A path-bearing `awf init <path>` span has
+# its backtick after the path, not after `init`, so it is left untouched.
 NO_PATH_INIT_PROHIBITION_RE = re.compile(
     r"(?P<qualifier>no[- ]path|without a path)\s+`awf init`", re.IGNORECASE
+)
+# The same prohibition written with the qualifier *after* the span — the natural
+# release/troubleshooting wording "Do not run `awf init` without a path for
+# service setup". Left untouched this phrasing would be (a) extracted by R2's
+# inline scan as a bare `awf init` command and (b) matched by R3's "without a
+# path" bootstrap pattern, so a doc could not forbid the legacy form in it. Unlike
+# the before-span form it is gated on an explicit prohibition lead-in
+# (`do not`/`don't`/`never`/`avoid`) kept within the same clause (the `[^.`\n]`
+# bridge stops it spanning a sentence break before the code span). That gate makes
+# unwrapping it safe even for R3: a *prescriptive* "run `awf init` without a path
+# to bootstrap" carries no lead-in, keeps its backticks, and is still flagged as a
+# reintroduction.
+AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE = re.compile(
+    r"(?P<lead>do not|don't|never|avoid)(?P<between>[^.`\n]*?)`awf init`"
+    r"(?P<qualifier>\s+(?:without a path|no[- ]path))",
+    re.IGNORECASE,
 )
 # Flags that consume the following token as their value; everything else that
 # starts with "-" is treated as a valueless flag. Covers every value-taking
@@ -230,6 +247,22 @@ def _fenced_command_lines(text: str) -> list[str]:
     return lines
 
 
+def _strip_after_span_init_prohibition(text: str) -> str:
+    """Unwrap a no-path ``awf init`` prohibition whose qualifier follows the span.
+
+    Handles the natural wording "Do not run ``awf init`` without a path", which
+    places the disallowed-form qualifier *after* the code span (the before-span
+    sibling :data:`NO_PATH_INIT_PROHIBITION_RE` cannot see it). It is gated on an
+    explicit prohibition lead-in (``do not``/``don't``/``never``/``avoid``) so it
+    can be applied to R3's bootstrap scan as well as R2's inline scan without
+    masking a *prescriptive* reintroduction ("run ``awf init`` without a path to
+    bootstrap"), which carries no lead-in, keeps its backticks, and stays flagged.
+    """
+    return AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE.sub(
+        r"\g<lead>\g<between>awf init\g<qualifier>", text
+    )
+
+
 def _without_init_prohibitions(text: str) -> str:
     """Unwrap the backticks of an explicitly no-path-qualified ``awf init``.
 
@@ -238,10 +271,13 @@ def _without_init_prohibitions(text: str) -> str:
     Stripping only the inner backticks (leaving the prose qualifier and words
     intact) keeps that guidance readable while stopping R2's inline scan from
     extracting the span and miscounting a documented prohibition as a no-path
-    command example. An *unqualified* bare ``awf init`` still keeps its backticks
-    and is surfaced as an R2 offender.
+    command example. Both the qualifier-*before* form and the qualifier-*after*
+    form (e.g. "Do not run ``awf init`` without a path") are unwrapped. An
+    *unqualified* bare ``awf init`` still keeps its backticks and is surfaced as
+    an R2 offender.
     """
-    return NO_PATH_INIT_PROHIBITION_RE.sub(r"\g<qualifier> awf init", text)
+    text = NO_PATH_INIT_PROHIBITION_RE.sub(r"\g<qualifier> awf init", text)
+    return _strip_after_span_init_prohibition(text)
 
 
 def _inline_command_mentions(text: str) -> list[str]:
@@ -455,6 +491,13 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
 
 
 def _bootstrap_offenders(text: str) -> list[str]:
+    # An after-span no-path `awf init` *prohibition* ("Do not run `awf init`
+    # without a path") must not be read as a bootstrap reintroduction: unwrap its
+    # backticks first so the R3 patterns (which key on the backticked span) do not
+    # fire on the very wording that forbids the legacy form. The strip is gated on
+    # a prohibition lead-in, so a prescriptive "run `awf init` without a path to
+    # bootstrap" keeps its backticks and is still flagged below.
+    text = _strip_after_span_init_prohibition(text)
     # Return the *matched snippet* (``match.group(0)``), not the raw regex
     # pattern, so an R3 failure message names the offending text a developer can
     # grep for instead of an opaque pattern string they would have to re-search
@@ -718,6 +761,16 @@ def test_helper_excludes_no_path_init_prohibition_from_inline_scan() -> None:
     # The "without a path" qualifier variant is handled the same way.
     variant = _without_init_prohibitions("Never run `awf init` without a path `awf init` here.")
     assert "without a path awf init" in variant
+    # The same prohibition with the qualifier *after* the span — the natural
+    # release/troubleshooting wording "Do not run `awf init` without a path" — is
+    # unwrapped too, so R2's inline scan does not read it as a bare command, while
+    # the positive `awf init <path>` example in the same sentence survives.
+    after = _without_init_prohibitions(
+        "Do not run `awf init` without a path for service setup; use `awf init <path>`."
+    )
+    after_mentions = _inline_command_mentions(after)
+    assert "awf init" not in after_mentions
+    assert "awf init <path>" in after_mentions
     # An *unqualified* bare `awf init` mention keeps its backticks and is still
     # surfaced as an offender, so the strip never weakens R2's core check.
     plain = "Run `awf init` to onboard the project.\n"
@@ -737,6 +790,17 @@ def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     fenced_offenders = _bootstrap_offenders(fenced)
     assert fenced_offenders
     assert all(snippet in fenced for snippet in fenced_offenders)
+    # An after-span no-path prohibition ("Do not run `awf init` without a path")
+    # is the natural way a release/troubleshooting doc forbids the legacy form, so
+    # it must not be read as a bootstrap reintroduction.
+    assert _bootstrap_offenders("Do not run `awf init` without a path for service setup.") == []
+    assert _bootstrap_offenders("Never run `awf init` without a path; pass a repo.") == []
+    # The exemption is gated on the prohibition lead-in: a *prescriptive* reuse of
+    # the same wording (no `do not`/`never`) is still flagged as a reintroduction,
+    # and a sentence break between the lead-in and the span breaks the exemption so
+    # a `do not` from an earlier sentence cannot smuggle a reintroduction through.
+    assert _bootstrap_offenders("Run `awf init` without a path to bootstrap Core.")
+    assert _bootstrap_offenders("Do not panic. Run `awf init` without a path to bootstrap.")
     # `awf service bootstrap` as a command must never be flagged.
     assert _bootstrap_offenders("Run `awf service bootstrap` to start Postgres.") == []
     assert _bootstrap_offenders("awf init .") == []
