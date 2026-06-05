@@ -407,6 +407,7 @@ class InstallerHarness:
         managed_tools = ("awf", "uv", "pipx")
         shadow_dir = self.root / "syspath-shadow"
         kept: list[str] = []
+        shadow_insert_at: int | None = None
         for entry in os.environ.get("PATH", "").split(os.pathsep):
             if not entry:
                 continue
@@ -414,13 +415,22 @@ class InstallerHarness:
             if not any((directory / tool).exists() for tool in managed_tools):
                 kept.append(entry)
                 continue
+            # Remember the original priority slot of the *first* managed-tool
+            # directory. Everything iterated before it is non-managed and thus
+            # already appended, so ``len(kept)`` here is exactly that slot in
+            # ``kept``. Reinserting the shadow dir there (rather than at the end)
+            # keeps co-located non-managed tools — e.g. GNU ``sha256sum`` sharing
+            # ``/opt/homebrew/bin`` with ``uv`` — at their original PATH rank, so a
+            # lower-priority entry can't silently shadow them with another variant.
+            if shadow_insert_at is None:
+                shadow_insert_at = len(kept)
             shadow_dir.mkdir(parents=True, exist_ok=True)
             for child in directory.iterdir():
                 link = shadow_dir / child.name
                 if child.name not in managed_tools and not link.exists():
                     link.symlink_to(child)
-        if shadow_dir.exists():
-            kept.append(str(shadow_dir))
+        if shadow_insert_at is not None:
+            kept.insert(shadow_insert_at, str(shadow_dir))
         system_path = os.pathsep.join(kept)
         env: dict[str, str] = {
             "PATH": f"{self.bin_dir}{os.pathsep}{system_path}",
