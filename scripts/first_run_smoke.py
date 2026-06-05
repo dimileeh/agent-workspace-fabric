@@ -520,6 +520,7 @@ def run_tool_install_lane(
         results.append(install_result)
         if install_result.status != "passed":
             continue
+        # uv and pipx expose their isolated script directory through method-specific env keys.
         awf_bin = Path(env["UV_TOOL_BIN_DIR" if method == "uv" else "PIPX_BIN_DIR"]) / "awf"
         outside = smoke_root / f"outside-{method}"
         outside.mkdir(parents=True, exist_ok=True)

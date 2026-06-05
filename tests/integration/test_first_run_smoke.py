@@ -27,9 +27,9 @@ def test_source_uv_run_lane_proves_checkout_from_outside(tmp_path: Path) -> None
 
     _assert_no_environmental_skip(results)
     assert all(result.status == "passed" for result in results), results
-    setup_results = [result for result in results if "setup" in result.command]
-    assert setup_results
-    source_checkout = setup_results[-1].source_checkout
+    source_checkout_results = [result for result in results if result.source_checkout is not None]
+    assert len(source_checkout_results) == 1, results
+    source_checkout = source_checkout_results[0].source_checkout
     assert isinstance(source_checkout, dict)
     assert source_checkout.get("root") == str((tmp_path / "source-checkout").resolve())
 
@@ -49,9 +49,9 @@ def test_source_tool_install_lane_installs_isolated_awf(tmp_path: Path) -> None:
     assert all(result.status == "passed" for result in results), results
     install_result = results[0]
     assert "uv tool install" in " ".join(install_result.command)
-    setup_results = [result for result in results if "setup" in result.command]
-    assert setup_results
-    source_checkout = setup_results[-1].source_checkout
+    source_checkout_results = [result for result in results if result.source_checkout is not None]
+    assert len(source_checkout_results) == 1, results
+    source_checkout = source_checkout_results[0].source_checkout
     assert isinstance(source_checkout, dict)
     assert source_checkout.get("root") == str((tmp_path / "source-checkout").resolve())
 
