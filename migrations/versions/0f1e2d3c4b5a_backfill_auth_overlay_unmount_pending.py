@@ -249,11 +249,17 @@ def _has_current_cycle_auth_overlay_marker(
     workspace_id: str,
     cycle_floor: int,
 ) -> bool:
+    event_order_matches_cycle = _WORKSPACE_EVENTS.c.event_order >= cycle_floor
+    if cycle_floor == -1:
+        event_order_matches_cycle = sa.or_(
+            event_order_matches_cycle,
+            _WORKSPACE_EVENTS.c.event_order.is_(None),
+        )
     marker = connection.execute(
         sa.select(_WORKSPACE_EVENTS.c.id)
         .where(_WORKSPACE_EVENTS.c.workspace_id == workspace_id)
         .where(_WORKSPACE_EVENTS.c.event_type.in_(_AUTH_OVERLAY_MARKER_EVENT_TYPES))
-        .where(_WORKSPACE_EVENTS.c.event_order >= cycle_floor)
+        .where(event_order_matches_cycle)
         .limit(1)
     ).scalar_one_or_none()
     return marker is not None

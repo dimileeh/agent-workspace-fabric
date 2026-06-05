@@ -302,7 +302,11 @@ def test_auth_overlay_unmount_backfill_sqlite_parses_payloads_without_json_predi
                     VALUES
                         ('ws_sqlite_false', 'failed', 1, 'awf_sqlite_false'),
                         ('ws_sqlite_true', 'failed', 1, 'awf_sqlite_true'),
-                        ('ws_sqlite_invalid', 'failed', 1, 'awf_sqlite_invalid')
+                        ('ws_sqlite_invalid', 'failed', 1, 'awf_sqlite_invalid'),
+                        (
+                            'ws_sqlite_existing_null_marker', 'failed', 0,
+                            'awf_sqlite_existing_null_marker'
+                        )
                     """
                 )
             )
@@ -331,12 +335,28 @@ def test_auth_overlay_unmount_backfill_sqlite_parses_payloads_without_json_predi
                             :release_type, :release_reason,
                             '{"auth_overlay_unmounted": ', 1,
                             '2026-06-01 00:00:00+00'
+                        ),
+                        (
+                            'evt_sqlite_existing_release',
+                            'ws_sqlite_existing_null_marker',
+                            :release_type, :release_reason,
+                            '{"auth_overlay_unmounted": false}', NULL,
+                            '2026-06-01 00:00:00+00'
+                        ),
+                        (
+                            'evt_sqlite_existing_marker',
+                            'ws_sqlite_existing_null_marker',
+                            :pending_type, :pending_reason,
+                            '{"attempt": 3}', NULL,
+                            '2026-06-01 00:00:01+00'
                         )
                     """
                 ),
                 {
                     "release_type": TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
                     "release_reason": TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    "pending_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE,
+                    "pending_reason": _AUTH_OVERLAY_PENDING_REASON_CODE,
                 },
             )
 
@@ -344,9 +364,10 @@ def test_auth_overlay_unmount_backfill_sqlite_parses_payloads_without_json_predi
             marker_rows = conn.execute(
                 text(
                     """
-                    SELECT workspace_id, reason_code, payload, event_order
+                    SELECT id, workspace_id, reason_code, payload, event_order
                     FROM workspace_events
                     WHERE event_type = :event_type
+                    ORDER BY workspace_id, event_order
                     """
                 ),
                 {"event_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE},
@@ -355,11 +376,15 @@ def test_auth_overlay_unmount_backfill_sqlite_parses_payloads_without_json_predi
         engine.dispose()
 
     assert inserted == 1
-    assert len(marker_rows) == 1
-    marker = marker_rows[0]
+    assert len(marker_rows) == 2
+    markers_by_workspace = {marker.workspace_id: marker for marker in marker_rows}
+    marker = markers_by_workspace["ws_sqlite_false"]
     assert marker.workspace_id == "ws_sqlite_false"
     assert marker.reason_code == _AUTH_OVERLAY_PENDING_REASON_CODE
     assert marker.event_order == 2
+    existing_marker = markers_by_workspace["ws_sqlite_existing_null_marker"]
+    assert existing_marker.id == "evt_sqlite_existing_marker"
+    assert existing_marker.event_order is None
 
 
 @pytest.mark.unit
