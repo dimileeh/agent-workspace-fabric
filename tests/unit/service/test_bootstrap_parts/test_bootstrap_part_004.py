@@ -922,7 +922,12 @@ def test_persist_is_best_effort_non_fatal(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_persist_is_best_effort_on_unicode_decode_error(tmp_path: Path) -> None:
-    """Non-OSError failures from read_text must not abort bootstrap; posture is still written (#413)."""
+    """Non-OSError failures from read_text must not abort bootstrap; posture is still written (#413).
+
+    When the env-file contains bytes that cannot be decoded as UTF-8, the
+    function now preserves those bytes rather than silently dropping all
+    existing entries. The posture keys are still appended.
+    """
     env_file = tmp_path / ".env"
     env_file.write_bytes(b"\xff\xfe")
 
@@ -934,10 +939,42 @@ def test_persist_is_best_effort_on_unicode_decode_error(tmp_path: Path) -> None:
     )
     bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
 
-    values = _read_env_file_values(env_file)
-    assert values["AWF_WORK_DIR_BIND_PROPAGATION"] == "rshared"
-    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "false"
-    assert "AWF_WORK_DIR_PROPAGATION_TIMESTAMP" in values
+    raw = env_file.read_bytes()
+    # The non-UTF-8 bytes are preserved (not dropped).
+    assert b"\xff\xfe" in raw
+    # Posture keys are still written.
+    assert b"AWF_WORK_DIR_BIND_PROPAGATION=rshared" in raw
+    assert b"AWF_CLAUDE_AUTH_FORCE_COPY=false" in raw
+    assert b"AWF_WORK_DIR_PROPAGATION_TIMESTAMP=" in raw
+
+
+@pytest.mark.unit
+def test_persist_preserves_other_entries_on_unicode_decode_error(tmp_path: Path) -> None:
+    """When the compose env-file has non-UTF-8 bytes, other entries must not be
+    dropped (#413 review thread PRRT_kwDOSJAM6s6HQV77).
+
+    Regression: the original code set ``existing_text = ""`` on
+    UnicodeDecodeError, which caused the atomic write to replace the entire
+    file with only the three posture keys, silently removing unrelated
+    variables (including secrets).
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"SECRET_KEY=abc123\n\xff\xfe\nOTHER_VAR=val\n")
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    raw = env_file.read_bytes()
+    assert b"SECRET_KEY=abc123" in raw
+    assert b"OTHER_VAR=val" in raw
+    assert b"\xff\xfe" in raw
+    assert b"AWF_WORK_DIR_BIND_PROPAGATION=rshared" in raw
+    assert b"AWF_CLAUDE_AUTH_FORCE_COPY=false" in raw
 
 
 @pytest.mark.unit

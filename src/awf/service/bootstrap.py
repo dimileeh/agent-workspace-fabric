@@ -331,13 +331,28 @@ def _persist_work_dir_propagation_result(
         timestamp=now_iso,
     )
     try:
-        lines: list[str] = []
         if env_file.exists():
+            lines: list[str] = []
+            lines_have_surrogates = False
             try:
                 existing_text = env_file.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
-                existing_text = ""
-            for raw_line in existing_text.splitlines():
+                existing_text = None
+            if existing_text is not None:
+                raw_lines = existing_text.splitlines()
+            else:
+                try:
+                    raw_bytes = env_file.read_bytes()
+                except OSError:
+                    raw_bytes = b""
+                raw_lines = []
+                for byte_line in raw_bytes.split(b"\n"):
+                    try:
+                        raw_lines.append(byte_line.decode("utf-8"))
+                    except UnicodeDecodeError:
+                        lines_have_surrogates = True
+                        raw_lines.append(byte_line.decode("utf-8", errors="surrogateescape"))
+            for raw_line in raw_lines:
                 stripped = raw_line.lstrip()
                 if not stripped or stripped.startswith("#"):
                     lines.append(raw_line)
@@ -358,6 +373,9 @@ def _persist_work_dir_propagation_result(
                 ):
                     continue
                 lines.append(raw_line)
+        else:
+            lines = []
+            lines_have_surrogates = False
         for key, value in (
             (AWF_WORK_DIR_BIND_PROPAGATION_ENV, new_posture.propagation),
             (AWF_CLAUDE_AUTH_FORCE_COPY_ENV, new_posture.force_copy),
@@ -371,7 +389,12 @@ def _persist_work_dir_propagation_result(
             suffix=".tmp",
         )
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            with os.fdopen(
+                fd,
+                "w",
+                encoding="utf-8",
+                errors="surrogateescape" if lines_have_surrogates else "strict",
+            ) as fh:
                 fh.write("\n".join(lines))
                 fh.write("\n")
             Path(tmp_path).replace(env_file)
