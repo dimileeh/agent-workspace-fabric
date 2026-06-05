@@ -23,6 +23,7 @@ from tests.unit.docs.public_docs_status_helpers import (
     _markdown_fences,
     _markdown_section,
     _public_docs,
+    _required_index,
     _typer_command_tree,
     app,
 )
@@ -273,8 +274,8 @@ def test_quickstart_package_first_run_persists_service_env_for_upgrade() -> None
         ordered_steps[1:],
         strict=False,
     ):
-        previous_index = first_run_section.index(previous_text)
-        next_index = first_run_section.index(next_text)
+        previous_index = _required_index(first_run_section, previous_text, previous_label)
+        next_index = _required_index(first_run_section, next_text, next_label)
         assert previous_index < next_index, (
             "Quickstart package first-run service env steps are out of order: "
             f"{previous_label} at {previous_index} must precede {next_label} at {next_index}"
