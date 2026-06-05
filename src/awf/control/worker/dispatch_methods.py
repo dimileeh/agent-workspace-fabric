@@ -277,9 +277,11 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
         # Release CAS on the stored epoch so a release issued after a newer
-        # claimant reclaimed the row cannot clobber it (D6).
-        await self._release_execution_claim(workspace_id)
-        self._execution_claim_epochs.pop(workspace_id, None)
+        # claimant reclaimed the row cannot clobber it (D6). This finally runs
+        # while an external cancel may already be propagating; shield the release
+        # and the epoch pop so a second cancellation (worker shutdown) landing
+        # mid-write cannot skip them and leak the DB lease or the epoch entry.
+        await self._release_execution_claim_after_cancellation(workspace_id)
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:

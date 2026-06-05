@@ -770,6 +770,28 @@ async def _release_execution_claim(self: Any, workspace_id: str) -> None:
         )
 
 
+async def _release_execution_claim_after_cancellation(self: Any, workspace_id: str) -> None:
+    """Release the execution claim and drop its epoch even if cancelled again.
+
+    ``_safely_provision_claimed``'s ``finally`` runs while an external cancel
+    (e.g. worker shutdown) is already propagating. The release is itself a
+    cancellable DB write and the in-memory epoch pop follows it; a second
+    cancellation landing mid-write would propagate out of the un-shielded
+    release (which only catches ``Exception``), skipping both and leaking the DB
+    lease plus the epoch entry. Shield the release and re-await across repeated
+    cancellations so it always runs to completion, then drop the epoch, mirroring
+    ``_finish_monitor_recovery_operation_after_cancellation``.
+    """
+    release_task = asyncio.create_task(
+        self._release_execution_claim(workspace_id),
+        name=f"awf-execution-claim-release-{workspace_id}",
+    )
+    while not release_task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(release_task)
+    self._execution_claim_epochs.pop(workspace_id, None)
+
+
 async def _release_monitoring_pr_claim(self: Any, workspace_id: str) -> None:
     try:
         async with self._session_factory() as session:

@@ -30,6 +30,9 @@ class WorkerDelegatesMixin:
     _read_execution_claim_epoch = _claims._read_execution_claim_epoch
     _refresh_execution_claim = _claims._refresh_execution_claim
     _release_execution_claim = _claims._release_execution_claim
+    _release_execution_claim_after_cancellation = (
+        _claims._release_execution_claim_after_cancellation
+    )
     _release_monitoring_pr_claim = _claims._release_monitoring_pr_claim
 
     _maybe_expire_due_secret_leases = _cleanup._maybe_expire_due_secret_leases

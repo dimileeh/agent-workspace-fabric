@@ -682,6 +682,66 @@ async def test_safely_provision_claimed_propagates_external_cancellation(
 
 
 @pytest.mark.unit
+async def test_safely_provision_claimed_release_survives_second_cancellation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The finally-block release runs while an external cancel is already
+    # propagating. A second cancellation (worker shutdown cancelling outstanding
+    # tasks) landing mid-release must not skip the DB release or the epoch pop:
+    # both are shielded so they always run to completion on shutdown.
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    provisioner = _BlockUntilCancelledProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            execution_claim_lease_seconds=3.0,
+        ),
+    )
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+
+    task_box: dict[str, asyncio.Task[None]] = {}
+    original_release = worker._release_execution_claim  # noqa: SLF001
+    second_cancel_injected = False
+
+    async def _release_with_second_cancel(ws_id: str) -> None:
+        # Inject a second cancellation the instant the release begins,
+        # reproducing a shutdown cancel arriving mid-write.
+        nonlocal second_cancel_injected
+        if not second_cancel_injected:
+            second_cancel_injected = True
+            task_box["task"].cancel()
+        await original_release(ws_id)
+
+    worker._release_execution_claim = _release_with_second_cancel  # type: ignore[method-assign]  # noqa: SLF001
+
+    task = asyncio.create_task(
+        worker._safely_provision_claimed(workspace_id),  # noqa: SLF001
+    )
+    task_box["task"] = task
+    await asyncio.wait_for(provisioner.started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+    # First (external) cancel: aborts the provision and enters the finally
+    # release, which injects the second cancel mid-flight.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    assert second_cancel_injected
+    # Despite the second cancel, the shielded release completed and the epoch was
+    # dropped — no DB lease or in-memory epoch leak on shutdown.
+    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
+    claimed_by, _ = await _workspace_execution_claim(session_factory, workspace_id)
+    assert claimed_by is None
+
+
+@pytest.mark.unit
 async def test_refresh_execution_claim_loop_cancels_provision_on_fence(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
