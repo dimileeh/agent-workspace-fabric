@@ -1294,8 +1294,15 @@ def test_reconcile_ambiguous_host_removed_file_is_not_whiteouted(
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
+    # ``forward_deletions=True`` is required to reach the host-absent guard: the default
+    # (False) early-returns before it runs, making ``recorded == []`` vacuous (#414).
     _reconcile_fallback_edits_into_upper(
-        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
     )
 
     assert recorded == []

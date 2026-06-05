@@ -53,8 +53,16 @@ def test_reconcile_ambiguous_host_changed_file_is_not_whiteouted(
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
+    # ``forward_deletions=True`` is required to reach the destructive whiteout pass:
+    # the default (False) early-returns before the host-divergence guard runs, which
+    # would make ``recorded == []`` vacuously true regardless of the guard (#414).
     _reconcile_fallback_edits_into_upper(
-        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
     )
 
     assert recorded == []
@@ -89,8 +97,15 @@ def test_reconcile_same_size_mtime_but_changed_content_is_not_whiteouted(
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
+    # ``forward_deletions=True`` is required to reach the content-compare guard: the
+    # default (False) early-returns before it runs, making ``recorded == []`` vacuous (#414).
     _reconcile_fallback_edits_into_upper(
-        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
     )
 
     assert recorded == []
@@ -131,8 +146,15 @@ def test_reconcile_same_size_mtime_content_but_changed_mode_is_not_whiteouted(
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
+    # ``forward_deletions=True`` is required to reach the mode-divergence guard: the
+    # default (False) early-returns before it runs, making ``recorded == []`` vacuous (#414).
     _reconcile_fallback_edits_into_upper(
-        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
     )
 
     assert recorded == []
@@ -266,8 +288,15 @@ def test_reconcile_deletion_skipped_when_upper_already_has_entry(
     recorded: list[dict[str, object]] = []
     monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
 
+    # ``forward_deletions=True`` is required to reach the upper-entry guard: the default
+    # (False) early-returns before it runs, making ``recorded == []`` vacuous (#414).
     _reconcile_fallback_edits_into_upper(
-        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
     )
 
     assert recorded == []
