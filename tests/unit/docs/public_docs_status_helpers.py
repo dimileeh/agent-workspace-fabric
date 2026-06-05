@@ -1568,7 +1568,12 @@ def _fence_delimiter_count_is_even(text: str) -> bool:
     return len(FENCE_DELIMITER_RE.findall(text)) % 2 == 0
 
 
-def _markdown_fences(rel_path: str, text: str) -> list[MarkdownFence]:
+def _markdown_fences(
+    rel_path: str,
+    text: str,
+    *,
+    line_offset: int = 0,
+) -> list[MarkdownFence]:
     fences: list[MarkdownFence] = []
     lines = text.splitlines()
     line_index = 0
@@ -1579,7 +1584,7 @@ def _markdown_fences(rel_path: str, text: str) -> list[MarkdownFence]:
             line_index += 1
             continue
 
-        opening_line = line_index + 1
+        opening_line = line_offset + line_index + 1
         indent_width = len(opening_match.group("indent"))
         delimiter_width = len(opening_match.group("delimiter"))
         body_lines: list[str] = []

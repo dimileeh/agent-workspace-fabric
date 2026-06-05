@@ -183,8 +183,14 @@ def test_quickstart_keeps_package_manager_alternatives_in_separate_blocks() -> N
         ),
     )
     mixed_blocks: list[str] = []
+    lane_section_offset = quickstart_text.index(lane_section)
+    lane_section_line_offset = quickstart_text[:lane_section_offset].count("\n")
 
-    for fence in _markdown_fences("docs/QUICKSTART.md", lane_section):
+    for fence in _markdown_fences(
+        "docs/QUICKSTART.md",
+        lane_section,
+        line_offset=lane_section_line_offset,
+    ):
         if fence.language != "bash":
             continue
 

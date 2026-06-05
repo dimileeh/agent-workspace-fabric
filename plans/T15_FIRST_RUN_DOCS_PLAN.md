@@ -851,3 +851,19 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_sta
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py tests/unit/docs/public_docs_status_helpers.py
 git diff --check
 ```
+
+Post-review adjustment for review-level comment `issue:4620140358`:
+when Quickstart Lane 1 tests inspect Markdown fences from a section substring,
+the diagnostic `MarkdownFence.line` values must still report the original
+`docs/QUICKSTART.md` line numbers. Add a focused helper regression, extend the
+fence parser with an explicit line-offset option for section slices, and keep
+full AWF/GitHub validation delegated to post-agent infrastructure.
+
+Focused repair commands for review-level comment `issue:4620140358`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_markdown_fences_accepts_line_offset_for_section_slices -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_keeps_package_manager_alternatives_in_separate_blocks tests/unit/docs/test_public_docs_guides_status.py::test_markdown_fences_accepts_line_offset_for_section_slices -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
+git diff --check
+```

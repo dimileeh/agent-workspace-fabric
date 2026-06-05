@@ -884,6 +884,21 @@ def test_markdown_fences_accepts_indented_copy_paste_fences() -> None:
     ]
 
 
+def test_markdown_fences_accepts_line_offset_for_section_slices() -> None:
+    text = "# Intro\n\nPreface.\n\n## Lane 1\n\n```bash\necho ok\n```\n"
+    section = _markdown_section(text, "## Lane 1")
+    line_offset = text[: text.index(section)].count("\n")
+
+    assert _markdown_fences("docs/example.md", section, line_offset=line_offset) == [
+        MarkdownFence(
+            path="docs/example.md",
+            line=7,
+            language="bash",
+            body="echo ok",
+        ),
+    ]
+
+
 def test_public_docs_are_discovered_from_docs_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

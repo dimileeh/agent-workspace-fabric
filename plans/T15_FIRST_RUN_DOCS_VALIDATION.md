@@ -2626,6 +2626,52 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for Review-Level Comment `issue:4620140358`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `_markdown_fences` accepts an explicit `line_offset` for callers
+  that inspect a Markdown section substring while preserving existing
+  full-document line numbering by default.
+- Complete: The Quickstart Lane 1 package-manager alternative assertion now
+  passes the section's original document line offset, so mixed-block diagnostics
+  report real `docs/QUICKSTART.md` line numbers.
+- Complete: A focused helper regression covers section-slice offset behavior.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_status.py`
+- `tests/unit/docs/test_public_docs_guides_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_markdown_fences_accepts_line_offset_for_section_slices -q
+# Red phase before helper update: failed with TypeError because _markdown_fences
+# did not accept line_offset.
+# Final result: included in the parser-focused run below.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_keeps_package_manager_alternatives_in_separate_blocks tests/unit/docs/test_public_docs_guides_status.py::test_markdown_fences_accepts_line_offset_for_section_slices -q
+# 2 passed in 0.60s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_markdown_fences_consumes_closing_fence_between_adjacent_snippets tests/unit/docs/test_public_docs_guides_status.py::test_markdown_fences_accepts_indented_copy_paste_fences tests/unit/docs/test_public_docs_guides_status.py::test_markdown_fences_accepts_line_offset_for_section_slices -q
+# 3 passed in 0.62s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+git diff --check
+# no output
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HYi_o`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
