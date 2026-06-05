@@ -55,6 +55,9 @@ SETUP_START_DOCS = (
 )
 
 FENCE_RE = re.compile(r"^ {0,3}```")
+# Inline (single-backtick) code spans in prose / numbered steps. R2 scans these
+# alongside fenced commands so a no-path `awf init` documented inline is caught.
+INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 # Flags that consume the following token as their value; everything else that
 # starts with "-" is treated as a valueless flag.
 VALUE_FLAGS = frozenset({"--project", "--format"})
@@ -107,6 +110,27 @@ def _fenced_command_lines(text: str) -> list[str]:
         if stripped:
             lines.append(stripped)
     return lines
+
+
+def _inline_command_mentions(text: str) -> list[str]:
+    """Return inline (single-backtick) code spans from prose, fences excluded.
+
+    Several first-run docs document ``awf init`` as inline backticked commands in
+    prose and numbered steps rather than only inside ``` fences. Those mentions
+    must honour the same public grammar, so R2 feeds them through the same
+    classifier. Fenced blocks are skipped here to avoid double-counting the lines
+    already returned by :func:`_fenced_command_lines`.
+    """
+    mentions: list[str] = []
+    inside = False
+    for raw_line in text.splitlines():
+        if FENCE_RE.match(raw_line):
+            inside = not inside
+            continue
+        if inside:
+            continue
+        mentions.extend(match.group(1).strip() for match in INLINE_CODE_RE.finditer(raw_line))
+    return mentions
 
 
 def _split_tail(tail: str) -> list[str]:
@@ -250,6 +274,17 @@ def test_helper_extracts_fenced_command_lines() -> None:
     assert _fenced_command_lines(text) == ["awf setup", "awf start"]
 
 
+def test_helper_extracts_inline_command_mentions() -> None:
+    text = (
+        "Run `awf init <path>` to onboard.\n\n"
+        "```bash\nawf setup\n```\n"
+        "Then `awf start` and see `awf init .`.\n"
+    )
+    # Fenced `awf setup` is excluded (it comes back via _fenced_command_lines);
+    # the inline mentions are returned in order so R2 can classify each.
+    assert _inline_command_mentions(text) == ["awf init <path>", "awf start", "awf init ."]
+
+
 def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     assert _bootstrap_offenders("Run `awf init` without a path to bootstrap Core.")
     assert _bootstrap_offenders("awf init  # bootstrap the local service")
@@ -278,11 +313,16 @@ def test_first_run_docs_use_setup_and_start_grammar() -> None:
 
 
 def test_documented_awf_init_always_takes_a_path() -> None:
-    """R2: every documented `awf init` command line carries a path/repo arg."""
+    """R2: every documented `awf init` command carries a path/repo arg.
+
+    Covers both fenced examples and inline backticked mentions in prose/list
+    steps so a no-path regression in either shape is flagged.
+    """
     offenders: list[str] = []
     init_lines_seen = 0
     for rel_path in FIRST_RUN_DOCS:
-        for line in _fenced_command_lines(_read(rel_path)):
+        text = _read(rel_path)
+        for line in _fenced_command_lines(text) + _inline_command_mentions(text):
             status = _init_arg_status(line)
             if status is None:
                 continue
