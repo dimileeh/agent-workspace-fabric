@@ -369,13 +369,22 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
     """Parse an ``awf smoke run`` command line, or ``None`` if it is not one.
 
     The match is anchored at the start of ``line`` (``re.match``, not
-    ``re.search``) so only a span that *begins with* ``awf smoke run`` is read as
-    an invocation. R4 feeds inline backtick spans through here, so a prose mention
+    ``re.search``), but a leading ``uv run ...`` runner prefix is allowed before
+    ``awf smoke run`` so the documented ``uv run --python 3.12 --extra dev awf
+    smoke run ...`` lane (README/UPGRADE/QUICKSTART/GETTING_STARTED) is still
+    classified — without it R4 silently skipped those lines while R2's
+    ``re.search``-based ``_init_arg_status`` checked the sibling ``uv run ... awf
+    init`` lane, leaving the mocked-smoke grammar on the ``uv run`` lanes able to
+    regress undetected.
+
+    Anchoring (rather than an unbounded ``re.search``) still keeps a prose mention
     that merely references the command mid-sentence (e.g. ``the awf smoke run
-    command``) would otherwise be parsed with the trailing prose as a positional
-    path and flagged as a spurious ``bare positional path`` offender.
+    command`` or ``see awf smoke run --mocked-local below``) from being parsed with
+    the trailing prose as a positional path and flagged as a spurious ``bare
+    positional path`` offender: such a line neither begins with ``awf smoke run``
+    nor with a ``uv run`` runner prefix, so it returns ``None``.
     """
-    match = re.match(r"awf smoke run\b(?P<tail>.*)", line)
+    match = re.match(r"(?:uv\s+run\b.*?\s+)?awf smoke run\b(?P<tail>.*)", line)
     if match is None:
         return None
     tail = match.group("tail")
@@ -508,6 +517,23 @@ def test_helper_smoke_parser_requires_command_at_span_start() -> None:
     assert _parse_smoke_invocation("see awf smoke run --mocked-local below") is None
     # A span that does start with the command is still parsed as before.
     assert _parse_smoke_invocation("awf smoke run --mocked-local") is not None
+    # The documented `uv run ... awf smoke run` lane is a real command line, not a
+    # prose reference, so the runner prefix is unwrapped and the smoke grammar is
+    # classified (mirroring how `_init_arg_status` checks the `uv run ... awf init`
+    # lane). Otherwise the mocked-smoke grammar could silently regress on those
+    # lanes without failing R4.
+    uv_lane = _parse_smoke_invocation(
+        "uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local"
+    )
+    assert uv_lane is not None
+    assert uv_lane.has_project is True
+    assert uv_lane.has_mocked_local is True
+    assert uv_lane.positional_path is False
+    # A bare positional path on the `uv run` lane is still surfaced as an offender.
+    uv_bare = _parse_smoke_invocation("uv run --extra dev awf smoke run /tmp/proj --mocked-local")
+    assert uv_bare is not None
+    assert uv_bare.positional_path is True
+    assert uv_bare.has_project is False
 
 
 def test_helper_curl_installer_pattern_targets_pipe_to_interpreter() -> None:
