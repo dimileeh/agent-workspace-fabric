@@ -669,10 +669,10 @@ def _prepare_isolated_claude_auth(
                         host_claude=source_dir,
                         forward_deletions=legacy_complete,
                     )
-                    shutil.rmtree(legacy_claude_copy, ignore_errors=True)
-                    # Reap the completeness marker with the copy it vouches for. It
-                    # lives *beside* the legacy tree (``target_root``), so ``rmtree``
-                    # of ``.claude`` leaves it dangling otherwise. Its invariant is
+                    # Reap the completeness marker with the copy it vouches for, and
+                    # do it *before* the (potentially multi-GB) ``rmtree`` — not after.
+                    # The marker lives *beside* the legacy tree (``target_root``), so
+                    # ``rmtree`` of ``.claude`` leaves it dangling. Its invariant is
                     # "present ⟹ *this* ``.claude`` copy is provably complete"; a
                     # stale marker over a since-reaped copy would falsely vouch for a
                     # later partial ``.claude`` that lands here without the atomic
@@ -680,7 +680,18 @@ def _prepare_isolated_claude_auth(
                     # ``forward_deletions`` true so the whiteout pass could hide
                     # still-valid lower credentials. Removing it restores the
                     # safe default (a missing marker forgoes the destructive pass).
+                    #
+                    # Order matters: a worker killed *during* the large ``rmtree`` would
+                    # leave a *partially removed* legacy tree behind. If the marker were
+                    # only cleared afterwards it would survive, and the next provision's
+                    # ``legacy_complete`` gate would treat that damaged tree as proven
+                    # complete — forwarding files the interrupted cleanup deleted (not the
+                    # agent) as credential-hiding whiteouts. Clearing the marker first
+                    # makes an interrupted cleanup degrade to the safe direction instead.
+                    # We already captured ``legacy_complete`` above, so the reconcile's
+                    # deletion-forwarding decision is unaffected by removing it now.
                     (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).unlink(missing_ok=True)
+                    shutil.rmtree(legacy_claude_copy, ignore_errors=True)
         else:
             target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)

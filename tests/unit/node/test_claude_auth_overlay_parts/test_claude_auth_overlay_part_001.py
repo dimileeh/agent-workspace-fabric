@@ -1417,3 +1417,52 @@ def test_overlay_reap_removes_stale_completeness_marker(
     # The legacy copy is reaped, and so is its now-dangling completeness marker.
     assert not (claude_root / ".claude").exists()
     assert not (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).exists()
+
+
+@pytest.mark.unit
+def test_overlay_reap_clears_marker_before_legacy_rmtree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reviewer's #414 PRRT_kwDOSJAM6s6HSG1G case: the completeness marker must be
+    # invalidated *before* the (potentially multi-GB) legacy-copy ``rmtree``, not after.
+    # A worker killed mid-``rmtree`` leaves a *partially removed* legacy tree; if the
+    # marker is only cleared afterwards it survives, and the next provision's
+    # ``legacy_complete`` gate would treat the damaged tree as proven complete — so files
+    # the interrupted cleanup deleted (never the agent) become eligible for credential-
+    # hiding deletion whiteouts. Clearing the marker first makes an interrupted cleanup
+    # fall back to the safe direction (a missing marker forgoes the destructive pass).
+    host_home, work_dir, claude_root = _seed_overlay_reuse_with_deletion_shaped_legacy(
+        tmp_path, "ws_reap_order"
+    )
+    (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).touch()
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod([]))
+
+    legacy_copy = claude_root / ".claude"
+    marker = claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER
+    real_rmtree = auth_mounts_mod.shutil.rmtree
+    marker_present_at_legacy_rmtree: list[bool] = []
+
+    def _recording_rmtree(path: object, *args: object, **kwargs: object) -> object:
+        # Record the marker's state exactly when the legacy ``.claude`` reap begins: an
+        # interrupted cleanup would freeze the tree in whatever state it is here, so the
+        # marker must already be gone for the next provision to stay safe.
+        if Path(str(path)) == legacy_copy:
+            marker_present_at_legacy_rmtree.append(marker.exists())
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(auth_mounts_mod.shutil, "rmtree", _recording_rmtree)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reap_order",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=True),
+    )
+
+    # The legacy reap ran, and the marker was already cleared before it started.
+    assert marker_present_at_legacy_rmtree == [False]
+    assert not legacy_copy.exists()
+    assert not marker.exists()
