@@ -78,10 +78,18 @@ def _default_local_service_compose_file(
     tmp_path: Path,
 ) -> None:
     from awf.service import bootstrap as bootstrap_mod
+    from awf.service import config as config_mod
 
     _write_root_service_compose(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(bootstrap_mod, "get_bootstrap_asset_root", lambda: None)
+    monkeypatch.setattr(
+        config_mod,
+        "resolve_local_service_compose_env_file",
+        lambda env_file=config_mod.LOCAL_SERVICE_COMPOSE_ENV_FILE: (
+            env_file if env_file.exists() else None
+        ),
+    )
     _clear_docker_compose_caller_env(monkeypatch)
 
 
@@ -474,7 +482,7 @@ def test_service_logs_defaults_to_tail_api_and_worker_logs(
     assert kwargs["check"] is False
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
-    assert isinstance(kwargs["env"], dict)
+    assert kwargs.get("env") is None
 
 
 @pytest.mark.unit
