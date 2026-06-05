@@ -66,7 +66,13 @@ INIT_CONTEXT_DOCS = (
     "docs/MCP_SETUP.md",
 )
 
-FENCE_RE = re.compile(r"^ {0,3}```")
+# Fenced blocks: capture the info string's leading language token so the command
+# scanners only read shell/command examples. Non-shell fences (yaml/json/toml/
+# text) hold config or sample output, not commands — feeding their lines to the
+# grammar classifiers would manufacture spurious offenders (e.g. a YAML value
+# containing `awf init` misread as a bare-init regression).
+FENCE_RE = re.compile(r"^ {0,3}```(?P<lang>[^\s`]*)")
+SHELL_FENCE_LANGS = frozenset({"", "bash", "sh", "shell", "console", "zsh"})
 # Inline (single-backtick) code spans in prose / numbered steps. R2 scans these
 # alongside fenced commands so a no-path `awf init` documented inline is caught.
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
@@ -110,14 +116,26 @@ def _read(rel_path: str) -> str:
 
 
 def _fenced_command_lines(text: str) -> list[str]:
-    """Return non-empty command lines inside ``` fences, prompt markers removed."""
+    """Return non-empty command lines inside shell ``` fences, markers removed.
+
+    Only shell-tagged (or untagged) fences contribute lines; ``yaml``/``json``/
+    ``toml``/``text`` fences carry config or sample output, so their lines are
+    skipped to avoid manufacturing false offenders in the grammar classifiers.
+    The ``$ ``/``> `` prompt prefix is stripped from each collected line.
+    """
     lines: list[str] = []
     inside = False
+    collecting = False
     for raw_line in text.splitlines():
-        if FENCE_RE.match(raw_line):
-            inside = not inside
+        fence = FENCE_RE.match(raw_line)
+        if fence is not None:
+            if inside:
+                inside = collecting = False
+            else:
+                inside = True
+                collecting = fence.group("lang").lower() in SHELL_FENCE_LANGS
             continue
-        if not inside:
+        if not collecting:
             continue
         stripped = raw_line.strip()
         if stripped.startswith(("$ ", "> ")):
@@ -153,6 +171,19 @@ def _split_tail(tail: str) -> list[str]:
         return shlex.split(tail, comments=True)
     except ValueError:
         return tail.split()
+
+
+def _is_standalone(line: str, command: str) -> bool:
+    """True if ``line`` invokes ``command`` as a standalone entrypoint.
+
+    Tokenised comment-aware (via :func:`_split_tail`) so an annotated example —
+    ``awf setup  # first-time setup`` — still counts as the bare entrypoint
+    instead of triggering a spurious R1 failure. Trailing flags/args
+    (``awf setup --x``) are intentionally *not* standalone, preserving R1's
+    "documented as a standalone entrypoint" intent rather than relaxing it to any
+    invocation.
+    """
+    return _split_tail(line) == command.split()
 
 
 def _looks_pathlike(token: str) -> bool:
@@ -289,6 +320,29 @@ def test_helper_extracts_fenced_command_lines() -> None:
     assert _fenced_command_lines(text) == ["awf setup", "awf start"]
 
 
+def test_helper_skips_non_shell_fenced_blocks() -> None:
+    # Only shell-tagged (or untagged) fences feed the command scanners; a
+    # yaml/json/text block that happens to contain an `awf` token must not
+    # contribute a line that the classifiers would misread as an offender.
+    text = (
+        "```yaml\ncommand: awf init\n```\n"
+        "```bash\nawf init .\n```\n"
+        "```\nawf start\n```\n"
+        "```text\nawf smoke run /tmp/proj\n```\n"
+    )
+    assert _fenced_command_lines(text) == ["awf init .", "awf start"]
+
+
+def test_helper_standalone_command_ignores_inline_comment() -> None:
+    # An annotated standalone entrypoint still counts as standalone (R1), while a
+    # genuinely argument-bearing invocation does not.
+    assert _is_standalone("awf setup", "awf setup")
+    assert _is_standalone("awf setup  # first-time setup", "awf setup")
+    assert _is_standalone("awf start", "awf start")
+    assert not _is_standalone("awf setup --source-checkout .", "awf setup")
+    assert not _is_standalone("awf service status", "awf start")
+
+
 def test_helper_extracts_inline_command_mentions() -> None:
     text = (
         "Run `awf init <path>` to onboard.\n\n"
@@ -324,10 +378,10 @@ def test_first_run_docs_use_setup_and_start_grammar() -> None:
     """R1: setup/start are documented as standalone entrypoints."""
     missing: list[str] = []
     for rel_path in SETUP_START_DOCS:
-        commands = set(_fenced_command_lines(_read(rel_path)))
-        if "awf setup" not in commands:
+        commands = _fenced_command_lines(_read(rel_path))
+        if not any(_is_standalone(line, "awf setup") for line in commands):
             missing.append(f"{rel_path}: missing standalone `awf setup`")
-        if "awf start" not in commands:
+        if not any(_is_standalone(line, "awf start") for line in commands):
             missing.append(f"{rel_path}: missing standalone `awf start`")
 
     assert not missing, missing
