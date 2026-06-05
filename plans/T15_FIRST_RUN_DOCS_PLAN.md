@@ -814,3 +814,21 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lif
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
 git diff --check
 ```
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HZ0De`:
+`docs/UPGRADE.md` restore snippets must strip trailing dotenv comments after
+valid single-quoted and double-quoted values before quote removal and double
+quote escape decoding. Preserve existing unquoted inline-comment stripping and
+quoted dotenv decoding, and keep the repair scoped to the Upgrade guide and its
+focused docs regression.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HZ0De`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_upgrade_env_restore_strips_quoted_inline_dotenv_comments -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments tests/unit/docs/test_public_docs_lifecycle_status.py::test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_env_restore_decodes_quoted_dotenv_entries -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py
+git diff --check
+```

@@ -522,6 +522,109 @@ def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
         assert result.stdout == "token-from-env\nawf_dev\n", label
 
 
+def test_upgrade_env_restore_strips_quoted_inline_dotenv_comments(
+    tmp_path: Path,
+) -> None:
+    """Assert upgrade snippets restore quoted dotenv values with trailing comments."""
+    env_file = tmp_path / ".env"
+    persisted_database_url = "postgresql+asyncpg://awf:p%23w@localhost:15433/awf"
+    env_file.write_text(
+        "\n".join(
+            [
+                'AWF_API_TOKEN="tok\\"\\$en # inside" # local token',
+                "AWF_POSTGRES_PASSWORD='pw # inside' # local password",
+                f'AWF_DATABASE_URL="{persisted_database_url}" # local database',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    global_rollback_heading = "For the source checkout with global tool install lane"
+    no_global_rollback_heading = "For the source checkout with no global install lane"
+    release_rollback_section = rollback_section.split(
+        "For release-installed lanes",
+        maxsplit=1,
+    )[1].split(
+        global_rollback_heading,
+        maxsplit=1,
+    )[0]
+    package_cases = (
+        ("Upgrade uv tool", _markdown_section(upgrade_text, "## uv tool")),
+        ("Upgrade pipx", _markdown_section(upgrade_text, "## pipx")),
+        ("Upgrade virtualenv / pip", _markdown_section(upgrade_text, "## Virtualenv / pip")),
+        ("Release-installed rollback", release_rollback_section),
+    )
+    source_cases = (
+        (
+            "Upgrade source checkout with global tool install",
+            _markdown_section(upgrade_text, "## Source Checkout With Global Tool Install"),
+        ),
+        (
+            "Upgrade source checkout with no global install",
+            _markdown_section(upgrade_text, "## Source Checkout With No Global Install"),
+        ),
+        (
+            "Global source-checkout rollback",
+            rollback_section.split(global_rollback_heading, maxsplit=1)[1].split(
+                no_global_rollback_heading,
+                maxsplit=1,
+            )[0],
+        ),
+        (
+            "No-global source-checkout rollback",
+            rollback_section.split(no_global_rollback_heading, maxsplit=1)[1],
+        ),
+    )
+
+    scripts: list[tuple[str, str, bool]] = [
+        (label, _package_env_restore_script(section, label), True)
+        for label, section in package_cases
+    ]
+    for label, section in source_cases:
+        bash_fences = [
+            fence
+            for fence in _markdown_fences("docs/UPGRADE.md", section)
+            if fence.language == "bash"
+        ]
+        assert len(bash_fences) == 1, label
+        body = bash_fences[0].body
+        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        stop_start = body.index("if [ -f .env ]; then")
+        restore_script = body[restore_start:stop_start]
+        scripts.append((label, restore_script, "AWF_PERSISTED_DATABASE_URL" in restore_script))
+
+    for label, restore_script, restores_database_url in scripts:
+        if restores_database_url:
+            print_command = (
+                'printf "%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
+                '"$AWF_POSTGRES_PASSWORD" "$AWF_DATABASE_URL"'
+            )
+            expected_stdout = f'tok"$en # inside\npw # inside\n{persisted_database_url}\n'
+        else:
+            print_command = 'printf "%s\\n%s\\n" "$AWF_API_TOKEN" "$AWF_POSTGRES_PASSWORD"'
+            expected_stdout = 'tok"$en # inside\npw # inside\n'
+        script = "\n".join(
+            (
+                "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD AWF_DATABASE_URL",
+                restore_script,
+                print_command,
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == expected_stdout, label
+
+
 @pytest.mark.parametrize(
     "heading",
     (
