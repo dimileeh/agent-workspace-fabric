@@ -3,18 +3,37 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import os
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect, text
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.dialects import postgresql
 
-from awf.db.session import make_engine
+from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories.base import (
+    TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+    TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+)
+from awf.db.session import make_engine, make_session_factory
 from tests.postgres import postgres_alembic_subprocess_lock, postgres_empty_test_url
+
+_AUTH_OVERLAY_BACKFILL_REVISION = "0f1e2d3c4b5a"
+_AUTH_OVERLAY_BACKFILL_FILENAME = (
+    f"{_AUTH_OVERLAY_BACKFILL_REVISION}_backfill_auth_overlay_unmount_pending.py"
+)
+_AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
+_AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
+_AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
 
 
 def _run_alembic(repo_root: Path, env: dict[str, str], *args: str) -> None:
@@ -34,6 +53,44 @@ def _run_alembic(repo_root: Path, env: dict[str, str], *args: str) -> None:
         )
 
 
+def _load_auth_overlay_backfill_migration(repo_root: Path) -> ModuleType:
+    migration_path = repo_root / "migrations" / "versions" / _AUTH_OVERLAY_BACKFILL_FILENAME
+    spec = importlib.util.spec_from_file_location(
+        "awf_auth_overlay_unmount_backfill_migration",
+        migration_path,
+    )
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"could not load migration module from {migration_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _ScalarOneResult:
+    def __init__(self, value: int) -> None:
+        self._value = value
+
+    def scalar_one(self) -> int:
+        return self._value
+
+    def scalar_one_or_none(self) -> int | None:
+        return self._value
+
+
+class _AtomicReserveConnection:
+    dialect = postgresql.dialect()
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute(self, statement: object) -> _ScalarOneResult:
+        compiled = str(statement.compile(dialect=self.dialect)).lower()
+        self.statements.append(compiled)
+        if compiled.lstrip().startswith("select"):
+            raise AssertionError("event-order reservation must be one atomic UPDATE")
+        return _ScalarOneResult(8)
+
+
 @pytest.mark.unit
 def test_alembic_revision_graph_has_single_head() -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -41,7 +98,545 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["f9a0b1c2d3e4"]
+    assert script.get_heads() == [_AUTH_OVERLAY_BACKFILL_REVISION]
+
+
+@pytest.mark.unit
+def test_auth_overlay_unmount_backfill_reserves_event_order_atomically() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = _load_auth_overlay_backfill_migration(repo_root)
+    connection = _AtomicReserveConnection()
+
+    event_order = migration._reserve_workspace_event_order(
+        connection,
+        workspace_id="ws_atomic",
+        release_event_id="evt_atomic_release",
+        release_event_order=5,
+        cycle_floor=5,
+    )
+
+    assert event_order == 8
+    assert len(connection.statements) == 1
+    statement = connection.statements[0]
+    assert statement.lstrip().startswith("update workspaces set")
+    assert "greatest(" in statement
+    assert "not (exists" in statement
+    assert "returning workspaces.event_sequence" in statement
+
+
+@pytest.mark.unit
+def test_auth_overlay_unmount_backfill_sets_timeout_guardrails_before_dml() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration_path = repo_root / "migrations" / "versions" / _AUTH_OVERLAY_BACKFILL_FILENAME
+    migration = migration_path.read_text(encoding="utf-8")
+
+    statement_timeout_index = migration.index("SET LOCAL statement_timeout = '10min'")
+    lock_timeout_index = migration.index("SET LOCAL lock_timeout = '0'")
+    backfill_index = migration.index("backfill_auth_overlay_unmount_pending(bind)")
+
+    assert "SET LOCAL lock_timeout = '5s'" not in migration
+    assert statement_timeout_index < lock_timeout_index < backfill_index
+
+
+@pytest.mark.unit
+def test_auth_overlay_unmount_backfill_skips_reservation_when_marker_appears() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = _load_auth_overlay_backfill_migration(repo_root)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspaces (
+                        id VARCHAR(36) PRIMARY KEY,
+                        event_sequence INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspace_events (
+                        id VARCHAR(36) PRIMARY KEY,
+                        workspace_id VARCHAR(36) NOT NULL,
+                        event_type VARCHAR(64) NOT NULL,
+                        reason_code VARCHAR(64),
+                        payload JSON,
+                        occurred_at DATETIME NOT NULL,
+                        event_order INTEGER
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspaces (id, event_sequence)
+                    VALUES ('ws_race_marker', 4)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspace_events (
+                        id, workspace_id, event_type, reason_code, payload,
+                        occurred_at, event_order
+                    )
+                    VALUES (
+                        'evt_race_release', 'ws_race_marker',
+                        :release_type, :release_reason,
+                        '{"auth_overlay_unmounted": false}',
+                        '2026-06-01 00:00:00+00', 4
+                    ),
+                    (
+                        'evt_race_marker', 'ws_race_marker',
+                        :pending_type, :pending_reason,
+                        '{"attempt": 2}',
+                        '2026-06-01 00:00:01+00', 4
+                    )
+                    """
+                ),
+                {
+                    "release_type": TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    "release_reason": TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    "pending_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE,
+                    "pending_reason": _AUTH_OVERLAY_PENDING_REASON_CODE,
+                },
+            )
+
+            event_order = migration._reserve_workspace_event_order(
+                conn,
+                workspace_id="ws_race_marker",
+                release_event_id="evt_race_release",
+                release_event_order=4,
+                cycle_floor=4,
+            )
+            sequence = conn.execute(
+                text(
+                    """
+                    SELECT event_sequence
+                    FROM workspaces
+                    WHERE id = 'ws_race_marker'
+                    """
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert event_order is None
+    assert sequence == 4
+
+
+@pytest.mark.unit
+def test_auth_overlay_unmount_backfill_skips_stale_release_cycle_reservation() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = _load_auth_overlay_backfill_migration(repo_root)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspaces (
+                        id VARCHAR(36) PRIMARY KEY,
+                        event_sequence INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspace_events (
+                        id VARCHAR(36) PRIMARY KEY,
+                        workspace_id VARCHAR(36) NOT NULL,
+                        event_type VARCHAR(64) NOT NULL,
+                        reason_code VARCHAR(64),
+                        payload JSON,
+                        event_order INTEGER,
+                        occurred_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspaces (id, event_sequence)
+                    VALUES ('ws_stale_release_cycle', 6)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspace_events (
+                        id, workspace_id, event_type, reason_code, payload,
+                        event_order, occurred_at
+                    )
+                    VALUES (
+                        'evt_old_release', 'ws_stale_release_cycle',
+                        :release_type, :release_reason,
+                        '{"auth_overlay_unmounted": false}', 4,
+                        '2026-06-01 00:00:00+00'
+                    ),
+                    (
+                        'evt_old_release_revoked', 'ws_stale_release_cycle',
+                        :revoked_type, :revoked_reason,
+                        '{}', 5, '2026-06-01 00:00:01+00'
+                    ),
+                    (
+                        'evt_new_release', 'ws_stale_release_cycle',
+                        :release_type, :release_reason,
+                        '{"auth_overlay_unmounted": true}', 6,
+                        '2026-06-01 00:00:02+00'
+                    )
+                    """
+                ),
+                {
+                    "release_type": TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    "release_reason": TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    "revoked_type": TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                    "revoked_reason": TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                },
+            )
+
+            event_order = migration._reserve_workspace_event_order(
+                conn,
+                workspace_id="ws_stale_release_cycle",
+                release_event_id="evt_old_release",
+                release_event_order=4,
+                cycle_floor=4,
+            )
+            sequence = conn.execute(
+                text(
+                    """
+                    SELECT event_sequence
+                    FROM workspaces
+                    WHERE id = 'ws_stale_release_cycle'
+                    """
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert event_order is None
+    assert sequence == 6
+
+
+@pytest.mark.unit
+async def test_auth_overlay_unmount_backfill_postgres_seeds_only_qualifying_rows_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = _load_auth_overlay_backfill_migration(repo_root)
+    async with postgres_empty_test_url() as database_url:
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": database_url,
+        }
+
+        monkeypatch.chdir(repo_root)
+        with postgres_alembic_subprocess_lock(database_url):
+            _run_alembic(repo_root, env, "upgrade", "f9a0b1c2d3e4")
+
+        engine = make_engine(database_url)
+        try:
+            factory = make_session_factory(engine)
+            async with factory() as session:
+                repo = WorkspaceRepository(session)
+
+                async def _workspace(
+                    workspace_id: str,
+                    *,
+                    payload: dict[str, object] | None,
+                ) -> tuple[str, int]:
+                    ws = await repo.create(
+                        workspace_id=workspace_id,
+                        repo_url=f"git@example.com:{workspace_id}.git",
+                        branch_base="main",
+                        task_title=workspace_id,
+                        task_prompt="do work",
+                        agent="codex",
+                        test_commands=[],
+                        task_policy={},
+                    )
+                    ws.status = WorkspaceStatus.failed.value
+                    ws.node_id = "node-1"
+                    ws.compose_project_name = f"awf_{workspace_id}"
+                    event = await repo.add_event(
+                        ws,
+                        event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                        reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                        payload=payload,
+                    )
+                    assert event.event_order is not None
+                    return ws.id, event.event_order
+
+                qualifying_id, qualifying_release_order = await _workspace(
+                    "ws_bf_ok",
+                    payload={
+                        "auth_overlay_unmounted": False,
+                        "compose_project_name": "awf_ws_bf_ok",
+                    },
+                )
+                existing_id, existing_release_order = await _workspace(
+                    "ws_bf_existing",
+                    payload={
+                        "auth_overlay_unmounted": False,
+                        "compose_project_name": "awf_ws_bf_existing",
+                    },
+                )
+                existing_ws = await repo.get(existing_id)
+                assert existing_ws is not None
+                existing_marker = await repo.add_event(
+                    existing_ws,
+                    event_type=_AUTH_OVERLAY_PENDING_EVENT_TYPE,
+                    reason_code=_AUTH_OVERLAY_PENDING_REASON_CODE,
+                    payload={"attempt": 7, "untouched": True},
+                )
+                assert existing_marker.event_order is not None
+
+                non_qualifying: list[str] = []
+                for workspace_id, payload in (
+                    (
+                        "ws_bf_true",
+                        {"auth_overlay_unmounted": True},
+                    ),
+                    (
+                        "ws_bf_missing",
+                        {"compose_project_name": "awf_ws_bf_missing"},
+                    ),
+                    (
+                        "ws_bf_null",
+                        None,
+                    ),
+                ):
+                    ws_id, _release_order = await _workspace(workspace_id, payload=payload)
+                    non_qualifying.append(ws_id)
+
+                revoked_id, _revoked_release_order = await _workspace(
+                    "ws_bf_revoked",
+                    payload={"auth_overlay_unmounted": False},
+                )
+                revoked_ws = await repo.get(revoked_id)
+                assert revoked_ws is not None
+                await repo.add_event(
+                    revoked_ws,
+                    event_type=TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                    reason_code=TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                )
+                non_qualifying.append(revoked_id)
+
+                terminal_id, _terminal_release_order = await _workspace(
+                    "ws_bf_terminal",
+                    payload={"auth_overlay_unmounted": False},
+                )
+                terminal_ws = await repo.get(terminal_id)
+                assert terminal_ws is not None
+                await repo.add_event(
+                    terminal_ws,
+                    event_type=_AUTH_OVERLAY_RESOLVED_EVENT_TYPE,
+                    reason_code="TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED",
+                )
+                non_qualifying.append(terminal_id)
+                await session.commit()
+
+            async with engine.begin() as conn:
+                inserted = await conn.run_sync(migration.backfill_auth_overlay_unmount_pending)
+                inserted_again = await conn.run_sync(
+                    migration.backfill_auth_overlay_unmount_pending
+                )
+
+            async with factory() as session:
+                marker_rows = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT workspace_id, reason_code, payload, event_order
+                            FROM workspace_events
+                            WHERE event_type = :event_type
+                            ORDER BY workspace_id, event_order
+                            """
+                        ),
+                        {"event_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE},
+                    )
+                ).all()
+                workspace_sequences = dict(
+                    (
+                        await session.execute(
+                            text(
+                                """
+                                SELECT id, event_sequence
+                                FROM workspaces
+                                WHERE id IN (
+                                    :qualifying_id,
+                                    :existing_id
+                                )
+                                """
+                            ),
+                            {
+                                "qualifying_id": qualifying_id,
+                                "existing_id": existing_id,
+                            },
+                        )
+                    ).all()
+                )
+        finally:
+            await engine.dispose()
+
+    assert inserted == 1
+    assert inserted_again == 0
+    rows_by_workspace = {row.workspace_id: row for row in marker_rows}
+    assert set(rows_by_workspace) == {qualifying_id, existing_id}
+
+    qualifying_marker = rows_by_workspace[qualifying_id]
+    assert qualifying_marker.reason_code == _AUTH_OVERLAY_PENDING_REASON_CODE
+    assert qualifying_marker.payload == {
+        "compose_project_name": "awf_ws_bf_ok",
+        "workspace_status": WorkspaceStatus.failed.value,
+        "attempt": 1,
+    }
+    assert qualifying_marker.event_order >= qualifying_release_order
+    assert workspace_sequences[qualifying_id] == qualifying_marker.event_order
+
+    existing_marker_row = rows_by_workspace[existing_id]
+    assert existing_marker_row.payload == {"attempt": 7, "untouched": True}
+    assert existing_marker_row.event_order == existing_marker.event_order
+    assert existing_marker_row.event_order >= existing_release_order
+    assert workspace_sequences[existing_id] == existing_marker.event_order
+    assert all(workspace_id not in rows_by_workspace for workspace_id in non_qualifying)
+
+
+@pytest.mark.unit
+def test_auth_overlay_unmount_backfill_sqlite_parses_payloads_without_json_predicates() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = _load_auth_overlay_backfill_migration(repo_root)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspaces (
+                        id VARCHAR(36) PRIMARY KEY,
+                        status VARCHAR(32) NOT NULL,
+                        event_sequence INTEGER NOT NULL DEFAULT 0,
+                        compose_project_name VARCHAR(128)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspace_events (
+                        id VARCHAR(36) PRIMARY KEY,
+                        workspace_id VARCHAR(36) NOT NULL,
+                        event_type VARCHAR(64) NOT NULL,
+                        old_state VARCHAR(32),
+                        new_state VARCHAR(32),
+                        reason_code VARCHAR(64),
+                        payload JSON,
+                        event_order INTEGER,
+                        occurred_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspaces (id, status, event_sequence, compose_project_name)
+                    VALUES
+                        ('ws_sqlite_false', 'failed', 1, 'awf_sqlite_false'),
+                        ('ws_sqlite_true', 'failed', 1, 'awf_sqlite_true'),
+                        ('ws_sqlite_invalid', 'failed', 1, 'awf_sqlite_invalid'),
+                        (
+                            'ws_sqlite_existing_null_marker', 'failed', 0,
+                            'awf_sqlite_existing_null_marker'
+                        )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspace_events (
+                        id, workspace_id, event_type, reason_code, payload,
+                        event_order, occurred_at
+                    )
+                    VALUES
+                        (
+                            'evt_sqlite_false', 'ws_sqlite_false',
+                            :release_type, :release_reason,
+                            '{"auth_overlay_unmounted": false}', 1,
+                            '2026-06-01 00:00:00+00'
+                        ),
+                        (
+                            'evt_sqlite_true', 'ws_sqlite_true',
+                            :release_type, :release_reason,
+                            '{"auth_overlay_unmounted": true}', 1,
+                            '2026-06-01 00:00:00+00'
+                        ),
+                        (
+                            'evt_sqlite_invalid', 'ws_sqlite_invalid',
+                            :release_type, :release_reason,
+                            '{"auth_overlay_unmounted": ', 1,
+                            '2026-06-01 00:00:00+00'
+                        ),
+                        (
+                            'evt_sqlite_existing_release',
+                            'ws_sqlite_existing_null_marker',
+                            :release_type, :release_reason,
+                            '{"auth_overlay_unmounted": false}', NULL,
+                            '2026-06-01 00:00:00+00'
+                        ),
+                        (
+                            'evt_sqlite_existing_marker',
+                            'ws_sqlite_existing_null_marker',
+                            :pending_type, :pending_reason,
+                            '{"attempt": 3}', NULL,
+                            '2026-06-01 00:00:01+00'
+                        )
+                    """
+                ),
+                {
+                    "release_type": TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    "release_reason": TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    "pending_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE,
+                    "pending_reason": _AUTH_OVERLAY_PENDING_REASON_CODE,
+                },
+            )
+
+            inserted = migration.backfill_auth_overlay_unmount_pending(conn)
+            marker_rows = conn.execute(
+                text(
+                    """
+                    SELECT id, workspace_id, reason_code, payload, event_order
+                    FROM workspace_events
+                    WHERE event_type = :event_type
+                    ORDER BY workspace_id, event_order
+                    """
+                ),
+                {"event_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE},
+            ).all()
+    finally:
+        engine.dispose()
+
+    assert inserted == 1
+    assert len(marker_rows) == 2
+    markers_by_workspace = {marker.workspace_id: marker for marker in marker_rows}
+    marker = markers_by_workspace["ws_sqlite_false"]
+    assert marker.workspace_id == "ws_sqlite_false"
+    assert marker.reason_code == _AUTH_OVERLAY_PENDING_REASON_CODE
+    assert marker.event_order == 2
+    existing_marker = markers_by_workspace["ws_sqlite_existing_null_marker"]
+    assert existing_marker.id == "evt_sqlite_existing_marker"
+    assert existing_marker.event_order is None
 
 
 @pytest.mark.unit
