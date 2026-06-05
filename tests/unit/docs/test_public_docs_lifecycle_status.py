@@ -123,8 +123,8 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
         root_then_legacy_env_loop = "for env_file in .env docker/compose/.env; do"
         assert checkout_refresh_line in section, f"{label} is missing checkout refresh"
         assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
-        assert section.count(root_then_legacy_env_loop) == 3, (
-            f"{label} must restore API token, Postgres password, and database URL "
+        assert section.count(root_then_legacy_env_loop) == 4, (
+            f"{label} must restore API token, Postgres password, Postgres host port, and database URL "
             "from root .env before legacy docker/compose/.env"
         )
         (
@@ -244,6 +244,89 @@ def test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over
 
         assert result.returncode == 0, f"{label}: {result.stderr}"
         assert result.stdout == f'tok$en\np@ss"quote\\tail\n{persisted_database_url}\n', label
+
+
+def test_source_checkout_upgrade_without_persisted_database_url_allows_runtime_derivation(
+    tmp_path: Path,
+) -> None:
+    """Assert legacy source env files without AWF_DATABASE_URL can still upgrade."""
+    legacy_env_file = tmp_path / "docker" / "compose" / ".env"
+    legacy_env_file.parent.mkdir(parents=True)
+    legacy_env_file.write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=legacy-token",
+                "AWF_POSTGRES_PASSWORD=awf_dev",
+                "AWF_POSTGRES_HOST_PORT=15433",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    cases = (
+        (
+            "Quickstart Lane 2",
+            "docs/QUICKSTART.md",
+            _quickstart_upgrade_section(
+                quickstart_text,
+                "## Lane 2: Source Checkout With Global Tool Install",
+            ),
+        ),
+        (
+            "Quickstart Lane 3",
+            "docs/QUICKSTART.md",
+            _quickstart_upgrade_section(
+                quickstart_text,
+                "## Lane 3: Source Checkout With No Global Install",
+            ),
+        ),
+        (
+            "Upgrade source checkout with global tool install",
+            "docs/UPGRADE.md",
+            _markdown_section(upgrade_text, "## Source Checkout With Global Tool Install"),
+        ),
+        (
+            "Upgrade source checkout with no global install",
+            "docs/UPGRADE.md",
+            _markdown_section(upgrade_text, "## Source Checkout With No Global Install"),
+        ),
+    )
+
+    for label, path, section in cases:
+        bash_fences = [
+            fence for fence in _markdown_fences(path, section) if fence.language == "bash"
+        ]
+        assert len(bash_fences) == 1, label
+        body = bash_fences[0].body
+        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        stop_start = body.index("if [ -f .env ]; then", restore_start)
+        script = "\n".join(
+            (
+                (
+                    "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD "
+                    "AWF_POSTGRES_HOST_PORT AWF_DATABASE_URL"
+                ),
+                body[restore_start:stop_start],
+                (
+                    'printf "%s\\n%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
+                    '"$AWF_POSTGRES_PASSWORD" "${AWF_POSTGRES_HOST_PORT:-}" '
+                    '"${AWF_DATABASE_URL-}"'
+                ),
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == "legacy-token\nawf_dev\n15433\n\n", label
 
 
 def test_package_upgrade_docs_restore_service_env_before_start() -> None:

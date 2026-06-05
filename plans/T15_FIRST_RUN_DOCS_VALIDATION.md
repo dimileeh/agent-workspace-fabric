@@ -2903,3 +2903,57 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 git diff --check
 # no output
 ```
+
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HZeUY`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `docs/QUICKSTART.md` and `docs/UPGRADE.md` source-checkout upgrade
+  snippets still export a persisted `AWF_DATABASE_URL` over a stale shell value
+  when an env file provides one.
+- Complete: The same source-checkout upgrade snippets no longer abort when
+  root `.env` or legacy `docker/compose/.env` omits `AWF_DATABASE_URL`.
+- Complete: Source-checkout upgrade snippets now restore persisted
+  `AWF_POSTGRES_HOST_PORT` from root `.env` before legacy
+  `docker/compose/.env`, allowing `awf start --source-checkout "$PWD"` to use
+  runtime local database URL derivation when `AWF_DATABASE_URL` is absent.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `docs/UPGRADE.md`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_without_persisted_database_url_allows_runtime_derivation -q
+# Red phase before docs update: failed with AWF_DATABASE_URL restore guard
+# Final result: 1 passed in 0.59s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_source_checkout_upgrade_env_restore_strips_unquoted_inline_dotenv_comments -q
+# Final result: 4 passed in 1.15s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 1 passed in 0.65s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# 2 files already formatted
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_without_persisted_database_url_allows_runtime_derivation tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_source_checkout_upgrade_env_restore_strips_unquoted_inline_dotenv_comments tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 6 passed in 1.39s
+
+git diff --check
+# no output
+```

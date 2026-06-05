@@ -163,6 +163,11 @@ SOURCE_CHECKOUT_ENV_READ_LINES = {
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
         'AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
     ),
+    "AWF_POSTGRES_HOST_PORT": (
+        "  AWF_PERSISTED_POSTGRES_HOST_PORT=\"$(sed -n 's/^[[:space:]]*"
+        "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        'AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
+    ),
     "AWF_DATABASE_URL": (
         "  AWF_PERSISTED_DATABASE_URL=\"$(sed -n 's/^[[:space:]]*"
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
@@ -199,6 +204,22 @@ SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES = {
         "    \\'*\\')",
         '      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\\'}"',
         '      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\\'}"',
+        "      ;;",
+        "  esac",
+    ),
+    "AWF_POSTGRES_HOST_PORT": (
+        '  case "$AWF_PERSISTED_POSTGRES_HOST_PORT" in',
+        '    \\"*\\")',
+        '      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT#\\"}"',
+        '      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT%\\"}"',
+        (
+            '      AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_decode_double_quoted_dotenv '
+            '"$AWF_PERSISTED_POSTGRES_HOST_PORT")"'
+        ),
+        "      ;;",
+        "    \\'*\\')",
+        '      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT#\\\'}"',
+        '      AWF_PERSISTED_POSTGRES_HOST_PORT="${AWF_PERSISTED_POSTGRES_HOST_PORT%\\\'}"',
         "      ;;",
         "  esac",
     ),
@@ -721,7 +742,14 @@ def _assert_source_checkout_database_url_restore(
     section: str,
     lifecycle: str,
 ) -> tuple[int, int]:
-    """Assert source-checkout snippets preserve persisted database URLs."""
+    """Assert source-checkout snippets preserve or derive database URLs."""
+    host_port_init_line = 'AWF_PERSISTED_POSTGRES_HOST_PORT=""'
+    host_port_inline_comment_strip_line = (
+        '  AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_POSTGRES_HOST_PORT")"'
+    )
+    host_port_guard_line = 'if [ -n "$AWF_PERSISTED_POSTGRES_HOST_PORT" ]; then'
+    host_port_export_line = '  export AWF_POSTGRES_HOST_PORT="$AWF_PERSISTED_POSTGRES_HOST_PORT"'
     database_url_init_line = 'AWF_PERSISTED_DATABASE_URL=""'
     legacy_first_database_url_loop_line = "for env_file in docker/compose/.env .env; do"
     root_first_database_url_loop_line = "for env_file in .env docker/compose/.env; do"
@@ -751,11 +779,8 @@ def _assert_source_checkout_database_url_restore(
         '  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for '
         "the running local Core or persist it in .env before " + lifecycle + '}"'
     )
-    database_url_require_line = (
-        root_first_database_url_require_line
-        if root_first_database_url_require_line in section
-        else root_database_url_require_line
-    )
+    database_url_existing_shell_guard_line = 'elif [ -n "${AWF_DATABASE_URL:-}" ]; then'
+    database_url_existing_shell_export_line = "  export AWF_DATABASE_URL"
     requires_inline_comment_strip = (
         DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES[0] in section
     )
@@ -766,8 +791,33 @@ def _assert_source_checkout_database_url_restore(
     assert legacy_first_database_url_require_line not in section, (
         f"{label} must describe root .env before legacy docker/compose/.env"
     )
+    assert root_first_database_url_require_line not in section, (
+        f"{label} must allow runtime-derived AWF_DATABASE_URL when none is persisted"
+    )
+    assert root_database_url_require_line not in section, (
+        f"{label} must allow runtime-derived AWF_DATABASE_URL when none is persisted"
+    )
+    assert host_port_init_line in section, (
+        f"{label} must initialize persisted Postgres host port lookup"
+    )
     assert database_url_init_line in section, (
         f"{label} must initialize persisted database URL lookup"
+    )
+    host_port_restore_lines = [
+        database_url_loop_line,
+        '  [ -f "$env_file" ] || continue',
+        SOURCE_CHECKOUT_ENV_READ_LINES["AWF_POSTGRES_HOST_PORT"],
+    ]
+    if requires_inline_comment_strip:
+        host_port_restore_lines.append(host_port_inline_comment_strip_line)
+    host_port_restore_lines.extend(
+        [
+            *SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_POSTGRES_HOST_PORT"],
+            '  [ -n "$AWF_PERSISTED_POSTGRES_HOST_PORT" ] && break',
+            "done",
+            host_port_guard_line,
+            host_port_export_line,
+        ]
     )
     database_url_restore_lines = [
         database_url_loop_line,
@@ -783,13 +833,32 @@ def _assert_source_checkout_database_url_restore(
             "done",
             'if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then',
             '  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"',
-            "else",
-            database_url_require_line,
-            "  export AWF_DATABASE_URL",
+            database_url_existing_shell_guard_line,
+            database_url_existing_shell_export_line,
         ]
     )
 
-    database_url_init_index = section.index(database_url_init_line)
+    host_port_init_index = section.index(host_port_init_line)
+    current_index = host_port_init_index
+    for host_port_restore_line in host_port_restore_lines:
+        current_index = _shell_line_index(
+            section,
+            host_port_restore_line,
+            label,
+            current_index,
+        )
+    host_port_guard_end_index = _shell_closing_fi_index(
+        section,
+        current_index,
+        label,
+    )
+
+    database_url_init_index = _shell_line_index(
+        section,
+        database_url_init_line,
+        label,
+        host_port_guard_end_index,
+    )
     current_index = database_url_init_index
     for database_url_restore_line in database_url_restore_lines:
         current_index = _shell_line_index(
@@ -803,7 +872,7 @@ def _assert_source_checkout_database_url_restore(
         current_index,
         label,
     )
-    return database_url_init_index, database_url_guard_end_index
+    return host_port_init_index, database_url_guard_end_index
 
 
 def _assert_source_checkout_stop_prefers_root_env(

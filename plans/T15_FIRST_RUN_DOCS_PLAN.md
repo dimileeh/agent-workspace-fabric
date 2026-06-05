@@ -794,3 +794,23 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lif
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py
 git diff --check
 ```
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HZeUY`:
+source-checkout upgrade snippets in `docs/QUICKSTART.md` and
+`docs/UPGRADE.md` must preserve a persisted `AWF_DATABASE_URL` when present,
+but must not abort legacy source checkouts whose `.env` or
+`docker/compose/.env` only carries `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`,
+and optionally `AWF_POSTGRES_HOST_PORT`. Restore the persisted host port before
+the missing-database-url branch so `awf start --source-checkout "$PWD"` can use
+the runtime's default local database URL derivation.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HZeUY`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_without_persisted_database_url_allows_runtime_derivation -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_source_checkout_upgrade_env_restore_strips_unquoted_inline_dotenv_comments -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+git diff --check
+```
