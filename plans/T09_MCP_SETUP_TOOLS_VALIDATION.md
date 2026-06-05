@@ -53,6 +53,63 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: PR393 Python Coverage Shard 8 Line Limit
+
+### Requirement Status
+
+- Keep all first-party Python files at or below the 1500-line maintainability
+  guard: Complete.
+- Preserve the public `awf.mcp.setup_tools` helper surface used by existing
+  focused tests: Complete.
+- Preserve existing MCP setup/start/client behavior and test assertions:
+  Complete.
+- Run the focused line-limit repro and targeted MCP setup-tool tests instead of
+  broad AWF/GitHub validation: Complete.
+
+### Evidence
+
+Root cause:
+
+- GitHub Actions CI run `27036001490`, job `python-coverage-shards (8)`, failed
+  `tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit`
+  because `src/awf/mcp/setup_tools.py` had 1505 lines and
+  `tests/unit/mcp/test_setup_tools.py` had 1530 lines.
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `src/awf/mcp/tool_result_types.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_start.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_start.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/mcp/tool_result_types.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev ruff format --check src/awf/mcp/setup_tools.py src/awf/mcp/tool_result_types.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/mcp/tool_result_types.py
+```
+
+Latest results:
+
+- Local repro before the implementation change: 1 failed with the same two
+  oversized files reported by CI.
+- Line-limit guard after the implementation change: 1 passed.
+- Split setup/start MCP test files: 36 passed.
+- Setup-tools import contract: 2 passed.
+- Focused ruff check: passed.
+- Focused ruff format check: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HdUcg
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

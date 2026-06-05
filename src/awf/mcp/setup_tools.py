@@ -9,7 +9,7 @@ import shlex
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from subprocess import CalledProcessError
-from typing import Annotated, Any, Protocol, cast
+from typing import Annotated, Any, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
@@ -50,6 +50,7 @@ from awf.host_setup.source_assets import (
     SourceCheckoutError,
 )
 from awf.host_setup.system_checks import SetupCheckError
+from awf.mcp.tool_result_types import SafeResult
 from awf.profiles.onboarding import preview_project_onboarding, write_workspace_profile
 from awf.service.bootstrap import (
     ServiceBootstrapError,
@@ -117,20 +118,6 @@ _SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN = re.compile(
     r"(?P<start_source_suffix>[.,;):](?=\s|$)|$|\s+to\b))"
     r"|(?P<start>\bawf start(?P<start_suffix>[.,;):]|$|\s+to\b))"
 )
-
-
-class SafeResult(Protocol):
-    """Protocol for constructing redacted MCP tool result objects."""
-
-    def __call__(
-        self,
-        payload: dict[str, Any],
-        *,
-        is_error: bool = False,
-        extra_secrets: Iterable[str] = (),
-    ) -> CallToolResult:
-        """Build a safe MCP tool result from a JSON payload."""
-        ...
 
 
 def register_setup_tools(
