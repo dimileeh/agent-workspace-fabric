@@ -304,6 +304,51 @@ def test_pinned_upper_with_unmatchable_signature_discarded(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+def test_corrupted_signature_marker_discarded_not_crash(tmp_path: Path) -> None:
+    # A ``base.signature`` marker corrupted into non-UTF-8 bytes must not crash
+    # provisioning. ``Path.read_text()`` raises ``UnicodeDecodeError`` (a
+    # ``ValueError``, NOT an ``OSError``) on such bytes; both ``_pinned_overlay_base``
+    # and ``_pin_matches_signature`` must swallow it so the unverifiable non-empty
+    # upper is discarded + rebuilt from the current host rather than propagating the
+    # crash up through provisioning.
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    claude_root = work_dir / "auth" / "ws_corrupt_pin" / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    (claude_root / "work").mkdir(parents=True)
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    # Invalid UTF-8 continuation bytes — ``read_text()`` raises ``UnicodeDecodeError``.
+    (claude_root / "base.signature").write_bytes(b"\xff\xfe\x00corrupt")
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_corrupt_pin",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    # Provisioning completed (no crash) and rebuilt from the current host ...
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    assert mounter.mounts[-1]["lowerdir"] == base
+    # ... the unverifiable upper edit is discarded loudly ...
+    assert not overlay_data.exists()
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
+        for entry in logs
+    )
+    # ... and the corrupted pin is rewritten to the current-host signature.
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
+
+
+@pytest.mark.unit
 def test_overlay_retry_without_pin_marker_recomputes_base(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"

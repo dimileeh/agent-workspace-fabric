@@ -853,7 +853,10 @@ def _pinned_overlay_base(work_dir: Path, sig_marker: Path) -> Path | None:
 
     try:
         signature = sig_marker.read_text().strip()
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError from a corrupted/binary marker:
+        # treat an unreadable pin as "no recoverable base" rather than crashing
+        # provisioning, so the caller rebuilds from the current host.
         return None
     base = _shared_claude_base_dir(work_dir, signature)
     return base if base.is_dir() else None
@@ -867,13 +870,18 @@ def _pin_matches_signature(sig_marker: Path, signature: str) -> bool:
     pin names the same signature a current-host rebuild would reproduce. This probe is
     the second case: ``True`` iff the marker exists and its stripped contents equal
     ``signature``, so rebuilding the base from the current host yields exactly the lower
-    the upper was built against (no guess). An absent/unreadable marker (``OSError``) is
-    not a match, so the caller treats the upper as unverifiable and discards it (#405).
+    the upper was built against (no guess). An absent or unreadable marker (``OSError``,
+    or ``ValueError``/``UnicodeDecodeError`` from corrupted bytes) is not a match, so the
+    caller treats the upper as unverifiable and discards it (#405).
     """
 
     try:
         return sig_marker.read_text().strip() == signature
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError from a corrupted/binary marker
+        # (UnicodeDecodeError subclasses ValueError, not OSError): treat an
+        # unreadable marker as "not a match" so the caller discards the
+        # unverifiable upper instead of crashing provisioning (#405).
         return False
 
 
