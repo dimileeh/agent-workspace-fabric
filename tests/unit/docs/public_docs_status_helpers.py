@@ -757,7 +757,7 @@ def _assert_source_checkout_database_url_restore(
     section: str,
     lifecycle: str,
 ) -> tuple[int, int]:
-    """Assert source-checkout snippets preserve or derive database URLs."""
+    """Assert source-checkout snippets restore persisted URLs or drop stale shell URLs."""
     host_port_init_line = 'AWF_PERSISTED_POSTGRES_HOST_PORT=""'
     host_port_inline_comment_strip_line = (
         '  AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_strip_unquoted_dotenv_inline_comment '
@@ -794,6 +794,8 @@ def _assert_source_checkout_database_url_restore(
         '  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for '
         "the running local Core or persist it in .env before " + lifecycle + '}"'
     )
+    database_url_else_line = "else"
+    database_url_unset_line = "  unset AWF_DATABASE_URL"
     database_url_existing_shell_guard_line = 'elif [ -n "${AWF_DATABASE_URL:-}" ]; then'
     database_url_existing_shell_export_line = "  export AWF_DATABASE_URL"
     requires_inline_comment_strip = (
@@ -811,6 +813,12 @@ def _assert_source_checkout_database_url_restore(
     )
     assert root_database_url_require_line not in section, (
         f"{label} must allow runtime-derived AWF_DATABASE_URL when none is persisted"
+    )
+    assert database_url_existing_shell_guard_line not in section, (
+        f"{label} must not preserve an ambient AWF_DATABASE_URL when none is persisted"
+    )
+    assert database_url_existing_shell_export_line not in section.splitlines(), (
+        f"{label} must not export an ambient AWF_DATABASE_URL when none is persisted"
     )
     assert host_port_init_line in section, (
         f"{label} must initialize persisted Postgres host port lookup"
@@ -848,8 +856,8 @@ def _assert_source_checkout_database_url_restore(
             "done",
             'if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then',
             '  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"',
-            database_url_existing_shell_guard_line,
-            database_url_existing_shell_export_line,
+            database_url_else_line,
+            database_url_unset_line,
         ]
     )
 

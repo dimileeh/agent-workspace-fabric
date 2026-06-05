@@ -493,8 +493,8 @@ for env_file in .env docker/compose/.env; do
 done
 if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
   export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
-elif [ -n "${AWF_DATABASE_URL:-}" ]; then
-  export AWF_DATABASE_URL
+else
+  unset AWF_DATABASE_URL
 fi
 if [ -f .env ]; then
   docker compose --env-file .env -f docker/compose/local-service.yml stop
@@ -653,8 +653,8 @@ for env_file in .env docker/compose/.env; do
 done
 if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
   export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
-elif [ -n "${AWF_DATABASE_URL:-}" ]; then
-  export AWF_DATABASE_URL
+else
+  unset AWF_DATABASE_URL
 fi
 if [ -f .env ]; then
   docker compose --env-file .env -f docker/compose/local-service.yml stop

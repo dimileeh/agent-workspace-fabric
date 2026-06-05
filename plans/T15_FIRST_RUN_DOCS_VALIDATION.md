@@ -2626,6 +2626,52 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HabO-`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `docs/QUICKSTART.md` Lane 2 and Lane 3 source-checkout upgrade
+  snippets still export a persisted checkout `AWF_DATABASE_URL` when one is
+  found.
+- Complete: `docs/QUICKSTART.md` and `docs/UPGRADE.md` source-checkout upgrade
+  snippets now `unset AWF_DATABASE_URL` when no persisted checkout URL exists,
+  so stale shell URLs cannot override host-port-based local URL derivation.
+- Complete: Existing source-checkout root `.env` before legacy
+  `docker/compose/.env` precedence, persisted `AWF_POSTGRES_HOST_PORT`
+  restoration, and setup/start ordering remain covered by focused docs tests.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `docs/UPGRADE.md`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_without_persisted_database_url_drops_stale_shell_url -q
+# Red phase before docs update: failed because Quickstart Lane 2 preserved
+# postgresql+asyncpg://awf:stale@localhost:5433/awf from the shell.
+# Final result: 1 passed in 0.60s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py -q
+# 72 passed in 4.73s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+git diff --check
+# no output
+```
+
 ## CI Repair for PR #390 Docs Helper Tests
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.

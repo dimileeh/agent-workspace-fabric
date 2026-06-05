@@ -265,10 +265,10 @@ def test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over
         assert result.stdout == f'tok$en\np@ss"quote\\tail\n{persisted_database_url}\n', label
 
 
-def test_source_checkout_upgrade_without_persisted_database_url_allows_runtime_derivation(
+def test_source_checkout_upgrade_without_persisted_database_url_drops_stale_shell_url(
     tmp_path: Path,
 ) -> None:
-    """Assert legacy source env files without AWF_DATABASE_URL can still upgrade."""
+    """Assert legacy source env files without AWF_DATABASE_URL do not keep stale URLs."""
     legacy_env_file = tmp_path / "docker" / "compose" / ".env"
     legacy_env_file.parent.mkdir(parents=True)
     legacy_env_file.write_text(
@@ -321,12 +321,13 @@ def test_source_checkout_upgrade_without_persisted_database_url_allows_runtime_d
         body = bash_fences[0].body
         restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
         stop_start = body.index("if [ -f .env ]; then", restore_start)
+        stale_env = {
+            **os.environ,
+            "AWF_DATABASE_URL": "postgresql+asyncpg://awf:stale@localhost:5433/awf",
+        }
         script = "\n".join(
             (
-                (
-                    "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD "
-                    "AWF_POSTGRES_HOST_PORT AWF_DATABASE_URL"
-                ),
+                ("unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD AWF_POSTGRES_HOST_PORT"),
                 body[restore_start:stop_start],
                 (
                     'printf "%s\\n%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
@@ -341,6 +342,7 @@ def test_source_checkout_upgrade_without_persisted_database_url_allows_runtime_d
             cwd=tmp_path,
             check=False,
             capture_output=True,
+            env=stale_env,
             text=True,
         )
 

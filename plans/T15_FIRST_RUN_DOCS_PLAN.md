@@ -917,3 +917,55 @@ wc -l tests/unit/docs/public_docs_status_helpers.py tests/unit/docs/public_docs_
 git diff --check
 # No whitespace errors.
 ```
+
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HabO-`
+
+Problem statement and scope:
+source-checkout upgrade snippets currently preserve an ambient
+`AWF_DATABASE_URL` when the checkout env files do not persist one. That lets a
+fresh-shell upgrade inherit an unrelated database URL instead of allowing
+`awf setup` / `awf start --source-checkout "$PWD"` to derive the local database
+URL from the restored `AWF_POSTGRES_HOST_PORT`. Keep the repair scoped to the
+source-checkout upgrade snippets in `docs/QUICKSTART.md` and `docs/UPGRADE.md`,
+the focused docs lifecycle regression, and these T15 plan artifacts.
+
+Requirements checklist:
+
+- Restore a persisted checkout `AWF_DATABASE_URL` when `.env` or
+  `docker/compose/.env` contains one.
+- When no persisted checkout `AWF_DATABASE_URL` exists, explicitly clear any
+  ambient shell value before stopping Core and restarting from the source
+  checkout.
+- Preserve existing root `.env` before legacy `docker/compose/.env` precedence,
+  persisted `AWF_POSTGRES_HOST_PORT` restoration, and source-checkout
+  setup/start ordering.
+- Do not run full AWF/GitHub-owned validation, full coverage, full frontend
+  builds, or push/rebase/branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Add a focused regression that starts with a stale exported
+   `AWF_DATABASE_URL` and legacy source env values without a persisted database
+   URL.
+2. Tighten the shared source-checkout docs helper to require `unset
+   AWF_DATABASE_URL` after the persisted URL branch.
+3. Update the four source-checkout upgrade snippets in `docs/QUICKSTART.md` and
+   `docs/UPGRADE.md` to unset stale database URLs when no checkout value was
+   restored.
+4. Run focused docs lifecycle tests, focused ruff checks, and `git diff --check`.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_without_persisted_database_url_drops_stale_shell_url -q
+# Red phase fails before the docs update; final result passes.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py -q
+# Focused docs lifecycle and guide checks pass.
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks pass.
+
+git diff --check
+# No whitespace errors.
+```
