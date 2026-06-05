@@ -120,8 +120,8 @@ def _safe_files_equal_content(a: Path, b: Path) -> bool:
         return False
 
 
-def _safe_agent_file_equal_content(agent_file: Path, trusted_file: Path) -> bool:
-    """True iff ``agent_file`` and ``trusted_file`` are both readable and byte-identical.
+def _safe_agent_file_equal_content(agent_root: Path, rel: Path, trusted_file: Path) -> bool:
+    """True iff ``agent_root / rel`` and ``trusted_file`` are both readable and byte-identical.
 
     Content-equality variant of :func:`_safe_files_equal_content` for the case where the
     *first* path lives under an **agent-controlled** tree — the ``rw`` legacy
@@ -129,35 +129,59 @@ def _safe_agent_file_equal_content(agent_file: Path, trusted_file: Path) -> bool
     :func:`~awf.node.auth_mounts_claude_reconcile._legacy_is_unedited_host_copy` reads.
     The caller's ``is_file()`` pre-check in
     :func:`~awf.node.auth_mounts_claude_reconcile._reconcile_fallback_edits_into_upper`
-    is *not* atomic with this read, and the agent can swap ``agent_file`` for a symlink
-    or a reader-less FIFO in that window: the plain ``open("rb")`` that
-    :func:`_safe_files_equal_content` uses for its two non-agent trees would then follow
-    the link out of the ``.claude`` tree or block the root provisioning worker forever
-    (the same DoS that :func:`_safe_overlay_copy` already defends against on its
-    agent-controlled source).
+    is *not* atomic with this read, and the agent can swap the agent file — or one of its
+    *parent* directories — for a symlink or a reader-less FIFO in that window: the plain
+    ``open("rb")`` that :func:`_safe_files_equal_content` uses for its two non-agent trees
+    would then follow the link out of the ``.claude`` tree or block the root provisioning
+    worker forever (the same DoS that :func:`_safe_overlay_copy` already defends against on
+    its agent-controlled source).
 
-    So ``agent_file`` is opened with ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK`` and an
-    ``S_ISREG`` ``fstat`` guard — the identical leaf protections
-    :func:`_safe_overlay_copy` applies: ``O_NOFOLLOW`` rejects a swapped symlink
-    (``ELOOP``), ``O_NONBLOCK`` makes a reader-less FIFO fail (``ENXIO``) instead of
-    blocking, and the ``S_ISREG`` guard refuses any other non-regular leaf (e.g. a FIFO
-    with a live reader) before a byte is read. ``trusted_file`` is the live host
-    ``~/.claude`` copy (non-agent), so it keeps the plain streamed read.
+    A full-path ``os.open(agent_root / rel, O_NOFOLLOW)`` is *not* enough: ``O_NOFOLLOW``
+    only guards the *leaf*, so a parent component such as ``agent_root/a`` in
+    ``agent_root/a/file`` would still be resolved by name. An agent that swaps a real
+    walked directory ``a`` for ``a -> /outside`` between the caller's ``os.walk`` /
+    ``is_file()`` and this read would redirect the root worker to ``/outside/<file>``; if
+    that out-of-tree file's bytes happen to match ``trusted_file`` the function returns a
+    *false* ``True``, the #404 caller treats the legacy file as an unedited host copy,
+    *skips* forwarding it (so :func:`_safe_overlay_copy` never re-validates it), and the
+    genuine agent fallback edit is lost when the legacy tree is reaped. So the agent path
+    is descended component-by-component from the trusted ``agent_root`` with
+    ``openat(O_NOFOLLOW | O_DIRECTORY)`` — the same fd-anchored descent
+    :func:`_safe_overlay_copy` uses for its agent-controlled source — and the leaf is
+    opened relative to its parent ``dir_fd`` with ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK``
+    plus an ``S_ISREG`` ``fstat`` guard: ``O_NOFOLLOW`` rejects a swapped symlink at the
+    leaf *or any descended parent* (``ELOOP``), ``O_NONBLOCK`` makes a reader-less FIFO
+    fail (``ENXIO``) instead of blocking, and the ``S_ISREG`` guard refuses any other
+    non-regular leaf (e.g. a FIFO with a live reader) before a byte is read.
+    ``trusted_file`` is the live host ``~/.claude`` copy (non-agent), so it keeps the
+    plain streamed read.
 
-    Any open/read error — a swapped special file, a racing unlink, a permission
-    failure — fails safe to ``False`` ("not provably equal"), exactly as
-    :func:`_safe_files_equal_content` does. The #404 caller then treats the legacy file
+    Any open/read error — a symlinked/non-dir component, a swapped special file, a racing
+    unlink, a permission failure — fails safe to ``False`` ("not provably equal"), exactly
+    as :func:`_safe_files_equal_content` does. The #404 caller then treats the legacy file
     as eligible to forward (where :func:`_safe_overlay_copy` independently re-validates
     it with the same fd-based descent), so this never silently hides or drops a
     credential — it only declines the "unedited host copy" protection.
     """
 
+    fds: list[int] = []
     try:
-        agent_fd = os.open(agent_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        dir_fd = os.open(agent_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fds.append(dir_fd)
+        for part in rel.parent.parts:
+            # No parent is ever created — the agent file must already exist. ``O_NOFOLLOW``
+            # rejects a symlink swapped in for any descended parent component (``ELOOP``),
+            # ``O_DIRECTORY`` rejects a non-directory one (``ENOTDIR``); both atomic, no
+            # check/use gap.
+            dir_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            fds.append(dir_fd)
+        agent_fd = os.open(rel.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+        fds.append(agent_fd)
     except OSError:
-        # A swapped symlink (``ELOOP``), a reader-less FIFO is *not* caught here (a
-        # read-only FIFO open succeeds even with no writer — the ``S_ISREG`` guard below
-        # rejects it), a racing unlink, or a permission failure. Fail safe.
+        # A symlinked/non-dir parent component, a swapped symlink leaf (``ELOOP``), a
+        # racing unlink, or a permission failure. (A reader-less FIFO leaf is *not* caught
+        # here — a read-only FIFO open succeeds even with no writer; the ``S_ISREG`` guard
+        # below rejects it.) Fail safe.
         return False
     try:
         if not stat.S_ISREG(os.fstat(agent_fd).st_mode):
@@ -169,8 +193,9 @@ def _safe_agent_file_equal_content(agent_file: Path, trusted_file: Path) -> bool
     except OSError:
         return False
     finally:
-        with contextlib.suppress(OSError):
-            os.close(agent_fd)
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 def _safe_overlay_copy(merged: Path, rel: Path, src_root: Path) -> None:

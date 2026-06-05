@@ -980,37 +980,73 @@ def test_reconcile_forwards_agent_edit_matching_host_mtime_size_but_not_bytes(
 
 @pytest.mark.unit
 def test_safe_agent_file_equal_content_guards_agent_path(tmp_path: Path) -> None:
-    # The agent-controlled first arg is opened with ``O_NOFOLLOW | O_NONBLOCK`` + an
-    # ``S_ISREG`` ``fstat`` guard so a swapped symlink/FIFO can never follow out of tree or
-    # block the root worker; the trusted host arg keeps the plain read.
+    # The agent-controlled path is descended from the trusted ``agent_root`` and the leaf
+    # opened with ``O_NOFOLLOW | O_NONBLOCK`` + an ``S_ISREG`` ``fstat`` guard so a swapped
+    # symlink/FIFO can never follow out of tree or block the root worker; the trusted host
+    # arg keeps the plain read.
+    root = tmp_path / "root"
+    root.mkdir()
     host = tmp_path / "host"
     host.write_bytes(b"token-aaaa\n")
-    agent = tmp_path / "agent"
+    rel = Path("agent")
+    agent = root / rel
     agent.write_bytes(b"token-aaaa\n")
     # Byte-identical regular files compare equal.
-    assert overlay_copy_mod._safe_agent_file_equal_content(agent, host) is True
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is True
 
     agent.write_bytes(b"token-bbbb\n")  # same length, different bytes
-    assert overlay_copy_mod._safe_agent_file_equal_content(agent, host) is False
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
 
-    # A reader-less FIFO swapped in for the agent path fails safe to ``False`` WITHOUT
+    # A reader-less FIFO swapped in for the agent leaf fails safe to ``False`` WITHOUT
     # blocking: the ``O_RDONLY | O_NONBLOCK`` open succeeds immediately and the ``S_ISREG``
     # ``fstat`` guard rejects it. If this regressed to a plain ``open("rb")`` the read-side
     # open would block forever — the test itself would hang.
     agent.unlink()
     os.mkfifo(agent)
-    assert overlay_copy_mod._safe_agent_file_equal_content(agent, host) is False
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
 
-    # A symlink swapped in for the agent path is refused by ``O_NOFOLLOW`` (``ELOOP`` ->
+    # A symlink swapped in for the agent leaf is refused by ``O_NOFOLLOW`` (``ELOOP`` ->
     # ``False``), never followed to read the link target.
     agent.unlink()
     agent.symlink_to(host)
-    assert overlay_copy_mod._safe_agent_file_equal_content(agent, host) is False
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
 
     # An absent/unreadable *trusted* path fails safe to ``False`` (the inner ``OSError``).
     agent.unlink()
     agent.write_bytes(b"token-aaaa\n")
-    assert overlay_copy_mod._safe_agent_file_equal_content(agent, tmp_path / "missing") is False
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, tmp_path / "missing") is False
+
+
+@pytest.mark.unit
+def test_safe_agent_file_equal_content_guards_swapped_parent_component(tmp_path: Path) -> None:
+    # PR #414 review (PRRT_kwDOSJAM6s6HQvpP): a full-path ``os.open(..., O_NOFOLLOW)`` only
+    # guards the *leaf*, so an agent that swaps an already-walked *parent* directory of the
+    # legacy file for a symlink before this read would have the root worker resolve through
+    # it and read a file OUTSIDE the ``.claude`` tree. If that out-of-tree file's bytes
+    # match the trusted host, the function returned a false ``True`` and the #404 caller
+    # silently dropped the genuine fallback edit. The fd-anchored component descent must
+    # reject the swapped parent (``ELOOP``) and fail safe to ``False``.
+    root = tmp_path / "root"
+    real_parent = root / "sub"
+    real_parent.mkdir(parents=True)
+    rel = Path("sub") / "agent"
+    (root / rel).write_bytes(b"agent-edit\n")  # the genuine agent fallback edit
+
+    host = tmp_path / "host"
+    host.write_bytes(b"host-bytes\n")
+    # An out-of-tree file whose bytes match the host — what the swapped parent redirects to.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "agent").write_bytes(b"host-bytes\n")
+
+    # The agent swaps the walked parent ``root/sub`` for ``sub -> outside`` after the
+    # caller's check. A leaf-only ``O_NOFOLLOW`` would follow it and read ``outside/agent``
+    # (== host) -> false ``True``; the per-component descent rejects ``sub`` as a symlink.
+    import shutil as _shutil
+
+    _shutil.rmtree(real_parent)
+    (root / "sub").symlink_to(outside)
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
 
 
 @pytest.mark.unit
@@ -1030,14 +1066,17 @@ def test_legacy_is_unedited_host_copy_refuses_fifo_swapped_after_caller_check(
     host = tmp_path / "host-file"
     host.write_bytes(b"credential\n")
     host_stat = host.stat()
-    legacy = tmp_path / "legacy-file"
+    legacy_root = tmp_path / "legacy-root"
+    legacy_root.mkdir()
+    rel = Path("legacy-file")
+    legacy = legacy_root / rel
     legacy.write_bytes(b"credential\n")  # same content + size as the host
     os.utime(legacy, ns=(host_stat.st_mtime_ns, host_stat.st_mtime_ns))  # align mtime
     legacy_stat = legacy.stat()  # the regular-file stat the caller captured pre-swap
     legacy.unlink()
     os.mkfifo(legacy)  # the agent swaps the checked-clean file for a reader-less FIFO
 
-    assert reconcile_mod._legacy_is_unedited_host_copy(legacy, legacy_stat, host) is False
+    assert reconcile_mod._legacy_is_unedited_host_copy(legacy_root, rel, legacy_stat, host) is False
     # The FIFO is left intact — never read through, never blocked on.
     assert stat.S_ISFIFO(os.lstat(legacy).st_mode)
 

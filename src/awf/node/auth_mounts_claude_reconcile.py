@@ -56,9 +56,9 @@ _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED = "CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED"
 
 
 def _legacy_is_unedited_host_copy(
-    legacy_file: Path, legacy_stat: os.stat_result, host_file: Path
+    legacy: Path, rel: Path, legacy_stat: os.stat_result, host_file: Path
 ) -> bool:
-    """True when ``legacy_file`` is byte/mtime-identical to the live host ``host_file``.
+    """True when ``legacy / rel`` is byte/mtime-identical to the live host ``host_file``.
 
     The legacy ``~/.claude`` copy is materialized via ``copytree(symlinks=False)``
     using ``copy2``, which preserves the host's ``st_mtime_ns`` and ``st_size``. So a
@@ -97,12 +97,16 @@ def _legacy_is_unedited_host_copy(
     # protect the existing ``upper`` edit; any divergence (or an unreadable side, which
     # fails safe to ``False``) leaves it eligible to forward.
     #
-    # ``legacy_file`` lives under the agent-writable legacy copy, and the caller's
-    # ``is_file()`` pre-check is not atomic with this read: an agent can swap it for a
-    # symlink or a reader-less FIFO in the window, which a plain ``open("rb")`` would
-    # follow out of tree or block on forever. Use the agent-safe compare (``O_NOFOLLOW |
-    # O_NONBLOCK`` + ``S_ISREG`` guard) for it; ``host_file`` is the trusted live host.
-    return _safe_agent_file_equal_content(legacy_file, host_file)
+    # ``legacy / rel`` lives under the agent-writable legacy copy, and the caller's
+    # ``is_file()`` pre-check is not atomic with this read: an agent can swap the file —
+    # *or any of its parent directories* — for a symlink or a reader-less FIFO in the
+    # window, which a plain ``open("rb")`` would follow out of tree or block on forever.
+    # Pass the trusted ``legacy`` root + ``rel`` so the agent path is descended
+    # component-by-component with fd-anchored ``O_NOFOLLOW`` (the same descent
+    # :func:`_safe_overlay_copy` uses) rather than opened by full path, where
+    # ``O_NOFOLLOW`` would guard only the leaf and a swapped parent could redirect the
+    # read out of tree; ``host_file`` is the trusted live host.
+    return _safe_agent_file_equal_content(legacy, rel, host_file)
 
 
 def _forward_fallback_deletions_as_whiteouts(
@@ -391,7 +395,7 @@ def _reconcile_fallback_edits_into_upper(
                     # ``upper`` wins ties: an equal-or-newer overlay-era edit stands.
                     continue
                 if stat.S_ISREG(upper_stat.st_mode) and _legacy_is_unedited_host_copy(
-                    legacy_file, legacy_stat, host_claude / rel
+                    legacy, rel, legacy_stat, host_claude / rel
                 ):
                     # #404: the strictly-newer legacy file is byte/mtime-identical to
                     # the live host, so it is an *unedited* copy of a host that changed
