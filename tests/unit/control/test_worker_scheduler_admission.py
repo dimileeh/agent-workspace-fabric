@@ -742,6 +742,62 @@ async def test_safely_provision_claimed_release_survives_second_cancellation(
 
 
 @pytest.mark.unit
+async def test_safely_provision_claimed_releases_claim_on_cancel_during_epoch_read(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # An external cancel (e.g. worker shutdown cancelling run_once's gather) can
+    # land on the very first await — the epoch read at provision start — before
+    # the provision try/finally is entered. The claim was already stamped by the
+    # earlier scheduling transaction, so the outer finally must still release it;
+    # otherwise the row stays claimed until the lease expires, delaying recovery
+    # even though no provision task ever started.
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    provisioner = _RecordingProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            execution_claim_lease_seconds=3.0,
+        ),
+    )
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+
+    reading = asyncio.Event()
+    original_read = worker._read_execution_claim_epoch  # noqa: SLF001
+
+    async def _blocking_read(ws_id: str) -> int | None:
+        # Signal that we are inside the epoch read, then block so the external
+        # cancel below lands precisely here, outside the provision try/finally.
+        reading.set()
+        await asyncio.Event().wait()
+        return await original_read(ws_id)  # pragma: no cover - never resumes
+
+    worker._read_execution_claim_epoch = _blocking_read  # type: ignore[method-assign]  # noqa: SLF001
+
+    task = asyncio.create_task(
+        worker._safely_provision_claimed(workspace_id),  # noqa: SLF001
+    )
+    await asyncio.wait_for(reading.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    # No provision ever started, yet the outer finally released the stamped
+    # claim and left no dangling epoch.
+    assert provisioner.calls == []
+    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
+    claimed_by, _ = await _workspace_execution_claim(session_factory, workspace_id)
+    assert claimed_by is None
+
+
+@pytest.mark.unit
 async def test_refresh_execution_claim_loop_cancels_provision_on_fence(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

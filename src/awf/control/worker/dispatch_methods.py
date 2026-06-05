@@ -220,62 +220,75 @@ def _update_execution_slot_saturation(self: Any, *, dispatched: int) -> None:
 
 
 async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
-    # D2: read our fencing epoch back at provision start. ``None`` means a newer
-    # claimant already superseded us (or the row is gone), so abort before any
-    # work — never touch the new claimant's row.
-    epoch = await self._read_execution_claim_epoch(workspace_id)
-    if epoch is None:
-        _log.warning(
-            "worker.execution_claim_fenced",
-            workspace_id=workspace_id,
-            worker_id=self._worker_id,
-            phase="provision_start",
-            reason_code=EXECUTION_CLAIM_FENCED,
-        )
-        return
-    self._execution_claim_epochs[workspace_id] = epoch
-    provision_task = asyncio.create_task(
-        self._provisioner.provision_claimed(workspace_id, execution_claim_epoch=epoch),
-        name=f"awf-provision-{workspace_id}",
-    )
-    # D4: the heartbeat CAS is epoch-gated; if a later claimant fences us it
-    # returns False and cancels the in-flight provision before any rmtree.
-    heartbeat = asyncio.create_task(
-        self._refresh_execution_claim_loop(workspace_id, on_claim_lost=provision_task.cancel),
-        name=f"awf-provisioning-claim-{workspace_id}",
-    )
+    # The execution claim was already stamped on the row by the earlier
+    # scheduling transaction, so *every* exit from here must release it —
+    # including a cancel landing on the initial epoch read below, before the
+    # provision try/finally is even entered. Without the outer finally, an
+    # external cancel (e.g. worker shutdown cancelling ``run_once``'s ``gather``)
+    # during that read would exit straight out, stranding the row claimed until
+    # the lease expires and delaying recovery despite no provision having
+    # started. The release is owner+epoch-gated (D6), so it is a no-op when a
+    # newer claimant already fenced us; the shielded helper still runs it to
+    # completion across a second cancellation (worker shutdown) landing
+    # mid-write so neither the DB lease nor the epoch entry leaks.
     try:
-        await provision_task
-    except asyncio.CancelledError:
-        # Two cancellations land here: the heartbeat fence (``on_claim_lost``
-        # cancels ``provision_task``) and an external cancel of *this* task —
-        # e.g. worker shutdown cancelling ``run_once``'s ``gather``. Only the
-        # fence is ours to abort quietly; an external cancel must propagate so
-        # cooperative cancellation is never suppressed (D7's CAS leaves the row
-        # untouched either way). ``current_task().cancelling()`` is the
-        # discriminator: cancelling this task increments its own request count
-        # even though the cancel is delegated to the awaited ``provision_task``,
-        # whereas a pure heartbeat fence never touches this task's count.
-        outer = cast("asyncio.Task[None]", asyncio.current_task())
-        if outer.cancelling() > 0:
-            raise
-        # Heartbeat-cancel fired: we were fenced mid-provision. The provisioner
-        # leaves the row untouched (D7 CAS), so just abort this attempt.
-        _log.warning(
-            "worker.execution_claim_fenced",
-            workspace_id=workspace_id,
-            worker_id=self._worker_id,
-            phase="provision_cancelled",
-            reason_code=EXECUTION_CLAIM_FENCED,
+        # D2: read our fencing epoch back at provision start. ``None`` means a newer
+        # claimant already superseded us (or the row is gone), so abort before any
+        # work — never touch the new claimant's row.
+        epoch = await self._read_execution_claim_epoch(workspace_id)
+        if epoch is None:
+            _log.warning(
+                "worker.execution_claim_fenced",
+                workspace_id=workspace_id,
+                worker_id=self._worker_id,
+                phase="provision_start",
+                reason_code=EXECUTION_CLAIM_FENCED,
+            )
+            return
+        self._execution_claim_epochs[workspace_id] = epoch
+        provision_task = asyncio.create_task(
+            self._provisioner.provision_claimed(workspace_id, execution_claim_epoch=epoch),
+            name=f"awf-provision-{workspace_id}",
         )
-    except Exception:
-        # Provisioner.provision_claimed() already logged + transitioned to failed;
-        # we swallow here so one bad workspace doesn't abort the batch.
-        _log.exception("worker.provision_failed", workspace_id=workspace_id)
+        # D4: the heartbeat CAS is epoch-gated; if a later claimant fences us it
+        # returns False and cancels the in-flight provision before any rmtree.
+        heartbeat = asyncio.create_task(
+            self._refresh_execution_claim_loop(workspace_id, on_claim_lost=provision_task.cancel),
+            name=f"awf-provisioning-claim-{workspace_id}",
+        )
+        try:
+            await provision_task
+        except asyncio.CancelledError:
+            # Two cancellations land here: the heartbeat fence (``on_claim_lost``
+            # cancels ``provision_task``) and an external cancel of *this* task —
+            # e.g. worker shutdown cancelling ``run_once``'s ``gather``. Only the
+            # fence is ours to abort quietly; an external cancel must propagate so
+            # cooperative cancellation is never suppressed (D7's CAS leaves the row
+            # untouched either way). ``current_task().cancelling()`` is the
+            # discriminator: cancelling this task increments its own request count
+            # even though the cancel is delegated to the awaited ``provision_task``,
+            # whereas a pure heartbeat fence never touches this task's count.
+            outer = cast("asyncio.Task[None]", asyncio.current_task())
+            if outer.cancelling() > 0:
+                raise
+            # Heartbeat-cancel fired: we were fenced mid-provision. The provisioner
+            # leaves the row untouched (D7 CAS), so just abort this attempt.
+            _log.warning(
+                "worker.execution_claim_fenced",
+                workspace_id=workspace_id,
+                worker_id=self._worker_id,
+                phase="provision_cancelled",
+                reason_code=EXECUTION_CLAIM_FENCED,
+            )
+        except Exception:
+            # Provisioner.provision_claimed() already logged + transitioned to failed;
+            # we swallow here so one bad workspace doesn't abort the batch.
+            _log.exception("worker.provision_failed", workspace_id=workspace_id)
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
     finally:
-        heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
         # Release CAS on the stored epoch so a release issued after a newer
         # claimant reclaimed the row cannot clobber it (D6). This finally runs
         # while an external cancel may already be propagating; shield the release
