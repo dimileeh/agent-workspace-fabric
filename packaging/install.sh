@@ -815,7 +815,10 @@ confirm_bootstrap_uv() {
 # --dry-run this only plans the action and mutates nothing. The installer honors
 # UV_INSTALL_DIR; we set it to a known dir and prepend that dir to PATH so the
 # subsequent `command -v uv` / `uv tool install` resolve the freshly installed uv
-# within this same process. Every failure fails closed with UV_BOOTSTRAP_FAILED
+# within this same process. We also set UV_NO_MODIFY_PATH=1 so the uv installer
+# does NOT edit the user's shell profiles (.bashrc/.zshrc); AWF owns PATH guidance
+# and prints its own advice after install, so the installer must not also mutate
+# shell config behind our back. Every failure fails closed with UV_BOOTSTRAP_FAILED
 # rather than proceeding toward an install with no usable uv.
 bootstrap_uv() {
     local src="${AWF_UV_INSTALLER:-$UV_INSTALLER_DEFAULT_URL}"
@@ -827,7 +830,7 @@ bootstrap_uv() {
     [ -s "$installer_file" ] \
         || fail UV_BOOTSTRAP_FAILED "downloaded uv installer is empty: ${src}"
     local uv_bin_dir="${HOME}/.local/bin"
-    UV_INSTALL_DIR="$uv_bin_dir" sh "$installer_file" \
+    UV_INSTALL_DIR="$uv_bin_dir" UV_NO_MODIFY_PATH=1 sh "$installer_file" \
         || fail UV_BOOTSTRAP_FAILED "the uv installer exited non-zero"
     case ":${PATH}:" in
         *":${uv_bin_dir}:"*) ;;

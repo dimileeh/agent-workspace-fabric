@@ -140,6 +140,33 @@ def test_bootstrap_uv_opt_in_installs_uv_then_awf(harness: InstallerHarness) -> 
 
 
 @pytest.mark.unit
+def test_bootstrap_disables_uv_installer_shell_modifications(harness: InstallerHarness) -> None:
+    """The bootstrap runs the uv installer with ``UV_NO_MODIFY_PATH=1``.
+
+    The official uv installer mutates shell profiles (``.bashrc``/``.zshrc``) by
+    default unless ``UV_NO_MODIFY_PATH=1`` is set. AWF owns PATH guidance — it
+    prepends the bootstrap dir to ``PATH`` for this process and prints its own
+    advice — so the installer must not also rewrite the user's shell config.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_awf(version="0.1.0")
+    installer = harness.write_uv_installer(succeeds=True)
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run(
+        ["--bootstrap-uv"], manifest=manifest, extra_env={"AWF_UV_INSTALLER": str(installer)}
+    )
+
+    assert result.returncode == 0, result.stderr
+    # The seam installer ran, and every invocation saw UV_NO_MODIFY_PATH=1 — proving
+    # the bootstrap suppressed the installer's shell-profile edits.
+    installer_calls = [line for line in harness.calls() if line.startswith("uv-installer ")]
+    assert installer_calls, harness.calls()
+    assert all("UV_NO_MODIFY_PATH=1" in line for line in installer_calls)
+
+
+@pytest.mark.unit
 def test_bootstrap_uv_dry_run_plans_without_mutation(harness: InstallerHarness) -> None:
     """``--bootstrap-uv --dry-run`` plans the bootstrap but never executes it."""
     harness.add_uname("Linux", "x86_64")

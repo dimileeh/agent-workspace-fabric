@@ -170,7 +170,14 @@ class InstallerHarness:
         # *invocation* observable independently of its filesystem side-effect, so
         # the dry-run test can prove the bootstrap was planned-not-run via call
         # absence rather than relying solely on ``~/.local/bin/uv`` not existing.
-        invoke_sentinel = f'printf \'%s\\n\' "uv-installer $*" >> "{self.log_file}"\n'
+        # The sentinel also records UV_NO_MODIFY_PATH so a test can assert the
+        # bootstrap suppresses the uv installer's shell-profile edits, mirroring how
+        # ``uv tool uninstall`` records ``UV_TOOL_BIN_DIR``.
+        invoke_sentinel = (
+            "printf '%s\\n' \"uv-installer $* "
+            'UV_NO_MODIFY_PATH=${UV_NO_MODIFY_PATH:-<unset>}" '
+            f'>> "{self.log_file}"\n'
+        )
         if succeeds:
             uv_stub = self._stub_contents("uv", self._uv_behavior())
             body = (
