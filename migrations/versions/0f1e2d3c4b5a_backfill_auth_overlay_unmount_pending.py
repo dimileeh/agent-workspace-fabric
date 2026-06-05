@@ -79,6 +79,9 @@ def upgrade() -> None:
     if bind.dialect.name == "postgresql":
         bind.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
         bind.execute(sa.text("SET LOCAL statement_timeout = '10min'"))
+        # Per-workspace event-order reservations may wait behind ordinary
+        # writers; leave total runtime bounded by statement_timeout instead.
+        bind.execute(sa.text("SET LOCAL lock_timeout = '0'"))
     backfill_auth_overlay_unmount_pending(bind)
 
 
