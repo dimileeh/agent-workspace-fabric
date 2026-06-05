@@ -94,7 +94,12 @@ _SECRET_ENV_KEY_SUFFIXES = (
     "_PASSWD",
     "_SECRET",
 )
-_SECRET_ENV_KEY_NAMES = {suffix.removeprefix("_") for suffix in _SECRET_ENV_KEY_SUFFIXES}
+_SECRET_ENV_KEY_NAMES = {
+    *{suffix.removeprefix("_") for suffix in _SECRET_ENV_KEY_SUFFIXES},
+    "ACCESSKEY",
+    "APIKEY",
+    "PRIVATEKEY",
+}
 
 URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
 _GITHUB_TOKEN_PATTERNS = (

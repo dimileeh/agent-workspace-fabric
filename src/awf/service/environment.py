@@ -7,6 +7,7 @@ import re
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import NoReturn, cast
@@ -49,6 +50,16 @@ class ComposeEnvInterpolationError(ValueError):
     def __init__(self, variable: str, message: str) -> None:
         self.variable = variable
         super().__init__(message or f"{variable} is required")
+
+
+@dataclass(frozen=True)
+class ComposeEnvQuotedMultilineValue:
+    """A closed quoted Compose env-file value whose decoded value contains a newline."""
+
+    key: str
+    value: str
+    first_line_value: str
+    closed_on_first_line: bool
 
 
 _COMPOSE_INTERPOLATION_KEYS_CACHE: OrderedDict[
@@ -192,6 +203,81 @@ def compose_env_file_values(
             value = _compose_expand_env_value(value, caller_environ=caller_environ, values=values)
         values[key] = value
     return values
+
+
+def compose_env_file_quoted_multiline_values(
+    compose_env_file: Path | None,
+) -> tuple[ComposeEnvQuotedMultilineValue, ...]:
+    """Return closed quoted Compose env-file entries whose decoded value spans lines."""
+    if compose_env_file is None or not compose_env_file.exists():
+        return ()
+    values: list[ComposeEnvQuotedMultilineValue] = []
+    lines = compose_env_file.read_text(encoding="utf-8").splitlines()
+    index = 0
+    while index < len(lines):
+        parsed = _parse_compose_quoted_env_start(lines[index])
+        if parsed is None:
+            index += 1
+            continue
+        key, quote, raw_value = parsed
+        first_line_value, closed = _consume_compose_quoted_multiline_value(raw_value, quote)
+        value = first_line_value
+        closed_on_first_line = closed
+        while not closed and index + 1 < len(lines):
+            index += 1
+            raw_value = raw_value + "\n" + lines[index]
+            value, closed = _consume_compose_quoted_multiline_value(raw_value, quote)
+        if closed and "\n" in value and value:
+            values.append(
+                ComposeEnvQuotedMultilineValue(
+                    key=key,
+                    value=value,
+                    first_line_value=first_line_value,
+                    closed_on_first_line=closed_on_first_line,
+                )
+            )
+        index += 1
+    return tuple(values)
+
+
+def _parse_compose_quoted_env_start(line: str) -> tuple[str, str, str] | None:
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    match = _COMPOSE_ENV_LINE_PATTERN.match(line)
+    if match is None or match.group("value") is None:
+        return None
+    raw_value = match.group("value").lstrip()
+    if not raw_value or raw_value[0] not in {"'", '"'}:
+        return None
+    return match.group("key"), raw_value[0], raw_value
+
+
+def _consume_compose_quoted_multiline_value(raw_value: str, quote: str) -> tuple[str, bool]:
+    chars: list[str] = []
+    escaped = False
+    for char in raw_value[1:]:
+        if escaped:
+            if quote == '"' or char != "'":
+                chars.append("\\")
+            chars.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "'" and quote == "'":
+            return "".join(chars), True
+        if char == '"' and quote == '"':
+            value = _decode_compose_double_quoted_value("".join(chars)).replace(
+                _COMPOSE_ESCAPED_DOLLAR,
+                "$",
+            )
+            return value, True
+        chars.append(char)
+    if escaped:
+        chars.append("\\")
+    return "".join(chars), False
 
 
 def _parse_compose_env_line(line: str) -> tuple[str, str, str | None] | None:

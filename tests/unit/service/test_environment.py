@@ -438,6 +438,39 @@ def test_compose_env_file_values_allows_empty_plain_mandatory_interpolation(
 
 
 @pytest.mark.unit
+def test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values(
+    tmp_path,
+) -> None:
+    from awf.service.environment import compose_env_file_quoted_multiline_values
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "API_KEY='first",
+                "second\\'s",
+                "third'",
+                'PUBLIC_URL="http://example.test"',
+                r'PRIVATE_KEY="line\nnext"',
+                "UNFINISHED_TOKEN='start",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    values = compose_env_file_quoted_multiline_values(env_file)
+
+    assert [
+        (value.key, value.value, value.first_line_value, value.closed_on_first_line)
+        for value in values
+    ] == [
+        ("API_KEY", "first\nsecond's\nthird", "first", False),
+        ("PRIVATE_KEY", "line\nnext", "line\nnext", True),
+    ]
+
+
+@pytest.mark.unit
 def test_compose_interpolation_keys_ignores_unreadable_and_non_utf8_files(
     tmp_path,
 ) -> None:

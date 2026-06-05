@@ -2500,3 +2500,56 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py src/awf/common
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py src/awf/common/token_patterns.py src/awf/common/audit.py
 # Success: no issues found in 3 source files
 ```
+
+## Review-Level Comment `issue:4620175517` Compose Multiline Parser Deduplication Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: service-log and MCP exact-secret collection now use the shared
+  `compose_env_file_quoted_multiline_values()` helper for quoted multiline
+  Compose env-file entries.
+- Complete: the shared helper preserves the existing single-quoted and
+  double-quoted escape behavior, returns only closed values whose decoded value
+  contains a newline, and leaves secret-key filtering to callers.
+- Complete: service-log exact-secret collection still suppresses first-line
+  fragments for physical multiline values so the full secret is redacted as one
+  exact span.
+- Complete: `is_secret_env_key()` now classifies `PRIVATEKEY`, `APIKEY`, and
+  `ACCESSKEY` while the existing public-key and bucket-size exclusions remain
+  covered.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/environment.py`
+- `src/awf/service/provider_readiness.py`
+- `src/awf/service/logs.py`
+- `src/awf/mcp/server.py`
+- `tests/unit/service/test_environment.py`
+- `tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py::test_provider_readiness_public_secret_env_key_classifier -q --tb=short -ra
+# 2 failed: shared helper was absent and PRIVATEKEY was not classified as a secret key.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py::test_provider_readiness_public_secret_env_key_classifier tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_excludes_multiline_first_line_fragment tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+# 5 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py tests/unit/service/test_environment.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py
+# Success: no issues found in 4 source files
+```

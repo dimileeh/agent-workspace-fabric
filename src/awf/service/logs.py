@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -28,6 +27,7 @@ from awf.service.config import (
 from awf.service.environment import (
     cleared_docker_cli_client_keys,
     compose_cli_environ,
+    compose_env_file_quoted_multiline_values,
     compose_env_file_values,
     compose_interpolation_environ,
     docker_cli_client_environ,
@@ -44,10 +44,6 @@ _STREAMING_DOWNSTREAM_WRITE_TIMEOUT_SECONDS = 5.0
 _STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS = 0.05
 _STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS = 0.05
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
-_COMPOSE_QUOTED_ENV_LINE_RE = re.compile(
-    r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<quote>['\"])(?P<value>.*)$"
-)
-_COMPOSE_ESCAPED_DOLLAR = "\0AWF_ESCAPED_DOLLAR\0"
 
 
 def _resolve_local_service_compose_file(compose_file: Path) -> Path:
@@ -571,83 +567,15 @@ def _service_log_quoted_multiline_secret_context(
     compose_env_file: Path | None,
 ) -> tuple[tuple[str, ...], frozenset[tuple[str, str]]]:
     """Return full quoted multiline secrets and parsed first-line fragments."""
-    if compose_env_file is None or not compose_env_file.exists():
-        return (), frozenset()
     values: list[str] = []
     first_line_values: set[tuple[str, str]] = set()
-    lines = compose_env_file.read_text(encoding="utf-8").splitlines()
-    index = 0
-    while index < len(lines):
-        match = _COMPOSE_QUOTED_ENV_LINE_RE.match(lines[index])
-        if match is None:
-            index += 1
+    for entry in compose_env_file_quoted_multiline_values(compose_env_file):
+        if len(entry.value) < 4 or not is_secret_env_key(entry.key):
             continue
-        key = match.group("key")
-        quote = match.group("quote")
-        raw_value = quote + match.group("value")
-        first_line_value, closed = _consume_service_log_quoted_value(raw_value, quote)
-        value = first_line_value
-        closed_on_first_line = closed
-        while not closed and index + 1 < len(lines):
-            index += 1
-            raw_value = raw_value + "\n" + lines[index]
-            value, closed = _consume_service_log_quoted_value(raw_value, quote)
-        if closed and "\n" in value and value and len(value) >= 4 and is_secret_env_key(key):
-            values.append(value)
-            if not closed_on_first_line:
-                first_line_values.add((key, first_line_value))
-        index += 1
+        values.append(entry.value)
+        if not entry.closed_on_first_line:
+            first_line_values.add((entry.key, entry.first_line_value))
     return tuple(values), frozenset(first_line_values)
-
-
-def _consume_service_log_quoted_value(raw_value: str, quote: str) -> tuple[str, bool]:
-    """Consume a Compose quoted value and report whether it closed."""
-    chars: list[str] = []
-    escaped = False
-    for char in raw_value[1:]:
-        if escaped:
-            if quote == '"' or char != "'":
-                chars.append("\\")
-            chars.append(char)
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char == "'" and quote == "'":
-            return "".join(chars), True
-        if char == '"' and quote == '"':
-            return _decode_service_log_double_quoted_value("".join(chars)), True
-        chars.append(char)
-    if escaped:
-        chars.append("\\")
-    return "".join(chars), False
-
-
-def _decode_service_log_double_quoted_value(value: str) -> str:
-    """Decode Compose double-quoted escapes that can appear in multiline values."""
-    replacements = {
-        "n": "\n",
-        "r": "\r",
-        "t": "\t",
-        "\\": "\\",
-        '"': '"',
-        "$": _COMPOSE_ESCAPED_DOLLAR,
-    }
-    decoded: list[str] = []
-    escaped = False
-    for char in value:
-        if escaped:
-            decoded.append(replacements.get(char, char))
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        decoded.append(char)
-    if escaped:
-        decoded.append("\\")
-    return "".join(decoded).replace(_COMPOSE_ESCAPED_DOLLAR, "$")
 
 
 def _resolve_service_log_compose_env_file(

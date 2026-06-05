@@ -16,7 +16,6 @@ import asyncio
 import inspect
 import json
 import os
-import re
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol
@@ -37,7 +36,10 @@ from awf.service import config as service_config
 from awf.service import provider_readiness as provider_readiness_service
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck, check_disk_space
-from awf.service.environment import compose_env_file_values
+from awf.service.environment import (
+    compose_env_file_quoted_multiline_values,
+    compose_env_file_values,
+)
 from awf.service.local_capacity import detect_local_capacity
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.provider_readiness import ProviderName, is_secret_env_key
@@ -74,10 +76,6 @@ _MCP_LEGACY_BASE_BRANCH_DEFAULT = "development"
 # legacy development default, so the release PR is opened development -> main
 # instead of degenerating to development -> development (NO_CHANGES_TO_SYNC).
 _MCP_RELEASE_SYNC_BASE_BRANCH_DEFAULT = "main"
-_MCP_COMPOSE_QUOTED_ENV_LINE_RE = re.compile(
-    r"^\s*(?:export\s+)?(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<quote>['\"])(?P<value>.*)$"
-)
-_MCP_COMPOSE_ESCAPED_DOLLAR = "\0AWF_ESCAPED_DOLLAR\0"
 
 
 class ReadinessProvider(Protocol):
@@ -578,78 +576,11 @@ def _mcp_compose_env_file_secret_values(compose_env_file: Path | None) -> tuple[
 
 def _mcp_quoted_multiline_secret_values(compose_env_file: Path | None) -> tuple[str, ...]:
     """Return Compose quoted multiline secret values for exact MCP redaction."""
-    if compose_env_file is None or not compose_env_file.exists():
-        return ()
-    values: list[str] = []
-    lines = compose_env_file.read_text(encoding="utf-8").splitlines()
-    index = 0
-    while index < len(lines):
-        match = _MCP_COMPOSE_QUOTED_ENV_LINE_RE.match(lines[index])
-        if match is None:
-            index += 1
-            continue
-        key = match.group("key")
-        quote = match.group("quote")
-        raw_value = quote + match.group("value")
-        value, closed = _consume_mcp_compose_quoted_value(raw_value, quote)
-        while not closed and index + 1 < len(lines):
-            index += 1
-            raw_value = raw_value + "\n" + lines[index]
-            value, closed = _consume_mcp_compose_quoted_value(raw_value, quote)
-        if closed and "\n" in value and value and len(value) >= 4 and is_secret_env_key(key):
-            values.append(value)
-        index += 1
-    return tuple(values)
-
-
-def _consume_mcp_compose_quoted_value(raw_value: str, quote: str) -> tuple[str, bool]:
-    """Consume a Compose quoted value and report whether it closed."""
-    chars: list[str] = []
-    escaped = False
-    for char in raw_value[1:]:
-        if escaped:
-            if quote == '"' or char != "'":
-                chars.append("\\")
-            chars.append(char)
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char == "'" and quote == "'":
-            return "".join(chars), True
-        if char == '"' and quote == '"':
-            return _decode_mcp_compose_double_quoted_value("".join(chars)), True
-        chars.append(char)
-    if escaped:
-        chars.append("\\")
-    return "".join(chars), False
-
-
-def _decode_mcp_compose_double_quoted_value(value: str) -> str:
-    """Decode Compose double-quoted escapes that can appear in multiline values."""
-    replacements = {
-        "n": "\n",
-        "r": "\r",
-        "t": "\t",
-        "\\": "\\",
-        '"': '"',
-        "$": _MCP_COMPOSE_ESCAPED_DOLLAR,
-    }
-    decoded: list[str] = []
-    escaped = False
-    for char in value:
-        if escaped:
-            decoded.append(replacements.get(char, char))
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        decoded.append(char)
-    if escaped:
-        decoded.append("\\")
-    return "".join(decoded).replace(_MCP_COMPOSE_ESCAPED_DOLLAR, "$")
+    return tuple(
+        entry.value
+        for entry in compose_env_file_quoted_multiline_values(compose_env_file)
+        if len(entry.value) >= 4 and is_secret_env_key(entry.key)
+    )
 
 
 def _redact_sensitive_payload(

@@ -2091,3 +2091,52 @@ uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py src/awf/common/token_patterns.py src/awf/common/audit.py tests/unit/mcp/test_mcp_server_redaction_helpers.py tests/unit/common/test_token_patterns.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py src/awf/common/token_patterns.py src/awf/common/audit.py
 ```
+
+## Review-Level Comment `issue:4620175517` Compose Multiline Parser Deduplication Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports two final redaction maintenance gaps: the
+quoted multiline Compose env-file parser exists separately in service logs and
+MCP server code, and `is_secret_env_key()` does not classify no-separator
+`PRIVATEKEY`, `APIKEY`, or `ACCESSKEY` names even though the shared token
+assignment pattern redacts those assignment forms.
+
+This repair is limited to centralizing the quoted multiline Compose env-file
+helper in the existing shared service environment module, updating the two
+current callers, adding the missing secret-key names, focused regressions, and
+this plan/validation evidence. It does not change branch management, pushing,
+broad validation, full coverage, or unrelated Compose parsing behavior.
+
+### Requirements Checklist
+
+- Service-log and MCP exact-secret collection use one shared helper for quoted
+  multiline Compose env-file entries.
+- The shared helper preserves existing single-quoted and double-quoted escape
+  behavior, returns only closed multiline values, and lets callers decide which
+  keys are secret-like.
+- Service-log exact-secret collection still suppresses first-line fragments for
+  multiline values so the full secret is redacted as one span.
+- `is_secret_env_key()` classifies `PRIVATEKEY`, `APIKEY`, and `ACCESSKEY` as
+  secret keys while preserving public-key and bucket-size exclusions.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused failing regressions for the shared multiline helper, the
+   no-separator secret key names, and the existing service-log/MCP callers.
+2. Move the quoted multiline Compose env-file parsing logic into
+   `awf.service.environment` and return key/value plus first-line context.
+3. Replace the service-log and MCP duplicate parser implementations with calls
+   to the shared helper.
+4. Add the no-separator key names to `_SECRET_ENV_KEY_NAMES`.
+5. Run the focused regressions and narrow lint/type checks for touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py::test_provider_readiness_public_secret_env_key_classifier tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_excludes_multiline_first_line_fragment tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py tests/unit/service/test_environment.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
+uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py
+```
