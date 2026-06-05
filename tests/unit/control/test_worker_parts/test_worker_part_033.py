@@ -1223,6 +1223,13 @@ class TestRunOnceStaleActiveExecutionRecoveryPart018:
             WorkspaceStatus.running,
             compose_project_name="awf_stale_running_fail",
         )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "zombie-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            ws.execution_claim_epoch = 4
+            await s.commit()
         cleaner = _RecordingRuntimeCleaner()
         worker = ControlWorker(
             session_factory=session_factory,
@@ -1264,6 +1271,9 @@ class TestRunOnceStaleActiveExecutionRecoveryPart018:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.execution_claimed_by is None
             assert ws.execution_claim_expires_at is None
+            # D3: the recovery clear bumps the fencing token so a zombie worker
+            # whose owner string still matches is fenced on its next CAS write.
+            assert ws.execution_claim_epoch == 5
             assert ws.failure_reason == "infrastructure_failure"
             assert ws.failure_message is not None
             assert "compose runtime state is running" in ws.failure_message

@@ -792,6 +792,9 @@ async def _fail_stale_active_execution(
         ws = transitioned
         ws.execution_claimed_by = None
         ws.execution_claim_expires_at = None
+        # D3: bump the fencing token so a zombie worker whose owner string still
+        # matches is fenced on its next heartbeat/release CAS write.
+        ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
         if primary_failure is None:
             ws.failure_reason = FailureReason.infrastructure_failure.value
             ws.failure_message = message[:2048]
@@ -867,6 +870,9 @@ async def _fail_stranded_workspace(
         ws = transitioned
         ws.execution_claimed_by = None
         ws.execution_claim_expires_at = None
+        # D3: bump the fencing token so a zombie worker whose owner string still
+        # matches is fenced on its next heartbeat/release CAS write.
+        ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
         ws.monitor_claimed_by = None
         ws.monitor_claim_expires_at = None
         if primary_failure is None:
@@ -937,6 +943,13 @@ async def _record_recoverable_runtime_stranding(
             ws.execution_claim_expires_at = None
             ws.monitor_claimed_by = None
             ws.monitor_claim_expires_at = None
+            if claims_will_clear:
+                # D3: bump the fencing token alongside the version advance so a
+                # zombie worker whose owner string still matches is fenced on
+                # its next heartbeat/release CAS write. Only the execution-claim
+                # branch advances the epoch (the monitoring_pr branch above
+                # clears only the monitor claim, leaving execution untouched).
+                ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
         if claims_will_clear:
             await repo.advance_workspace_version(ws)
         await repo.add_event(
