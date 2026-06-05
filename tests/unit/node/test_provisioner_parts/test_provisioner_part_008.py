@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.node.compose_manager import ComposeProjectPaths
+from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from tests.postgres import postgres_test_engine
@@ -299,6 +299,85 @@ async def test_fenced_ready_transition_updates_zero_rows_cannot_steal(
     assert reloaded.status == WorkspaceStatus.provisioning.value
     assert reloaded.execution_claim_epoch == 2
     assert reloaded.execution_claimed_by == "control-worker-newer"
+
+
+class _ComposeFailBackstopLauncher(_RecordingStackLauncher):
+    """Signal compose-up started, let a later claimant reclaim, then fail compose."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__()
+        self._session_factory = session_factory
+
+    async def launch(self, request: Any) -> object:
+        self.requests.append(request)
+        on_started = getattr(request, "on_compose_up_started", None)
+        if on_started is not None:
+            await on_started()
+        # A later claimant reclaims the row during the launch ``to_thread``
+        # window (epoch -> 2), then compose-up fails.
+        await _advance_epoch(self._session_factory, request.workspace_id)
+        raise ComposeOperationError(
+            operation="up",
+            returncode=17,
+            stdout="",
+            stderr="docker compose up failed after launch began",
+            reason_code="COMPOSE_UP_FAILED",
+        )
+
+
+@pytest.mark.unit
+async def test_fenced_compose_fail_backstop_does_not_write_metadata(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_repo: Path,
+) -> None:
+    # The pre-launch verify passes (epoch still 1 at that point), but a later
+    # claimant reclaims during launch (epoch -> 2) and compose-up then fails.
+    # The compose-fail backstop must be epoch-fenced like the pre-launch write:
+    # a fenced worker must NOT republish compose_project_name / resolved_profile
+    # into the new claimant's row, or a retry would inherit the stale
+    # auto-resolved profile. Downstream, the epoch-gated _mark_failed (D7) also
+    # leaves the row in ``provisioning``.
+    ws_id = await _create_provisioning(session_factory, origin_repo, epoch=1)
+
+    class _ClearMetadataProvisioner(Provisioner):
+        async def _recheck_before_launch(self, workspace_id: str) -> bool:
+            # pre_launch_session already committed compose_project_name and the
+            # auto-resolved profile (the epoch matched then); null both so the
+            # backstop's "compose_project_name is None" branch is live and a
+            # stale resolved_profile write would be observable if unfenced.
+            async with self._session_factory() as s:
+                ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+                assert ws is not None
+                assert ws.compose_project_name == f"awf_{workspace_id}"
+                assert ws.resolved_profile is not None
+                ws.compose_project_name = None
+                ws.resolved_profile = None
+                await s.commit()
+            return True
+
+    launcher = _ComposeFailBackstopLauncher(session_factory)
+    provisioner = _ClearMetadataProvisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        stack_launcher=launcher,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+
+    with pytest.raises(ComposeOperationError):
+        await provisioner.provision_claimed(ws_id, execution_claim_epoch=1)
+
+    assert len(launcher.requests) == 1
+    reloaded = await _reload(session_factory, ws_id)
+    assert reloaded is not None
+    # D7: the fenced _mark_failed CAS updated 0 rows, so the row stays provisioning.
+    assert reloaded.status == WorkspaceStatus.provisioning.value
+    assert reloaded.execution_claim_epoch == 2
+    assert reloaded.execution_claimed_by == "control-worker-newer"
+    # D4 (backstop): the fenced worker did NOT republish placement metadata into
+    # the new claimant's row, so a retry re-resolves the profile cleanly.
+    assert reloaded.compose_project_name is None
+    assert reloaded.resolved_profile is None
 
 
 class _FailingGit:

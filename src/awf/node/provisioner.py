@@ -639,6 +639,10 @@ class Provisioner(ProvisionerHostPortCheckMixin):
                         compose_fail_ws is not None
                         and compose_fail_ws.status == WorkspaceStatus.provisioning.value
                         and compose_fail_ws.compose_project_name is None
+                        and (
+                            execution_claim_epoch is None
+                            or compose_fail_ws.execution_claim_epoch == execution_claim_epoch
+                        )
                     ):
                         # Defensive backstop: pre_launch_session normally sets
                         # compose_project_name before launch, so this branch
@@ -648,6 +652,17 @@ class Provisioner(ProvisionerHostPortCheckMixin):
                         # compose_project_name null at compose-fail time,
                         # ensuring the cleanup worker can still discover and
                         # tear down the project.
+                        #
+                        # D4 (row-locked): the epoch read under this
+                        # ``get_for_update`` fences the write the same way
+                        # ``pre_launch_session`` does — a later claimant can
+                        # advance ``execution_claim_epoch`` during the launch
+                        # ``to_thread`` window (the residual gap the D4 verify
+                        # above acknowledges), and a fenced worker must not
+                        # write compose_project_name / resolved_profile into
+                        # the new claimant's row.  When the epoch has moved on
+                        # we skip the write; the epoch-gated ``_mark_failed``
+                        # (D7) below then CAS-skips the terminal transition.
                         compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
                         if (
                             resolved_profile_dict is not None
