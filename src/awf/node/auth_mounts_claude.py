@@ -670,6 +670,17 @@ def _prepare_isolated_claude_auth(
                         forward_deletions=legacy_complete,
                     )
                     shutil.rmtree(legacy_claude_copy, ignore_errors=True)
+                    # Reap the completeness marker with the copy it vouches for. It
+                    # lives *beside* the legacy tree (``target_root``), so ``rmtree``
+                    # of ``.claude`` leaves it dangling otherwise. Its invariant is
+                    # "present ⟹ *this* ``.claude`` copy is provably complete"; a
+                    # stale marker over a since-reaped copy would falsely vouch for a
+                    # later partial ``.claude`` that lands here without the atomic
+                    # write path (e.g. a concurrent older-code provision), keeping
+                    # ``forward_deletions`` true so the whiteout pass could hide
+                    # still-valid lower credentials. Removing it restores the
+                    # safe default (a missing marker forgoes the destructive pass).
+                    (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).unlink(missing_ok=True)
         else:
             target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)

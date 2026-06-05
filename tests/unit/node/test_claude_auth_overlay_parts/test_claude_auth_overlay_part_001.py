@@ -1385,3 +1385,35 @@ def test_reconcile_forwards_deletions_for_marked_complete_legacy_copy(
         entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_DELETION_SKIPPED_INCOMPLETE_LEGACY"
         for entry in logs
     )
+
+
+@pytest.mark.unit
+def test_overlay_reap_removes_stale_completeness_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reviewer's #414 PRRT_kwDOSJAM6s6HRwl_ case: reaping the reconciled legacy copy
+    # when the overlay wins must ALSO remove the completeness marker that lived beside it.
+    # The marker's invariant is "present ⟹ *this* ``.claude`` copy is provably complete";
+    # leaving it dangling after the copy is gone would let a later partial ``.claude`` (one
+    # that never went through the atomic-write path — e.g. a concurrent older-code provision)
+    # be falsely vouched for, so ``forward_deletions`` would stay true and the whiteout pass
+    # could hide still-valid lower credentials.
+    host_home, work_dir, claude_root = _seed_overlay_reuse_with_deletion_shaped_legacy(
+        tmp_path, "ws_reap_marker"
+    )
+    (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).touch()
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod([]))
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reap_marker",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=True),
+    )
+
+    # The legacy copy is reaped, and so is its now-dangling completeness marker.
+    assert not (claude_root / ".claude").exists()
+    assert not (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).exists()
