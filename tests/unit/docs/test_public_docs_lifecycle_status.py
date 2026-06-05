@@ -17,7 +17,7 @@ from tests.unit.docs.public_docs_status_helpers import (
     REPO_ROOT,
     SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES,
     _assert_package_upgrade_restores_service_env,
-    _assert_source_checkout_service_env_restore_before_stop,
+    _assert_source_checkout_service_env_restore_and_stop,
     _assert_source_checkout_stop_prefers_root_env,
     _markdown_fences,
     _markdown_section,
@@ -25,6 +25,50 @@ from tests.unit.docs.public_docs_status_helpers import (
     _quickstart_upgrade_section,
     _required_index,
 )
+
+
+def test_source_checkout_stop_helper_allows_root_guard_without_legacy_when_optional() -> None:
+    """Assert optional legacy fallback permits a guarded root-only stop."""
+    section = "\n".join(
+        (
+            "if [ -f .env ]; then",
+            "  docker compose --env-file .env -f docker/compose/local-service.yml stop",
+            "else",
+            "  docker compose -f docker/compose/local-service.yml stop",
+            "fi",
+        )
+    )
+
+    stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+        "root-only guarded stop",
+        section,
+        0,
+        require_legacy_fallback=False,
+    )
+
+    assert section[stop_start_index:].startswith("if [ -f .env ]; then")
+    assert section[stop_end_index:].startswith("fi")
+
+
+def test_source_checkout_stop_helper_requires_legacy_fallback_with_clear_message() -> None:
+    """Assert required legacy fallback failures are explicit."""
+    section = "\n".join(
+        (
+            "if [ -f .env ]; then",
+            "  docker compose --env-file .env -f docker/compose/local-service.yml stop",
+            "else",
+            "  docker compose -f docker/compose/local-service.yml stop",
+            "fi",
+        )
+    )
+
+    with pytest.raises(AssertionError, match="must keep legacy compose env fallback"):
+        _assert_source_checkout_stop_prefers_root_env(
+            "root-only guarded stop",
+            section,
+            0,
+            require_legacy_fallback=True,
+        )
 
 
 def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
@@ -78,21 +122,19 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
     for label, section, refresh_prereq, setup_line, start_line in cases:
         assert checkout_refresh_line in section, f"{label} is missing checkout refresh"
         assert refresh_prereq in section, f"{label} is missing upgrade prerequisite"
-        env_restore_start_index, env_restore_end_index = (
-            _assert_source_checkout_service_env_restore_before_stop(
-                label,
-                section,
-                "upgrading",
-            )
+        (
+            env_restore_start_index,
+            env_restore_end_index,
+            _stop_start_index,
+            stop_end_index,
+        ) = _assert_source_checkout_service_env_restore_and_stop(
+            label,
+            section,
+            "upgrading",
+            require_legacy_fallback=not label.startswith("Quickstart"),
         )
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
         assert start_line in section, f"{label} is missing source-checkout start"
-        _stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
-            label,
-            section,
-            env_restore_end_index,
-            require_legacy_fallback=not label.startswith("Quickstart"),
-        )
         checkout_refresh_index = section.index(checkout_refresh_line)
         assert (
             env_restore_start_index

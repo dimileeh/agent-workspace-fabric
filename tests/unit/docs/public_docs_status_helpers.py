@@ -700,12 +700,26 @@ def _assert_source_checkout_stop_prefers_root_env(
 
     root_stop_guard_index = _shell_line_index(section, root_stop_guard_line, label, start)
     root_stop_index = _shell_line_index(section, root_stop_line, label, root_stop_guard_index)
-    legacy_stop_guard_index = _shell_line_index(
-        section,
-        legacy_stop_guard_line,
-        label,
-        root_stop_index,
+    legacy_stop_guard_match = re.search(
+        rf"(?m)^{re.escape(legacy_stop_guard_line)}$",
+        section[root_stop_index:],
     )
+    if legacy_stop_guard_match is None:
+        assert not require_legacy_fallback, f"{label} must keep legacy compose env fallback"
+        stop_else_index = _shell_line_index(section, stop_else_line, label, root_stop_index)
+        stop_fallback_index = _shell_line_index(section, stop_fallback_line, label, stop_else_index)
+        stop_guard_end_index = _shell_closing_fi_index(section, stop_fallback_index, label)
+
+        assert (
+            root_stop_guard_index
+            < root_stop_index
+            < stop_else_index
+            < stop_fallback_index
+            < stop_guard_end_index
+        ), f"{label} must stop with root .env before unconfigured compose fallback"
+        return root_stop_guard_index, stop_guard_end_index
+
+    legacy_stop_guard_index = root_stop_index + legacy_stop_guard_match.start()
     legacy_stop_index = _shell_line_index(section, legacy_stop_line, label, legacy_stop_guard_index)
     stop_else_index = _shell_line_index(section, stop_else_line, label, legacy_stop_index)
     stop_fallback_index = _shell_line_index(section, stop_fallback_line, label, stop_else_index)
@@ -723,11 +737,13 @@ def _assert_source_checkout_stop_prefers_root_env(
     return root_stop_guard_index, stop_guard_end_index
 
 
-def _assert_source_checkout_service_env_restore_before_stop(
+def _assert_source_checkout_service_env_restore_and_stop(
     label: str,
     section: str,
     lifecycle: str,
-) -> tuple[int, int]:
+    *,
+    require_legacy_fallback: bool = False,
+) -> tuple[int, int, int, int]:
     """Assert source-checkout snippets restore service secrets before stopping Core."""
     api_restore_start_index, api_restore_end_index = _assert_source_checkout_api_token_restore(
         label,
@@ -745,6 +761,7 @@ def _assert_source_checkout_service_env_restore_before_stop(
         label,
         section,
         password_restore_end_index,
+        require_legacy_fallback=require_legacy_fallback,
     )
 
     assert (
@@ -754,6 +771,22 @@ def _assert_source_checkout_service_env_restore_before_stop(
         < password_restore_end_index
         < stop_index
     ), f"{label} must restore service secrets before stopping Core"
+    return api_restore_start_index, password_restore_end_index, stop_index, _stop_end_index
+
+
+def _assert_source_checkout_service_env_restore_before_stop(
+    label: str,
+    section: str,
+    lifecycle: str,
+) -> tuple[int, int]:
+    """Assert source-checkout snippets restore service secrets before stopping Core."""
+    api_restore_start_index, password_restore_end_index, _stop_index, _stop_end_index = (
+        _assert_source_checkout_service_env_restore_and_stop(
+            label,
+            section,
+            lifecycle,
+        )
+    )
     return api_restore_start_index, password_restore_end_index
 
 

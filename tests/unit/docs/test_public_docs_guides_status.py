@@ -17,8 +17,7 @@ from tests.unit.docs.public_docs_status_helpers import (
     REPO_ROOT,
     MarkdownFence,
     _assert_snippet_syntax,
-    _assert_source_checkout_service_env_restore_before_stop,
-    _assert_source_checkout_stop_prefers_root_env,
+    _assert_source_checkout_service_env_restore_and_stop,
     _awf_command_mentions,
     _copy_paste_docs,
     _fence_delimiter_count_is_even,
@@ -494,17 +493,15 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         intro_setup_line,
         "intro source-checkout uninstall",
     )
-    intro_env_restore_start_index, intro_env_restore_end_index = (
-        _assert_source_checkout_service_env_restore_before_stop(
-            "intro source-checkout uninstall",
-            intro_section,
-            "refreshing source-checkout metadata",
-        )
-    )
-    intro_stop_start_index, intro_stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+    (
+        intro_env_restore_start_index,
+        intro_env_restore_end_index,
+        intro_stop_start_index,
+        intro_stop_end_index,
+    ) = _assert_source_checkout_service_env_restore_and_stop(
         "intro source-checkout uninstall",
         intro_section,
-        intro_env_restore_end_index,
+        "refreshing source-checkout metadata",
         require_legacy_fallback=True,
     )
     assert (
@@ -521,17 +518,15 @@ def test_uninstall_source_checkout_refresh_requires_core_stop_guidance() -> None
         assert port_block_guidance in section_words, f"{label} must explain setup port blockers"
         assert section_words.index(core_stop_guidance) < section_words.index(setup_line)
         assert checkout_cd_line in section, f"{label} must cd into the source checkout"
-        env_restore_start_index, env_restore_end_index = (
-            _assert_source_checkout_service_env_restore_before_stop(
-                f"{label} uninstall",
-                section,
-                "refreshing source-checkout metadata",
-            )
-        )
-        stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+        (
+            env_restore_start_index,
+            env_restore_end_index,
+            stop_start_index,
+            stop_end_index,
+        ) = _assert_source_checkout_service_env_restore_and_stop(
             f"{label} uninstall",
             section,
-            env_restore_end_index,
+            "refreshing source-checkout metadata",
             require_legacy_fallback=True,
         )
         assert (
@@ -598,17 +593,15 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
 
     assert no_global_heading in rollback_section
     no_global_section = rollback_section.split(no_global_heading, maxsplit=1)[1]
-    env_restore_start_index, env_restore_end_index = (
-        _assert_source_checkout_service_env_restore_before_stop(
-            "no-global source-checkout rollback",
-            no_global_section,
-            "rollback",
-        )
-    )
-    stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+    (
+        env_restore_start_index,
+        env_restore_end_index,
+        stop_start_index,
+        stop_end_index,
+    ) = _assert_source_checkout_service_env_restore_and_stop(
         "no-global source-checkout rollback",
         no_global_section,
-        env_restore_end_index,
+        "rollback",
         require_legacy_fallback=True,
     )
     assert (
@@ -646,17 +639,15 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
     )[0]
     assert "cd /path/to/aira-agent-workspace-fabric" in global_section
     assert "uv tool install . --force" in global_section
-    env_restore_start_index, env_restore_end_index = (
-        _assert_source_checkout_service_env_restore_before_stop(
-            "global source-checkout rollback",
-            global_section,
-            "rollback",
-        )
-    )
-    stop_start_index, stop_end_index = _assert_source_checkout_stop_prefers_root_env(
+    (
+        env_restore_start_index,
+        env_restore_end_index,
+        stop_start_index,
+        stop_end_index,
+    ) = _assert_source_checkout_service_env_restore_and_stop(
         "global source-checkout rollback",
         global_section,
-        env_restore_end_index,
+        "rollback",
         require_legacy_fallback=True,
     )
     assert (

@@ -2662,3 +2662,53 @@ rg -n "http://localhost:(3000|8000)|http://127\\.0\\.0\\.1:(3000|8000)" docs/QUI
 git diff --check
 # no output
 ```
+
+## Post-Review Repair for Review-Level Comment `issue:4620140358`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `_assert_source_checkout_stop_prefers_root_env` now allows a
+  root-guarded stop block without a legacy `docker/compose/.env` branch when
+  `require_legacy_fallback=False`.
+- Complete: The same helper now emits the explicit
+  `must keep legacy compose env fallback` assertion when a caller requires the
+  legacy branch and a guarded root-only stop block omits it.
+- Complete: Lifecycle and guide docs tests that need stop-order spans now use a
+  single combined env-restore/stop assertion helper, avoiding duplicate stop
+  checks with different fallback semantics.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `tests/unit/docs/test_public_docs_guides_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_stop_helper_allows_root_guard_without_legacy_when_optional tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_stop_helper_requires_legacy_fallback_with_clear_message tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+# Red phase before helper update: the two new helper regressions failed as expected
+# Final result: 3 passed in 0.59s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance tests/unit/docs/test_public_docs_guides_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_guides_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+# 3 passed in 0.66s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+# 1 passed in 0.55s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
+# 3 files already formatted
+
+git diff --check
+# no output
+```

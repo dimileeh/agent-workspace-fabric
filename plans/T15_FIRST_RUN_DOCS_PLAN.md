@@ -707,3 +707,21 @@ uv run --python 3.12 --extra dev pytest tests/unit/cli/test_init_parts/test_init
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py tests/unit/cli/test_init_parts/test_init_part_004.py
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py tests/unit/cli/test_init_parts/test_init_part_004.py
 ```
+
+Post-review adjustment for review-level comment `issue:4620140358`: the
+source-checkout stop helper must make `require_legacy_fallback=False` mean the
+legacy fallback is genuinely optional for both bare and guarded root `.env`
+stop forms. Focused lifecycle tests that need stop ordering must also avoid
+asserting the same stop block twice with different fallback semantics; use a
+single helper result that returns the env-restore and stop-command spans.
+
+Focused repair commands for review-level comment `issue:4620140358` helper
+semantics follow-up:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_stop_helper_allows_root_guard_without_legacy_when_optional tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_stop_helper_requires_legacy_fallback_with_clear_message tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance tests/unit/docs/test_public_docs_guides_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_guides_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py tests/unit/docs/public_docs_status_helpers.py
+git diff --check
+```
