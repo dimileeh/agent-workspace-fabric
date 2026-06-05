@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HRcKZ
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` rebuilds the structured
+`command` field with selected `--provider` values on error paths, but leaves
+copied `next_steps` unchanged when no `source_checkout` is selected. Operators
+who copy those remediation commands can therefore re-run a broader dry-run
+than the structured command indicates.
+
+Scope is limited to setup-status next-step command rewriting. Existing
+source-checkout command rewriting, provider-unknown guidance, redaction, and
+payload shape stay unchanged.
+
+### Requirements Checklist
+
+- Preserve setup-status error payload shape and selected-provider command
+  rendering.
+- When no `source_checkout` is selected, rewrite `awf setup --dry-run`
+  remediation text with the selected `--provider` values.
+- Preserve existing `awf start` next-step text when no source checkout is
+  selected.
+- Add focused regression coverage for the repaired host-config error path.
+
+### Implementation Steps
+
+1. Update the focused host-config error regression to require selected
+   providers in copied setup dry-run next steps.
+2. Change setup-status next-step rewriting so setup dry-run commands are
+   rewritten even without `source_checkout`.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Client Catch-All Reason Codes
 
 ### Problem Statement And Scope

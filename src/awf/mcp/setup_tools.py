@@ -1007,14 +1007,13 @@ def _setup_status_next_steps(
     source_checkout: Path | None,
 ) -> list[str]:
     next_steps = _list_of_strings(value)
-    if source_checkout is None:
-        return next_steps
-
     setup_command = _setup_status_dry_run_command(
         selected_providers=selected_providers,
         source_checkout=source_checkout,
     )
-    start_command = _start_source_checkout_command(source_checkout)
+    start_command = (
+        _start_source_checkout_command(source_checkout) if source_checkout is not None else None
+    )
     return [
         _setup_status_next_step_for_source_checkout(
             step,
@@ -1029,11 +1028,13 @@ def _setup_status_next_step_for_source_checkout(
     step: str,
     *,
     setup_command: str,
-    start_command: str,
+    start_command: str | None,
 ) -> str:
     def replace_command(match: re.Match[str]) -> str:
         if match.group("setup") is not None:
             return f"{setup_command}{match.group('setup_suffix') or ''}"
+        if start_command is None:
+            return match.group(0)
         if match.group("start_source") is not None:
             return f"{start_command}{match.group('start_source_suffix') or ''}"
         return f"{start_command}{match.group('start_suffix') or ''}"

@@ -639,7 +639,7 @@ async def test_get_setup_status_host_config_error_without_source_checkout_is_str
     assert payload["command"] == "awf setup --dry-run --provider github"
     assert payload["reason_code"] == HOST_SETUP_CONFIG_CORRUPT
     assert payload["next_steps"] == [
-        "Fix the reported issue above, then re-run awf setup --dry-run."
+        "Fix the reported issue above, then re-run awf setup --dry-run --provider github."
     ]
     assert payload["issues"][0]["reason_code"] == HOST_SETUP_CONFIG_CORRUPT
     assert payload["issues"][0]["severity"] == "blocked"

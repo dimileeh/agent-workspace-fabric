@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HRcKZ
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve setup-status error payload shape and selected-provider command
+  rendering: Complete.
+- When no `source_checkout` is selected, rewrite `awf setup --dry-run`
+  remediation text with the selected `--provider` values: Complete.
+- Preserve existing `awf start` next-step text when no source checkout is
+  selected: Complete.
+- Add focused regression coverage for the repaired host-config error path:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_setup_status_source_checkout.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["next_steps"]` still said to re-run `awf setup --dry-run` without
+  the selected `--provider github`.
+- Regression test after the implementation change: 1 passed.
+- Regression plus setup-status source-checkout next-step coverage: 10 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Client Catch-All Reason Codes
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
