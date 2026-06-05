@@ -12,7 +12,6 @@ from sqlalchemy import (
     and_,
     case,
     func,
-    literal,
     or_,
     select,
     text,
@@ -28,12 +27,10 @@ from awf.common.ids import (
 )
 from awf.db.enums import (
     AgentRuntime,
-    OperationType,
     WorkspaceStatus,
 )
 from awf.db.models import (
     MergeCandidate,
-    Operation,
     TaskAttempt,
     Workspace,
     WorkspaceEvent,
@@ -62,6 +59,15 @@ from awf.db.repositories.quality_repo import (
 from awf.db.repositories.task_repo import (
     TaskAttemptRepository,
     TaskRepository,
+)
+from awf.db.repositories.workspace_repo_claims import (
+    claim_monitoring_pr,
+    claim_worker_restart_recovery_execution,
+    read_execution_claim_epoch,
+    refresh_execution_claim,
+    refresh_monitoring_pr_claim,
+    release_execution_claim,
+    release_monitoring_pr_claim,
 )
 from awf.db.repositories.workspace_repo_host_ports import (
     acquire_host_port_admission_lock,
@@ -1027,52 +1033,14 @@ class WorkspaceRepository:
         clear_stale_execution_claim_cutoff: datetime | None = None,
     ) -> bool:
         """Claim a monitor-recovery workspace unless another lease is active."""
-        cutoff = now or datetime.now(UTC)
-        values: dict[str, Any] = {
-            "monitor_claimed_by": owner_id,
-            "monitor_claim_expires_at": lease_expires_at,
-            "updated_at": Workspace.updated_at,
-        }
-        if clear_stale_execution_claim_cutoff is not None:
-            stale_execution_claim = or_(
-                Workspace.execution_claimed_by.is_(None),
-                Workspace.execution_claim_expires_at.is_(None),
-                Workspace.execution_claim_expires_at <= clear_stale_execution_claim_cutoff,
-            )
-            values.update(
-                execution_claimed_by=case(
-                    (stale_execution_claim, None),
-                    else_=Workspace.execution_claimed_by,
-                ),
-                execution_claim_expires_at=case(
-                    (stale_execution_claim, None),
-                    else_=Workspace.execution_claim_expires_at,
-                ),
-                # D3: bump the fencing token when clearing a stale execution
-                # claim so a zombie worker whose owner string still matches is
-                # fenced on its next CAS write. Untouched when the claim is
-                # preserved (unexpired) so a live worker is never fenced.
-                execution_claim_epoch=case(
-                    (stale_execution_claim, Workspace.execution_claim_epoch + 1),
-                    else_=Workspace.execution_claim_epoch,
-                ),
-            )
-        result = await self._session.execute(
-            update(Workspace)
-            .where(
-                Workspace.id == workspace_id,
-                Workspace.status == WorkspaceStatus.monitoring_pr.value,
-                or_(
-                    Workspace.monitor_claim_expires_at.is_(None),
-                    Workspace.monitor_claim_expires_at <= cutoff,
-                    Workspace.monitor_claimed_by == owner_id,
-                ),
-            )
-            .values(**values)
-            .returning(Workspace.id)
-            .execution_options(synchronize_session=False)
+        return await claim_monitoring_pr(
+            self._session,
+            workspace_id,
+            owner_id=owner_id,
+            lease_expires_at=lease_expires_at,
+            now=now,
+            clear_stale_execution_claim_cutoff=clear_stale_execution_claim_cutoff,
         )
-        return result.scalar_one_or_none() is not None
 
     async def claim_worker_restart_recovery_execution(
         self,
@@ -1083,66 +1051,13 @@ class WorkspaceRepository:
         claim_cutoff: datetime,
     ) -> Workspace | None:
         """Atomically adopt a worker-restart execution recovery lease."""
-        from awf.db.repositories.base import (
-            _ACTIVE_RECOVERY_OPERATION_STATUSES,
-            _VALIDATE_ONLY_RECOVERY_MODES,
-            _WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES,
+        return await claim_worker_restart_recovery_execution(
+            self._session,
+            workspace_id,
+            owner_id=owner_id,
+            lease_expires_at=lease_expires_at,
+            claim_cutoff=claim_cutoff,
         )
-
-        active_worker_restart_recovery = (
-            select(literal(1))
-            .select_from(Operation)
-            .where(
-                Operation.workspace_id == workspace_id,
-                Operation.status.in_(_ACTIVE_RECOVERY_OPERATION_STATUSES),
-                Operation.payload["source"].as_string() == "worker_restart",
-                or_(
-                    and_(
-                        Operation.type == OperationType.validate.value,
-                        Operation.payload["recovery_mode"]
-                        .as_string()
-                        .in_(_VALIDATE_ONLY_RECOVERY_MODES),
-                    ),
-                    and_(
-                        Operation.type == OperationType.rebase.value,
-                        Operation.payload["recovery_mode"].as_string() == "rebase_only",
-                    ),
-                ),
-            )
-            .exists()
-        )
-        claim_available = or_(
-            Workspace.execution_claimed_by.is_(None),
-            Workspace.execution_claim_expires_at.is_(None),
-            Workspace.execution_claim_expires_at <= claim_cutoff,
-            Workspace.execution_claimed_by == owner_id,
-        )
-        result = await self._session.execute(
-            update(Workspace)
-            .where(
-                Workspace.id == workspace_id,
-                Workspace.status.in_(_WORKER_RESTART_RECOVERY_EXECUTION_CLAIM_STATUSES),
-                active_worker_restart_recovery,
-                claim_available,
-            )
-            .values(
-                execution_claimed_by=owner_id,
-                execution_claim_expires_at=lease_expires_at,
-                updated_at=Workspace.updated_at,
-            )
-            .returning(Workspace.id)
-            .execution_options(synchronize_session=False)
-        )
-        if result.scalar_one_or_none() is None:
-            return None
-
-        stmt = (
-            select(Workspace)
-            .where(Workspace.id == workspace_id)
-            .options(selectinload(Workspace.operations))
-            .execution_options(populate_existing=True)
-        )
-        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def refresh_monitoring_pr_claim(
         self,
@@ -1152,20 +1067,12 @@ class WorkspaceRepository:
         lease_expires_at: datetime,
     ) -> bool:
         """Extend this worker's active monitor-recovery lease."""
-        result = await self._session.execute(
-            update(Workspace)
-            .where(
-                Workspace.id == workspace_id,
-                Workspace.status == WorkspaceStatus.monitoring_pr.value,
-                Workspace.monitor_claimed_by == owner_id,
-            )
-            .values(
-                monitor_claim_expires_at=lease_expires_at,
-                updated_at=Workspace.updated_at,
-            )
-            .returning(Workspace.id)
+        return await refresh_monitoring_pr_claim(
+            self._session,
+            workspace_id,
+            owner_id=owner_id,
+            lease_expires_at=lease_expires_at,
         )
-        return result.scalar_one_or_none() is not None
 
     async def refresh_execution_claim(
         self,
@@ -1183,22 +1090,13 @@ class WorkspaceRepository:
         heartbeat updates 0 rows and the caller knows it has been fenced.
         ``None`` preserves the legacy owner-only behavior (the executor path).
         """
-        conditions = [
-            Workspace.id == workspace_id,
-            Workspace.execution_claimed_by == owner_id,
-        ]
-        if execution_claim_epoch is not None:
-            conditions.append(Workspace.execution_claim_epoch == execution_claim_epoch)
-        result = await self._session.execute(
-            update(Workspace)
-            .where(*conditions)
-            .values(
-                execution_claim_expires_at=lease_expires_at,
-                updated_at=Workspace.updated_at,
-            )
-            .returning(Workspace.id)
+        return await refresh_execution_claim(
+            self._session,
+            workspace_id,
+            owner_id=owner_id,
+            lease_expires_at=lease_expires_at,
+            execution_claim_epoch=execution_claim_epoch,
         )
-        return result.scalar_one_or_none() is not None
 
     async def release_execution_claim(
         self,
@@ -1214,23 +1112,12 @@ class WorkspaceRepository:
         the row (advancing the epoch) updates 0 rows instead of clobbering the
         new claimant's lease.
         """
-        conditions = [
-            Workspace.id == workspace_id,
-            Workspace.execution_claimed_by == owner_id,
-        ]
-        if execution_claim_epoch is not None:
-            conditions.append(Workspace.execution_claim_epoch == execution_claim_epoch)
-        result = await self._session.execute(
-            update(Workspace)
-            .where(*conditions)
-            .values(
-                execution_claimed_by=None,
-                execution_claim_expires_at=None,
-                updated_at=Workspace.updated_at,
-            )
-            .returning(Workspace.id)
+        return await release_execution_claim(
+            self._session,
+            workspace_id,
+            owner_id=owner_id,
+            execution_claim_epoch=execution_claim_epoch,
         )
-        return result.scalar_one_or_none() is not None
 
     async def read_execution_claim_epoch(
         self,
@@ -1245,13 +1132,11 @@ class WorkspaceRepository:
         epoch back at provision start via this method and aborts when it is
         ``None`` (D2).
         """
-        result = await self._session.execute(
-            select(Workspace.execution_claim_epoch).where(
-                Workspace.id == workspace_id,
-                Workspace.execution_claimed_by == owner_id,
-            )
+        return await read_execution_claim_epoch(
+            self._session,
+            workspace_id,
+            owner_id=owner_id,
         )
-        return result.scalar_one_or_none()
 
     async def release_monitoring_pr_claim(
         self,
@@ -1260,20 +1145,11 @@ class WorkspaceRepository:
         owner_id: str,
     ) -> bool:
         """Release this worker's monitor-recovery lease, if it still owns it."""
-        result = await self._session.execute(
-            update(Workspace)
-            .where(
-                Workspace.id == workspace_id,
-                Workspace.monitor_claimed_by == owner_id,
-            )
-            .values(
-                monitor_claimed_by=None,
-                monitor_claim_expires_at=None,
-                updated_at=Workspace.updated_at,
-            )
-            .returning(Workspace.id)
+        return await release_monitoring_pr_claim(
+            self._session,
+            workspace_id,
+            owner_id=owner_id,
         )
-        return result.scalar_one_or_none() is not None
 
     async def add_event(
         self,

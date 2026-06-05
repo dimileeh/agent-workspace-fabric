@@ -8,6 +8,7 @@ tests while still asserting durable behavior, not just execution.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -389,3 +390,161 @@ async def test_operation_finish_failure_sets_failure_audit_without_losing_payloa
     assert operation.error_code == "STACK_STOP_FAILED"
     assert operation.error_message == "docker stop failed"
     assert operation.result == {"log_stream_refs": {"stderr": "stop.stderr"}}
+
+
+@pytest.mark.unit
+async def test_execution_claim_epoch_default_and_cas_fencing(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    workspace = await _workspace(
+        session,
+        title="execution claim epoch fencing",
+        status=WorkspaceStatus.provisioning,
+    )
+    # D1: fresh rows default the fencing token to 0 (ORM default).
+    assert workspace.execution_claim_epoch == 0
+
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    expiry = now + timedelta(minutes=5)
+    later = now + timedelta(minutes=10)
+    workspace.execution_claimed_by = "runner-1"
+    workspace.execution_claim_expires_at = expiry
+    workspace.execution_claim_epoch = 5
+    await session.flush()
+
+    # read_execution_claim_epoch (D2): returns the epoch for the owner, None otherwise.
+    assert await workspace_repo.read_execution_claim_epoch(workspace.id, owner_id="runner-1") == 5
+    assert (
+        await workspace_repo.read_execution_claim_epoch(workspace.id, owner_id="runner-2") is None
+    )
+
+    # refresh CAS (D6): matching owner+epoch succeeds; wrong epoch / wrong owner fenced.
+    assert not await workspace_repo.refresh_execution_claim(
+        workspace.id,
+        owner_id="runner-1",
+        lease_expires_at=later,
+        execution_claim_epoch=4,
+    )
+    assert not await workspace_repo.refresh_execution_claim(
+        workspace.id,
+        owner_id="runner-2",
+        lease_expires_at=later,
+        execution_claim_epoch=5,
+    )
+    assert await workspace_repo.refresh_execution_claim(
+        workspace.id,
+        owner_id="runner-1",
+        lease_expires_at=later,
+        execution_claim_epoch=5,
+    )
+    # epoch=None keeps the legacy owner-only behavior.
+    assert await workspace_repo.refresh_execution_claim(
+        workspace.id,
+        owner_id="runner-1",
+        lease_expires_at=later,
+    )
+
+    # release must NOT clobber a row whose epoch advanced past the caller's.
+    assert not await workspace_repo.release_execution_claim(
+        workspace.id,
+        owner_id="runner-1",
+        execution_claim_epoch=4,
+    )
+    await session.refresh(workspace)
+    assert workspace.execution_claimed_by == "runner-1"
+    assert workspace.execution_claim_epoch == 5
+
+    # matching epoch releases the claim.
+    assert await workspace_repo.release_execution_claim(
+        workspace.id,
+        owner_id="runner-1",
+        execution_claim_epoch=5,
+    )
+    await session.refresh(workspace)
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_clears_stale_execution_claim_bumps_epoch(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    now = datetime(2026, 5, 2, 9, 0, tzinfo=UTC)
+    workspace = await _workspace(
+        session,
+        title="monitor claim clears stale execution epoch",
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    workspace.execution_claimed_by = "stale-runner"
+    workspace.execution_claim_expires_at = now - timedelta(minutes=5)
+    workspace.execution_claim_epoch = 7
+    await session.flush()
+
+    claimed = await workspace_repo.claim_monitoring_pr(
+        workspace.id,
+        owner_id="owner-1",
+        lease_expires_at=now + timedelta(minutes=5),
+        now=now,
+        clear_stale_execution_claim_cutoff=now,
+    )
+    assert claimed
+    await session.refresh(workspace)
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
+    # D3: clearing a stale execution claim bumps the fencing token so a zombie
+    # whose owner string still matches is fenced on its next CAS write.
+    assert workspace.execution_claim_epoch == 8
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_preserves_epoch_for_unexpired_execution_claim(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    now = datetime(2026, 5, 2, 9, 0, tzinfo=UTC)
+    workspace = await _workspace(
+        session,
+        title="monitor claim preserves unexpired execution epoch",
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    workspace.execution_claimed_by = "live-runner"
+    workspace.execution_claim_expires_at = now + timedelta(minutes=5)
+    workspace.execution_claim_epoch = 7
+    await session.flush()
+
+    claimed = await workspace_repo.claim_monitoring_pr(
+        workspace.id,
+        owner_id="owner-1",
+        lease_expires_at=now + timedelta(minutes=5),
+        now=now,
+        clear_stale_execution_claim_cutoff=now,
+    )
+    assert claimed
+    await session.refresh(workspace)
+    # An unexpired execution claim is preserved, and its epoch is left untouched.
+    assert workspace.execution_claimed_by == "live-runner"
+    assert workspace.execution_claim_epoch == 7
+
+
+@pytest.mark.unit
+async def test_claim_monitoring_pr_with_active_postgres_expiry_uses_database_compare(
+    session: AsyncSession,
+) -> None:
+    workspace_repo = WorkspaceRepository(session)
+    claim_workspace = await _workspace(
+        session,
+        title="monitor claim naive expiry",
+        status=WorkspaceStatus.monitoring_pr,
+    )
+    claim_workspace.monitor_claimed_by = "owner-1"
+    claim_workspace.monitor_claim_expires_at = datetime(2026, 4, 27, 15, 5, tzinfo=UTC)
+    await session.flush()
+
+    assert not await workspace_repo.claim_monitoring_pr(
+        claim_workspace.id,
+        owner_id="owner-2",
+        lease_expires_at=datetime(2026, 4, 27, 15, 10, tzinfo=UTC),
+        now=datetime(2026, 4, 27, 15, 1, tzinfo=UTC),
+    )
