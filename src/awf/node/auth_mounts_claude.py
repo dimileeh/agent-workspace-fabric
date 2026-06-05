@@ -99,6 +99,13 @@ _OVERLAY_UNMOUNTED_MARKER = ".overlay-unmounted"
 # never propagate into the sibling agent container and the agent would see an
 # empty ``~/.claude``. The copy fallback is correct there (no disk saving).
 _CLAUDE_AUTH_FORCE_COPY_ENV = "AWF_CLAUDE_AUTH_FORCE_COPY"
+# overlayfs's legacy ``mount -o`` API joins options with ``,`` and stacks lower
+# layers with ``:`` inside ``lowerdir=``; neither can be escaped in that payload
+# (only ``/proc/mounts`` *read-back* octal-decodes ``\054``/``\072``). A workspace
+# auth path carrying either character — inherited from ``AWF_WORK_DIR`` /
+# ``AWF_HOST_WORK_DIR`` — therefore cannot be expressed as an overlay mount option,
+# so the overlay branch degrades to the per-workspace copy fallback on such a host.
+_OVERLAY_OPTION_RESERVED_CHARS = (",", ":")
 _PROC_FILESYSTEMS = Path("/proc/filesystems")
 _PROC_SELF_STATUS = Path("/proc/self/status")
 _CAP_SYS_ADMIN_BIT = 21
@@ -168,6 +175,20 @@ def _has_cap_sys_admin(proc_status: Path = _PROC_SELF_STATUS) -> bool:
             return False
         return bool(caps & (1 << _CAP_SYS_ADMIN_BIT))
     return False
+
+
+def _overlay_path_has_reserved_chars(path: Path) -> bool:
+    """Return whether ``path`` holds a char overlayfs's ``-o`` payload cannot encode.
+
+    A literal ``,`` would split the ``lowerdir=..,upperdir=..,workdir=..`` option
+    string into spurious options, and a literal ``:`` inside ``lowerdir`` would be
+    misread as the separator between stacked lower layers — either breaking the
+    mount or, worse, resolving a different lower than intended. ``mount(8)`` offers
+    no escaping for these, so a path carrying one forces the copy fallback.
+    """
+
+    text = os.fspath(path)
+    return any(char in text for char in _OVERLAY_OPTION_RESERVED_CHARS)
 
 
 class OverlayMounter(Protocol):
@@ -895,6 +916,22 @@ def _prepare_claude_overlay_mount(
             reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
             workspace_auth_root=str(claude_root),
             reason="overlayfs_unsupported",
+        )
+        return None
+
+    # The overlay paths feed an unescapable ``mount -o lowerdir=..,upperdir=..,
+    # workdir=..`` payload: ``base`` lives under ``work_dir`` and ``upper``/``work``
+    # under ``claude_root``. If either carries a ``,`` or ``:`` (from a comma/colon
+    # in ``AWF_WORK_DIR``/``AWF_HOST_WORK_DIR``) the option string would tear apart
+    # or be misread as an extra lower layer, so the mount cannot faithfully express
+    # these paths. Degrade to the per-workspace copy fallback — the same posture a
+    # force-copy host takes — rather than attempt a broken or ambiguous mount.
+    if _overlay_path_has_reserved_chars(work_dir) or _overlay_path_has_reserved_chars(claude_root):
+        _log.info(
+            "claude_auth_overlay_unavailable",
+            reason_code=_CLAUDE_AUTH_OVERLAY_UNAVAILABLE,
+            workspace_auth_root=str(claude_root),
+            reason="overlay_path_reserved_chars",
         )
         return None
 

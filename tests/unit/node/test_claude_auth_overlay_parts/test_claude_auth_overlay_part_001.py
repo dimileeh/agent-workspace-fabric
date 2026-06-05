@@ -461,6 +461,48 @@ def test_overlay_unavailable_falls_back_to_legacy_copy(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("reserved", [",", ":"])
+def test_reserved_char_work_dir_falls_back_to_legacy_copy(tmp_path: Path, reserved: str) -> None:
+    """A ``,``/``:`` in the work dir degrades to copy instead of a broken mount.
+
+    overlayfs's ``mount -o lowerdir=..,upperdir=..,workdir=..`` payload splits on
+    ``,`` and stacks lower layers on ``:`` — neither is escapable in that legacy API.
+    A literal comma/colon in ``AWF_WORK_DIR`` would tear the option string apart or
+    be misread as an extra lower layer, so the overlay branch must never attempt the
+    mount: it falls back to the per-workspace copy (PRRT_kwDOSJAM6s6HOnML).
+    """
+
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / f"wo{reserved}rk"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_reserved",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    claude_root = work_dir / "auth" / "ws_reserved" / "claude"
+    # The mount is never attempted — the paths cannot be expressed as overlay options.
+    assert mounter.mounts == []
+    # Legacy full copy took over: the mount source is the copied ``.claude`` tree.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert not (claude_root / "merged").exists()
+    # The degrade is logged with a distinct reason so it is never silent.
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
+        and entry.get("reason") == "overlay_path_reserved_chars"
+        for entry in logs
+    )
+
+
+@pytest.mark.unit
 def test_mount_failure_forwards_called_process_stderr(tmp_path: Path) -> None:
     """The copy-fallback warning carries ``mount(8)`` stderr, not just the rc.
 
