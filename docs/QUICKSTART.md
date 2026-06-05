@@ -20,9 +20,9 @@ All lanes use root `.env` for local runtime values. Existing legacy
 - At least one coding-agent credential for real workspace execution.
 
 The mocked smoke command below does not require live GitHub or provider access.
-Local first-run URLs use the smoke defaults: API checks use
-`http://localhost:8000` by default, and the console is
-`http://localhost:3000` when the console is running.
+Local first-run service URLs use IPv4 loopback to match the loopback-only
+Compose port bindings: use `http://127.0.0.1:8000` for API checks, and
+`http://127.0.0.1:3000` when the console is running.
 
 For source checkouts or raw Docker installs, root Compose can bring up the full
 local stack with safe loopback-only defaults:
@@ -31,8 +31,8 @@ local stack with safe loopback-only defaults:
 docker compose up --build
 ```
 
-Open <http://localhost:3000> for the console, or call the API at
-<http://localhost:8000>. Protected local API calls use
+Open <http://127.0.0.1:3000> for the console, or call the API at
+<http://127.0.0.1:8000>. Protected local API calls use
 `Authorization: Bearer local-dev-token` unless you set `AWF_API_TOKEN`.
 
 If you set or refresh the GitHub token after starting Core, rerun the start
@@ -586,8 +586,8 @@ persisted `source_checkout` metadata points at it.
 ## After Start
 
 `awf start` prints the local API and console URLs. Use
-`http://localhost:3000` for the console when it is running, and
-`http://localhost:8000/readyz` for a direct local API readiness check.
+`http://127.0.0.1:3000` for the console when it is running, and
+`http://127.0.0.1:8000/readyz` for a direct local API readiness check.
 
 Next:
 

@@ -2629,3 +2629,36 @@ git diff --check
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, console
 builds, pushes, and PR lifecycle actions were intentionally not run in the
 agent phase; AWF owns those broad gates after agent completion.
+
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HXyZR`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: Quickstart's first-run API and console copy-paste URLs now use
+  `127.0.0.1` to match the IPv4 loopback-only Compose port bindings and the
+  `awf start` local display normalization.
+- Complete: Existing smoke runtime defaults remain unchanged; this repair is
+  limited to Quickstart documentation, focused docs tests, and the T15 plan
+  artifacts.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_first_run_urls_use_ipv4_loopback tests/unit/docs/test_public_docs_lifecycle_status.py::test_raw_docker_compose_source_path_is_single_command -q
+# Red phase before docs update: 2 failed
+# Final result: 2 passed in 0.53s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py
+# All checks passed!
+
+rg -n "http://localhost:(3000|8000)|http://127\\.0\\.0\\.1:(3000|8000)" docs/QUICKSTART.md
+# Only the expected 127.0.0.1 API/console URLs were found.
+
+git diff --check
+# no output
+```

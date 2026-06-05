@@ -23,7 +23,9 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`.
 - Use current first-run grammar: `awf setup`, `awf start`, `awf init <path>` or
   project-local `awf init .`, and
   `awf smoke run --mocked-local --format pretty`.
-- Keep local API and console URLs aligned with the default smoke probe targets.
+- Keep mocked smoke commands aligned with the default smoke probe targets, while
+  using IPv4 loopback for Quickstart's host-facing API and console URLs that
+  operators paste into browsers or local HTTP clients.
 - Remove stale placeholder/no-path bootstrap language from public first-run docs.
 - Add `docs/UNINSTALL.md` with lane-specific uninstall guidance that separates
   CLI/tool removal from destructive local state cleanup.
@@ -91,6 +93,12 @@ Started must not contradict the Quickstart smoke-default `localhost` URLs with a
 blanket `127.0.0.1` first-run statement, and the Quickstart optional GitHub
 token assertion must calibrate itself from the advertised lane headings instead
 of hard-coding the current lane count.
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HXyZR`: Quickstart's
+host-facing first-run API and console URLs must use `127.0.0.1` because
+`docker/compose/local-service.yml` publishes those ports only on IPv4 loopback
+and `awf start` normalizes local display URLs to `127.0.0.1`. Leave smoke
+runtime defaults unchanged in this docs-thread repair.
 
 Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HC6Eb`: source-checkout
 upgrade snippets in `docs/QUICKSTART.md` and `docs/UPGRADE.md` must refresh
