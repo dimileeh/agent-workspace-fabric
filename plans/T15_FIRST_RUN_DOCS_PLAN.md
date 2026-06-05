@@ -511,6 +511,18 @@ Focused repair command for PR thread `PRRT_kwDOSJAM6s6HOCUX`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_token_refresh_restart_is_lane_aware -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HODkj`: Quickstart
+source-checkout upgrade snippets must allow the documented first-run default
+token path. When `.env` contains the copied example `AWF_API_TOKEN=` entry and
+the upgrade shell has no `AWF_API_TOKEN`, the snippet must export
+`local-dev-token` instead of aborting before `git pull` and restart.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HODkj`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_upgrade_accepts_default_api_token -q
+```
+
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.

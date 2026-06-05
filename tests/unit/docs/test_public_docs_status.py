@@ -757,6 +757,52 @@ def test_source_checkout_env_restore_strips_quoted_dotenv_entries(
             assert result.stdout == expected_value + "\n"
 
 
+@pytest.mark.parametrize(
+    "heading",
+    (
+        "## Lane 2: Source Checkout With Global Tool Install",
+        "## Lane 3: Source Checkout With No Global Install",
+    ),
+)
+def test_quickstart_source_checkout_upgrade_accepts_default_api_token(
+    heading: str,
+    tmp_path: Path,
+) -> None:
+    """Assert copied example `.env` source upgrades keep the local default token."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    upgrade_section = _quickstart_upgrade_section(quickstart_text, heading)
+    bash_fences = [
+        fence
+        for fence in _markdown_fences("docs/QUICKSTART.md", upgrade_section)
+        if fence.language == "bash"
+    ]
+    assert len(bash_fences) == 1
+    token_restore_script = bash_fences[0].body.split(
+        'AWF_PERSISTED_POSTGRES_PASSWORD=""',
+        maxsplit=1,
+    )[0]
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
+    script = "\n".join(
+        (
+            "unset AWF_API_TOKEN",
+            token_restore_script,
+            'printf "%s\\n" "$AWF_API_TOKEN"',
+        )
+    )
+
+    result = subprocess.run(  # noqa: S602
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "local-dev-token\n"
+
+
 def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
     """Assert lowercase fi in unrelated text is not treated as a shell keyword."""
     upgrade_line = "pipx upgrade agent-workspace-fabric"

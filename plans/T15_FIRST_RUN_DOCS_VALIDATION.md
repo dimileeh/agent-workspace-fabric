@@ -102,6 +102,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   Quickstart optional GitHub token guidance per advertised lane first-run
   section and documenting the flat shell guard assumption in
   `_shell_closing_fi_index`.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HODkj` by allowing Quickstart
+  source-checkout upgrade snippets to export the documented `local-dev-token`
+  when the copied `.env.example` leaves `AWF_API_TOKEN=` empty and the upgrade
+  shell has no token.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -2147,6 +2151,36 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 
 Final focused repair result: `1 passed in 0.70s`; `3 passed in 0.74s`;
 `All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HODkj`:
+
+- `docs/QUICKSTART.md` Lane 2 and Lane 3 source-checkout upgrade snippets now
+  treat a copied empty `AWF_API_TOKEN=` entry as the documented local Compose
+  default token, exporting `local-dev-token` when the shell has no
+  `AWF_API_TOKEN`.
+- `tests/unit/docs/test_public_docs_status.py` now executes the documented
+  Quickstart token-restore fragment against `AWF_API_TOKEN=` and an unset shell
+  token for both source-checkout lanes.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_upgrade_accepts_default_api_token -q
+```
+
+Red-phase result after adding the focused regression: failed with the expected
+`${AWF_API_TOKEN:?restore ...}` shell abort for both source-checkout lanes.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_source_checkout_upgrade_accepts_default_api_token -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid tests/unit/docs/test_public_docs_status.py::test_source_checkout_env_restore_strips_quoted_dotenv_entries -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `2 passed in 0.71s`; `5 passed in 0.87s`;
+`All checks passed!`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
