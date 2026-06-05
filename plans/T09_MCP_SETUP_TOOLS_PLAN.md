@@ -84,6 +84,53 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HP5RB
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` still returns the generic
+`_reason_coded_payload(...)` unchanged for non-`SetupCheckError` readiness probe
+failures and post-render transformation failures. Those sanitized generic paths
+therefore advertise the mutating `awf setup` command and omit explicit
+`source_checkout` retry context, unlike the setup-status-specific early error
+paths.
+
+Scope is limited to the two existing generic setup-status error branches and
+focused regressions for command and next-step rendering. Redaction and structured
+error details must stay unchanged.
+
+### Requirements Checklist
+
+- Preserve the existing sanitized reason code, summary, issue details, redaction,
+  and MCP error behavior for generic readiness probe failures.
+- Preserve the same behavior for post-render setup-status transformation
+  failures.
+- Render both generic setup-status failure commands as `awf setup --dry-run`
+  with the original provider selectors.
+- Preserve explicit `source_checkout` in both dry-run retry commands and
+  checkout-aware next steps.
+- Add focused regression coverage for both generic setup-status failure paths.
+
+### Implementation Steps
+
+1. Extend the focused generic setup-status failure regressions to assert dry-run
+   command and explicit-checkout next-step rendering.
+2. Replace the two generic setup-status `_reason_coded_payload(...)` returns
+   with `_setup_status_reason_coded_payload(...)`.
+3. Run the targeted regressions and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_run_setup_oserror_is_structured_and_redacted tests/unit/mcp/test_setup_tools.py::test_get_setup_status_success_transformation_failure_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HP5Q8
 
 ### Problem Statement And Scope

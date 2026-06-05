@@ -277,10 +277,12 @@ def _get_setup_status_result(
     except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
         return _first_run_result(
             safe_result,
-            _reason_coded_payload(
+            _setup_status_reason_coded_payload(
                 SETUP_READINESS_FAILED,
                 "could not inspect local setup readiness",
                 {"error_type": type(exc).__name__},
+                providers=providers,
+                source_checkout=source_path,
             ),
             is_error=True,
         )
@@ -327,10 +329,12 @@ def _get_setup_status_result(
     except Exception as exc:
         return _first_run_result(
             safe_result,
-            _reason_coded_payload(
+            _setup_status_reason_coded_payload(
                 SETUP_READINESS_FAILED,
                 "could not build setup status response",
                 {"error_type": type(exc).__name__},
+                providers=providers,
+                source_checkout=source_path,
             ),
             is_error=True,
         )

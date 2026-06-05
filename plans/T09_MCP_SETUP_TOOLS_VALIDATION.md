@@ -53,6 +53,50 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HP5RB
+
+### Requirement Status
+
+- Preserve the existing sanitized reason code, summary, issue details, redaction,
+  and MCP error behavior for generic readiness probe failures: Complete.
+- Preserve the same behavior for post-render setup-status transformation
+  failures: Complete.
+- Render both generic setup-status failure commands as `awf setup --dry-run`
+  with the original provider selectors: Complete.
+- Preserve explicit `source_checkout` in both dry-run retry commands and
+  checkout-aware next steps: Complete.
+- Add focused regression coverage for both generic setup-status failure paths:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_run_setup_oserror_is_structured_and_redacted tests/unit/mcp/test_setup_tools.py::test_get_setup_status_success_transformation_failure_is_structured_and_redacted -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression tests failed before the implementation change because both generic
+  setup-status failure paths returned `payload["command"] == "awf setup"`.
+- Regression tests after the implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HP5Q8
 
 ### Requirement Status

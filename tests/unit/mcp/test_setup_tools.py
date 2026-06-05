@@ -616,21 +616,33 @@ async def test_get_setup_status_run_setup_oserror_is_structured_and_redacted(
 ) -> None:
     from awf.mcp import setup_tools
 
+    checkout = tmp_path / "source checkout"
     raw_token = "sk-proj-" + "f" * 40
     leaked_detail = f"{tmp_path}/docker.sock contains {raw_token}"
 
-    def fail_run_setup(**_kwargs: Any) -> Any:
+    def fail_run_setup(**kwargs: Any) -> Any:
+        assert kwargs["providers"] == ["github"]
+        assert kwargs["dry_run"] is True
+        assert kwargs["source_checkout"] == checkout
         raise OSError(leaked_detail)
 
     monkeypatch.setattr(setup_tools, "_run_setup", fail_run_setup)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
-    result = await mcp.call_tool("awf_get_setup_status", {})
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"providers": ["github"], "source_checkout": str(checkout)},
+    )
     payload = _payload(result)
     rendered = _json_text(result)
+    expected_command = f"awf setup --dry-run --provider github --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"
+    assert payload["command"] == expected_command
+    assert payload["next_steps"] == [
+        f"Fix the reported issue above, then re-run {expected_command}."
+    ]
     assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["summary"] == "could not inspect local setup readiness"
     assert payload["issues"][0]["details"] == {"error_type": "OSError"}
@@ -645,6 +657,7 @@ async def test_get_setup_status_success_transformation_failure_is_structured_and
 ) -> None:
     from awf.mcp import setup_tools
 
+    checkout = tmp_path / "source checkout"
     raw_token = "sk-proj-" + "g" * 40
     readiness = first_run_success_payload(
         command="awf setup",
@@ -661,12 +674,20 @@ async def test_get_setup_status_success_transformation_failure_is_structured_and
     monkeypatch.setattr(setup_tools, "_safe_setup_checks", fail_setup_check_rendering)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
-    result = await mcp.call_tool("awf_get_setup_status", {})
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"providers": ["github"], "source_checkout": str(checkout)},
+    )
     payload = _payload(result)
     rendered = _json_text(result)
+    expected_command = f"awf setup --dry-run --provider github --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"
+    assert payload["command"] == expected_command
+    assert payload["next_steps"] == [
+        f"Fix the reported issue above, then re-run {expected_command}."
+    ]
     assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["summary"] == "could not build setup status response"
     assert payload["issues"][0]["details"] == {"error_type": "RuntimeError"}
