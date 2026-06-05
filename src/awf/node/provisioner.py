@@ -435,6 +435,20 @@ class Provisioner:
                             pre_launch_ws is not None
                             and pre_launch_ws.compose_project_name is None
                             and pre_launch_ws.status == WorkspaceStatus.provisioning.value
+                            # Fence (row-locked): a later claimant that superseded
+                            # us after profile resolution advanced
+                            # execution_claim_epoch while the row stayed
+                            # ``provisioning``. The status guard alone cannot see
+                            # that, so without this epoch predicate a fenced worker
+                            # would commit compose_project_name / resolved_profile
+                            # into the new claimant's row before the D4 verify
+                            # aborts it — letting the new provisioner reuse a stale
+                            # auto-resolved profile. The SELECT FOR UPDATE makes
+                            # this read-and-write atomic against the reclaim.
+                            and (
+                                execution_claim_epoch is None
+                                or pre_launch_ws.execution_claim_epoch == execution_claim_epoch
+                            )
                             # Guard (row-locked): a cancel/stop that wins the race
                             # is serialized behind this SELECT FOR UPDATE, so it
                             # cannot commit a terminal transition between our read

@@ -145,6 +145,49 @@ async def test_fenced_worker_aborts_before_launch_without_transitioning(
 
 
 @pytest.mark.unit
+async def test_fenced_before_pre_launch_commit_does_not_write_metadata(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_repo: Path,
+) -> None:
+    # A later claimant supersedes this worker AFTER it resolved the profile but
+    # BEFORE the pre-launch commit (epoch -> 2 while the row stays provisioning).
+    # The pre-launch commit must be fenced on the epoch (not just the status
+    # guard), so the fenced worker cannot write compose_project_name /
+    # resolved_profile into the new claimant's row. Otherwise the new provisioner
+    # would reuse a stale auto-resolved profile.
+    ws_id = await _create_provisioning(session_factory, origin_repo, epoch=1)
+
+    class _ReclaimAtHostPortCheckProvisioner(Provisioner):
+        async def _check_auto_resolved_profile_host_ports(self, **kwargs: Any) -> None:
+            await super()._check_auto_resolved_profile_host_ports(**kwargs)
+            # Runs after profile resolution, immediately before the pre-launch
+            # commit: a newer claimant reclaims the row here.
+            await _advance_epoch(session_factory, ws_id)
+
+    launcher = _RecordingStackLauncher()
+    provisioner = _ReclaimAtHostPortCheckProvisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        stack_launcher=launcher,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+
+    await provisioner.provision_claimed(ws_id, execution_claim_epoch=1)
+
+    assert launcher.requests == []
+    reloaded = await _reload(session_factory, ws_id)
+    assert reloaded is not None
+    # Fenced before the stale write: the new claimant's row keeps its null
+    # placement metadata, so a retry re-resolves the profile cleanly.
+    assert reloaded.status == WorkspaceStatus.provisioning.value
+    assert reloaded.execution_claim_epoch == 2
+    assert reloaded.execution_claimed_by == "control-worker-newer"
+    assert reloaded.compose_project_name is None
+    assert reloaded.resolved_profile is None
+
+
+@pytest.mark.unit
 async def test_matching_epoch_transitions_to_ready_with_metadata_intact(
     session_factory: async_sessionmaker[AsyncSession],
     git_manager: GitManager,
