@@ -174,6 +174,24 @@ SOURCE_CHECKOUT_ENV_READ_LINES = {
         'AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
     ),
 }
+SOURCE_CHECKOUT_ENV_INLINE_COMMENT_STRIP_LINES = {
+    "AWF_API_TOKEN": (
+        '  AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_API_TOKEN")"'
+    ),
+    "AWF_POSTGRES_PASSWORD": (
+        '  AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_POSTGRES_PASSWORD")"'
+    ),
+    "AWF_POSTGRES_HOST_PORT": (
+        '  AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_POSTGRES_HOST_PORT")"'
+    ),
+    "AWF_DATABASE_URL": (
+        '  AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_DATABASE_URL")"'
+    ),
+}
 SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES = {
     "AWF_API_TOKEN": (
         '  case "$AWF_PERSISTED_API_TOKEN" in',
@@ -407,6 +425,9 @@ def _assert_source_checkout_api_token_restore(
     )
     token_file_guard_line = '  [ -f "$env_file" ] || continue'
     token_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_API_TOKEN"]
+    token_inline_comment_strip_line = SOURCE_CHECKOUT_ENV_INLINE_COMMENT_STRIP_LINES[
+        "AWF_API_TOKEN"
+    ]
     token_quote_strip_lines = SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"]
     token_break_line = '  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break'
     token_loop_end_line = "done"
@@ -454,6 +475,9 @@ def _assert_source_checkout_api_token_restore(
     assert token_loop_line in section, f"{label} must inspect source checkout env files"
     assert token_file_guard_line in section, f"{label} must skip absent env files"
     assert token_read_line in section, f"{label} must read persisted AWF_API_TOKEN"
+    assert token_inline_comment_strip_line in section, (
+        f"{label} must strip unquoted AWF_API_TOKEN inline comments"
+    )
     for token_quote_strip_line in token_quote_strip_lines:
         assert token_quote_strip_line in section, (
             f"{label} must strip quoted persisted AWF_API_TOKEN values"
@@ -483,6 +507,11 @@ def _assert_source_checkout_api_token_restore(
     assert token_shell_export_line in section, f"{label} must export restored shell AWF_API_TOKEN"
 
     decode_start_index, decode_end_index = _assert_dotenv_decode_function(section, label)
+    strip_start_index, strip_end_index = _assert_dotenv_inline_comment_strip_function(
+        section,
+        label,
+        decode_end_index,
+    )
     token_init_index = section.index(token_init_line)
     token_loop_index = _required_index(section, token_loop_line, label, token_init_index)
     token_file_guard_index = _required_index(
@@ -492,8 +521,14 @@ def _assert_source_checkout_api_token_restore(
         token_loop_index,
     )
     token_read_index = _required_index(section, token_read_line, label, token_file_guard_index)
+    token_inline_comment_strip_index = _shell_line_index(
+        section,
+        token_inline_comment_strip_line,
+        label,
+        token_read_index,
+    )
     token_quote_strip_indexes: list[int] = []
-    token_quote_strip_index = token_read_index
+    token_quote_strip_index = token_inline_comment_strip_index
     for token_quote_strip_line in token_quote_strip_lines:
         token_quote_strip_index = _shell_line_index(
             section,
@@ -566,10 +601,13 @@ def _assert_source_checkout_api_token_restore(
     assert (
         decode_start_index
         < decode_end_index
+        < strip_start_index
+        < strip_end_index
         < token_init_index
         < token_loop_index
         < token_file_guard_index
         < token_read_index
+        < token_inline_comment_strip_index
         < min(token_quote_strip_indexes)
         <= max(token_quote_strip_indexes)
         < token_break_index
@@ -603,6 +641,9 @@ def _assert_source_checkout_postgres_password_restore(
     )
     password_file_guard_line = '  [ -f "$env_file" ] || continue'
     password_read_line = SOURCE_CHECKOUT_ENV_READ_LINES["AWF_POSTGRES_PASSWORD"]
+    password_inline_comment_strip_line = SOURCE_CHECKOUT_ENV_INLINE_COMMENT_STRIP_LINES[
+        "AWF_POSTGRES_PASSWORD"
+    ]
     password_quote_strip_lines = SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_POSTGRES_PASSWORD"]
     password_break_line = '  [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break'
     password_loop_end_line = "done"
@@ -645,6 +686,9 @@ def _assert_source_checkout_postgres_password_restore(
     assert password_loop_line in section, f"{label} must inspect source checkout env files"
     assert password_file_guard_line in section, f"{label} must skip absent env files"
     assert password_read_line in section, f"{label} must read persisted AWF_POSTGRES_PASSWORD"
+    assert password_inline_comment_strip_line in section, (
+        f"{label} must strip unquoted AWF_POSTGRES_PASSWORD inline comments"
+    )
     for password_quote_strip_line in password_quote_strip_lines:
         assert password_quote_strip_line in section, (
             f"{label} must strip quoted persisted AWF_POSTGRES_PASSWORD values"
@@ -672,8 +716,14 @@ def _assert_source_checkout_postgres_password_restore(
     password_read_index = _required_index(
         section, password_read_line, label, password_file_guard_index
     )
+    password_inline_comment_strip_index = _shell_line_index(
+        section,
+        password_inline_comment_strip_line,
+        label,
+        password_read_index,
+    )
     password_quote_strip_indexes: list[int] = []
-    password_quote_strip_index = password_read_index
+    password_quote_strip_index = password_inline_comment_strip_index
     for password_quote_strip_line in password_quote_strip_lines:
         password_quote_strip_index = _shell_line_index(
             section,
@@ -732,6 +782,7 @@ def _assert_source_checkout_postgres_password_restore(
         < password_loop_index
         < password_file_guard_index
         < password_read_index
+        < password_inline_comment_strip_index
         < min(password_quote_strip_indexes)
         <= max(password_quote_strip_indexes)
         < password_break_index

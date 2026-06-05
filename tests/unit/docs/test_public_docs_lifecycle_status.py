@@ -682,6 +682,67 @@ def test_quickstart_source_checkout_upgrade_env_restore_strips_unquoted_inline_d
     assert result.stdout == f"token-from-env\nawf_dev\n{persisted_database_url}\n", heading
 
 
+def test_uninstall_source_checkout_env_restore_strips_unquoted_inline_dotenv_comments(
+    tmp_path: Path,
+) -> None:
+    """Assert uninstall refresh snippets restore the same unquoted dotenv bytes as Compose."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=token-from-env # local token",
+                "AWF_POSTGRES_PASSWORD=awf_dev # local password",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+    cases = (
+        (
+            "Intro source-checkout uninstall",
+            uninstall_text.split("## uv tool", maxsplit=1)[0],
+        ),
+        (
+            "Global source-checkout uninstall",
+            _markdown_section(uninstall_text, "## Source Checkout With Global Tool Install"),
+        ),
+        (
+            "No-global source-checkout uninstall",
+            _markdown_section(uninstall_text, "## Source Checkout With No Global Install"),
+        ),
+    )
+
+    for label, section in cases:
+        bash_fences = [
+            fence
+            for fence in _markdown_fences("docs/UNINSTALL.md", section)
+            if fence.language == "bash" and 'AWF_PERSISTED_API_TOKEN=""' in fence.body
+        ]
+        assert len(bash_fences) == 1, label
+        restore_body = bash_fences[0].body
+        restore_start = restore_body.index("awf_decode_double_quoted_dotenv() {")
+        restore_script = restore_body[restore_start:].split("if [ -f .env ]; then", maxsplit=1)[0]
+        script = "\n".join(
+            (
+                "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD",
+                restore_script,
+                'printf "%s\\n%s\\n" "$AWF_API_TOKEN" "$AWF_POSTGRES_PASSWORD"',
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == "token-from-env\nawf_dev\n", label
+
+
 @pytest.mark.parametrize("doc_name", ("QUICKSTART.md", "UNINSTALL.md", "UPGRADE.md"))
 def test_source_checkout_env_restore_decodes_quoted_dotenv_entries(
     doc_name: str,
