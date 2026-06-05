@@ -53,6 +53,55 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: Comment 4440090018 Client Instructions Env File Dry-Run
+
+### Requirement Status
+
+- Resolve the MCP instructions env-file path in dry-run/planning mode:
+  Complete.
+- Preserve successful client-instruction payloads, including `env_file`,
+  `command`, `apply_command`, and next steps, when the resolved env file is
+  absent: Complete.
+- Preserve existing source-checkout validation and client-planning error
+  handling: Complete.
+- Keep CLI non-dry-run apply behavior guarded by `require_existing=True`:
+  Complete; this change only touches the MCP instructions caller.
+- Add or update focused regression coverage for the MCP instructions path:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_source_env_returns_secret_free_plan tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_preserve_explicit_source_checkout_apply_command tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_resolves_relative_source_checkout_apply_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_setup_commands_providers.py::test_resolve_client_env_file_require_existing_raises_when_absent tests/unit/cli/test_setup_commands_providers.py::test_run_client_setup_blocks_apply_when_env_file_absent -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- The three review-focused regressions failed before implementation because the
+  MCP tool passed `require_existing=True` and blocked on the absent env file.
+- The three review-focused regressions after implementation: 3 passed.
+- Focused MCP client-integration test file: 23 passed.
+- Focused CLI apply-guard regressions: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## CI Repair: PR393 Full-Coverage Exact Threshold Gap
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

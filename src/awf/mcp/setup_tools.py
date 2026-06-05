@@ -874,7 +874,7 @@ def _client_integration_instructions_result(
             return safe_result(empty_payload)
 
         source_path = _resolve_client_source_checkout_path(source_checkout)
-        env_file = _resolve_client_env_file(source_path, True)
+        env_file = _resolve_client_env_file(source_path, False)
         home = _client_home()
         env = _client_env()
         plans = [

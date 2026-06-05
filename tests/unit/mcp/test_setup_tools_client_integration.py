@@ -310,7 +310,7 @@ async def test_client_integration_instructions_preserve_explicit_source_checkout
 
     expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
     assert result.isError is False
-    assert resolve_calls == [(checkout, True)]
+    assert resolve_calls == [(checkout, False)]
     assert payload["command"] == expected_command
     assert payload["clients"][0]["apply_command"] == expected_command
     assert payload["next_steps"] == [
@@ -319,7 +319,7 @@ async def test_client_integration_instructions_preserve_explicit_source_checkout
 
 
 @pytest.mark.unit
-async def test_client_integration_instructions_missing_source_env_blocks_before_apply_commands(
+async def test_client_integration_instructions_missing_source_env_returns_secret_free_plan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -346,25 +346,18 @@ async def test_client_integration_instructions_missing_source_env_blocks_before_
     rendered = _json_text(result)
     expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
 
-    assert result.isError is True
-    assert payload["status"] == "blocked"
-    assert payload["reason_code"] == START_COMPOSE_ASSETS_MISSING
+    assert result.isError is False
+    assert payload["status"] == "success"
     assert payload["command"] == expected_command
-    assert payload["summary"] == (
-        "AWF could not register the MCP client: the env file does not exist yet."
-    )
-    assert payload["issues"][0]["details"] == {
-        "check": "client_env_file",
-        "env_file": str(root_env),
-    }
+    assert payload["env_file"] == str(root_env)
+    assert payload["clients"][0]["desired_entry"]["args"][-1] == str(root_env)
+    assert payload["clients"][0]["apply_command"] == expected_command
     assert payload["next_steps"] == [
-        f"Run awf service bootstrap to create the env file, then re-run {expected_command}.",
+        f"Run `{expected_command}` to apply the claude client integration."
     ]
-    assert payload["issues"][0]["remediation"]["related_command"] == (
-        f"awf start --source-checkout '{checkout}'"
-    )
-    assert "clients" not in payload
-    assert "apply_command" not in rendered
+    assert "reason_code" not in payload
+    assert "issues" not in payload
+    assert str(root_env) in rendered
 
 
 @pytest.mark.unit
@@ -405,7 +398,7 @@ async def test_client_integration_instructions_missing_persisted_source_env_rewr
     expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
 
     assert result.isError is True
-    assert resolve_calls == [(None, True)]
+    assert resolve_calls == [(None, False)]
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == START_COMPOSE_ASSETS_MISSING
     assert payload["command"] == expected_command
@@ -435,7 +428,7 @@ async def test_client_integration_instructions_missing_unmatched_env_keeps_defau
 
     def fail_env_file(source_checkout: Path | None, require_existing: bool = False) -> Path:
         assert source_checkout is None
-        assert require_existing is True
+        assert require_existing is False
         raise setup_tools._ClientEnvFileMissingError(env_file)
 
     monkeypatch.setattr(setup_tools, "_resolve_client_env_file", fail_env_file)
@@ -497,7 +490,7 @@ async def test_client_integration_instructions_missing_env_config_oserror_keeps_
     payload = _payload(result)
 
     assert result.isError is True
-    assert resolve_calls == [(None, True)]
+    assert resolve_calls == [(None, False)]
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == START_COMPOSE_ASSETS_MISSING
     assert payload["command"] == "awf setup --client claude"
@@ -569,7 +562,7 @@ async def test_client_integration_instructions_resolves_relative_source_checkout
     resolved_checkout = checkout.resolve()
     expected_command = f"awf setup --client claude --source-checkout '{resolved_checkout}'"
     assert result.isError is False
-    assert resolve_calls == [(resolved_checkout, True)]
+    assert resolve_calls == [(resolved_checkout, False)]
     assert payload["clients"][0]["apply_command"] == expected_command
     assert payload["next_steps"] == [
         f"Run `{expected_command}` to apply the claude client integration."

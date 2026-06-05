@@ -84,6 +84,55 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: Comment 4440090018 Client Instructions Env File Dry-Run
+
+### Problem Statement And Scope
+
+Cursor Bugbot reported that `awf_get_client_integration_instructions` resolves
+the MCP env-file path with `require_existing=True`, so a valid source checkout
+that has `.env.example` but no root `.env` returns a blocked payload instead of
+secret-free client integration plans. CLI `awf setup --client --dry-run` resolves
+the same path without requiring the env file because dry-run planning only needs
+the path string.
+
+Scope is limited to the MCP client-integration instructions path and its focused
+unit tests. The non-dry-run CLI apply guard must remain unchanged so real client
+config writes still block before registering an MCP server that cannot start.
+
+### Requirements Checklist
+
+- Resolve the MCP instructions env-file path in dry-run/planning mode.
+- Preserve successful client-instruction payloads, including `env_file`,
+  `command`, `apply_command`, and next steps, when the resolved env file is
+  absent.
+- Preserve existing source-checkout validation and client-planning error
+  handling.
+- Keep CLI non-dry-run apply behavior guarded by `require_existing=True`.
+- Add or update focused regression coverage for the MCP instructions path.
+
+### Implementation Steps
+
+1. Update focused MCP client-integration tests to expect
+   `_resolve_client_env_file(..., False)` and a successful payload for a fresh
+   valid checkout without `.env`.
+2. Confirm the updated regression fails before the implementation change.
+3. Change `_client_integration_instructions_result` to resolve the env file with
+   `require_existing=False`.
+4. Run targeted tests and focused lint/type checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_source_env_returns_secret_free_plan tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_preserve_explicit_source_checkout_apply_command tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_resolves_relative_source_checkout_apply_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/cli/test_setup_commands_providers.py::test_resolve_client_env_file_require_existing_raises_when_absent tests/unit/cli/test_setup_commands_providers.py::test_run_client_setup_blocks_apply_when_env_file_absent -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: PR393 Full-Coverage Exact Threshold Gap
 
 ### Problem Statement And Scope
