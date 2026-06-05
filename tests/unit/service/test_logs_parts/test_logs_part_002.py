@@ -21,6 +21,7 @@ from awf.service.logs import (
     ServiceLogsError,
     ServiceLogsResult,
     _resolve_local_service_compose_file,
+    _resolve_service_log_compose_env_file,
     _run_subprocess,
     _service_log_secret_values,
     run_service_logs,
@@ -897,18 +898,19 @@ def test_service_log_secret_values_skips_short_secret_values(
 
 
 @pytest.mark.unit
-def test_service_log_secret_values_resolves_omitted_compose_env_file(
+def test_service_log_secret_values_reads_resolved_omitted_compose_env_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Resolve the public omitted env-file sentinel before parsing env files."""
+    """Read provider secrets after resolving the public omitted env-file sentinel."""
     secret = "compose-sentinel-secret"
     compose_env_file = tmp_path / LOCAL_SERVICE_COMPOSE_ENV_FILE
-    compose_env_file.parent.mkdir(parents=True)
+    compose_env_file.parent.mkdir(parents=True, exist_ok=True)
     compose_env_file.write_text(f"CUSTOM_API_KEY={secret}\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    resolved_compose_env_file = _resolve_service_log_compose_env_file(COMPOSE_ENV_FILE_OMITTED)
 
-    values = _service_log_secret_values({}, COMPOSE_ENV_FILE_OMITTED)
+    values = _service_log_secret_values({}, resolved_compose_env_file)
 
     assert secret in values
 
@@ -951,7 +953,7 @@ def test_service_logs_default_resolves_adjacent_compose_env_file_for_redaction(
     compose_file = tmp_path / LOCAL_SERVICE_COMPOSE_FILE
     compose_env_file = tmp_path / LOCAL_SERVICE_COMPOSE_ENV_FILE
     nested_dir = tmp_path / "nested" / "project"
-    compose_file.parent.mkdir(parents=True)
+    compose_file.parent.mkdir(parents=True, exist_ok=True)
     nested_dir.mkdir(parents=True)
     compose_file.write_text("services: {}\n", encoding="utf-8")
     compose_env_file.write_text(f"ANTHROPIC_AUTH_TOKEN={secret}\n", encoding="utf-8")

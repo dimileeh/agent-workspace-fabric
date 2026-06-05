@@ -535,13 +535,12 @@ def _multiline_exact_secret_spans(
 
 def _service_log_secret_values(
     environ: Mapping[str, str] | None,
-    compose_env_file: ComposeEnvFileInput,
+    compose_env_file: Path | None,
 ) -> tuple[str, ...]:
     """Return exact service env values that service logs must redact."""
-    resolved_compose_env_file = _resolve_service_log_compose_env_file(compose_env_file)
     secret_values = [
         value
-        for key, value in compose_env_file_values(resolved_compose_env_file).items()
+        for key, value in compose_env_file_values(compose_env_file).items()
         if value and len(value) >= 4 and is_secret_env_key(key)
     ]
     for source_environ in (os.environ, environ):
