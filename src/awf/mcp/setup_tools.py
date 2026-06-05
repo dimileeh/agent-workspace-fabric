@@ -57,6 +57,7 @@ from awf.host_setup.config import (
 )
 from awf.host_setup.rendering import (
     CLIENT_CONFIG_CONFLICT,
+    SETUP_CLIENT_UNKNOWN,
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
     FirstRunPayload,
@@ -606,7 +607,14 @@ def _client_integration_instructions_result(
     except SetupCheckError as exc:
         return _first_run_result(
             safe_result,
-            _reason_coded_payload(exc.reason_code, str(exc), exc.details),
+            _client_instruction_reason_coded_payload(
+                exc.reason_code,
+                str(exc),
+                exc.details,
+                requested_clients=clients,
+                selected_clients=selected,
+                source_checkout=source_path,
+            ),
             is_error=True,
         )
     except SourceCheckoutError as exc:
@@ -1018,6 +1026,56 @@ def _client_source_checkout_blocked_payload_with_explicit_command(
             ),
         },
     )
+
+
+def _client_instruction_reason_coded_payload(
+    reason_code: str,
+    summary: str,
+    details: dict[str, Any],
+    *,
+    requested_clients: list[str],
+    selected_clients: list[str],
+    source_checkout: Path | None,
+) -> FirstRunPayload:
+    command = _client_instruction_command(
+        selected_clients or requested_clients,
+        source_checkout=source_checkout,
+    )
+    payload = _reason_coded_payload(reason_code, summary, details)
+    return payload.model_copy(
+        update={
+            "command": command,
+            "next_steps": _client_instruction_reason_coded_next_steps(
+                reason_code,
+                payload.next_steps,
+                command=command,
+            ),
+        }
+    )
+
+
+def _client_instruction_reason_coded_next_steps(
+    reason_code: str,
+    next_steps: tuple[str, ...],
+    *,
+    command: str,
+) -> tuple[str, ...]:
+    if reason_code == SETUP_CLIENT_UNKNOWN:
+        return (
+            f"Re-run {command} with a supported --client; the accepted names are "
+            "listed under known_clients in the issue details.",
+        )
+    return tuple(
+        _client_instruction_reason_coded_next_step(step, command=command) for step in next_steps
+    )
+
+
+def _client_instruction_reason_coded_next_step(step: str, *, command: str) -> str:
+    if "awf setup --dry-run" in step:
+        return step.replace("awf setup --dry-run", command)
+    if "awf setup --client" in step:
+        return step.replace("awf setup --client", command)
+    return step.replace("awf setup", command)
 
 
 def _client_instruction_command(clients: list[str], *, source_checkout: Path | None) -> str:

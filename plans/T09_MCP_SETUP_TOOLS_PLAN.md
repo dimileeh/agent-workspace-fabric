@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HP6Qv
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` returns
+`_reason_coded_payload(...)` unchanged when client normalization or selected
+client planning raises `SetupCheckError`. That generic payload renders
+`awf setup` / `awf setup --dry-run` remediation instead of the matching
+`awf setup --client ...` instruction request the MCP caller made.
+
+Scope is limited to the client-integration `SetupCheckError` branch and focused
+regressions for command and next-step rendering.
+
+### Requirements Checklist
+
+- Preserve existing reason code, issue details, redaction, status, and MCP error
+  behavior for client normalization and planning `SetupCheckError` failures.
+- Render normalization errors with a top-level command that preserves the
+  requested client selectors.
+- Render planning errors with a top-level command that preserves normalized
+  selected clients and resolved explicit `source_checkout`.
+- Keep top-level next steps aligned with the client-instruction command instead
+  of generic setup readiness commands.
+- Add focused regression coverage for normalization and planning error paths.
+
+### Implementation Steps
+
+1. Extend focused client-integration regressions for unknown-client and planning
+   `SetupCheckError` command/next-step rendering.
+2. Wrap the existing reason-coded payload in a client-instruction command helper
+   before returning it from the `SetupCheckError` branch.
+3. Run targeted regressions and focused lint/type checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_unknown_client_is_structured_error tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_setup_error_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HP5RB
 
 ### Problem Statement And Scope

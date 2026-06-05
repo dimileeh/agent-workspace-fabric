@@ -53,6 +53,55 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HP6Qv
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve existing reason code, issue details, redaction, status, and MCP error
+  behavior for client normalization and planning `SetupCheckError` failures:
+  Complete.
+- Render normalization errors with a top-level command that preserves the
+  requested client selectors: Complete.
+- Render planning errors with a top-level command that preserves normalized
+  selected clients and resolved explicit `source_checkout`: Complete.
+- Keep top-level next steps aligned with the client-instruction command instead
+  of generic setup readiness commands: Complete.
+- Add focused regression coverage for normalization and planning error paths:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_unknown_client_is_structured_error tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_planning_setup_error_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+```
+
+Latest results:
+
+- The two updated regressions failed before the implementation change because
+  both `SetupCheckError` paths returned `payload["command"] == "awf setup"`.
+- Targeted regressions after the implementation change: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+- Focused client-integration test file: 9 passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HP5RB
 
 ### Requirement Status

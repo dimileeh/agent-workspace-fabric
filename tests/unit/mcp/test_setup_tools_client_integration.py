@@ -153,6 +153,11 @@ async def test_client_integration_instructions_unknown_client_is_structured_erro
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == SETUP_CLIENT_UNKNOWN
+    assert payload["command"] == "awf setup --client missing-client"
+    assert payload["next_steps"] == [
+        "Re-run awf setup --client missing-client with a supported --client; "
+        "the accepted names are listed under known_clients in the issue details."
+    ]
 
 
 @pytest.mark.unit
@@ -163,6 +168,8 @@ async def test_client_integration_instructions_planning_setup_error_is_structure
     from awf.mcp import setup_tools
 
     raw_token = "sk-proj-" + "d" * 40
+    checkout = tmp_path / "source checkout"
+    env_file = checkout / "docker" / "compose" / ".env"
 
     def fail_plan(*_args: Any, **_kwargs: Any) -> Any:
         raise SetupCheckError(
@@ -171,19 +178,25 @@ async def test_client_integration_instructions_planning_setup_error_is_structure
             details={"client": "claude", "raw": raw_token},
         )
 
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
     monkeypatch.setattr(setup_tools, "build_client_config_plan", fail_plan)
     mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
 
     result = await mcp.call_tool(
         "awf_get_client_integration_instructions",
-        {"clients": ["claude"]},
+        {"clients": ["claude"], "source_checkout": str(checkout)},
     )
     payload = _payload(result)
     rendered = _json_text(result)
+    expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
 
     assert result.isError is True
     assert payload["status"] == "blocked"
     assert payload["reason_code"] == CLIENT_CONFIG_CONFLICT
+    assert payload["command"] == expected_command
+    assert payload["next_steps"] == [
+        f"Fix the reported issue above, then re-run {expected_command}.",
+    ]
     assert raw_token not in rendered
     assert REDACTION_MARKER in rendered
 
