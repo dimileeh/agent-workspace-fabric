@@ -249,14 +249,30 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
     tail = match.group("tail")
     tokens = _split_tail(tail)
 
-    has_project = any(tok == "--project" or tok.startswith("--project=") for tok in tokens)
     has_mocked_local = "--mocked-local" in tokens
 
+    # `--project` is the path-to-smoke option (src/awf/cli/profile_smoke_commands.py),
+    # so it only counts as satisfied when an actual path value follows. A bare
+    # `--project` whose next token is another flag (e.g.
+    # `awf smoke run --project --mocked-local ...`) dropped its path: it must not
+    # set `has_project`, and must not swallow that following flag as if it were
+    # the value — otherwise R4 would wave through invalid mocked smoke guidance.
+    has_project = False
     positional_path = False
     skip_next = False
-    for token in tokens:
+    for index, token in enumerate(tokens):
         if skip_next:
             skip_next = False
+            continue
+        if token.startswith("--project="):
+            if token[len("--project=") :]:
+                has_project = True
+            continue
+        if token == "--project":
+            nxt = tokens[index + 1] if index + 1 < len(tokens) else None
+            if nxt is not None and not nxt.startswith("-"):
+                has_project = True
+                skip_next = True
             continue
         if token.startswith("-"):
             if token in VALUE_FLAGS:
@@ -328,6 +344,18 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
     assert no_project_proof is not None
     assert no_project_proof.positional_path is False
     assert no_project_proof.has_project is False
+
+    # A `--project` flag that drops its path value (the next token is another
+    # flag) must not count as a satisfied `--project`, and must not swallow that
+    # flag as the value — otherwise R4 would pass invalid mocked smoke guidance
+    # like `awf smoke run --project --mocked-local --format pretty`.
+    dropped_value = _parse_smoke_invocation(
+        "awf smoke run --project --mocked-local --format pretty"
+    )
+    assert dropped_value is not None
+    assert dropped_value.has_project is False
+    assert dropped_value.has_mocked_local is True
+    assert dropped_value.positional_path is False
 
     assert _parse_smoke_invocation("awf service status --format pretty") is None
 
