@@ -2116,6 +2116,42 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HOCUX`:
+
+- `docs/QUICKSTART.md` shared GitHub token refresh prerequisites now list a
+  lane-specific restart command instead of only `awf start`.
+- Lane 1 keeps the bare package-lane `awf start` restart.
+- Lane 2 now shows `awf start --source-checkout "$PWD"` from the source
+  checkout.
+- Lane 3 now shows
+  `uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"` from
+  the source checkout, matching the no-global startup lane.
+- `tests/unit/docs/test_public_docs_status.py` now rejects shared token refresh
+  guidance that omits the Lane 2 source-checkout restart or Lane 3 no-global
+  wrapper restart.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_token_refresh_restart_is_lane_aware -q
+```
+
+Red-phase result after adding the focused regression: failed with the expected
+assertion because the shared prerequisites only contained a bare `awf start`
+restart block.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_token_refresh_restart_is_lane_aware -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_token_refresh_restart_is_lane_aware tests/unit/docs/test_public_docs_status.py::test_quickstart_uses_runnable_startup_path tests/unit/docs/test_public_docs_status.py::test_raw_docker_compose_source_path_is_single_command -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: `1 passed in 0.70s`; `3 passed in 0.74s`;
+`All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

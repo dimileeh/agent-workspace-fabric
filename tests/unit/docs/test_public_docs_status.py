@@ -1049,6 +1049,30 @@ def test_quickstart_uses_runnable_startup_path() -> None:
     assert "migration sources only" in quickstart_text
 
 
+def test_quickstart_token_refresh_restart_is_lane_aware() -> None:
+    """Assert shared token-refresh guidance has runnable lane restarts."""
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    prerequisites_section = _markdown_section(quickstart_text, "## Prerequisites")
+    restart_section = prerequisites_section.split(
+        "If you set or refresh the GitHub token",
+        maxsplit=1,
+    )[1]
+
+    assert "For Lane 1" in restart_section
+    assert "For Lane 2" in restart_section
+    assert "For Lane 3" in restart_section
+    assert re.search(r"(?m)^awf start\s*$", restart_section)
+    assert re.search(r'(?m)^awf start --source-checkout "\$PWD"\s*$', restart_section)
+    assert re.search(
+        (
+            r"(?m)^uv run --python 3\.12 --extra dev awf start "
+            r'--source-checkout "\$PWD"\s*$'
+        ),
+        restart_section,
+    )
+    assert not re.search(r"(?m)^uv run --python 3\.12 --extra dev awf start\s*$", restart_section)
+
+
 def test_raw_docker_compose_source_path_is_single_command() -> None:
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")

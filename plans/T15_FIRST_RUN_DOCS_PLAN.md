@@ -497,6 +497,20 @@ Focused repair command for review-level comment `issue:4620140358`:
 uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_mocked_smoke_keeps_github_auth_optional tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_detects_only_closing_fi_keyword -q
 ```
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HOCUX`: Quickstart
+shared GitHub token refresh prerequisites must not present only a bare
+`awf start` restart command. Scope the bare restart command to the package
+manager lane, include the Lane 2 source-checkout restart form with
+`awf start --source-checkout "$PWD"`, and include the Lane 3 no-global
+source-checkout restart form with
+`uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"`.
+
+Focused repair command for PR thread `PRRT_kwDOSJAM6s6HOCUX`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_quickstart_token_refresh_restart_is_lane_aware -q
+```
+
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.

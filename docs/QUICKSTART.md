@@ -35,12 +35,26 @@ Open <http://localhost:3000> for the console, or call the API at
 <http://localhost:8000>. Protected local API calls use
 `Authorization: Bearer local-dev-token` unless you set `AWF_API_TOKEN`.
 
-If you set or refresh the GitHub token after starting Core, rerun the service
-start command so Compose recreates the service containers with the updated
-environment:
+If you set or refresh the GitHub token after starting Core, rerun the start
+command for the lane you used so Compose recreates the service containers with
+the updated environment.
+
+For Lane 1 (`uv tool` or `pipx`):
 
 ```bash
 awf start
+```
+
+For Lane 2 (source checkout with global tool install), run from the checkout:
+
+```bash
+awf start --source-checkout "$PWD"
+```
+
+For Lane 3 (source checkout with no global install), run from the checkout:
+
+```bash
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
 ```
 
 ## Lane 1: uv tool or pipx
