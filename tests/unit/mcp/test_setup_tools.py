@@ -734,6 +734,84 @@ async def test_get_setup_status_source_checkout_reads_host_config_status(
 
 
 @pytest.mark.unit
+async def test_get_setup_status_source_checkout_preserves_host_config_when_config_path_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    verified_at = datetime(2026, 2, 3, tzinfo=UTC).isoformat()
+    readiness = first_run_success_payload(
+        command="awf setup",
+        summary="source checkout ready",
+        details={
+            "selected_providers": ["github"],
+            "checks": [{"name": "docker", "level": "ok"}],
+            "source_checkout": {"root": str(checkout), "verified_at": verified_at},
+        },
+        next_steps=("Run awf start.",),
+    )
+    config = HostSetupConfig(
+        providers={
+            "github": ProviderConfig(
+                credential_ref="env://GITHUB_TOKEN",
+                backend="env_ref",
+                source="env",
+                status="ready",
+            )
+        },
+        clients={
+            "codex": ClientIntegrationConfig(
+                status="configured",
+                updated_at=datetime(2026, 2, 4, tzinfo=UTC),
+            )
+        },
+        consent=ConsentConfig(plain_file_secrets=True, source_checkout_assets=True),
+    )
+
+    def fail_config_path() -> Path:
+        raise HostSetupConfigError(
+            reason_code=HOST_SETUP_CONFIG_CORRUPT,
+            message="Host setup config path could not be resolved.",
+            path=Path("~/.awf/config.yml"),
+            details={"error_type": "RuntimeError"},
+        )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", lambda **_kwargs: readiness)
+    monkeypatch.setattr(setup_tools, "read_host_setup_config", lambda: config)
+    monkeypatch.setattr(setup_tools, "default_host_setup_config_path", fail_config_path)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"providers": ["github"], "source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+
+    assert result.isError is False
+    assert "config_path" not in payload["setup"]
+    assert payload["setup"]["plain_file_consent"] is True
+    assert payload["setup"]["source_checkout_assets_consent"] is True
+    assert payload["providers"]["github"] == {
+        "status": "ready",
+        "backend": "env_ref",
+        "source": "env",
+        "credential_ref": {"present": True, "scheme": "env"},
+    }
+    assert payload["clients"]["codex"] == {
+        "status": "configured",
+        "updated_at": "2026-02-04T00:00:00+00:00",
+    }
+    assert payload["source_checkout"] == {
+        "present": True,
+        "root": str(checkout),
+        "verified_at": verified_at,
+        "marker_count": None,
+    }
+
+
+@pytest.mark.unit
 async def test_get_setup_status_source_checkout_next_steps_do_not_duplicate_existing_start_flags(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

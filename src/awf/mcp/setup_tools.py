@@ -240,11 +240,16 @@ def _get_setup_status_result(
         )
         try:
             config = read_host_setup_config()
-            config_path = default_host_setup_config_path()
         except HostSetupConfigError:
             if source_path is None:
                 raise
             config = HostSetupConfig()
+        else:
+            try:
+                config_path = default_host_setup_config_path()
+            except HostSetupConfigError:
+                if source_path is None:
+                    raise
     except SetupCheckError as exc:
         return _first_run_result(
             safe_result,

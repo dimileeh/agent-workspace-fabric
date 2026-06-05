@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HPsBy
+
+### Requirement Status
+
+- Preserve valid provider, client, consent, and persisted source-checkout
+  metadata after a successful host config read: Complete.
+- Omit `setup.config_path` when `default_host_setup_config_path()` is not
+  resolvable on an explicit source-checkout status probe: Complete.
+- Preserve the existing fallback to an empty config when host config reading
+  itself fails for an explicit source-checkout status probe: Complete.
+- Add a focused regression proving config metadata is not dropped when only
+  the config path lookup fails: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_preserves_host_config_when_config_path_fails -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_preserves_host_config_when_config_path_fails tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_falls_back_when_host_config_read_fails tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_omits_unresolvable_config_path_on_fallback tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["setup"]["plain_file_consent"]` was `False` after
+  `default_host_setup_config_path()` failed, proving the loaded config had been
+  dropped.
+- Regression test after the implementation change: 1 passed.
+- Regression plus neighboring setup-status config fallback tests after the
+  implementation change: 4 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HPsBt
 
 ### Requirement Status

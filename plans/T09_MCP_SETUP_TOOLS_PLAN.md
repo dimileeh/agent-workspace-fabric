@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HPsBy
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` drops valid host setup config
+metadata on the explicit `source_checkout` path when `read_host_setup_config()`
+succeeds but `default_host_setup_config_path()` raises
+`HostSetupConfigError`. The current shared `try` treats both failures as a
+signal to replace the loaded config with an empty `HostSetupConfig()`.
+
+Scope is limited to preserving the already loaded host config while omitting
+`setup.config_path` when only the default path resolution fails.
+
+### Requirements Checklist
+
+- Preserve valid provider, client, consent, and persisted source-checkout
+  metadata after a successful host config read.
+- Omit `setup.config_path` when `default_host_setup_config_path()` is not
+  resolvable on an explicit source-checkout status probe.
+- Preserve the existing fallback to an empty config when host config reading
+  itself fails for an explicit source-checkout status probe.
+- Add a focused regression proving config metadata is not dropped when only
+  the config path lookup fails.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for successful config read followed
+   by default config path failure.
+2. Split host config reading from config path lookup so path errors only clear
+   `config_path`.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_source_checkout_preserves_host_config_when_config_path_fails -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HPsBt
 
 ### Problem Statement And Scope
