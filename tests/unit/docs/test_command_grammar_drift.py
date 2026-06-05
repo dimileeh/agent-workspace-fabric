@@ -206,7 +206,11 @@ def _inline_command_mentions(text: str) -> list[str]:
     return mentions
 
 
-_SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", "&"})
+# Operator characters that begin/are a shell command separator (`;`, `&`, `&&`,
+# `|`, `||`). Split on the characters rather than the whole-word operators so a
+# separator glued to a neighbouring token (`--yes;`, `.;awf`, `init&&awf`) is
+# detected just like a spaced one.
+_SHELL_OPERATOR_RE = re.compile(r"[;&|]")
 
 
 def _split_tail(tail: str) -> list[str]:
@@ -216,12 +220,20 @@ def _split_tail(tail: str) -> list[str]:
         tokens = tail.split()
     # Stop at the first shell operator so chained commands (e.g. `awf init &&
     # awf start`) don't contribute their continuation tokens to the argument
-    # scan — `shlex.split` keeps `&&`/`|`/`;` as ordinary words, and a bare `&&`
-    # would otherwise be mistaken for a positional path/argument.
-    for index, token in enumerate(tokens):
-        if token in _SHELL_OPERATORS:
-            return tokens[:index]
-    return tokens
+    # scan. `shlex.split` keeps `&&`/`|`/`;` as ordinary characters, so an
+    # operator can arrive either as its own token (`... --yes ; awf start`) or
+    # glued to a neighbour (`... --yes; awf start` → `--yes;`, `.;awf`). Splitting
+    # each token on the operator characters keeps only the head before the first
+    # separator, so the chained continuation command (e.g. `awf`) is never read
+    # as a positional path/argument.
+    result: list[str] = []
+    for token in tokens:
+        head = _SHELL_OPERATOR_RE.split(token, maxsplit=1)[0]
+        if head:
+            result.append(head)
+        if head != token:
+            break
+    return result
 
 
 def _is_standalone(line: str, command: str) -> bool:
@@ -377,6 +389,15 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("awf init && awf start") == "bare"
     assert _init_arg_status("awf init ; awf start") == "bare"
     assert _init_arg_status("awf init | tee log") == "bare"
+    # A separator glued to a neighbouring token (no surrounding spaces) must be
+    # detected too, so a one-line chained form does not smuggle the continuation
+    # command in as the required path.
+    assert _init_arg_status("awf init;awf start") == "bare"
+    assert _init_arg_status("awf init&&awf start") == "bare"
+    assert _init_arg_status("awf init --write-profile --yes; awf start") == "flag-only"
+    assert _init_arg_status("awf init --write-profile --yes;awf start") == "flag-only"
+    # A real path before an attached separator still counts as a path.
+    assert _init_arg_status("awf init .;awf start") == "ok"
     assert _init_arg_status("awf init --write-profile --yes") == "flag-only"
     # An option value (the `python` after `--template`) is not a path: a no-path
     # init written with a value-taking flag is still flag-only, not "ok".
