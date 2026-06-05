@@ -332,6 +332,29 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
+AWF_PERSISTED_DATABASE_URL=""
+for env_file in .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_DATABASE_URL" in
+    \"*\")
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+      AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+      ;;
+  esac
+  [ -n "$AWF_PERSISTED_DATABASE_URL" ] && break
+done
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before upgrading}"
+  export AWF_DATABASE_URL
+fi
 docker compose --env-file .env -f docker/compose/local-service.yml stop
 git pull
 uv tool install . --force
@@ -514,6 +537,29 @@ if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
 else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
+fi
+AWF_PERSISTED_DATABASE_URL=""
+for env_file in .env; do
+  [ -f "$env_file" ] || continue
+  AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  case "$AWF_PERSISTED_DATABASE_URL" in
+    \"*\")
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\"}"
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\"}"
+      AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_DATABASE_URL")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\'}"
+      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\'}"
+      ;;
+  esac
+  [ -n "$AWF_PERSISTED_DATABASE_URL" ] && break
+done
+if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then
+  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"
+else
+  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for the running local Core or persist it in .env before upgrading}"
+  export AWF_DATABASE_URL
 fi
 docker compose --env-file .env -f docker/compose/local-service.yml stop
 git pull

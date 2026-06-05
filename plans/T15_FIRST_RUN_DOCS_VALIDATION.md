@@ -2626,6 +2626,55 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HYgyo`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: Quickstart Lane 2 and Lane 3 source-checkout upgrade snippets now
+  restore persisted `AWF_DATABASE_URL` from the checkout-root `.env` before
+  `awf start --source-checkout "$PWD"` or the no-global `uv run ... awf start`
+  equivalent.
+- Complete: `docs/UPGRADE.md` source-checkout upgrade snippets now restore
+  persisted `AWF_DATABASE_URL` from checkout-root `.env`, with legacy
+  `docker/compose/.env` fallback, before source-checkout restart.
+- Complete: Focused lifecycle docs tests now require source-checkout upgrade
+  database URL restore and prove a stale shell `AWF_DATABASE_URL` is replaced
+  by the persisted dotenv value.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `docs/UPGRADE.md`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_lifecycle_status.py::test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell -q
+# Red phase before docs update: 2 failed
+# Final result: 2 passed in 1.07s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 1 passed in 0.64s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# 2 files already formatted
+
+git diff --check
+# no output
+```
+
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, console
 builds, pushes, and PR lifecycle actions were intentionally not run in the
 agent phase; AWF owns those broad gates after agent completion.

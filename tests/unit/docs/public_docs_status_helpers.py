@@ -163,6 +163,11 @@ SOURCE_CHECKOUT_ENV_READ_LINES = {
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
         'AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
     ),
+    "AWF_DATABASE_URL": (
+        "  AWF_PERSISTED_DATABASE_URL=\"$(sed -n 's/^[[:space:]]*"
+        "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        'AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
+    ),
 }
 SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES = {
     "AWF_API_TOKEN": (
@@ -194,6 +199,22 @@ SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES = {
         "    \\'*\\')",
         '      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\\'}"',
         '      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\\'}"',
+        "      ;;",
+        "  esac",
+    ),
+    "AWF_DATABASE_URL": (
+        '  case "$AWF_PERSISTED_DATABASE_URL" in',
+        '    \\"*\\")',
+        '      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\\"}"',
+        '      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\\"}"',
+        (
+            '      AWF_PERSISTED_DATABASE_URL="$(awf_decode_double_quoted_dotenv '
+            '"$AWF_PERSISTED_DATABASE_URL")"'
+        ),
+        "      ;;",
+        "    \\'*\\')",
+        '      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL#\\\'}"',
+        '      AWF_PERSISTED_DATABASE_URL="${AWF_PERSISTED_DATABASE_URL%\\\'}"',
         "      ;;",
         "  esac",
     ),
@@ -695,6 +716,96 @@ def _assert_source_checkout_postgres_password_restore(
     return password_init_index, password_guard_end_index
 
 
+def _assert_source_checkout_database_url_restore(
+    label: str,
+    section: str,
+    lifecycle: str,
+) -> tuple[int, int]:
+    """Assert source-checkout snippets preserve persisted database URLs."""
+    database_url_init_line = 'AWF_PERSISTED_DATABASE_URL=""'
+    legacy_first_database_url_loop_line = "for env_file in docker/compose/.env .env; do"
+    root_first_database_url_loop_line = "for env_file in .env docker/compose/.env; do"
+    root_database_url_loop_line = "for env_file in .env; do"
+    database_url_loop_line = (
+        root_first_database_url_loop_line
+        if root_first_database_url_loop_line in section
+        else root_database_url_loop_line
+    )
+    database_url_inline_comment_strip_line = (
+        '  AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment '
+        '"$AWF_PERSISTED_DATABASE_URL")"'
+    )
+    legacy_first_database_url_require_line = (
+        '  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for '
+        "the running local Core or persist it in docker/compose/.env or .env before "
+        + lifecycle
+        + '}"'
+    )
+    root_first_database_url_require_line = (
+        '  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for '
+        "the running local Core or persist it in .env or docker/compose/.env before "
+        + lifecycle
+        + '}"'
+    )
+    root_database_url_require_line = (
+        '  : "${AWF_DATABASE_URL:?restore the AWF_DATABASE_URL used for '
+        "the running local Core or persist it in .env before " + lifecycle + '}"'
+    )
+    database_url_require_line = (
+        root_first_database_url_require_line
+        if root_first_database_url_require_line in section
+        else root_database_url_require_line
+    )
+    requires_inline_comment_strip = (
+        DOTENV_UNQUOTED_INLINE_COMMENT_STRIP_FUNCTION_LINES[0] in section
+    )
+
+    assert legacy_first_database_url_loop_line not in section, (
+        f"{label} must prefer root .env over legacy docker/compose/.env"
+    )
+    assert legacy_first_database_url_require_line not in section, (
+        f"{label} must describe root .env before legacy docker/compose/.env"
+    )
+    assert database_url_init_line in section, (
+        f"{label} must initialize persisted database URL lookup"
+    )
+    database_url_restore_lines = [
+        database_url_loop_line,
+        '  [ -f "$env_file" ] || continue',
+        SOURCE_CHECKOUT_ENV_READ_LINES["AWF_DATABASE_URL"],
+    ]
+    if requires_inline_comment_strip:
+        database_url_restore_lines.append(database_url_inline_comment_strip_line)
+    database_url_restore_lines.extend(
+        [
+            *SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_DATABASE_URL"],
+            '  [ -n "$AWF_PERSISTED_DATABASE_URL" ] && break',
+            "done",
+            'if [ -n "$AWF_PERSISTED_DATABASE_URL" ]; then',
+            '  export AWF_DATABASE_URL="$AWF_PERSISTED_DATABASE_URL"',
+            "else",
+            database_url_require_line,
+            "  export AWF_DATABASE_URL",
+        ]
+    )
+
+    database_url_init_index = section.index(database_url_init_line)
+    current_index = database_url_init_index
+    for database_url_restore_line in database_url_restore_lines:
+        current_index = _shell_line_index(
+            section,
+            database_url_restore_line,
+            label,
+            current_index,
+        )
+    database_url_guard_end_index = _shell_closing_fi_index(
+        section,
+        current_index,
+        label,
+    )
+    return database_url_init_index, database_url_guard_end_index
+
+
 def _assert_source_checkout_stop_prefers_root_env(
     label: str,
     section: str,
@@ -768,6 +879,7 @@ def _assert_source_checkout_service_env_restore_and_stop(
     section: str,
     lifecycle: str,
     *,
+    require_database_url_restore: bool = False,
     require_legacy_fallback: bool = False,
 ) -> tuple[int, int, int, int]:
     """Assert source-checkout snippets restore service secrets before stopping Core."""
@@ -783,10 +895,20 @@ def _assert_source_checkout_service_env_restore_and_stop(
             lifecycle,
         )
     )
+    env_restore_end_index = password_restore_end_index
+    database_url_restore_start_index = password_restore_end_index
+    if require_database_url_restore:
+        database_url_restore_start_index, env_restore_end_index = (
+            _assert_source_checkout_database_url_restore(
+                label,
+                section,
+                lifecycle,
+            )
+        )
     stop_index, _stop_end_index = _assert_source_checkout_stop_prefers_root_env(
         label,
         section,
-        password_restore_end_index,
+        env_restore_end_index,
         require_legacy_fallback=require_legacy_fallback,
     )
 
@@ -795,9 +917,11 @@ def _assert_source_checkout_service_env_restore_and_stop(
         < api_restore_end_index
         < password_restore_start_index
         < password_restore_end_index
+        <= database_url_restore_start_index
+        <= env_restore_end_index
         < stop_index
-    ), f"{label} must restore service secrets before stopping Core"
-    return api_restore_start_index, password_restore_end_index, stop_index, _stop_end_index
+    ), f"{label} must restore service environment before stopping Core"
+    return api_restore_start_index, env_restore_end_index, stop_index, _stop_end_index
 
 
 def _assert_source_checkout_service_env_restore_before_stop(

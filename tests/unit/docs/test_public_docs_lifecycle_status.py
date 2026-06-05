@@ -131,6 +131,7 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
             label,
             section,
             "upgrading",
+            require_database_url_restore=True,
             require_legacy_fallback=not label.startswith("Quickstart"),
         )
         assert setup_line in section, f"{label} does not refresh source_checkout metadata"
@@ -145,6 +146,99 @@ def test_source_checkout_upgrade_docs_refresh_persisted_metadata() -> None:
             < section.index(setup_line)
             < section.index(start_line)
         ), f"{label} must stop Core before refreshing source files"
+
+
+def test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell(
+    tmp_path: Path,
+) -> None:
+    """Assert source-checkout upgrades restore persisted database URLs."""
+    persisted_database_url = "postgresql+asyncpg://awf:p%40ss%22quote%5Ctail@localhost:15433/awf"
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                'AWF_API_TOKEN="tok\\$en"',
+                'AWF_POSTGRES_PASSWORD="p@ss\\"quote\\\\tail"',
+                f'AWF_DATABASE_URL="{persisted_database_url}"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    cases = (
+        (
+            "Quickstart Lane 2",
+            "docs/QUICKSTART.md",
+            _quickstart_upgrade_section(
+                quickstart_text,
+                "## Lane 2: Source Checkout With Global Tool Install",
+            ),
+        ),
+        (
+            "Quickstart Lane 3",
+            "docs/QUICKSTART.md",
+            _quickstart_upgrade_section(
+                quickstart_text,
+                "## Lane 3: Source Checkout With No Global Install",
+            ),
+        ),
+        (
+            "Upgrade source checkout with global tool install",
+            "docs/UPGRADE.md",
+            _markdown_section(upgrade_text, "## Source Checkout With Global Tool Install"),
+        ),
+        (
+            "Upgrade source checkout with no global install",
+            "docs/UPGRADE.md",
+            _markdown_section(upgrade_text, "## Source Checkout With No Global Install"),
+        ),
+    )
+    stale_env = {
+        **os.environ,
+        "AWF_API_TOKEN": "stale-token-from-shell",
+        "AWF_POSTGRES_PASSWORD": "stale-password-from-shell",
+        "AWF_DATABASE_URL": "postgresql+asyncpg://awf:stale@localhost:5433/awf",
+    }
+
+    for label, path, section in cases:
+        bash_fences = [
+            fence for fence in _markdown_fences(path, section) if fence.language == "bash"
+        ]
+        assert len(bash_fences) == 1, label
+        body = bash_fences[0].body
+        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        guarded_stop_index = body.find("if [ -f .env ]; then", restore_start)
+        bare_stop_index = body.find(
+            "docker compose --env-file .env -f docker/compose/local-service.yml stop",
+            restore_start,
+        )
+        stop_start_candidates = [
+            index for index in (guarded_stop_index, bare_stop_index) if index != -1
+        ]
+        assert stop_start_candidates, label
+        restore_script = body[restore_start : min(stop_start_candidates)]
+        script = "\n".join(
+            (
+                restore_script,
+                (
+                    'printf "%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
+                    '"$AWF_POSTGRES_PASSWORD" "$AWF_DATABASE_URL"'
+                ),
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            env=stale_env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == f'tok$en\np@ss"quote\\tail\n{persisted_database_url}\n', label
 
 
 def test_package_upgrade_docs_restore_service_env_before_start() -> None:
