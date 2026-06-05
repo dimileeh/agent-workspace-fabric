@@ -2776,11 +2776,12 @@ Requirement status:
   matches only the skipped first-line fragment while still redacting the full
   multiline secret.
 - Complete: service-log first-line fragment behavior and the shared Compose
-  parser behavior were left unchanged. The duplicated-parser review item was
-  already stale because both MCP and service logs use
-  `compose_env_file_quoted_multiline_values()`, and the single-quoted
-  backslash behavior matches Docker Compose's documented escaped-quote syntax
-  plus the existing regression test.
+  parser behavior were left unchanged. The duplicated-parser concern in this
+  pass was limited to the parser itself because both MCP and service logs
+  already used `compose_env_file_quoted_multiline_values()`. A later
+  validation section covers the remaining duplicate context-helper extraction.
+  The single-quoted backslash behavior matches Docker Compose's documented
+  escaped-quote syntax plus the existing regression test.
 - Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
   full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
   owns those gates after agent completion.
@@ -2813,4 +2814,60 @@ uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp
 
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
 # Success: no issues found in 1 source file
+```
+
+## Review-Level Comment `issue:4620175517` Context Helper Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: service-log and MCP exact-secret collection now share
+  `compose_env_file_quoted_multiline_secret_context()` from
+  `awf.service.environment`.
+- Complete: the shared helper filters by caller-supplied secret-key predicate,
+  skips values shorter than the exact-secret minimum, returns full multiline
+  values, and only returns first-line fragments for values that did not close on
+  the first line.
+- Complete: escaped single-quote Compose parser behavior remains covered by
+  the existing parser and service-log regressions. The review claim that
+  backslash is always literal for a single quote is a false positive against
+  Docker's documented env-file syntax, which explicitly allows escaped quotes
+  such as `VAR='Let\'s go!'`.
+- Complete: MCP metrics-tool registration now documents that exact secrets are
+  snapshotted at startup and that newly rotated bare exact values require MCP
+  restart to join the exact redaction list; the existing startup-cache behavior
+  remains unchanged and covered.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/environment.py`
+- `src/awf/service/logs.py`
+- `src/awf/mcp/server.py`
+- `src/awf/mcp/metrics_tools.py`
+- `tests/unit/service/test_environment.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_secret_context_filters_fragments -q --tb=short -ra
+# 1 failed: ImportError for missing compose_env_file_quoted_multiline_secret_context
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_secret_context_filters_fragments tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_excludes_multiline_first_line_fragment tests/unit/mcp/test_mcp_multiline_compose_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_read_workspace_log_uses_startup_redaction_secrets -q --tb=short -ra
+# 9 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py tests/unit/service/test_environment.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
+# Success: no issues found in 4 source files
 ```

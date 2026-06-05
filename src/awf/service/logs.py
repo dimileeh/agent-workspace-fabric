@@ -29,7 +29,7 @@ from awf.service.config import (
 from awf.service.environment import (
     cleared_docker_cli_client_keys,
     compose_cli_environ,
-    compose_env_file_quoted_multiline_values,
+    compose_env_file_quoted_multiline_secret_context,
     compose_env_file_values,
     compose_interpolation_environ,
     docker_cli_client_environ,
@@ -595,9 +595,10 @@ def _service_log_secret_values(
     (
         quoted_multiline_values,
         quoted_multiline_first_line_values,
-    ) = _service_log_quoted_multiline_secret_context(
+    ) = compose_env_file_quoted_multiline_secret_context(
         compose_env_file,
         environ=compose_environ,
+        is_secret_key=is_secret_env_key,
     )
     secret_values = [
         value
@@ -617,23 +618,6 @@ def _service_log_secret_values(
             if value and len(value) >= 4 and is_secret_env_key(key)
         )
     return tuple(dict.fromkeys(secret_values))
-
-
-def _service_log_quoted_multiline_secret_context(
-    compose_env_file: Path | None,
-    *,
-    environ: Mapping[str, str] | None = None,
-) -> tuple[tuple[str, ...], frozenset[tuple[str, str]]]:
-    """Return full quoted multiline secrets and parsed first-line fragments."""
-    values: list[str] = []
-    first_line_values: set[tuple[str, str]] = set()
-    for entry in compose_env_file_quoted_multiline_values(compose_env_file, environ=environ):
-        if len(entry.value) < 4 or not is_secret_env_key(entry.key):
-            continue
-        values.append(entry.value)
-        if not entry.closed_on_first_line:
-            first_line_values.add((entry.key, entry.first_line_value))
-    return tuple(values), frozenset(first_line_values)
 
 
 def _resolve_service_log_compose_env_file(

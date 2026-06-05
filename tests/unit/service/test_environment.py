@@ -526,6 +526,38 @@ def test_compose_env_file_quoted_multiline_values_expands_double_quoted_referenc
 
 
 @pytest.mark.unit
+def test_compose_env_file_quoted_multiline_secret_context_filters_fragments(
+    tmp_path,
+) -> None:
+    """Collect quoted multiline secrets and first-line fragments in one shared helper."""
+    from awf.service.environment import compose_env_file_quoted_multiline_secret_context
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "API_TOKEN='top-secret",
+                "second-secret'",
+                "PUBLIC_URL='public-first",
+                "public-second'",
+                "SHORT_TOKEN='a",
+                "b'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    values, first_line_values = compose_env_file_quoted_multiline_secret_context(
+        env_file,
+        is_secret_key=lambda key: key.endswith("_TOKEN"),
+    )
+
+    assert values == ("top-secret\nsecond-secret",)
+    assert first_line_values == frozenset({("API_TOKEN", "top-secret")})
+
+
+@pytest.mark.unit
 def test_compose_interpolation_keys_ignores_unreadable_and_non_utf8_files(
     tmp_path,
 ) -> None:

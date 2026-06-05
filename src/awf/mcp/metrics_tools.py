@@ -400,6 +400,11 @@ def register_metrics_tools(
     extra_secrets: Iterable[str] | None = None,
 ) -> None:
     _safe_result = safe_result
+    # Exact secret values are snapshotted when MCP tools are registered so log
+    # polling does not reread settings or Compose env files on every request.
+    # After credential rotation, restart the MCP server so newly configured bare
+    # exact values join this list; pattern and assignment redaction still applies
+    # to each returned log slice.
     if extra_secrets is None:
         service_settings_value = service_settings or service_config.resolve_service_settings(
             settings_value

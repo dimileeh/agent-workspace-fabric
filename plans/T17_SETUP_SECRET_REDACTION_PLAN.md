@@ -134,6 +134,17 @@ credential entry, or unrelated refactors are included.
 - This repair remains inside the existing T17 service-log redaction scope and
   only changes default service-log env-file resolution, a focused regression,
   and this plan/validation evidence.
+- Review-level comment `issue:4620175517` identified duplicated quoted
+  multiline Compose secret-context helpers and asked that MCP startup-time
+  exact-secret capture document the credential-rotation restart requirement.
+- The same comment's single-quoted escape concern is a false positive for the
+  current implementation: Docker Compose documents escaped quotes with
+  backslash even for single-quoted env-file values, and the existing regression
+  already depends on that behavior.
+- This repair remains inside the existing T17 service-log/MCP redaction scope
+  and only centralizes the shared context helper, adds the startup snapshot
+  comment, preserves the Compose escaped-quote parser behavior, runs focused
+  regressions, and updates this plan/validation evidence.
 
 ## Requirements Checklist
 
@@ -169,6 +180,10 @@ credential entry, or unrelated refactors are included.
   the MCP process environment.
 - MCP workspace log exact-secret redaction honors the explicitly selected MCP
   Compose env file when the service is started with a custom `--env-file`.
+- Quoted multiline Compose env-file secret context is computed by one shared
+  helper so MCP and service-log first-line-fragment filtering cannot drift.
+- MCP startup-time exact-secret snapshots are documented as requiring MCP
+  restart after credential rotation for newly configured bare exact values.
 - Captured and followed service-log output redact exact provider credential
   values loaded from the selected Compose env file, even when those values do
   not match token shape patterns and appear without an assignment or bearer
@@ -275,6 +290,12 @@ credential entry, or unrelated refactors are included.
     `ValueError` during flush, confirm it leaves the process unterminated, then
     route those downstream write/flush failures through the existing
     broken-pipe cleanup path.
+28. Add a focused regression for a shared quoted multiline Compose secret
+    context helper, confirm it is absent, then replace the duplicate MCP and
+    service-log helpers with the shared implementation.
+29. Add a focused MCP log-redaction comment documenting that exact secrets are
+    snapshotted at tool registration and newly rotated bare exact values require
+    MCP restart to join the exact-secret set.
 
 ## Verification Commands
 
@@ -2356,11 +2377,12 @@ quoted multiline Compose env-file secret, then also adds the reconstructed full
 multiline value. That can over-redact unrelated MCP workspace-log content that
 contains the same first-line text outside the secret.
 
-The duplicated-parser item is already stale in this checkout because service
-logs and MCP use `compose_env_file_quoted_multiline_values()` from
-`awf.service.environment`. The single-quoted backslash item conflicts with
-Docker Compose's documented escaped-quote syntax and the existing regression
-test, so this repair leaves that behavior unchanged.
+The duplicated-parser concern in that pass was limited to the parser itself:
+service logs and MCP already used `compose_env_file_quoted_multiline_values()`
+from `awf.service.environment`. A later pass centralizes the remaining
+first-line-fragment context helper. The single-quoted backslash item conflicts
+with Docker Compose's documented escaped-quote syntax and the existing
+regression test, so this repair leaves that behavior unchanged.
 
 This repair is limited to MCP exact-secret collection, a focused MCP
 regression, and this plan/validation evidence. It does not change branch
@@ -2399,4 +2421,61 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compos
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_multiline_compose_redaction.py -q --tb=short -ra
 uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
 uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py
+```
+
+## Review-Level Comment `issue:4620175517` Context Helper Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports that service logs and MCP still keep
+near-duplicate quoted multiline Compose secret-context helpers. Both helpers
+collect the reconstructed full multiline secret and the first physical-line
+fragment used to avoid over-redacting a partial value. The same comment also
+asks that MCP startup-time exact-secret capture document the operational
+rotation constraint.
+
+The single-quoted escape concern is a false positive in this checkout: Docker
+Compose's official env-file syntax documents that quotes can be escaped with
+backslash, including `VAR='Let\'s go!'`, while single-quoted values still keep
+ordinary escape sequences like `\t` literal. The existing Compose parser
+regression already depends on escaped single quotes and should remain intact.
+
+This repair is limited to centralizing the shared quoted multiline context
+helper, adding the MCP startup snapshot comment, preserving escaped
+single-quote parsing, focused regressions, and plan/validation evidence. It
+does not change branch management, pushing, broad validation, full coverage,
+OpenAPI drift, frontend validation, or per-request MCP secret refresh behavior.
+
+### Requirements Checklist
+
+- Service-log and MCP exact-secret collection must share one quoted multiline
+  Compose env-file secret-context helper.
+- The shared helper must filter by secret key, omit values shorter than the
+  minimum exact-secret length, return full multiline values, and return
+  first-line fragments only for values that did not close on the first line.
+- Existing escaped single-quote Compose parser behavior must remain covered.
+- MCP tool registration must document that exact secrets are snapshotted at
+  startup and rotated bare exact values require MCP restart to join the exact
+  redaction list.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing regression for a shared quoted multiline Compose
+   secret-context helper.
+2. Implement the shared helper in `awf.service.environment`.
+3. Replace the duplicate service-log and MCP private helpers with calls to the
+   shared helper.
+4. Add the MCP startup snapshot operational comment without changing the
+   startup-cache behavior.
+5. Run the focused helper, parser, service-log, MCP multiline, startup-cache,
+   ruff, and mypy checks.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_values_parses_closed_multiline_values tests/unit/service/test_environment.py::test_compose_env_file_quoted_multiline_secret_context_filters_fragments tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_log_secret_values_excludes_multiline_first_line_fragment tests/unit/mcp/test_mcp_multiline_compose_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py::TestWorkspaceLogs::test_read_workspace_log_uses_startup_redaction_secrets -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py tests/unit/service/test_environment.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
+uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/logs.py src/awf/mcp/server.py src/awf/mcp/metrics_tools.py
 ```

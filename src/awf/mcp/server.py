@@ -37,7 +37,7 @@ from awf.service import provider_readiness as provider_readiness_service
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.environment import (
-    compose_env_file_quoted_multiline_values,
+    compose_env_file_quoted_multiline_secret_context,
     compose_env_file_values,
 )
 from awf.service.local_capacity import detect_local_capacity
@@ -546,8 +546,9 @@ def _mcp_secret_values(
         service_settings.github_token,
     ]
     values.extend(_mcp_compose_env_file_secret_values(resolved_secret_env_file))
-    _, quoted_multiline_first_line_values = _mcp_quoted_multiline_secret_context(
-        resolved_secret_env_file
+    _, quoted_multiline_first_line_values = compose_env_file_quoted_multiline_secret_context(
+        resolved_secret_env_file,
+        is_secret_key=is_secret_env_key,
     )
     values.extend(
         value
@@ -578,7 +579,10 @@ def _mcp_compose_env_file_secret_values(compose_env_file: Path | None) -> tuple[
     (
         quoted_multiline_values,
         quoted_multiline_first_line_values,
-    ) = _mcp_quoted_multiline_secret_context(compose_env_file)
+    ) = compose_env_file_quoted_multiline_secret_context(
+        compose_env_file,
+        is_secret_key=is_secret_env_key,
+    )
     values = [
         value
         for key, value in compose_env_file_values(compose_env_file).items()
@@ -589,21 +593,6 @@ def _mcp_compose_env_file_secret_values(compose_env_file: Path | None) -> tuple[
     ]
     values.extend(quoted_multiline_values)
     return tuple(dict.fromkeys(values))
-
-
-def _mcp_quoted_multiline_secret_context(
-    compose_env_file: Path | None,
-) -> tuple[tuple[str, ...], frozenset[tuple[str, str]]]:
-    """Return full quoted multiline MCP secrets and parsed first-line fragments."""
-    values: list[str] = []
-    first_line_values: set[tuple[str, str]] = set()
-    for entry in compose_env_file_quoted_multiline_values(compose_env_file):
-        if len(entry.value) < 4 or not is_secret_env_key(entry.key):
-            continue
-        values.append(entry.value)
-        if not entry.closed_on_first_line:
-            first_line_values.add((entry.key, entry.first_line_value))
-    return tuple(values), frozenset(first_line_values)
 
 
 def _redact_sensitive_payload(

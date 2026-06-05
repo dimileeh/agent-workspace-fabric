@@ -6,7 +6,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -268,6 +268,25 @@ def compose_env_file_quoted_multiline_values(
             )
         index += 1
     return tuple(multiline_values)
+
+
+def compose_env_file_quoted_multiline_secret_context(
+    compose_env_file: Path | None,
+    *,
+    is_secret_key: Callable[[str], bool],
+    environ: Mapping[str, str] | None = None,
+    min_value_length: int = 4,
+) -> tuple[tuple[str, ...], frozenset[tuple[str, str]]]:
+    """Return full quoted multiline secrets and parsed first-line fragments."""
+    values: list[str] = []
+    first_line_values: set[tuple[str, str]] = set()
+    for entry in compose_env_file_quoted_multiline_values(compose_env_file, environ=environ):
+        if len(entry.value) < min_value_length or not is_secret_key(entry.key):
+            continue
+        values.append(entry.value)
+        if not entry.closed_on_first_line:
+            first_line_values.add((entry.key, entry.first_line_value))
+    return tuple(values), frozenset(first_line_values)
 
 
 def _resolve_compose_quoted_multiline_value(
