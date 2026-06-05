@@ -1311,6 +1311,21 @@ def _client_instruction_next_steps(
     ] or ["No client config changes are needed."]
 
 
+def _client_source_checkout_issue_with_command(
+    issue: FirstRunIssue,
+    *,
+    command: str,
+) -> FirstRunIssue:
+    if issue.reason_code not in _SOURCE_CHECKOUT_REMEDIATION_REASON_CODES:
+        return issue
+    remediation = issue.remediation
+    if not _is_source_checkout_remediation_command(remediation.related_command):
+        return issue
+    return issue.model_copy(
+        update={"remediation": remediation.model_copy(update={"related_command": command})}
+    )
+
+
 def _client_source_checkout_blocked_payload_with_explicit_command(
     payload: FirstRunPayload,
     *,
@@ -1322,11 +1337,10 @@ def _client_source_checkout_blocked_payload_with_explicit_command(
         "command": command,
         "next_steps": (f"Fix the reported --source-checkout path above, then re-run {command}.",),
     }
-    if source_checkout is not None and payload.issues:
-        update["issues"] = _start_issues_with_command(
-            payload.issues,
-            command=command,
-            source_checkout=source_checkout,
+    if payload.issues:
+        update["issues"] = tuple(
+            _client_source_checkout_issue_with_command(issue, command=command)
+            for issue in payload.issues
         )
     return payload.model_copy(
         update=update,

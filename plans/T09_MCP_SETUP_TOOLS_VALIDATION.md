@@ -53,6 +53,61 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6Hc2bA
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve selected client command rendering for stale persisted checkout
+  failures without explicit `source_checkout`: Complete.
+- Rewrite source-checkout issue remediation commands to the same selected
+  client instruction command: Complete.
+- Preserve the existing explicit `source_checkout` source-checkout failure
+  behavior: Complete.
+- Add a focused regression for the persisted stale nested remediation command:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_persisted_source_checkout_failure_preserves_selected_clients -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_source_checkout_failure_preserves_explicit_command tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_persisted_source_checkout_failure_preserves_selected_clients -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev ruff format --check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+wc -l src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["issues"][0]["remediation"]["related_command"]` was
+  `awf setup --source-checkout .` instead of
+  `awf setup --client claude --client codex`.
+- Persisted-stale regression after the implementation change: 1 passed.
+- Explicit and persisted source-checkout failure regressions: 2 passed.
+- Focused ruff: passed.
+- Focused ruff format check: passed after formatting
+  `src/awf/mcp/setup_tools.py`.
+- Focused mypy: passed.
+- Line counts after formatting:
+  `src/awf/mcp/setup_tools.py: 1488`;
+  `tests/unit/mcp/test_setup_tools_client_integration.py: 744`.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6Hctfz
 
 ### Requirement Status
