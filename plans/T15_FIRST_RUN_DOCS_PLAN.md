@@ -930,6 +930,44 @@ git diff --check
 # No whitespace errors.
 ```
 
+## CI Repair: docs lifecycle test file line limit
+
+Problem statement and scope:
+PR #390 CI fails the first-party file line-limit guard because
+`tests/unit/docs/test_public_docs_lifecycle_status.py` grew to 1772 lines after
+review-fix regressions were added. Keep the repair scoped to reorganizing docs
+lifecycle tests under `tests/unit/docs` plus this T15 plan/validation evidence;
+do not change documentation behavior or weaken the maintainability guard.
+
+Requirements checklist:
+
+- Preserve the existing source-checkout lifecycle assertions without weakening
+  test coverage.
+- Split a cohesive source-checkout upgrade test group into a new docs test
+  module so every first-party file is at or below the 1500-line guardrail.
+- Keep imports focused after the split and avoid unrelated refactors.
+- Do not run full AWF/GitHub-owned validation, full coverage, full frontend
+  builds, or push/rebase/branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Move the source-checkout upgrade/restore tests from the oversized lifecycle
+   test file into a new `tests/unit/docs` test module.
+2. Remove now-unused imports from the original lifecycle test file.
+3. Run the focused line-limit repro and the moved/original docs lifecycle test
+   modules.
+4. Record focused validation evidence in `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+# Red phase reports the oversized lifecycle test file; final result passes.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py -q
+# Split lifecycle tests pass without full-suite execution.
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbDiq`
 
 Problem statement and scope:

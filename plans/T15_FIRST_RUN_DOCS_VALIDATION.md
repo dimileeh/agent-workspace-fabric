@@ -2626,6 +2626,52 @@ git diff --check
 # no output
 ```
 
+## CI Repair: docs lifecycle test file line limit
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: The source-checkout upgrade/restore assertions were moved intact
+  from `tests/unit/docs/test_public_docs_lifecycle_status.py` to
+  `tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py`.
+- Complete: `tests/unit/docs/test_public_docs_lifecycle_status.py` is now 1455
+  lines and the new source-checkout module is 333 lines, keeping both under the
+  1500-line first-party guardrail.
+- Complete: Imports in the original lifecycle module were narrowed after the
+  split; no docs behavior or maintainability guard was weakened.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+# Red phase before split: failed with
+# {'tests/unit/docs/test_public_docs_lifecycle_status.py': 1772}
+# Final result: 1 passed in 0.45s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py -q
+# 41 passed in 5.57s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py
+# 2 files already formatted
+
+git diff --check
+# no output
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbDiq`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
