@@ -84,6 +84,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HZ6Wt Missing Env Remediation Command
+
+### Problem Statement And Scope
+
+The review reports that MCP client instructions preserve an explicit
+`source_checkout` in the missing-env top-level command and next steps, but leave
+the structured `START_COMPOSE_ASSETS_MISSING` issue remediation command as the
+reason-catalog default `awf start --source-checkout .`. MCP clients following
+that structured command can start the current directory instead of creating the
+`.env` for the validated checkout.
+
+Scope is limited to the client-integration missing-env payload path and its
+focused regression.
+
+### Requirements Checklist
+
+- Preserve existing blocked missing-env payload status, reason code, summary,
+  details, top-level setup command, next steps, and absence of apply commands.
+- When explicit `source_checkout` is present, rewrite the issue remediation
+  `related_command` to `awf start --source-checkout <resolved checkout>`.
+- Preserve existing behavior when no explicit `source_checkout` is present.
+
+### Implementation Steps
+
+1. Extend the existing missing-source-env regression to assert the structured
+   issue remediation command for an explicit checkout.
+2. Update `_client_env_file_missing_payload_with_explicit_command` to rewrite
+   issue remediations with the explicit checkout start command.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_source_env_blocks_before_apply_commands -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HZuDL
 
 ### Problem Statement And Scope

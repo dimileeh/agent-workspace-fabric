@@ -316,6 +316,9 @@ async def test_client_integration_instructions_missing_source_env_blocks_before_
     assert payload["next_steps"] == [
         f"Run awf service bootstrap to create the env file, then re-run {expected_command}.",
     ]
+    assert payload["issues"][0]["remediation"]["related_command"] == (
+        f"awf start --source-checkout '{checkout}'"
+    )
     assert "clients" not in payload
     assert "apply_command" not in rendered
 

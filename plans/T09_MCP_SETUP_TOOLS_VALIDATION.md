@@ -53,6 +53,50 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HZ6Wt
+
+### Requirement Status
+
+- Preserve existing blocked missing-env payload status, reason code, summary,
+  details, top-level setup command, next steps, and absence of apply commands:
+  Complete.
+- When explicit `source_checkout` is present, rewrite the issue remediation
+  `related_command` to `awf start --source-checkout <resolved checkout>`:
+  Complete.
+- Preserve existing behavior when no explicit `source_checkout` is present:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_source_env_blocks_before_apply_commands -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["issues"][0]["remediation"]["related_command"]` was
+  `awf start --source-checkout .` instead of the explicit checkout start
+  command.
+- Regression test after the implementation change: 1 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HZuDL
 
 ### Requirement Status

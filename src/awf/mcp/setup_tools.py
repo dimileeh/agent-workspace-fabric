@@ -1331,16 +1331,21 @@ def _client_env_file_missing_payload_with_explicit_command(
     source_checkout: Path | None,
 ) -> FirstRunPayload:
     command = _client_instruction_command(selected_clients, source_checkout=source_checkout)
-    return payload.model_copy(
-        update={
-            "command": command,
-            "next_steps": _client_instruction_reason_coded_next_steps(
-                payload.reason_code or SETUP_READINESS_FAILED,
-                payload.next_steps,
-                command=command,
-            ),
-        },
-    )
+    update: dict[str, Any] = {
+        "command": command,
+        "next_steps": _client_instruction_reason_coded_next_steps(
+            payload.reason_code or SETUP_READINESS_FAILED,
+            payload.next_steps,
+            command=command,
+        ),
+    }
+    if source_checkout is not None and payload.issues:
+        update["issues"] = _start_issues_with_command(
+            payload.issues,
+            command=_start_source_checkout_command(source_checkout),
+            source_checkout=source_checkout,
+        )
+    return payload.model_copy(update=update)
 
 
 def _client_instruction_reason_coded_payload(
