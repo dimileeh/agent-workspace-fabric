@@ -85,6 +85,26 @@ from awf.db.resilience import run_db_operation_with_retry
 from awf.service.scheduler import SchedulerOrderCursor
 
 
+def _apply_execution_claim(self: Any, ws: Workspace, *, owner_id: str) -> None:
+    """Stamp ``ws`` with this worker's execution claim and bump the fencing epoch.
+
+    Shared by both requested-claim blocks (D8). ``execution_claim_epoch`` is
+    incremented with a SQL-side expression so monotonicity holds regardless of
+    any in-memory staleness: the row is freshly row-locked / atomically
+    transitioned by the caller, so a later claimant always lands a strictly
+    higher epoch and a stale worker is fenced on its next CAS write. The
+    concrete value is read back later via ``_read_execution_claim_epoch`` (D2),
+    so the SQL-expression placeholder is never read inside the claim txn.
+    """
+    ws.execution_claimed_by = owner_id
+    ws.execution_claim_expires_at = self._execution_claim_expires_at()
+    ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+    if self._config.node_id is not None:
+        # Recovery for named workers is node-scoped, so ownership must be
+        # persisted with the claim before a provisioner crash can strand it.
+        ws.node_id = self._config.node_id
+
+
 def _empty_requested_capacity_claim_result() -> _RequestedCapacityClaimResult:
     return _RequestedCapacityClaimResult(
         workspace_ids=[],
@@ -382,12 +402,7 @@ async def _claim_requested_capacity_candidates(
         if ws is None:
             await self._log_stale_requested_claims(session, [workspace.id])
             continue
-        ws.execution_claimed_by = self._worker_id
-        ws.execution_claim_expires_at = self._execution_claim_expires_at()
-        if self._config.node_id is not None:
-            # Recovery for named workers is node-scoped, so ownership must be
-            # persisted with the claim before a provisioner crash can strand it.
-            ws.node_id = self._config.node_id
+        self._apply_execution_claim(ws, owner_id=self._worker_id)
         if demand.defaulted:
             await _record_capacity_queue_decision(
                 session,
@@ -451,12 +466,7 @@ async def _claim_requested_for_provisioning(self: Any, workspace_id: str) -> boo
             ),
         )
         if ws is not None:
-            ws.execution_claimed_by = self._worker_id
-            ws.execution_claim_expires_at = self._execution_claim_expires_at()
-            if self._config.node_id is not None:
-                # Keep the provisioning row recoverable if the worker crashes
-                # before the provisioner writes placement metadata.
-                ws.node_id = self._config.node_id
+            self._apply_execution_claim(ws, owner_id=self._worker_id)
             await session.commit()
             return True
 

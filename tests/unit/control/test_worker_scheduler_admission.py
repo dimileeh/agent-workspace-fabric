@@ -239,6 +239,27 @@ async def _workspace_execution_claim(
         return workspace.execution_claimed_by, workspace.execution_claim_expires_at
 
 
+async def _workspace_execution_epoch(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> int:
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        return workspace.execution_claim_epoch
+
+
+async def _reset_to_requested(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> None:
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.requested.value
+        await session.commit()
+
+
 async def _stale_events(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -428,6 +449,70 @@ async def test_live_named_provisioning_claim_is_hidden_from_sibling_stale_scan(
     )
 
     assert [candidate.workspace_id for candidate in candidates] == []
+
+
+@pytest.mark.unit
+async def test_provisioning_claim_increments_execution_claim_epoch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    assert await _workspace_execution_epoch(session_factory, workspace_id) == 0
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+        ),
+    )
+
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+    claimed_by, _ = await _workspace_execution_claim(session_factory, workspace_id)
+    assert claimed_by == worker._worker_id  # noqa: SLF001
+    # D1/D8: the backfilled 0 row advances to 1 on claim.
+    assert await _workspace_execution_epoch(session_factory, workspace_id) == 1
+
+    # Same-worker re-dispatch still increments, fencing a previously captured epoch.
+    await _reset_to_requested(session_factory, workspace_id)
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+    assert await _workspace_execution_epoch(session_factory, workspace_id) == 2
+
+
+@pytest.mark.unit
+async def test_capacity_claim_increments_execution_claim_epoch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=True,
+        node_id=None,
+    )
+    assert await _workspace_execution_epoch(session_factory, workspace_id) == 0
+
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            node_id="local",
+            local_capacity_cpu_cores=100.0,
+        ),
+    )
+
+    claimed = await worker._claim_requested_ids([workspace_id], limit=1)  # noqa: SLF001
+    assert claimed == [workspace_id]
+    claimed_by, _ = await _workspace_execution_claim(session_factory, workspace_id)
+    assert claimed_by == worker._worker_id  # noqa: SLF001
+    assert await _workspace_execution_epoch(session_factory, workspace_id) == 1
 
 
 @pytest.mark.unit

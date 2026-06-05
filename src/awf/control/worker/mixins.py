@@ -13,6 +13,7 @@ from awf.control.worker import scheduler_methods as _scheduler_methods
 class WorkerDelegatesMixin:
     """Methods mechanically delegated to focused implementation modules."""
 
+    _apply_execution_claim = _claims._apply_execution_claim
     _claim_requested_ids = _claims._claim_requested_ids
     _claim_requested_ids_with_capacity = _claims._claim_requested_ids_with_capacity
     _claim_requested_capacity_candidates = _claims._claim_requested_capacity_candidates
