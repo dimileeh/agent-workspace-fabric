@@ -2349,3 +2349,47 @@ wc -l tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/uni
 # 1465 tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py
 # 1476 tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py
 ```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HV86k` Multiline Compose Env Secret Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: service-log exact-secret collection now adds full quoted multiline
+  secret values from the selected Compose env file, including Docker Compose's
+  single-quoted multiline syntax and escaped single quotes.
+- Complete: captured service-log output redacts every fragment of a bare
+  multiline provider secret loaded only from the Compose env file.
+- Complete: existing one-line Compose env secret redaction and multiline
+  followed-stream redaction remain covered by focused adjacent tests.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output -q --tb=short -ra
+# failed: later multiline secret fragments remained in captured service-log output.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_provider_secret_from_captured_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_compose_env_secret_from_streamed_output -q --tb=short -ra
+# 3 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```

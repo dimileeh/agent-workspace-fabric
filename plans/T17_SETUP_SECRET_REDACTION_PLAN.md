@@ -1940,3 +1940,53 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/tes
 uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py tests/unit/mcp/test_mcp_client_parity_docs.py::test_parity_matrix_matches_real_surfaces tests/unit/docs/test_pr_monitor_adoption_docs.py::test_adoption_docs_publish_real_rest_cli_and_mcp_names -q
 uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_004.py tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_005.py tests/unit/mcp/test_mcp_client_parity_docs.py tests/unit/docs/test_pr_monitor_adoption_docs.py
 ```
+
+## Inline Review Thread `PRRT_kwDOSJAM6s6HV86k` Multiline Compose Env Secret Plan
+
+### Problem Statement And Scope
+
+The review reports that service-log exact-secret collection reads the selected
+Compose env file through a parser that handles each physical line separately.
+Docker Compose supports single-quoted multiline env-file values, so a provider
+secret such as a PEM key can be collected as only its first line. That leaves
+later lines available to leak from captured or followed service logs.
+
+This repair keeps the change at the review target: service-log exact-secret
+collection. It is limited to reconstructing quoted multiline Compose env-file
+values for service-log redaction, a focused service-log regression, and this
+plan/validation evidence. It does not change branch management, pushing, broad
+validation, full coverage, or unrelated Compose parsing behavior.
+
+### Requirements Checklist
+
+- Service-log exact-secret collection must reconstruct Docker Compose
+  single-quoted multiline values from the selected Compose env file, preserving
+  embedded newlines and existing escaped-quote behavior for redaction inputs.
+- Service-log exact-secret collection must include the full multiline provider
+  secret from the selected Compose env file so captured bare log output cannot
+  expose any fragment.
+- Existing single-line Compose env-file parsing and service-log redaction
+  behavior must remain compatible.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused service-log regression proving captured bare output redacts
+   every fragment of a single-quoted multiline provider secret.
+2. Add a small service-log redaction-only helper that reads quoted multiline
+   entries from the selected Compose env file and contributes only
+   secret-key values to the existing exact-secret list.
+3. Keep the existing `compose_env_file_values()` path for normal one-line
+   Compose env values and deduplicate any overlapping redaction candidates.
+4. Run the focused service-log tests plus narrow lint/type checks for touched
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_redacts_compose_env_provider_secret_from_captured_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_compose_env_secret_from_streamed_output -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```

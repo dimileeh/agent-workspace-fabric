@@ -828,6 +828,43 @@ def test_service_logs_redacts_compose_env_provider_secret_from_captured_output(
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_redacts_single_quoted_multiline_compose_env_secret_from_captured_output(
+    tmp_path: Path,
+) -> None:
+    """Redact every fragment of a Compose single-quoted multiline provider secret."""
+    secret = "opaque-first-fragment\noperator's-second-fragment\nopaque-third-fragment"
+    escaped_secret = secret.replace("'", "\\'")
+    visible_value = "visible-compose-project"
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        (f"ANTHROPIC_AUTH_TOKEN='{escaped_secret}'\nCOMPOSE_PROJECT_NAME={visible_value}\n"),
+        encoding="utf-8",
+    )
+
+    def success_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Return captured output containing a bare multiline provider secret."""
+        return subprocess.CompletedProcess(
+            args,
+            returncode=0,
+            stdout=f"stdout bare {secret} and {visible_value}\n",
+            stderr=f"stderr bare {secret}\n",
+        )
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        compose_env_file=compose_env_file,
+        run_subprocess=success_run,
+    )
+
+    rendered = result.stdout + result.stderr
+    for fragment in secret.splitlines():
+        assert fragment not in rendered
+    assert visible_value in rendered
+    assert "<redacted>" in rendered
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_redacts_inherited_env_secret_from_captured_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
