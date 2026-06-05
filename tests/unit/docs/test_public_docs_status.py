@@ -41,6 +41,19 @@ OPTIONAL_PUBLIC_GUIDES = {
 COPY_PASTE_DOC_HINTS = {
     "docs/PROJECT_ONBOARDING.md",
 }
+DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES = (
+    "awf_decode_double_quoted_dotenv() {",
+    "  python3 -c 'import re, sys",
+    (
+        'replacements = {"n": "\\n", "r": "\\r", "t": "\\t", "\\\\": "\\\\", '
+        'chr(34): chr(34), "$": "$"}'
+    ),
+    (
+        'print(re.sub(r"\\\\(.)", lambda match: replacements.get(match[1], match[1]), '
+        'sys.argv[1]), end="")\' "$1"'
+    ),
+    "}",
+)
 PACKAGE_ENV_READ_LINES = {
     "AWF_API_TOKEN": (
         "AWF_PERSISTED_API_TOKEN=\"$(sed -n 's/^[[:space:]]*"
@@ -57,29 +70,31 @@ PACKAGE_ENV_READ_LINES = {
 PACKAGE_ENV_QUOTE_STRIP_LINES = {
     "AWF_API_TOKEN": (
         'case "$AWF_PERSISTED_API_TOKEN" in',
-        (
-            '  \\"*\\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\\"}"; '
-            'AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\"}" ;;'
-        ),
-        (
-            "  \\'*\\') AWF_PERSISTED_API_TOKEN=\"${AWF_PERSISTED_API_TOKEN#\\'}\"; "
-            'AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\\'}" ;;'
-        ),
+        '  \\"*\\")',
+        '    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\\"}"',
+        '    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\"}"',
+        '    AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"',
+        "    ;;",
+        "  \\'*\\')",
+        '    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\\\'}"',
+        '    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\\'}"',
+        "    ;;",
         "esac",
     ),
     "AWF_POSTGRES_PASSWORD": (
         'case "$AWF_PERSISTED_POSTGRES_PASSWORD" in',
+        '  \\"*\\")',
+        '    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\"}"',
+        '    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\"}"',
         (
-            '  \\"*\\") AWF_PERSISTED_POSTGRES_PASSWORD='
-            '"${AWF_PERSISTED_POSTGRES_PASSWORD#\\"}"; '
-            'AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\"}" ;;'
+            '    AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv '
+            '"$AWF_PERSISTED_POSTGRES_PASSWORD")"'
         ),
-        (
-            "  \\'*\\') AWF_PERSISTED_POSTGRES_PASSWORD="
-            '"${AWF_PERSISTED_POSTGRES_PASSWORD#\\\'}"; '
-            "AWF_PERSISTED_POSTGRES_PASSWORD="
-            '"${AWF_PERSISTED_POSTGRES_PASSWORD%\\\'}" ;;'
-        ),
+        "    ;;",
+        "  \\'*\\')",
+        '    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\\'}"',
+        '    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\\'}"',
+        "    ;;",
         "esac",
     ),
 }
@@ -111,28 +126,34 @@ SOURCE_CHECKOUT_ENV_READ_LINES = {
 SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES = {
     "AWF_API_TOKEN": (
         '  case "$AWF_PERSISTED_API_TOKEN" in',
+        '    \\"*\\")',
+        '      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\\"}"',
+        '      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\"}"',
         (
-            '    \\"*\\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\\"}"; '
-            'AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\"}" ;;'
+            '      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv '
+            '"$AWF_PERSISTED_API_TOKEN")"'
         ),
-        (
-            "    \\'*\\') AWF_PERSISTED_API_TOKEN=\"${AWF_PERSISTED_API_TOKEN#\\'}\"; "
-            'AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\\'}" ;;'
-        ),
+        "      ;;",
+        "    \\'*\\')",
+        '      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\\\'}"',
+        '      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\\\'}"',
+        "      ;;",
         "  esac",
     ),
     "AWF_POSTGRES_PASSWORD": (
         '  case "$AWF_PERSISTED_POSTGRES_PASSWORD" in',
+        '    \\"*\\")',
+        '      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\"}"',
+        '      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\"}"',
         (
-            '    \\"*\\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\"}"; '
-            'AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\"}" ;;'
+            '      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv '
+            '"$AWF_PERSISTED_POSTGRES_PASSWORD")"'
         ),
-        (
-            "    \\'*\\') AWF_PERSISTED_POSTGRES_PASSWORD="
-            '"${AWF_PERSISTED_POSTGRES_PASSWORD#\\\'}"; '
-            "AWF_PERSISTED_POSTGRES_PASSWORD="
-            '"${AWF_PERSISTED_POSTGRES_PASSWORD%\\\'}" ;;'
-        ),
+        "      ;;",
+        "    \\'*\\')",
+        '      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\\\'}"',
+        '      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\\\'}"',
+        "      ;;",
         "  esac",
     ),
 }
@@ -762,8 +783,8 @@ def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
     env_file.write_text(
         "\n".join(
             [
-                "  export AWF_API_TOKEN=token-from-dotenv",
-                "export AWF_POSTGRES_PASSWORD=password-from-dotenv",
+                '  export AWF_API_TOKEN="tok\\$en"',
+                'export AWF_POSTGRES_PASSWORD="p@ss\\"quote\\\\tail"',
             ]
         )
         + "\n",
@@ -807,15 +828,15 @@ def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
             text=True,
         )
         assert result.returncode == 0, f"{label}: {result.stderr}"
-        assert result.stdout == "token-from-dotenv\npassword-from-dotenv\n", label
+        assert result.stdout == 'tok$en\np@ss"quote\\tail\n', label
 
 
 @pytest.mark.parametrize("doc_name", ("QUICKSTART.md", "UNINSTALL.md", "UPGRADE.md"))
-def test_source_checkout_env_restore_strips_quoted_dotenv_entries(
+def test_source_checkout_env_restore_decodes_quoted_dotenv_entries(
     doc_name: str,
     tmp_path: Path,
 ) -> None:
-    """Assert source-checkout snippets do not export dotenv quotes as secret bytes."""
+    """Assert source-checkout snippets do not export raw dotenv escapes as secret bytes."""
     doc_text = (REPO_ROOT / "docs" / doc_name).read_text(encoding="utf-8")
     env_file = tmp_path / ".env"
 
@@ -831,6 +852,7 @@ def test_source_checkout_env_restore_strips_quoted_dotenv_entries(
         expression = expressions.pop()
         script = "\n".join(
             [
+                *DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
                 'env_file="$1"',
                 f'{persisted_var}="$(sed -n {shlex.quote(expression)} "$env_file" | head -n 1)"',
                 *SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES[key],
@@ -839,7 +861,8 @@ def test_source_checkout_env_restore_strips_quoted_dotenv_entries(
         )
 
         for raw_value, expected_value in (
-            ('"from-double-quotes"', "from-double-quotes"),
+            ('"from\\$double"', "from$double"),
+            ('"slash\\\\quote\\""', 'slash\\quote"'),
             ("'from-single-quotes'", "from-single-quotes"),
         ):
             env_file.write_text(
@@ -1035,6 +1058,7 @@ def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
         + "\n".join(
             [
                 upgrade_line,
+                *DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
                 PACKAGE_ENV_READ_LINES["AWF_API_TOKEN"],
                 *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"],
                 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then',
@@ -1075,6 +1099,7 @@ def test_package_upgrade_env_restore_matches_restart_command_line() -> None:
     section = "\n".join(
         [
             upgrade_line,
+            *DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
             PACKAGE_ENV_READ_LINES["AWF_API_TOKEN"],
             *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"],
             'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then',
@@ -1112,6 +1137,7 @@ def test_package_upgrade_env_restore_rejects_prefixed_api_export_line() -> None:
         "\n".join(
             [
                 upgrade_line,
+                *DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
                 PACKAGE_ENV_READ_LINES["AWF_API_TOKEN"],
                 *PACKAGE_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"],
                 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then',
@@ -2303,11 +2329,21 @@ def _package_env_restore_script(section: str, label: str) -> str:
     """Return the package-lane restore script before the restart command."""
     restore_index = _shell_line_index(
         section,
-        PACKAGE_ENV_READ_LINES["AWF_API_TOKEN"],
+        DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0],
         label,
     )
     start_index = _shell_line_index(section, "awf start", label, restore_index)
     return section[restore_index:start_index]
+
+
+def _assert_dotenv_decode_function(section: str, label: str, start: int = 0) -> tuple[int, int]:
+    """Assert the double-quoted dotenv decoder is present in order."""
+    indexes: list[int] = []
+    current_index = start
+    for line in DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES:
+        current_index = _shell_line_index(section, line, label, current_index)
+        indexes.append(current_index)
+    return indexes[0], indexes[-1]
 
 
 def _assert_package_env_quote_strip_lines(
@@ -2426,6 +2462,7 @@ def _assert_source_checkout_api_token_restore(
     )
     assert token_shell_export_line in section, f"{label} must export restored shell AWF_API_TOKEN"
 
+    decode_start_index, decode_end_index = _assert_dotenv_decode_function(section, label)
     token_init_index = section.index(token_init_line)
     token_loop_index = _required_index(section, token_loop_line, label, token_init_index)
     token_file_guard_index = _required_index(
@@ -2507,7 +2544,9 @@ def _assert_source_checkout_api_token_restore(
     )
 
     assert (
-        token_init_index
+        decode_start_index
+        < decode_end_index
+        < token_init_index
         < token_loop_index
         < token_file_guard_index
         < token_read_index
@@ -2523,7 +2562,7 @@ def _assert_source_checkout_api_token_restore(
         < token_shell_export_index
         < token_guard_end_index
     ), f"{label} must restore persisted or required API token before continuing"
-    return token_init_index, token_guard_end_index
+    return decode_start_index, token_guard_end_index
 
 
 def _assert_source_checkout_postgres_password_restore(
@@ -2823,6 +2862,8 @@ def _assert_package_upgrade_restores_service_env(
 
     if upgrade_line is not None:
         assert upgrade_line in section, f"{label} is missing upgrade command"
+    for decode_line in DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES:
+        assert decode_line in section, f"{label} must decode double-quoted dotenv escapes"
     assert unsafe_api_grep_guard_line not in section, (
         f"{label} must not let stale shell AWF_API_TOKEN override persisted .env"
     )
@@ -2859,7 +2900,12 @@ def _assert_package_upgrade_restores_service_env(
 
     upgrade_index = -1 if upgrade_line is None else _required_index(section, upgrade_line, label)
     search_start_index = 0 if upgrade_line is None else upgrade_index
-    api_read_index = _shell_line_index(section, api_read_line, label, search_start_index)
+    decode_start_index, decode_end_index = _assert_dotenv_decode_function(
+        section,
+        label,
+        search_start_index,
+    )
+    api_read_index = _shell_line_index(section, api_read_line, label, decode_end_index)
     api_quote_strip_indexes = _assert_package_env_quote_strip_lines(
         label=label,
         section=section,
@@ -2932,6 +2978,8 @@ def _assert_package_upgrade_restores_service_env(
     start_index = _required_index(section, start_line, label, start=password_guard_end_index)
     assert (
         upgrade_index
+        < decode_start_index
+        < decode_end_index
         < api_read_index
         < min(api_quote_strip_indexes)
         <= max(api_quote_strip_indexes)

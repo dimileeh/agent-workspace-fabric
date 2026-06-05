@@ -27,10 +27,22 @@ The `uv tool` lane is release-installed and package-manager mediated:
 
 ```bash
 uv tool upgrade agent-workspace-fabric
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_API_TOKEN" in
-  \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-  \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+    AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
@@ -40,8 +52,15 @@ else
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-  \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-  \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
@@ -60,10 +79,22 @@ The `pipx` lane is release-installed and package-manager mediated:
 
 ```bash
 pipx upgrade agent-workspace-fabric
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_API_TOKEN" in
-  \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-  \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+    AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
@@ -73,8 +104,15 @@ else
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-  \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-  \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
@@ -96,10 +134,22 @@ Use this path only when you installed AWF into an active virtualenv with
 cd /path/to/project-or-env
 . .venv/bin/activate
 pip install --upgrade agent-workspace-fabric
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_API_TOKEN" in
-  \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-  \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+    AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
@@ -109,8 +159,15 @@ else
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-  \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-  \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
@@ -132,13 +189,25 @@ blocks while the previous Core stack still holds them:
 
 ```bash
 cd /path/to/aira-agent-workspace-fabric
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
-    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
@@ -155,8 +224,15 @@ for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
@@ -191,13 +267,25 @@ them:
 
 ```bash
 cd /path/to/aira-agent-workspace-fabric
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
-    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
@@ -214,8 +302,15 @@ for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
@@ -252,10 +347,22 @@ For release-installed lanes, and for virtualenv/pip installs after activating
 the restored environment:
 
 ```bash
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_API_TOKEN" in
-  \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-  \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+    AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
@@ -265,8 +372,15 @@ else
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-  \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-  \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
@@ -285,13 +399,25 @@ checkout and refresh persisted source-checkout metadata before starting:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 uv tool install . --force
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
-    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
@@ -308,8 +434,15 @@ for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
@@ -337,13 +470,25 @@ For the source checkout with no global install lane, run AWF from the checkout:
 ```bash
 cd /path/to/aira-agent-workspace-fabric
 uv sync --extra dev
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
-    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
@@ -360,8 +505,15 @@ for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done

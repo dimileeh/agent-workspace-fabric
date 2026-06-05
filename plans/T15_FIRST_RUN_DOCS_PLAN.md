@@ -628,3 +628,18 @@ uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.
 uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
 uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
 ```
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HWyxN`: package,
+source-checkout, rollback, and uninstall restore snippets must not export raw
+escaped dotenv text after stripping surrounding quotes. Decode double-quoted
+dotenv escapes before exporting `AWF_API_TOKEN` or `AWF_POSTGRES_PASSWORD`, so
+values such as `AWF_API_TOKEN="tok\$en"` and Compose-safe persisted Postgres
+passwords restore to the same bytes AWF/Compose use when starting local Core.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HWyxN`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell tests/unit/docs/test_public_docs_status.py::test_source_checkout_env_restore_decodes_quoted_dotenv_entries tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```

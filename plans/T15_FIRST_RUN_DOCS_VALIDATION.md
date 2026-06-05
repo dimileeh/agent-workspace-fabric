@@ -2446,6 +2446,44 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HWyxN`:
+
+- `docs/UPGRADE.md`, `docs/QUICKSTART.md`, and `docs/UNINSTALL.md` restore
+  snippets now decode double-quoted dotenv escapes after stripping quote
+  delimiters and before exporting `AWF_API_TOKEN` or
+  `AWF_POSTGRES_PASSWORD`.
+- The helper is used by package, virtualenv, source-checkout, rollback, and
+  uninstall restore blocks so persisted values such as
+  `AWF_API_TOKEN="tok\$en"` and escaped Postgres passwords restart with the
+  same bytes AWF/Compose read from dotenv files.
+- `tests/unit/docs/test_public_docs_status.py` now executes the documented
+  package restore snippets and the shared source-checkout restore pattern
+  against escaped double-quoted dotenv values.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell tests/unit/docs/test_public_docs_status.py::test_source_checkout_env_restore_decodes_quoted_dotenv_entries -q
+```
+
+Red-phase result after updating the focused regressions: failed as expected
+with `4 failed`; package restore printed raw backslashes such as `tok\$en`, and
+the source-checkout restore helper printed `from\$double`.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell tests/unit/docs/test_public_docs_status.py::test_source_checkout_env_restore_decodes_quoted_dotenv_entries tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: targeted regression plus snippet syntax checks
+`5 passed in 1.78s`; full focused public-docs file `73 passed in 3.67s`;
+`ruff check` passed; `ruff format --check` reported
+`1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

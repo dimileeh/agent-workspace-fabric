@@ -153,10 +153,22 @@ this shell before restarting. Restore the same `AWF_API_TOKEN` and
 replacement service secrets during upgrade:
 
 ```bash
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_API_TOKEN" in
-  \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-  \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+    AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+    AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
@@ -166,8 +178,15 @@ else
 fi
 AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-  \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-  \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+  \"*\")
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+    ;;
+  \'*\')
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+    AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+    ;;
 esac
 if [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ]; then
   export AWF_POSTGRES_PASSWORD="$AWF_PERSISTED_POSTGRES_PASSWORD"
@@ -232,13 +251,25 @@ checks the API and Postgres host ports and blocks while the previous Core stack
 still holds them.
 
 ```bash
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
-    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
@@ -255,8 +286,15 @@ for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
@@ -285,13 +323,25 @@ Editing `~/.awf/config.yml` remains the no-stop option. To refresh the persisted
 path:
 
 ```bash
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
-    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
@@ -308,8 +358,15 @@ for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
@@ -377,13 +434,25 @@ checks the API and Postgres host ports and blocks while the previous Core stack
 still holds them.
 
 ```bash
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
-    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
@@ -400,8 +469,15 @@ for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
@@ -429,13 +505,25 @@ Core stack still holds them. Editing `~/.awf/config.yml` remains the no-stop
 option. To refresh the persisted path:
 
 ```bash
+awf_decode_double_quoted_dotenv() {
+  python3 -c 'import re, sys
+replacements = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", chr(34): chr(34), "$": "$"}
+print(re.sub(r"\\(.)", lambda match: replacements.get(match[1], match[1]), sys.argv[1]), end="")' "$1"
+}
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_API_TOKEN" in
-    \"*\") AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}" ;;
-    \'*\') AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"; AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\"}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\"}"
+      AWF_PERSISTED_API_TOKEN="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_API_TOKEN")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN#\'}"
+      AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
 done
@@ -452,8 +540,15 @@ for env_file in .env; do
   [ -f "$env_file" ] || continue
   AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
-    \"*\") AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}" ;;
-    \'*\') AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"; AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}" ;;
+    \"*\")
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\"}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_decode_double_quoted_dotenv "$AWF_PERSISTED_POSTGRES_PASSWORD")"
+      ;;
+    \'*\')
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD#\'}"
+      AWF_PERSISTED_POSTGRES_PASSWORD="${AWF_PERSISTED_POSTGRES_PASSWORD%\'}"
+      ;;
   esac
   [ -n "$AWF_PERSISTED_POSTGRES_PASSWORD" ] && break
 done
