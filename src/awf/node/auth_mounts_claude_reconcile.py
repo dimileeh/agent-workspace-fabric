@@ -177,6 +177,20 @@ def _forward_fallback_deletions_as_whiteouts(
     deleted — at most an empty husk remains) and, for Claude's auth layout — individual
     credential files, not whole directories, are the deletion target — does not matter in
     practice. Partial-directory deletions are handled correctly.
+
+    Known limitation (residual TOCTOU between the content check and the whiteout):
+    :func:`_safe_files_equal_content` reads ``base / rel`` and ``host_claude / rel`` to
+    confirm byte-for-byte equality and *then* returns, after which
+    :func:`_safe_overlay_whiteout` creates the ``mknod``. Between that last host byte read
+    and the ``mknod``, the host could complete a credential rotation: the *old* bytes
+    matched (so the rotation-defense content check passed), yet the freshly-written token
+    is what a live agent would now need — and the whiteout will hide it. The content check
+    closes the ``touch -r`` / same-length-rotation window *up to* its own read, not the
+    sub-microsecond gap after it, which is bounded to a scheduled host sync landing exactly
+    inside this per-file window. This is accepted as best-effort: like the other ambiguous
+    cases it biases toward the credential staying visible at decision time, and the
+    base-pin/rebuild mechanism re-detects the stale base and recovers the rotated
+    credential on the next provision rather than trusting it across reboots.
     """
 
     excluded = frozenset(_CLAUDE_USAGE_HISTORY_DIRS)
