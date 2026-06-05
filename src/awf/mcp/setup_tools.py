@@ -867,13 +867,11 @@ def _client_instruction_next_steps(
 
 
 def _client_instruction_command(clients: list[str], *, source_checkout: Path | None) -> str:
-    if source_checkout is None:
-        return "awf setup --client"
-
     command = ["awf", "setup"]
     for client in clients:
         command.extend(["--client", client])
-    command.extend(["--source-checkout", str(source_checkout)])
+    if source_checkout is not None:
+        command.extend(["--source-checkout", str(source_checkout)])
     return shlex.join(command)
 
 

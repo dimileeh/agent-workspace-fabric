@@ -84,6 +84,47 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HOuPN
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` builds a
+top-level `command` containing selected clients when an explicit
+`source_checkout` is provided, but falls back to the incomplete
+`awf setup --client` command when no checkout is provided. Operators or MCP
+clients copying that field cannot apply the same selected client plan.
+
+Scope is limited to rendering the selected clients in the top-level client
+instruction command for the no-explicit-checkout path. Empty explicit client
+selection, per-client `apply_command`, next-step text, redaction, and explicit
+checkout behavior stay unchanged.
+
+### Requirements Checklist
+
+- Preserve the empty-client selection response.
+- Include each selected client in the top-level command when `source_checkout`
+  is not provided.
+- Preserve explicit `source_checkout` command rendering.
+- Add a focused regression for the no-checkout selected-client command field.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for selected-client top-level command
+   rendering without `source_checkout`.
+2. Reuse the existing client command builder for both checkout and no-checkout
+   selected-client paths.
+3. Run the targeted regression and focused client-integration test file.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HOlA0
 
 ### Problem Statement And Scope

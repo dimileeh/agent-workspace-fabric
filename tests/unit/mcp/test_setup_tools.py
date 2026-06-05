@@ -89,6 +89,7 @@ async def test_client_integration_instructions_are_secret_free(
 
     assert result.isError is False
     assert payload["status"] == "success"
+    assert payload["command"] == "awf setup --client claude --client codex"
     assert {client["client"] for client in payload["clients"]} == {"claude", "codex"}
     claude = next(client for client in payload["clients"] if client["client"] == "claude")
     assert claude["config_path"] == str(home / ".claude.json")
