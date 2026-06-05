@@ -606,8 +606,17 @@ async def _reparent_fix_pass_commit(
         return None, False, _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
 
     if current_tree == start_tree:
-        # The agent produced no net change relative to the pre-fix-pass commit. Signal
-        # no-commit so the caller falls through to the existing rollback.
+        # The agent produced no net change relative to the pre-fix-pass commit. Emit a
+        # dedicated audit event so this case is distinguishable in logs from a genuine
+        # no-commit rollback, then signal no-commit so the caller falls through to the
+        # existing rollback.
+        _log.info(
+            "monitor.pre_push_validation_fix_reparent_no_net_change",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            current_head=current_head,
+            fix_start_head=fix_start_head,
+        )
         return None, True, None
 
     message_result = await self._deps.runner.run(

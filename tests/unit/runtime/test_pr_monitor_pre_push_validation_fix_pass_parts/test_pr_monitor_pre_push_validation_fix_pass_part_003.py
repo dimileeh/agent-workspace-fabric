@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -185,14 +186,15 @@ async def test_reparent_fix_pass_commit_no_net_change_signals_no_commit(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    head, no_net_change, failure_reason = await pre_push_validation._reparent_fix_pass_commit(
-        runner,
-        workspace_id="workspace",
-        worktree_path=worktree,
-        fix_start_head="1" * 40,
-        current_head="2" * 40,
-        pass_number=1,
-    )
+    with structlog.testing.capture_logs() as captured:
+        head, no_net_change, failure_reason = await pre_push_validation._reparent_fix_pass_commit(
+            runner,
+            workspace_id="workspace",
+            worktree_path=worktree,
+            fix_start_head="1" * 40,
+            current_head="2" * 40,
+            pass_number=1,
+        )
 
     assert head is None
     assert no_net_change is True
@@ -201,6 +203,18 @@ async def test_reparent_fix_pass_commit_no_net_change_signals_no_commit(
     assert not any("commit-tree" in call for call in joined_calls)
     assert not any("reset --hard" in call for call in joined_calls)
     assert not any("log -1" in call for call in joined_calls)
+    # A dedicated audit event records the no-net-change re-parent so it is
+    # distinguishable in logs from a genuine no-commit rollback.
+    no_net_change_events = [
+        event
+        for event in captured
+        if event["event"] == "monitor.pre_push_validation_fix_reparent_no_net_change"
+    ]
+    assert len(no_net_change_events) == 1
+    assert no_net_change_events[0]["workspace_id"] == "workspace"
+    assert no_net_change_events[0]["fix_start_head"] == "1" * 40
+    assert no_net_change_events[0]["current_head"] == "2" * 40
+    assert no_net_change_events[0]["pass_number"] == 1
 
 
 @pytest.mark.unit
