@@ -1,6 +1,6 @@
 # Agent Workspace Fabric (AWF)
 
-*New to AWF? Pick one first-run lane in the [Quickstart](docs/QUICKSTART.md).*
+*New to AWF? See the [Quickstart](docs/QUICKSTART.md) to bootstrap a local evaluation workspace in a few commands.*
 
 **AWF is an industrial workspace fabric for AI coding agents.**
 
@@ -146,69 +146,51 @@ See:
 
 ## Installation
 
-AWF currently has three public first-run lanes. Pick one lane and stay in it
-through setup, start, project init, mocked smoke, upgrade, and uninstall. The
-hosted curl installer lane is intentionally omitted until its public installer,
-manifest, checksums, and distribution artifacts are published and verified.
+AWF currently has three runnable first-run lanes. The public curl installer lane
+is release-gated until its hosted installer URL, manifest, checksums, and
+release artifacts are published and verified.
 
 | Lane | Use When | Install |
-|---|---|---|
+| --- | --- | --- |
 | `uv tool` / `pipx` | You want a release-installed package mediated by an isolated Python tool manager. | `uv tool install agent-workspace-fabric` or `pipx install agent-workspace-fabric` |
-| Source checkout with global tool install | You want inspectable source, then a global `awf` executable installed from that checkout. | `git clone ...` then `uv tool install . --force` |
-| Source checkout with no global install | You want inspectable source and no global `awf` on `PATH`. | `git clone ...` then `uv run --python 3.12 --extra dev awf ...` |
+| Source checkout with global tool install | You want inspectable source plus a global `awf` executable installed from that checkout. | `git clone ...` then `uv tool install . --force` |
+| Source checkout with no global install | You want inspectable source and no global executable. | `git clone ...` then run `uv run --python 3.12 --extra dev awf ...` |
 
-For package-manager and virtualenv lanes that put `awf` on `PATH`, the first-run
-command grammar is:
+For package-manager and virtualenv lanes that put `awf` on `PATH`:
 
 ```bash
 awf setup
 awf start
+awf service status --format pretty
 awf init <path>
 awf smoke run --project <path> --mocked-local --format pretty
 ```
 
-For the source checkout with global tool install lane, run from the checkout and
-pin setup/start to that checkout's assets:
+For the source checkout with global tool install lane, run from the checkout:
 
 ```bash
+uv tool install . --force
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
+awf service status --format pretty
 awf init <path>
 awf smoke run --project <path> --mocked-local --format pretty
 ```
 
-For the no-global source checkout lane, run the same subcommands through the
-checkout wrapper from the source checkout:
+For the source checkout with no global install lane, run from the checkout:
 
 ```bash
+uv sync --extra dev
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf service status --format pretty
 uv run --python 3.12 --extra dev awf init <path>
 uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local --format pretty
 ```
 
-For the full lane-specific commands, including source checkout variants, see:
-
-- [Quickstart](docs/QUICKSTART.md)
-- [Upgrade Guide](docs/UPGRADE.md)
-- [Uninstall Guide](docs/UNINSTALL.md)
-
-Virtualenv installs are also supported when you want AWF in an active project
-environment instead of an isolated tool environment:
-
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install agent-workspace-fabric
-```
-
-For contributor checkouts with a global tool install:
-
-```bash
-git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
-cd aira-agent-workspace-fabric
-uv tool install . --force
-```
+For the full lane-specific commands, including upgrade and uninstall paths, see
+[Quickstart](docs/QUICKSTART.md), [Upgrade Guide](docs/UPGRADE.md), and
+[Uninstall Guide](docs/UNINSTALL.md).
 
 Homebrew is planned after the first stable tagged PyPI/GitHub release and a
 formula audit; do not rely on a `brew` install path yet.

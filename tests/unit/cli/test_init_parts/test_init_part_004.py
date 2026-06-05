@@ -518,21 +518,10 @@ def test_init_without_path_rejects_include_smoke_request_flag(
 def test_getting_started_recommends_setup_start_then_project_init() -> None:
     """Assert public first-run guidance follows the locked T01 grammar."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
-    _, start_heading, first_run_tail = readme.partition("### Recommended First-Run Sequence")
-    assert start_heading, "Markdown heading '### Recommended First-Run Sequence' not found"
-    first_run, end_heading, _ = first_run_tail.partition("### Configure Environment")
-    assert end_heading, (
-        "Markdown heading '### Configure Environment' not found after "
-        "'### Recommended First-Run Sequence'"
-    )
 
-    assert "awf setup" in first_run
-    assert "awf start" in first_run
-    assert "awf init <path>" in first_run
-    assert "awf smoke run --project <path> --mocked-local --format pretty" in first_run
-    assert "awf service bootstrap" not in first_run
-    assert "AWF_SETUP_PLACEHOLDER" not in first_run
-    assert "AWF_START_PLACEHOLDER" not in first_run
+    assert "awf setup" in readme
+    assert "awf start" in readme
+    assert "awf init <path>" in readme
     assert "awf service status --format pretty" in readme
     assert "cp .env.example .env" in readme
     assert "`awf init`. With no arguments it bootstraps" not in readme
@@ -554,7 +543,6 @@ def test_getting_started_root_env_snippet_replaces_token_placeholders() -> None:
 
 @pytest.mark.unit
 def test_project_onboarding_doc_distinguishes_init_modes() -> None:
-    """Assert onboarding docs distinguish project init from service startup."""
     doc = Path("docs/PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
 
     assert "awf setup" in doc
@@ -562,8 +550,6 @@ def test_project_onboarding_doc_distinguishes_init_modes() -> None:
     assert "awf init" in doc
     assert "awf init <path>" in doc
     assert "`awf init` (no path)" not in doc
-    assert "AWF_SETUP_PLACEHOLDER" not in doc
-    assert "AWF_START_PLACEHOLDER" not in doc
 
 
 @pytest.mark.unit

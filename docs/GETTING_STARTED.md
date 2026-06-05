@@ -36,14 +36,18 @@ docker compose version
 
 ### Installation
 
-AWF currently has three public first-run lanes. The
-[Quickstart](QUICKSTART.md) is the canonical lane selector; this guide adds
-contributor and development detail. The hosted curl installer lane is
-intentionally omitted until its public installer, manifest, checksums, and
-distribution artifacts are published and verified.
+AWF currently has three runnable first-run lanes:
 
-The package-manager release-installed lane uses an isolated CLI tool via
-`uv tool`:
+- `uv tool` / `pipx` for a release-installed package.
+- Source checkout with a global tool install for inspectable source plus an
+  `awf` executable on `PATH`.
+- Source checkout with no global install for inspectable source run through
+  `uv run`.
+
+The public curl installer lane is release-gated until the hosted installer URL,
+manifest, checksums, and release artifacts are published and verified.
+
+The recommended primary path is to install AWF as an isolated CLI tool via `uv tool`:
 
 ```bash
 uv tool install agent-workspace-fabric
@@ -63,7 +67,7 @@ python -m venv .venv
 pip install agent-workspace-fabric
 ```
 
-For contributors who want inspectable source plus a global `awf` executable:
+For contributors who want to modify AWF itself:
 
 ```bash
 git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
@@ -72,132 +76,53 @@ uv tool install . --force
 uv sync
 ```
 
-For contributors who want inspectable source with no global install:
-
-```bash
-git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
-cd aira-agent-workspace-fabric
-uv sync --extra dev
-uv run --python 3.12 --extra dev awf --help
-```
-
 Homebrew is planned after the Python package has stable tagged artifacts and a
 passing formula audit; it is not a supported install channel yet.
 
 ### Recommended First-Run Sequence
 
-Once AWF is installed, the runnable first-run sequence is setup, start, health
-check, project onboarding, then mocked smoke. Keep local runtime values in the
+Once AWF is installed, the recommended first-run sequence is setup, start,
+health check, then project onboarding. Keep local runtime values in the install
 root `.env` so the CLI, worker, MCP server, and raw Docker Compose lane all read
-the same configuration. The mocked smoke proof does not require GitHub CLI auth;
-add a GitHub token later when you create or monitor PRs.
-
-For package-manager or virtualenv installs:
-
-Run from the directory where AWF should keep the package-lane `.env`.
-`.env.example` stays inside the installed package assets, so create `.env` from
-generated local service values. Persist an escaped dotenv copy of the Postgres
-password for Compose, while `AWF_DATABASE_URL` receives a URL-encoded copy. If
-you override `AWF_POSTGRES_PASSWORD` in this lane, use only URL-safe unreserved
-characters: letters, digits, `.`, `_`, `-`, and `~`. The snippet rejects values
-such as `/`, `#`, or `@` before writing `.env` because the current Compose
-service URL also embeds that password:
+the same configuration:
 
 ```bash
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_POSTGRES_HOST_PORT="${AWF_POSTGRES_HOST_PORT:-5433}"
-if ! python3 - <<'PY'
-from os import environ
-from urllib.parse import quote
-
-value = environ["AWF_POSTGRES_PASSWORD"]
-if "\n" in value or "\r" in value:
-    raise SystemExit("AWF_POSTGRES_PASSWORD cannot contain newlines")
-if quote(value, safe="") != value:
-    raise SystemExit(
-        "AWF_POSTGRES_PASSWORD must be URL-safe for package-lane Compose database URLs; "
-        "use only letters, digits, '.', '_', '-', or '~'"
-    )
-PY
-then
-  exit 1
-fi
-awf_postgres_password_urlencoded="$(python3 -c 'from os import environ; from urllib.parse import quote; print(quote(environ["AWF_POSTGRES_PASSWORD"], safe=""))')"
-awf_postgres_password_dotenv="$(
-  python3 - <<'PY'
-from os import environ
-
-value = environ["AWF_POSTGRES_PASSWORD"]
-if "\n" in value or "\r" in value:
-    raise SystemExit("AWF_POSTGRES_PASSWORD cannot contain newlines")
-print('"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"')
-PY
-)"
-export AWF_DATABASE_URL="postgresql+asyncpg://awf:${awf_postgres_password_urlencoded}@localhost:${AWF_POSTGRES_HOST_PORT}/awf"
-awf_env_tmp="$(mktemp)"
-{
-  printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
-  printf 'AWF_POSTGRES_PASSWORD=%s\n' "$awf_postgres_password_dotenv"
-  printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
-  printf 'AWF_DATABASE_URL=%s\n' "$AWF_DATABASE_URL"
-  if [ -f .env ]; then
-    sed \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=/d' \
-      -e '/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=/d' \
-      .env
-  fi
-} > "$awf_env_tmp"
-mv "$awf_env_tmp" .env
+mkdir -p "$HOME/awf-eval-project"
+cp .env.example .env
 awf setup
 awf start
 awf service status --format pretty
-awf init <path> --write-profile --yes
-awf smoke run --project <path> --mocked-local --format pretty
+awf init "$HOME/awf-eval-project"
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 ```
-
-For a source checkout with a global `awf` executable, run from the checkout:
-
-```bash
-cp .env.example .env
-# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
-# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
-awf setup --source-checkout "$PWD"
-awf start --source-checkout "$PWD"
-awf service status --format pretty
-awf init <path> --write-profile --yes
-awf smoke run --project <path> --mocked-local --format pretty
-```
-
-For a source checkout with no global install, run from the checkout:
-
-```bash
-cp .env.example .env
-# [optional] Only needed for PR creation/monitoring; skip for mocked smoke.
-# Provide AWF_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN manually if needed.
-uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
-uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
-uv run --python 3.12 --extra dev awf service status --format pretty
-uv run --python 3.12 --extra dev awf init <path> --write-profile --yes
-uv run --python 3.12 --extra dev awf smoke run --project <path> --mocked-local --format pretty
-```
-
-The `setup` command runs bounded host readiness checks without starting Core.
-The `start` command starts local AWF Core and reports the local API and console
-URLs. Source-checkout startup commands pass `--source-checkout "$PWD"` so setup
-and start use the checkout's Compose assets instead of packaged/default assets
-or stale persisted metadata. All three first-run lanes use root `.env`; existing
-legacy `docker/compose/.env` values are imported into root `.env` by setup/start.
-For first-run probes, Quickstart keeps those URLs aligned with the current smoke
-defaults.
 
 `awf setup` checks host readiness, imports any legacy `docker/compose/.env`
 values into root `.env`, and configures supported clients such as MCP when
 requested. `awf start` starts the local AWF Core stack, and
 `awf service status --format pretty` confirms API, database, Docker, image,
-disk, provider, and cleanup health.
+disk, provider, and cleanup health. The lower-level
+`awf service bootstrap` command remains available for service-only development
+and is what `awf start` delegates to.
+
+For the source checkout with global tool install lane, run from the checkout:
+
+```bash
+awf setup --source-checkout "$PWD"
+awf start --source-checkout "$PWD"
+awf service status --format pretty
+awf init "$HOME/awf-eval-project"
+awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
+```
+
+For the source checkout with no global install lane, run from the checkout:
+
+```bash
+uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"
+uv run --python 3.12 --extra dev awf service status --format pretty
+uv run --python 3.12 --extra dev awf init "$HOME/awf-eval-project"
+uv run --python 3.12 --extra dev awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
+```
 
 For source checkouts or raw Docker installs, root Compose can bring up the full
 local stack with safe loopback-only defaults:
@@ -222,9 +147,6 @@ per-provider copy-paste prompts).
 - `awf init <path>` — run local project onboarding. Interactive terminals get
   a short guided profile setup; automation can use
   `awf init <path> --write-profile --yes` to write detected defaults.
-- `awf smoke run --project <path> --mocked-local --format pretty` — prove the
-  local operator path for the initialized project without requiring live GitHub
-  or provider credentials.
 
 Subsequent sections describe the contributor/development setup; a fresh
 machine only needs the steps above plus a coding-agent credential.
@@ -301,7 +223,7 @@ AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF=<optional ISO-8601 rollout instant>
 ```
 
 If you change `AWF_POSTGRES_HOST_PORT` and set `AWF_DATABASE_URL` to a
-non-default value, update its loopback port to match.
+non-default value, update its localhost port to match.
 
 For host-side `awf` workspace commands and manual HTTP checks, `AWF_BASE_URL`
 is the operator-facing API knob. Usually you do not need to set it: when
