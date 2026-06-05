@@ -45,6 +45,7 @@ def _make_push_result(reason_code: str) -> _GitPushResult:
         "PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED",
         "PRE_PUSH_VALIDATION_FIX_FAILED",
         "PRE_PUSH_VALIDATION_ROLLBACK_FAILED",
+        "PRE_PUSH_VALIDATION_REPARENT_FAILED",
     ],
 )
 @pytest.mark.unit
