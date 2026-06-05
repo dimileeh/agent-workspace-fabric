@@ -93,3 +93,24 @@ Focused validation:
 
 Full AWF/GitHub validation, full coverage, and broad external docstring
 coverage remain managed after agent completion.
+
+## Current HEAD follow-up validation
+
+After later PR #390 repairs, a fresh diff-scoped AST audit found one new
+PR-touched test without a docstring:
+`tests/unit/docs/test_public_docs_status.py:1122 test_raw_docker_compose_source_path_is_single_command`.
+This iteration added a concise behavior-neutral test docstring only.
+
+Focused validation:
+
+- Pre-fix diff-scoped AST audit against `origin/development...HEAD`:
+  `changed_python_files=2`, `touched_defs=63`, `missing_docstrings=1`.
+- Post-fix diff-scoped AST audit against `origin/development...HEAD`:
+  `changed_python_files=2`, `touched_defs=63`, `missing_docstrings=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q`:
+  `69 passed in 2.32s`.
+
+Full AWF/GitHub validation, full coverage, and broad external docstring
+coverage remain managed after agent completion.

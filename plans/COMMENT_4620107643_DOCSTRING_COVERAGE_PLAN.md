@@ -55,6 +55,15 @@ behavior-neutral helper docstring, re-run the diff-scoped AST audit, run focused
 Ruff/pytest checks for the touched docs test file, and update the validation
 record.
 
+## Current HEAD follow-up iteration
+
+A fresh re-audit after later PR #390 repairs found one new PR-touched test
+without a docstring: `test_raw_docker_compose_source_path_is_single_command` in
+`tests/unit/docs/test_public_docs_status.py`. This iteration will add a concise
+behavior-neutral test docstring, re-run the diff-scoped AST audit, run focused
+Ruff/pytest checks for the touched docs test file, and update the validation
+record.
+
 ## Verification commands and pass criteria
 
 - Diff-scoped AST audit over `origin/development...HEAD` reports

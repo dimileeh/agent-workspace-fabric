@@ -1120,6 +1120,7 @@ def test_quickstart_token_refresh_restart_is_lane_aware() -> None:
 
 
 def test_raw_docker_compose_source_path_is_single_command() -> None:
+    """Assert raw Docker guidance remains a single runnable command."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
 
