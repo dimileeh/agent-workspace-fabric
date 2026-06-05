@@ -65,6 +65,9 @@ class WorkerDelegatesMixin:
     _retry_pending_terminal_auth_overlay_unmount_for_candidate = (
         _cleanup_auth_overlay._retry_pending_terminal_auth_overlay_unmount_for_candidate
     )
+    _terminal_auth_overlay_unmount_effective_release_guard = (
+        _cleanup_auth_overlay._terminal_auth_overlay_unmount_effective_release_guard
+    )
     _list_pending_terminal_auth_overlay_unmount_candidates = (
         _cleanup_auth_overlay._list_pending_terminal_auth_overlay_unmount_candidates
     )

@@ -260,7 +260,30 @@ async def _retry_pending_terminal_auth_overlay_unmount_for_candidate(
       has been reached, record a terminal ``exhausted`` marker (GC's loud-failure
       path remains the backstop); otherwise append a new ``pending`` marker with an
       incremented attempt index so a later sweep tries again.
+
+    Before any of that, effective release is re-validated under the workspace row lock
+    (see :func:`_terminal_auth_overlay_unmount_effective_release_guard`) so the
+    destructive umount itself — not only the marker write that records its outcome — is
+    gated against a revoke that landed after candidate listing.
     """
+    # Re-validate effective release under the workspace row lock *before* the
+    # destructive umount. The candidate query gated on effective release, but a
+    # provision launch can race terminal cleanup — starting orphan containers it then
+    # fails to stop — and write ``terminal_runtime_release_revoked`` (under
+    # ``get_for_update``) in the window between candidate listing and this retry. The
+    # agent container then holds the overlay bind again, so unmounting now would tear
+    # the auth overlay out from under still-running orphan containers, exactly the
+    # revoked-release state the candidate query avoids. The marker-write guards below
+    # already skip after a revoke, but only *after* the umount has run; this gates the
+    # umount itself, leaving the retry owed for a later genuine release.
+    guard = await self._terminal_auth_overlay_unmount_effective_release_guard(candidate)
+    if guard == "revoked":
+        _log_terminal_auth_overlay_unmount_release_revoked(candidate, marker="teardown")
+        return
+    if guard != "released":
+        # The row vanished or its lock is held (``skip_locked``): skip this sweep
+        # silently and let a later sweep retry, burning no deferred attempt.
+        return
     auth_overlay_unmounted = await _teardown_terminal_auth_overlay(self, candidate)
     if auth_overlay_unmounted is not False:
         await self._record_terminal_auth_overlay_unmount_resolved(
@@ -281,6 +304,43 @@ async def _retry_pending_terminal_auth_overlay_unmount_for_candidate(
     await self._append_terminal_auth_overlay_unmount_pending(
         candidate,
         attempt=pending_attempts + 1,
+    )
+
+
+async def _terminal_auth_overlay_unmount_effective_release_guard(
+    self: Any,
+    candidate: _TerminalRuntimeCandidate,
+) -> str:
+    """Re-validate effective release under the workspace row lock before teardown.
+
+    The candidate query gated on effective release, but the provisioner can write
+    ``terminal_runtime_release_revoked`` (under ``get_for_update``) between candidate
+    listing and this deferred retry. Acquiring the *same* row lock here serializes
+    against that write — mirroring the marker-write guards — so the destructive umount
+    only fires when the runtime is genuinely still released. Returns one of:
+
+    - ``"released"`` — still effectively released; the caller proceeds with the umount.
+    - ``"revoked"``  — the release was superseded by a later revoke after listing; the
+      caller skips the umount (logged) and the retry stays owed for a later genuine
+      release, never tearing the overlay out from under still-running orphan containers.
+    - ``"skipped"``  — the row vanished or its lock is held (``skip_locked`` lost the
+      race); the caller skips this sweep silently and a later sweep retries, burning no
+      deferred attempt and writing no marker.
+    """
+
+    async def _operation(session: AsyncSession) -> str:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get_for_update(candidate.workspace_id, skip_locked=True)
+        if ws is None:
+            return "skipped"
+        if not await has_terminal_runtime_released_event(session, candidate.workspace_id):
+            return "revoked"
+        return "released"
+
+    return await run_db_operation_with_retry(
+        self._session_factory,
+        _operation,
+        on_retry=self._log_transient_db_retry,
     )
 
 
@@ -547,11 +607,13 @@ def _log_terminal_auth_overlay_unmount_release_revoked(
     *,
     marker: str,
 ) -> None:
-    """Surface a deferred-sweep marker write that was skipped because release was revoked.
+    """Surface a deferred-sweep step skipped because the release was revoked.
 
-    The skip keeps the umount retry owed once the runtime is genuinely released; logging
-    it (rather than returning silently like the dedup/missing-row skips) keeps the
-    revoke-race observable under its own reason code.
+    Emitted both when a marker write (``resolved``/``exhausted``/``pending``) is skipped
+    under the row lock and when the pre-teardown guard (``marker="teardown"``) skips the
+    umount itself. The skip keeps the umount retry owed once the runtime is genuinely
+    released; logging it (rather than returning silently like the dedup/missing-row
+    skips) keeps the revoke-race observable under its own reason code.
     """
     _log.warning(
         _TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE,

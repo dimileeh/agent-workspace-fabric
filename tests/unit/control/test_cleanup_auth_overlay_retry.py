@@ -358,8 +358,16 @@ async def test_release_resources_propagates_cancelled_from_deferred_sweep(
 # --------------------------------------------------------------------------- #
 
 
-def _retry_candidate_worker(teardown_result: bool | None, **overrides: Any) -> SimpleNamespace:
+def _retry_candidate_worker(
+    teardown_result: bool | None,
+    *,
+    guard_result: str = "released",
+    **overrides: Any,
+) -> SimpleNamespace:
     recorded: dict[str, Any] = {}
+
+    async def _guard(_candidate: _TerminalRuntimeCandidate) -> str:
+        return guard_result
 
     async def _resolved(
         candidate: _TerminalRuntimeCandidate, *, auth_overlay_unmounted: bool | None
@@ -374,6 +382,7 @@ def _retry_candidate_worker(teardown_result: bool | None, **overrides: Any) -> S
 
     return SimpleNamespace(
         _auth_overlay_work_dir=Path("/tmp/work"),
+        _terminal_auth_overlay_unmount_effective_release_guard=_guard,
         _record_terminal_auth_overlay_unmount_resolved=_resolved,
         _record_terminal_auth_overlay_unmount_exhausted=_exhausted,
         _append_terminal_auth_overlay_unmount_pending=_append,
@@ -472,6 +481,92 @@ async def test_retry_candidate_records_exhausted_at_bound(
             worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_MAX_DEFERRED_SWEEPS,
         )
     }
+
+
+@pytest.mark.unit
+async def test_retry_candidate_skips_teardown_when_release_revoked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the pre-teardown guard reports the release was revoked after listing, the
+    destructive umount must NOT run and no marker is recorded — the retry stays owed for
+    a later genuine release. The skip is surfaced under the revoke reason code with
+    ``marker="teardown"`` so the umount-site skip is distinguishable from a marker-write
+    skip."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_overlay, "_log", log)
+
+    teardown_calls: list[int] = []
+
+    async def _teardown(_self: object, _candidate: _TerminalRuntimeCandidate) -> bool | None:
+        teardown_calls.append(1)  # pragma: no cover - must not run
+        return None
+
+    monkeypatch.setattr(worker_overlay, "_teardown_terminal_auth_overlay", _teardown)
+
+    async def _count(_workspace_id: str) -> int:  # pragma: no cover - must not run
+        raise AssertionError("count must not be consulted when the umount is gated off")
+
+    worker = _retry_candidate_worker(
+        None,
+        guard_result="revoked",
+        _count_terminal_auth_overlay_unmount_pending_events=_count,
+    )
+
+    await worker_overlay._retry_pending_terminal_auth_overlay_unmount_for_candidate(  # noqa: SLF001
+        worker,
+        _candidate("ws_revoked_teardown"),
+    )
+
+    assert teardown_calls == [], "umount must not run when the release was revoked"
+    assert worker.recorded == {}, "no marker may be written when the umount is gated off"
+    revoked = [
+        fields
+        for event, fields in log.warnings
+        if event == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_EVENT_TYPE
+    ]
+    assert len(revoked) == 1
+    assert revoked[0]["marker"] == "teardown"
+    assert (
+        revoked[0]["reason_code"]
+        == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RELEASE_REVOKED_REASON_CODE
+    )
+
+
+@pytest.mark.unit
+async def test_retry_candidate_skips_teardown_when_guard_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the pre-teardown guard cannot confirm release (row gone or its lock is held),
+    the umount is skipped silently — no marker, no revoke log — and a later sweep
+    retries, burning no deferred attempt."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_overlay, "_log", log)
+
+    teardown_calls: list[int] = []
+
+    async def _teardown(_self: object, _candidate: _TerminalRuntimeCandidate) -> bool | None:
+        teardown_calls.append(1)  # pragma: no cover - must not run
+        return None
+
+    monkeypatch.setattr(worker_overlay, "_teardown_terminal_auth_overlay", _teardown)
+
+    async def _count(_workspace_id: str) -> int:  # pragma: no cover - must not run
+        raise AssertionError("count must not be consulted when the umount is gated off")
+
+    worker = _retry_candidate_worker(
+        None,
+        guard_result="skipped",
+        _count_terminal_auth_overlay_unmount_pending_events=_count,
+    )
+
+    await worker_overlay._retry_pending_terminal_auth_overlay_unmount_for_candidate(  # noqa: SLF001
+        worker,
+        _candidate("ws_lock_contended"),
+    )
+
+    assert teardown_calls == []
+    assert worker.recorded == {}
+    assert log.warnings == [], "a lock-contended/missing-row skip must not log a revoke"
 
 
 # --------------------------------------------------------------------------- #
@@ -650,6 +745,9 @@ def _sweeper(factory: async_sessionmaker[AsyncSession], node_id: str = "node-1")
             "_log_transient_db_retry": lambda *_: None,
             "_list_pending_terminal_auth_overlay_unmount_candidates": (
                 worker_overlay._list_pending_terminal_auth_overlay_unmount_candidates
+            ),
+            "_terminal_auth_overlay_unmount_effective_release_guard": (
+                worker_overlay._terminal_auth_overlay_unmount_effective_release_guard
             ),
             "_count_terminal_auth_overlay_unmount_pending_events": (
                 worker_overlay._count_terminal_auth_overlay_unmount_pending_events
@@ -1426,3 +1524,43 @@ async def test_append_pending_skips_when_release_revoked(
     ]
     assert len(revoked) == 1
     assert revoked[0]["marker"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_teardown_guard_reports_released_revoked_and_skipped(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The pre-teardown guard returns ``"released"`` while the release is effective,
+    ``"revoked"`` once a later revoke supersedes it (so the umount is gated off), and
+    ``"skipped"`` when the workspace row is absent — all read under the row lock."""
+    sweeper = _sweeper(factory)
+    released_id: str = ""
+    revoked_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws_released = await _make_workspace(session, repo, compose_project_name="awf_guard_ok")
+        ws_revoked = await _make_workspace(session, repo, compose_project_name="awf_guard_revoked")
+        released_id = ws_released.id
+        revoked_id = ws_revoked.id
+        await _mark_runtime_released(repo, ws_released)
+        await _mark_runtime_release_revoked(session, repo, ws_revoked)
+        await session.commit()
+
+    assert (
+        await worker_overlay._terminal_auth_overlay_unmount_effective_release_guard(  # noqa: SLF001
+            sweeper, _candidate(released_id)
+        )
+        == "released"
+    )
+    assert (
+        await worker_overlay._terminal_auth_overlay_unmount_effective_release_guard(  # noqa: SLF001
+            sweeper, _candidate(revoked_id)
+        )
+        == "revoked"
+    )
+    assert (
+        await worker_overlay._terminal_auth_overlay_unmount_effective_release_guard(  # noqa: SLF001
+            sweeper, _candidate("ws_guard_missing")
+        )
+        == "skipped"
+    )
