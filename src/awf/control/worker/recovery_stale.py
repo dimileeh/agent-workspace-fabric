@@ -946,9 +946,14 @@ async def _record_recoverable_runtime_stranding(
             if claims_will_clear:
                 # D3: bump the fencing token alongside the version advance so a
                 # zombie worker whose owner string still matches is fenced on
-                # its next heartbeat/release CAS write. Only the execution-claim
-                # branch advances the epoch (the monitoring_pr branch above
-                # clears only the monitor claim, leaving execution untouched).
+                # its next heartbeat/release CAS write. The epoch advances only
+                # in this non-monitoring branch (the monitoring_pr branch above
+                # never touches it, since execution stays untouched there).
+                # ``claims_will_clear`` is True as soon as *any* of the four
+                # claim fields is set, so this also bumps in the edge case where
+                # only the monitor claim was set and there is no execution zombie
+                # to fence — harmless, as a higher epoch still fences any future
+                # execution worker correctly.
                 ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
         if claims_will_clear:
             await repo.advance_workspace_version(ws)
