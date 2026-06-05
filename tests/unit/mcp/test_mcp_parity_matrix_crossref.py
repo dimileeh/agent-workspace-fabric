@@ -264,8 +264,9 @@ def test_parity_matrix_implemented_status_is_backed_by_real_surfaces() -> None:
                     failures.append(
                         f"{capability}: REST endpoint {method} {path} is not registered"
                     )
-        elif not _normalize_cell(rest_cell).startswith("If-Match") and not (
-            _is_local_first_run_contract(rest_cell)
+        elif not (
+            _normalize_cell(rest_cell).startswith("If-Match")
+            or _is_local_first_run_contract(rest_cell)
         ):
             failures.append(
                 f"{capability}: implemented row must name REST endpoints or a documented cross-cutting REST contract"

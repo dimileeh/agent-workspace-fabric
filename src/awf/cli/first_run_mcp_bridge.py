@@ -3,6 +3,9 @@
 The setup/start/init command modules keep their implementation helpers private.
 This module is the stable import surface for MCP tools that must reuse those
 helpers without importing command-module internals directly.
+
+MCP tests should monkeypatch the re-aliased symbols in awf.mcp.setup_tools, not
+this bridge, because setup_tools snapshots these exports when it is imported.
 """
 
 from __future__ import annotations
