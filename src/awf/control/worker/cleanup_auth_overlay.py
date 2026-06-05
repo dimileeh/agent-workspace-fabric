@@ -506,8 +506,8 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
             Workspace.compose_file_path,
             # Carry the listed cycle's release floor so the marker-write guards can detect a
             # revoke-plus-re-release that opened a *new* cycle after listing. ``effectively_released``
-            # below guarantees a release event exists, so the ``coalesce(-1)`` fallback never
-            # fires for a listed row — the value is always the real release ``event_order``.
+            # below guarantees a release event exists; legacy releases with a NULL
+            # ``event_order`` carry the same ``-1`` floor used by the marker predicates.
             release_cycle_floor.label("release_cycle_floor"),
         )
         .where(Workspace.status.in_(terminal_status_values))
@@ -556,9 +556,8 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
                 repo_url=repo_url,
                 compose_project_name=compose_project_name,
                 compose_file_path=compose_file_path,
-                # ``coalesce`` never yields NULL and ``effectively_released`` guarantees a
-                # real release order (never the ``-1`` fallback), so this is always the
-                # listed cycle's release ``event_order``.
+                # ``coalesce`` never yields NULL. For modern events this is the listed
+                # cycle's release ``event_order``; legacy NULL-order releases use ``-1``.
                 release_cycle_floor=int(cycle_floor),
             )
         )
@@ -681,7 +680,8 @@ async def _terminal_auth_overlay_unmount_release_cycle_unchanged(
     if candidate.release_cycle_floor is None:
         return True
     latest = await latest_terminal_runtime_release_event_order(session, candidate.workspace_id)
-    return latest == candidate.release_cycle_floor
+    latest_floor = -1 if latest is None else latest
+    return latest_floor == candidate.release_cycle_floor
 
 
 async def _record_terminal_auth_overlay_unmount_resolved(

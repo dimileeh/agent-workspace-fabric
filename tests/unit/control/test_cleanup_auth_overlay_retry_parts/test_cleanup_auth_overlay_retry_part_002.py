@@ -253,6 +253,96 @@ async def test_auth_overlay_backfill_seeds_pre_upgrade_failed_release_and_retry_
     }
 
 
+@pytest.mark.asyncio
+async def test_auth_overlay_backfill_null_order_release_retry_sweep_resolves(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backfilled pending marker for a NULL-order release still resolves after retry."""
+    migration = _load_auth_overlay_backfill_migration()
+    sweeper = _sweeper(factory)
+    teardown_calls: list[str] = []
+
+    async def _teardown(_self: object, candidate: Any) -> bool:
+        teardown_calls.append(candidate.workspace_id)
+        return True
+
+    monkeypatch.setattr(worker_overlay, "_teardown_terminal_auth_overlay", _teardown)
+
+    ws_id = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(
+            session,
+            repo,
+            compose_project_name="awf_backfilled_null_order_retry",
+        )
+        ws_id = ws.id
+        release = await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+            payload={
+                "auth_overlay_unmounted": False,
+                "compose_project_name": "awf_backfilled_null_order_retry",
+            },
+        )
+        release.event_order = None
+        await session.commit()
+
+    async with factory() as session:
+        conn = await session.connection()
+        inserted = await conn.run_sync(migration.backfill_auth_overlay_unmount_pending)
+        await session.commit()
+
+    candidates = await sweeper._list_pending_terminal_auth_overlay_unmount_candidates(  # noqa: SLF001
+        limit=None
+    )
+    backfilled_candidate = next(
+        candidate for candidate in candidates if candidate.workspace_id == ws_id
+    )
+    assert inserted == 1
+    assert backfilled_candidate.release_cycle_floor == -1
+
+    await sweeper._retry_pending_terminal_auth_overlay_unmounts(limit=None)  # noqa: SLF001
+
+    async with factory() as session:
+        events = (
+            await session.execute(
+                sa.select(
+                    WorkspaceEvent.event_type,
+                    WorkspaceEvent.reason_code,
+                    WorkspaceEvent.payload,
+                )
+                .where(WorkspaceEvent.workspace_id == ws_id)
+                .where(
+                    WorkspaceEvent.event_type.in_(
+                        (
+                            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                            worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+                        )
+                    )
+                )
+                .order_by(WorkspaceEvent.event_order.asc())
+            )
+        ).all()
+
+    assert teardown_calls == [ws_id]
+    assert [row.event_type for row in events] == [
+        worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+        worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+    ]
+    resolved = events[-1]
+    assert (
+        resolved.reason_code == worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_REASON_CODE
+    )
+    assert resolved.payload == {
+        "compose_project_name": "awf_backfilled_null_order_retry",
+        "workspace_status": WorkspaceStatus.failed.value,
+        "auth_overlay_unmounted": True,
+    }
+
+
 async def _mark_runtime_released(repo: WorkspaceRepository, ws: Workspace) -> None:
     """Write the ``terminal_runtime_released`` event a deferred candidate always carries.
 
