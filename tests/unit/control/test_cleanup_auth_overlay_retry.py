@@ -551,6 +551,9 @@ async def test_retry_failure_handler_logs_warning(
     assert (
         fields["reason_code"] == worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE
     )
+    # The unexpected best-effort failure preserves its full traceback so it is
+    # diagnosable rather than masked behind the truncated ``error`` string.
+    assert fields["exc_info"] is True
 
 
 # --------------------------------------------------------------------------- #

@@ -1194,7 +1194,13 @@ async def _handle_terminal_auth_overlay_unmount_retry_failure(
     candidate: _TerminalRuntimeCandidate,
     exc: Exception,
 ) -> None:
-    """Log a per-candidate deferred-sweep failure without aborting the scan."""
+    """Log a per-candidate deferred-sweep failure without aborting the scan.
+
+    The broad ``except Exception`` upstream is deliberate (one candidate must not
+    abort the whole sweep), so the traceback is preserved via ``exc_info`` to keep
+    the unexpected failure fully diagnosable rather than masked behind the
+    truncated ``error`` string.
+    """
     _ = self
     _log.warning(
         _TERMINAL_AUTH_OVERLAY_UNMOUNT_RETRY_FAILED_EVENT_TYPE,
@@ -1204,6 +1210,7 @@ async def _handle_terminal_auth_overlay_unmount_retry_failure(
         reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
         error_type=type(exc).__name__,
         error=str(exc)[:240],
+        exc_info=True,
     )
 
 
