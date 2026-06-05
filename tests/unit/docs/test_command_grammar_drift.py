@@ -32,7 +32,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 # Single source of truth for the first-run public docs the grammar contract
 # spans. Read it in one place so a doc joining the first-run experience is added
-# here once.
+# here once. `RELEASING.md` is the maintainer release runbook rather than a
+# first-run page, but T18 scopes the release docs into the `awf init`/bootstrap
+# grammar sweep (R2/R3) so a future stale no-path-init or service-bootstrap
+# mention in the runbook is caught alongside README/quickstart/upgrade/uninstall/
+# troubleshooting. Its deliberate *negative* "no-path `awf init`" prohibition is
+# allowed (see `_without_init_prohibitions`) instead of being read as a command.
 FIRST_RUN_DOCS = (
     "README.md",
     "docs/QUICKSTART.md",
@@ -42,6 +47,7 @@ FIRST_RUN_DOCS = (
     "docs/UNINSTALL.md",
     "docs/TROUBLESHOOTING.md",
     "docs/PROJECT_ONBOARDING.md",
+    "RELEASING.md",
 )
 
 # Docs that must spell out the standalone setup/start entrypoints (R1). The
@@ -76,6 +82,17 @@ SHELL_FENCE_LANGS = frozenset({"", "bash", "sh", "shell", "console", "zsh"})
 # Inline (single-backtick) code spans in prose / numbered steps. R2 scans these
 # alongside fenced commands so a no-path `awf init` documented inline is caught.
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+# A prose *prohibition* that explicitly labels a backticked `awf init` as the
+# disallowed no-path form (qualifier-before, e.g. RELEASING.md's "Do not use
+# no-path `awf init` for service setup"). Such a mention is teaching the reader
+# *not* to run no-path init, so R2 must not read it as a no-path command example.
+# The qualifier sits before the span, so this never collides with R3's
+# bootstrap-framing patterns (which key on `awf init` *followed by* "without a
+# path"). A path-bearing `awf init <path>` span has its backtick after the path,
+# not after `init`, so it is left untouched.
+NO_PATH_INIT_PROHIBITION_RE = re.compile(
+    r"(?P<qualifier>no[- ]path|without a path)\s+`awf init`", re.IGNORECASE
+)
 # Flags that consume the following token as their value; everything else that
 # starts with "-" is treated as a valueless flag.
 VALUE_FLAGS = frozenset({"--project", "--format"})
@@ -183,6 +200,20 @@ def _fenced_command_lines(text: str) -> list[str]:
         if stripped:
             lines.append(stripped)
     return lines
+
+
+def _without_init_prohibitions(text: str) -> str:
+    """Unwrap the backticks of an explicitly no-path-qualified ``awf init``.
+
+    A prohibition such as RELEASING.md's "Do not use no-path ``awf init`` for
+    service setup" documents the *disallowed* no-path form so readers avoid it.
+    Stripping only the inner backticks (leaving the prose qualifier and words
+    intact) keeps that guidance readable while stopping R2's inline scan from
+    extracting the span and miscounting a documented prohibition as a no-path
+    command example. An *unqualified* bare ``awf init`` still keeps its backticks
+    and is surfaced as an R2 offender.
+    """
+    return NO_PATH_INIT_PROHIBITION_RE.sub(r"\g<qualifier> awf init", text)
 
 
 def _inline_command_mentions(text: str) -> list[str]:
@@ -564,6 +595,27 @@ def test_helper_extracts_inline_command_mentions() -> None:
     assert _inline_command_mentions(text) == ["awf init <path>", "awf start", "awf init ."]
 
 
+def test_helper_excludes_no_path_init_prohibition_from_inline_scan() -> None:
+    # A doc that *prohibits* no-path init (the release runbook's "Do not use
+    # no-path `awf init` for service setup") must not have that warning read as a
+    # no-path command example: the qualified mention is unwrapped before the R2
+    # inline scan, while the positive `awf init <path>` example survives intact.
+    text = (
+        "Do not use no-path `awf init` for service setup; project onboarding is\n"
+        "the separate `awf init <path>` flow after the local service is up.\n"
+    )
+    mentions = _inline_command_mentions(_without_init_prohibitions(text))
+    assert "awf init" not in mentions
+    assert "awf init <path>" in mentions
+    # The "without a path" qualifier variant is handled the same way.
+    variant = _without_init_prohibitions("Never run `awf init` without a path `awf init` here.")
+    assert "without a path awf init" in variant
+    # An *unqualified* bare `awf init` mention keeps its backticks and is still
+    # surfaced as an offender, so the strip never weakens R2's core check.
+    plain = "Run `awf init` to onboard the project.\n"
+    assert "awf init" in _inline_command_mentions(_without_init_prohibitions(plain))
+
+
 def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     assert _bootstrap_offenders("Run `awf init` without a path to bootstrap Core.")
     assert _bootstrap_offenders("awf init  # bootstrap the local service")
@@ -616,7 +668,11 @@ def test_documented_awf_init_always_takes_a_path() -> None:
     init_examples_by_context = dict.fromkeys(INIT_CONTEXT_DOCS, 0)
     for rel_path in FIRST_RUN_DOCS:
         text = _read(rel_path)
-        for line in _fenced_command_lines(text) + _inline_command_mentions(text):
+        # Inline mentions are scanned with explicit no-path prohibitions unwrapped
+        # so a doc that *warns against* no-path `awf init` (e.g. the release
+        # runbook) is not itself read as a no-path command example.
+        inline = _inline_command_mentions(_without_init_prohibitions(text))
+        for line in _fenced_command_lines(text) + inline:
             status = _init_arg_status(line)
             if status is None or status == "help":
                 # `awf init --help`/`-h` carries no path but is a legitimate
