@@ -53,6 +53,54 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Start Settings Secret Field Discovery
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve exact-secret redaction for existing `api_token` and `github_token`
+  settings fields: Complete.
+- Include future settings fields whose names match the existing secret key
+  convention, such as `registry_token` or `webhook_secret`: Complete.
+- Preserve service environment secret extraction through `is_secret_env_key`:
+  Complete.
+- Add a focused regression proving a future-style settings secret is redacted
+  from the start success payload: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_start.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_future_settings_secret_field_from_success_payload -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_selected_start_environment_secret_from_bootstrap_failure tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_selected_start_environment_secret_from_success_payload tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_future_settings_secret_field_from_success_payload -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev ruff format --check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because the start
+  success payload still contained `opaque-future-settings-secret`.
+- Regression test after the implementation change: 1 passed.
+- Focused existing/future start secret redaction tests: 3 passed.
+- Focused ruff: passed.
+- Focused ruff format check: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Start Redaction And Client Env Hint Errors
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

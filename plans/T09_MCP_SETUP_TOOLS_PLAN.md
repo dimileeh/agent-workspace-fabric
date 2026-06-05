@@ -84,6 +84,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Start Settings Secret Field Discovery
+
+### Problem Statement And Scope
+
+The PR review reports that `_selected_start_settings_secret_values` hardcodes
+`api_token` and `github_token` for the start tool's extra exact-secret redaction
+pass. If `Settings` gains another credential field such as `registry_token`, the
+start success/failure redaction defense-in-depth layer would not include the new
+value.
+
+Scope is limited to deriving start settings secret values from settings field
+names that follow the existing secret environment-key convention, while
+preserving the current service-env secret handling and payload shapes.
+
+### Requirements Checklist
+
+- Preserve exact-secret redaction for existing `api_token` and `github_token`
+  settings fields.
+- Include future settings fields whose names match the existing secret key
+  convention, such as `registry_token` or `webhook_secret`.
+- Preserve service environment secret extraction through `is_secret_env_key`.
+- Add a focused regression proving a future-style settings secret is redacted
+  from the start success payload.
+
+### Implementation Steps
+
+1. Add a focused failing start success regression with a future-style settings
+   `registry_token` field.
+2. Replace the hardcoded settings field list with convention-based field
+   discovery from Pydantic `model_fields`, falling back to object attributes for
+   test doubles.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_start.py::test_start_local_service_redacts_future_settings_secret_field_from_success_payload -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Start Redaction And Client Env Hint Errors
 
 ### Problem Statement And Scope

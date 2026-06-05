@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import Annotated, Any, cast
@@ -499,11 +499,23 @@ def _selected_start_secret_values(inputs: _StartBootstrapInputs) -> tuple[str, .
 
 def _selected_start_settings_secret_values(settings: object) -> tuple[str, ...]:
     values: list[str] = []
-    for field_name in ("api_token", "github_token"):
+    for field_name in _settings_secret_field_names(settings):
         value = getattr(settings, field_name, None)
         if isinstance(value, str):
             values.append(value)
     return tuple(values)
+
+
+def _settings_secret_field_names(settings: object) -> tuple[str, ...]:
+    fields = getattr(type(settings), "model_fields", None)
+    if isinstance(fields, Mapping):
+        field_names = fields.keys()
+    else:
+        try:
+            field_names = vars(settings).keys()
+        except TypeError:
+            return ()
+    return tuple(field_name for field_name in field_names if is_secret_env_key(field_name))
 
 
 def _unique_secret_values(values: Iterable[str | None]) -> tuple[str, ...]:
