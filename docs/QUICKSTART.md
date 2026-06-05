@@ -384,7 +384,7 @@ for env_file in .env docker/compose/.env; do
       AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
       ;;
   esac
-  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+  grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' "$env_file" && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
@@ -743,7 +743,7 @@ for env_file in .env docker/compose/.env; do
       AWF_PERSISTED_API_TOKEN="${AWF_PERSISTED_API_TOKEN%\'}"
       ;;
   esac
-  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break
+  grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' "$env_file" && break
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"

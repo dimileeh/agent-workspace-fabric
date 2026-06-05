@@ -220,6 +220,11 @@ at the changed document, and tighten package upgrade env-restore anchor lookup
 so the `AWF_API_TOKEN` export match is an exact shell line found after the
 preceding guard/require anchors.
 
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HcJOX`: Quickstart
+source-checkout upgrade snippets must treat checkout-root `AWF_API_TOKEN=`
+presence as authoritative even when empty, export `local-dev-token`, and avoid
+falling through to an older non-empty `docker/compose/.env` token.
+
 Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HJDHL`: README no-global
 source-checkout setup/start commands must pass `--source-checkout "$PWD"` so a
 fresh checkout is selected even when stale persisted `source_checkout` metadata

@@ -2626,6 +2626,48 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HcJOX`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: Quickstart source-checkout upgrade snippets now stop the
+  `AWF_API_TOKEN` lookup when checkout-root `.env` contains the token key, even
+  when the value is empty.
+- Complete: An empty root `AWF_API_TOKEN=` now maps to `local-dev-token`
+  instead of falling through to an older non-empty `docker/compose/.env` token
+  in the documented Quickstart upgrade path.
+- Complete: Focused docs assertions cover the empty-root-plus-legacy-token
+  regression and accept the new key-presence break line in copied source
+  lifecycle snippets.
+- Complete: Full AWF/GitHub validation, full coverage, pushes, rebases, and PR
+  lifecycle actions were intentionally not run in the agent phase; AWF owns
+  those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_source_checkout_upgrade_accepts_default_api_token -q
+# Red phase before docs update: 2 failed; both Quickstart source-checkout
+# upgrade snippets exported legacy-token from docker/compose/.env.
+# Final result: 2 passed in 0.55s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_lifecycle_status.py::test_lifecycle_env_restore_uses_last_dotenv_assignment tests/unit/docs/test_public_docs_lifecycle_status.py::test_quickstart_and_uninstall_restore_strip_quoted_inline_dotenv_comments -q
+# 3 passed in 1.94s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+```
+
 ## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbuNN`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.

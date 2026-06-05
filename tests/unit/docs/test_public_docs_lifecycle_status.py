@@ -872,7 +872,7 @@ def test_quickstart_source_checkout_upgrade_accepts_default_api_token(
     heading: str,
     tmp_path: Path,
 ) -> None:
-    """Assert copied example `.env` source upgrades keep the local default token."""
+    """Assert empty root `.env` source upgrades keep the local default token."""
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     upgrade_section = _quickstart_upgrade_section(quickstart_text, heading)
     bash_fences = [
@@ -886,7 +886,10 @@ def test_quickstart_source_checkout_upgrade_accepts_default_api_token(
         maxsplit=1,
     )[0]
     env_file = tmp_path / ".env"
+    legacy_env_file = tmp_path / "docker" / "compose" / ".env"
+    legacy_env_file.parent.mkdir(parents=True)
     env_file.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
+    legacy_env_file.write_text("AWF_API_TOKEN=legacy-token\n", encoding="utf-8")
     script = "\n".join(
         (
             "export AWF_API_TOKEN=stale-token-from-shell",

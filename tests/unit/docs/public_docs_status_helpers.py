@@ -413,7 +413,17 @@ def _assert_source_checkout_api_token_restore(
         "AWF_API_TOKEN"
     ]
     token_quote_strip_lines = SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES["AWF_API_TOKEN"]
-    token_break_line = '  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break'
+    token_value_break_line = '  [ -n "$AWF_PERSISTED_API_TOKEN" ] && break'
+    token_key_present_break_line = (
+        "  grep -q '^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        "AWF_API_TOKEN[[:space:]]*='"
+        ' "$env_file" && break'
+    )
+    token_break_line = (
+        token_key_present_break_line
+        if token_key_present_break_line in section
+        else token_value_break_line
+    )
     token_loop_end_line = "done"
     token_guard_line = 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then'
     token_persisted_export_line = '  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"'
@@ -466,7 +476,9 @@ def _assert_source_checkout_api_token_restore(
         assert token_quote_strip_line in section, (
             f"{label} must strip quoted persisted AWF_API_TOKEN values"
         )
-    assert token_break_line in section, f"{label} must prefer the first persisted API token"
+    assert token_break_line in section, (
+        f"{label} must stop API token lookup at the first authoritative env file"
+    )
     assert token_guard_line in section, f"{label} must branch on persisted API token"
     assert token_persisted_export_line in section, (
         f"{label} must export the persisted AWF_API_TOKEN"
