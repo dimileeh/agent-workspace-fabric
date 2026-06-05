@@ -203,6 +203,40 @@ async def test_setup_status_init_and_client_tools_offload_blocking_work(
 
 
 @pytest.mark.unit
+async def test_client_integration_instructions_are_secret_free(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    raw_token = "sk-proj-" + "c" * 40
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"OPENAI_API_KEY={raw_token}\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", lambda *_args: env_file)
+    monkeypatch.setattr(setup_tools, "_client_home", lambda: home)
+    monkeypatch.setattr(setup_tools, "_client_which", lambda _binary: None)
+    monkeypatch.setattr(setup_tools, "_client_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(setup_tools, "_client_env", lambda: {})
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude", "codex"]},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is False
+    assert payload["status"] == "success"
+    assert payload["command"] == "awf setup --client claude --client codex"
+    assert {client["client"] for client in payload["clients"]} == {"claude", "codex"}
+    assert raw_token not in rendered
+
+
+@pytest.mark.unit
 async def test_start_local_service_offloads_sync_preparation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

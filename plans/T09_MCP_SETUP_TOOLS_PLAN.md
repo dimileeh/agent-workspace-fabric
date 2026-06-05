@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: python-coverage-shards (2) Stale MCP Coverage Node
+
+### Problem Statement And Scope
+
+`python-coverage-shards (2)` fails in
+`tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference`
+because the MCP parity coverage registry references
+`tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free`,
+but the client-integration tests were moved into
+`tests/unit/mcp/test_setup_tools_client_integration.py` during the line-limit
+repair. The contract registry is a quality-gate file outside this workspace's
+declared owned paths, so this repair restores the referenced executable node
+from the owned MCP test file instead of editing the registry.
+
+### Requirements Checklist
+
+- Keep the protected contract registry unchanged.
+- Restore the exact pytest node ID referenced by the MCP parity coverage map.
+- Make the restored node assert real secret-free MCP client-instruction
+  behavior.
+- Keep `tests/unit/mcp/test_setup_tools.py` under the 1500-line guardrail.
+- Run focused repro and affected MCP checks only; full AWF/GitHub validation
+  remains managed by AWF after agent completion.
+
+### Implementation Steps
+
+1. Confirm the focused contract smoke repro fails on the stale node.
+2. Add a minimal behavior test named
+   `test_client_integration_instructions_are_secret_free` to
+   `tests/unit/mcp/test_setup_tools.py`.
+3. Run the focused contract smoke repro, the restored test node, and line-limit
+   guard.
+4. Update the validation document with focused evidence.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free -q
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HZNUj
 
 ### Problem Statement And Scope

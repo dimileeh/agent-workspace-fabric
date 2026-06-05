@@ -53,6 +53,54 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: python-coverage-shards (2) Stale MCP Coverage Node
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Keep the protected contract registry unchanged: Complete.
+- Restore the exact pytest node ID referenced by the MCP parity coverage map:
+  Complete.
+- Make the restored node assert real secret-free MCP client-instruction
+  behavior: Complete.
+- Keep `tests/unit/mcp/test_setup_tools.py` under the 1500-line guardrail:
+  Complete.
+- Run focused repro and affected MCP checks only: Complete.
+
+### Evidence
+
+Files changed:
+
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free -q
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py
+```
+
+Latest results:
+
+- Focused contract smoke repro failed before the repair because
+  `tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free`
+  was not a collected pytest node ID.
+- Focused contract smoke repro after the repair: 1 passed.
+- Restored client-integration secret-free node: 1 passed.
+- Line-limit guard: 1 passed.
+- Affected MCP setup-tools module: 35 passed.
+- Focused ruff: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HZNUj
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
