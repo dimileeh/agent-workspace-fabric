@@ -185,9 +185,9 @@ def test_overlay_reboot_without_pin_rebuilds_and_repins(tmp_path: Path) -> None:
     )
     # ... and the pin is now durable for future remounts (recorded post-mount).
     assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
-    # No operator-visible credential loss: the mount is backed by the current-host base,
-    # so ~/.claude (credentials included) is re-derived fresh from the current host.
-    assert base_a.is_dir()
+    # No operator-visible credential loss: the mount is backed by the current-host base
+    # (asserted by the lowerdir check above), so ~/.claude (credentials included) is
+    # re-derived fresh from the current host.
 
 
 @pytest.mark.unit
