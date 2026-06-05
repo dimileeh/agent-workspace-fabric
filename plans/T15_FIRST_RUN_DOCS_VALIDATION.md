@@ -2331,6 +2331,44 @@ Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
 gates after agent completion.
 
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HWWni`:
+
+- `docs/UNINSTALL.md` now exports `local-dev-token` when source-checkout
+  uninstall metadata-refresh snippets find an empty persisted `AWF_API_TOKEN=`
+  entry in `.env` or legacy `docker/compose/.env` and the shell has no token.
+- Matching Quickstart inline source-checkout uninstall snippets now apply the
+  same fallback for the `.env` copied from `.env.example`.
+- `AWF_POSTGRES_PASSWORD` restore behavior remains strict and still requires a
+  non-empty persisted value or an explicit shell value.
+- `tests/unit/docs/test_public_docs_status.py` now executes the UNINSTALL
+  source API-token restore snippets against an empty copied `.env` entry, and
+  the shared source-checkout restore assertion requires the default-token
+  branch for uninstall metadata refreshes.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_restore_accepts_default_api_token tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+```
+
+Red-phase result after updating the focused regression: failed as expected with
+`3 failed`; the standalone `docs/UNINSTALL.md` restore block still aborted with
+`AWF_API_TOKEN: restore the AWF_API_TOKEN...`, and the shared assertions found
+the missing default-token branch in UNINSTALL and Quickstart uninstall snippets.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_restore_accepts_default_api_token tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+git diff --check
+```
+
+Final focused repair result: `3 passed in 0.80s`; `ruff check` passed;
+`ruff format --check` reported `1 file already formatted`; `git diff --check`
+reported no whitespace errors.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
 ## Gaps
 
 None.

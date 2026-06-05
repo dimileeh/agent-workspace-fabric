@@ -272,6 +272,8 @@ for env_file in .env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN
@@ -414,6 +416,8 @@ for env_file in .env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before refreshing source-checkout metadata}"
   export AWF_API_TOKEN

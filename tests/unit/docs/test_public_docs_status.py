@@ -933,6 +933,64 @@ def test_upgrade_source_checkout_restore_accepts_default_api_token(tmp_path: Pat
         assert result.stdout == "local-dev-token\n", label
 
 
+def test_uninstall_source_checkout_restore_accepts_default_api_token(
+    tmp_path: Path,
+) -> None:
+    """Assert source uninstall snippets keep the local default token."""
+    uninstall_text = (REPO_ROOT / "docs" / "UNINSTALL.md").read_text(encoding="utf-8")
+    cases = (
+        (
+            "Intro source-checkout uninstall",
+            uninstall_text.split("## uv tool", maxsplit=1)[0],
+        ),
+        (
+            "Global source-checkout uninstall",
+            _markdown_section(uninstall_text, "## Source Checkout With Global Tool Install"),
+        ),
+        (
+            "No-global source-checkout uninstall",
+            _markdown_section(uninstall_text, "## Source Checkout With No Global Install"),
+        ),
+    )
+
+    for label, section in cases:
+        bash_fences = [
+            fence
+            for fence in _markdown_fences("docs/UNINSTALL.md", section)
+            if fence.language == "bash" and 'AWF_PERSISTED_API_TOKEN=""' in fence.body
+        ]
+        assert len(bash_fences) == 1, label
+        token_restore_start = bash_fences[0].body.index('AWF_PERSISTED_API_TOKEN=""')
+        token_restore_script = (
+            bash_fences[0]
+            .body[token_restore_start:]
+            .split(
+                'AWF_PERSISTED_POSTGRES_PASSWORD=""',
+                maxsplit=1,
+            )[0]
+        )
+        env_file = tmp_path / ".env"
+        env_file.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
+        script = "\n".join(
+            (
+                "unset AWF_API_TOKEN",
+                token_restore_script,
+                'printf "%s\\n" "$AWF_API_TOKEN"',
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == "local-dev-token\n", label
+
+
 def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
     """Assert lowercase fi in unrelated text is not treated as a shell keyword."""
     upgrade_line = "pipx upgrade agent-workspace-fabric"
@@ -2285,7 +2343,11 @@ def _assert_source_checkout_api_token_restore(
     lifecycle: str,
 ) -> tuple[int, int]:
     """Assert source-checkout snippets export persisted API tokens before use."""
-    allow_default_api_token = lifecycle in {"upgrading", "rollback"}
+    allow_default_api_token = lifecycle in {
+        "upgrading",
+        "rollback",
+        "refreshing source-checkout metadata",
+    }
     unsafe_default_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     unsafe_shared_guard_line = (
         "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"

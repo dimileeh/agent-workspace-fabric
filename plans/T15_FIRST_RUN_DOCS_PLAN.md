@@ -581,3 +581,21 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 Pass criteria: the focused commands pass. Full repository tests, full coverage,
 OpenAPI drift checks, console builds, push, and PR lifecycle are intentionally
 left to AWF/GitHub after agent completion.
+
+Post-review adjustment for PR thread `PRRT_kwDOSJAM6s6HWWni`:
+source-checkout uninstall snippets in `docs/UNINSTALL.md`, plus the matching
+Quickstart inline uninstall snippets covered by the same focused docs
+assertions, must allow the documented first-run default token path. When the
+source checkout env files contain an empty `AWF_API_TOKEN=` entry and the shell
+has no `AWF_API_TOKEN`, the uninstall metadata-refresh snippets should export
+`local-dev-token` instead of aborting before stopping Core or refreshing
+`source_checkout` metadata. Preserve the stricter `AWF_POSTGRES_PASSWORD`
+restore behavior.
+
+Focused repair commands for PR thread `PRRT_kwDOSJAM6s6HWWni`:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_restore_accepts_default_api_token tests/unit/docs/test_public_docs_status.py::test_uninstall_source_checkout_refresh_requires_core_stop_guidance tests/unit/docs/test_public_docs_status.py::test_quickstart_clears_source_checkout_metadata_before_checkout_deletion -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
