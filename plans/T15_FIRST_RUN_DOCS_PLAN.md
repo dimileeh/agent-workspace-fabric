@@ -1168,3 +1168,52 @@ uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lif
 git diff --check
 # No whitespace errors.
 ```
+
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6Hbc2N`
+
+Problem statement and scope:
+source-checkout rollback snippets in `docs/UPGRADE.md` currently restore
+`AWF_API_TOKEN` and `AWF_POSTGRES_PASSWORD`, but they do not restore a persisted
+`AWF_DATABASE_URL` or clear an ambient shell value before `awf setup` / `awf
+start --source-checkout "$PWD"`. Because AWF overlays shell environment values
+over checkout env files, a stale `AWF_DATABASE_URL` from another checkout can
+send rollback at the wrong database. Keep the repair scoped to the two
+source-checkout rollback snippets, the focused docs regressions, and these T15
+plan artifacts.
+
+Requirements checklist:
+
+- Restore a persisted checkout `AWF_DATABASE_URL` during source-checkout
+  rollback when `.env` or `docker/compose/.env` contains one.
+- When no persisted checkout `AWF_DATABASE_URL` exists, explicitly unset any
+  ambient shell value so runtime derivation can use the restored
+  `AWF_POSTGRES_HOST_PORT`.
+- Preserve root `.env` before legacy `docker/compose/.env` precedence and keep
+  setup/start ordering unchanged for both global-tool and no-global rollback
+  lanes.
+- Do not run full AWF/GitHub-owned validation, full coverage, full frontend
+  builds, or push/rebase/branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Extend focused source-checkout lifecycle regressions to cover rollback with
+   both a persisted database URL and a stale shell database URL.
+2. Tighten the rollback guide assertions to require the existing
+   `AWF_POSTGRES_HOST_PORT` plus `AWF_DATABASE_URL` restore/unset block.
+3. Update both `docs/UPGRADE.md` source-checkout rollback snippets to mirror
+   the source-upgrade database URL restore/unset handling.
+4. Run the targeted docs tests and `git diff --check`; leave broad validation
+   to AWF/GitHub after agent completion.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py::test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py::test_source_checkout_upgrade_without_persisted_database_url_drops_stale_shell_url -q
+# Red phase fails before the docs update; final result passes.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_guides_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_guides_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+# Focused rollback structure checks pass.
+
+git diff --check
+# No whitespace errors.
+```

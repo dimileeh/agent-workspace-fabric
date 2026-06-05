@@ -3432,3 +3432,50 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 git diff --check
 # no output
 ```
+
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6Hbc2N`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: `docs/UPGRADE.md` global-tool source-checkout rollback now restores
+  persisted `AWF_POSTGRES_HOST_PORT` and `AWF_DATABASE_URL` before the Compose
+  stop and `awf setup` / `awf start --source-checkout "$PWD"` sequence.
+- Complete: `docs/UPGRADE.md` no-global source-checkout rollback now applies
+  the same restore behavior before the `uv run ... awf setup/start` sequence.
+- Complete: Both rollback snippets unset `AWF_DATABASE_URL` when no checkout
+  env file persists one, preventing a stale shell database URL from overriding
+  runtime derivation from the restored host port.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/UPGRADE.md`
+- `tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py`
+- `tests/unit/docs/test_public_docs_guides_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py::test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over_stale_shell tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py::test_source_checkout_upgrade_without_persisted_database_url_drops_stale_shell_url tests/unit/docs/test_public_docs_guides_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_guides_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+# Red phase before docs update: 4 failed; rollback preserved stale
+# AWF_DATABASE_URL and missed the host-port/database-url restore block.
+# Final result: 4 passed in 1.54s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments tests/unit/docs/test_public_docs_lifecycle_status.py::test_upgrade_env_restore_strips_quoted_inline_dotenv_comments tests/unit/docs/test_public_docs_status.py::test_copy_paste_marked_snippets_are_syntactically_valid -q
+# 3 passed in 2.20s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_source_checkout_lifecycle_status.py tests/unit/docs/test_public_docs_guides_status.py
+# 2 files already formatted
+
+git diff --check
+# no output
+```

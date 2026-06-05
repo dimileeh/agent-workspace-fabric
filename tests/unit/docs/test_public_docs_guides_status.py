@@ -623,6 +623,7 @@ def test_upgrade_no_global_source_checkout_rollback_uses_uv_run() -> None:
         "no-global source-checkout rollback",
         no_global_section,
         "rollback",
+        require_database_url_restore=True,
         require_legacy_fallback=True,
     )
     assert (
@@ -669,6 +670,7 @@ def test_upgrade_global_source_checkout_rollback_refreshes_metadata() -> None:
         "global source-checkout rollback",
         global_section,
         "rollback",
+        require_database_url_restore=True,
         require_legacy_fallback=True,
     )
     assert (

@@ -165,6 +165,11 @@ def test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over
     )
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    global_rollback_heading = "For the source checkout with global tool install lane"
+    no_global_rollback_heading = "For the source checkout with no global install lane"
+    assert global_rollback_heading in rollback_section
+    assert no_global_rollback_heading in rollback_section
     cases = (
         (
             "Quickstart Lane 2",
@@ -191,6 +196,19 @@ def test_source_checkout_upgrade_env_restore_exports_persisted_database_url_over
             "Upgrade source checkout with no global install",
             "docs/UPGRADE.md",
             _markdown_section(upgrade_text, "## Source Checkout With No Global Install"),
+        ),
+        (
+            "Rollback source checkout with global tool install",
+            "docs/UPGRADE.md",
+            rollback_section.split(global_rollback_heading, maxsplit=1)[1].split(
+                no_global_rollback_heading,
+                maxsplit=1,
+            )[0],
+        ),
+        (
+            "Rollback source checkout with no global install",
+            "docs/UPGRADE.md",
+            rollback_section.split(no_global_rollback_heading, maxsplit=1)[1],
         ),
     )
     stale_env = {
@@ -263,6 +281,11 @@ def test_source_checkout_upgrade_without_persisted_database_url_drops_stale_shel
     )
     quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
     upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    global_rollback_heading = "For the source checkout with global tool install lane"
+    no_global_rollback_heading = "For the source checkout with no global install lane"
+    assert global_rollback_heading in rollback_section
+    assert no_global_rollback_heading in rollback_section
     cases = (
         (
             "Quickstart Lane 2",
@@ -289,6 +312,19 @@ def test_source_checkout_upgrade_without_persisted_database_url_drops_stale_shel
             "Upgrade source checkout with no global install",
             "docs/UPGRADE.md",
             _markdown_section(upgrade_text, "## Source Checkout With No Global Install"),
+        ),
+        (
+            "Rollback source checkout with global tool install",
+            "docs/UPGRADE.md",
+            rollback_section.split(global_rollback_heading, maxsplit=1)[1].split(
+                no_global_rollback_heading,
+                maxsplit=1,
+            )[0],
+        ),
+        (
+            "Rollback source checkout with no global install",
+            "docs/UPGRADE.md",
+            rollback_section.split(no_global_rollback_heading, maxsplit=1)[1],
         ),
     )
 
