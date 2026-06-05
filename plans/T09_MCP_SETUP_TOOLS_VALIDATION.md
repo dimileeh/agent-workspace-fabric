@@ -53,6 +53,65 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: PR393 Python Coverage Shard 2 Registry Smoke
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Reproduce the CI failure with the single focused contract test before the
+  fix: Complete.
+- Keep the start-offload behavior assertion meaningful: Complete.
+- Restore the collected pytest node ID expected by the parity coverage map:
+  Complete.
+- Avoid editing unowned contract/quality-gate files: Complete.
+- Run focused tests for the restored node and failing contract assertion:
+  Complete.
+
+### Evidence
+
+Root cause:
+
+- GitHub Actions CI run `27037106444`, job `python-coverage-shards (2)`,
+  failed
+  `tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference`
+  because the implemented-parity coverage map referenced
+  `tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation`,
+  but that behavior test had been moved to
+  `tests/unit/mcp/test_setup_tools_start.py`.
+
+Files changed:
+
+- `tests/unit/mcp/test_setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_start.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation -q
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_start.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+```
+
+Latest results:
+
+- Focused contract repro before the fix: 1 failed with the same stale
+  `test_start_local_service_offloads_sync_preparation` node ID reported by CI.
+- Restored start-offload node after the fix: 1 passed.
+- Failing contract assertion after the fix: 1 passed.
+- Focused ruff on touched tests: passed.
+- Focused setup/start MCP test files: 36 passed.
+- First-party line-limit guard: 1 passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## CI Repair: PR393 Python Coverage Shard 8 Line Limit
 
 ### Requirement Status

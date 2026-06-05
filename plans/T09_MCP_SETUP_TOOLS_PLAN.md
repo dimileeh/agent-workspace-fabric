@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: Registry Smoke Stale Start-Test Reference
+
+### Problem Statement And Scope
+
+GitHub Actions run `27037106444`, job `python-coverage-shards (2)`, fails
+`tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference`
+because the implemented-parity coverage map still references
+`tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation`
+after the start-tool tests were split into `tests/unit/mcp/test_setup_tools_start.py`.
+
+`tests/unit/contracts/test_registry_smoke.py` is a contract/quality-gate file
+outside this repair agent's declared owned paths, so this repair keeps the
+contract map unchanged and restores a real collected regression node at the
+referenced owned MCP test path.
+
+### Requirements Checklist
+
+- Reproduce the CI failure with the single focused contract test before the fix.
+- Keep the existing start-offload behavior assertion meaningful, not a hollow
+  placeholder.
+- Restore the collected pytest node ID expected by the parity coverage map.
+- Avoid editing unowned contract/quality-gate files.
+- Run focused tests for the restored node and failing contract assertion.
+
+### Implementation Steps
+
+1. Move the existing `awf_start_local_service` sync-preparation offload
+   regression back from `tests/unit/mcp/test_setup_tools_start.py` to
+   `tests/unit/mcp/test_setup_tools.py`.
+2. Keep `tests/unit/mcp/test_setup_tools_start.py` focused on the remaining
+   start-tool behavior and avoid duplicate test nodes.
+3. Run the restored node, the contract smoke assertion, and the focused
+   start/MCP test set needed to prove the move did not weaken behavior.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation -q
+uv run --python 3.12 --extra dev pytest tests/unit/contracts/test_registry_smoke.py::test_mcp_implemented_matrix_rows_have_executable_coverage_reference -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_start.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_tools.py tests/unit/mcp/test_setup_tools_start.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: PR393 Python Coverage Shard 8 Line Limit
 
 ### Problem Statement And Scope

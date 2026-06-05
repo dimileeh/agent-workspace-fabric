@@ -31,6 +31,7 @@ from awf.host_setup.source_assets import (
 )
 from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
+from awf.service.bootstrap import ServiceBootstrapResult
 from tests.unit.mcp.setup_tools_test_helpers import _json_text, _payload, _settings
 
 SETUP_TOOL_NAMES = {
@@ -153,6 +154,64 @@ async def test_setup_status_init_and_client_tools_offload_blocking_work(
         "initialize_project_profile",
         "client_integration_instructions",
     }
+    assert all(thread_id != event_loop_thread_id for thread_id in helper_thread_ids.values())
+
+
+@pytest.mark.unit
+async def test_start_local_service_offloads_sync_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    event_loop_thread_id = threading.get_ident()
+    helper_thread_ids: dict[str, int] = {}
+    verified = object()
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(
+            api_base_url="http://localhost:8000",
+            console_url="http://localhost:3000",
+        ),
+        compose_file=tmp_path / "compose.yml",
+        compose_env_file=tmp_path / ".env",
+        asset_root=tmp_path,
+        service_env={"AWF_API_HOST_PORT": "8000"},
+        env_migration=None,
+    )
+
+    def fake_resolve_start_source_checkout(source_checkout: Path | None) -> object:
+        assert source_checkout == tmp_path
+        helper_thread_ids["source_checkout"] = threading.get_ident()
+        return verified
+
+    def fake_resolve_start_bootstrap_inputs(item: object) -> SimpleNamespace:
+        assert item is verified
+        helper_thread_ids["bootstrap_inputs"] = threading.get_ident()
+        return inputs
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(
+        setup_tools,
+        "_resolve_start_source_checkout",
+        fake_resolve_start_source_checkout,
+    )
+    monkeypatch.setattr(
+        setup_tools,
+        "_resolve_start_bootstrap_inputs",
+        fake_resolve_start_bootstrap_inputs,
+    )
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_start_local_service",
+        {"source_checkout": str(tmp_path)},
+    )
+
+    assert result.isError is False
+    assert set(helper_thread_ids) == {"source_checkout", "bootstrap_inputs"}
     assert all(thread_id != event_loop_thread_id for thread_id in helper_thread_ids.values())
 
 
