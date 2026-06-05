@@ -37,6 +37,72 @@ class _RecordingProvisioner:
         self.calls.append(workspace_id)
 
 
+class _EpochCapturingProvisioner:
+    """Records the epoch passed and the worker's in-memory epoch at call time."""
+
+    def __init__(self, worker_box: dict[str, ControlWorker]) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+        self.epoch_in_map_at_call: int | None = None
+        self._worker_box = worker_box
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        worker = self._worker_box["worker"]
+        self.epoch_in_map_at_call = worker._execution_claim_epochs.get(workspace_id)  # noqa: SLF001
+        self.calls.append((workspace_id, execution_claim_epoch))
+
+
+class _RaisingProvisioner:
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        raise RuntimeError("provision failed")
+
+
+class _FenceThenBlockProvisioner:
+    """Advances the epoch (a later claimant) then blocks until cancelled."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+        self.cancelled = False
+        self.started = asyncio.Event()
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.execution_claim_epoch = ws.execution_claim_epoch + 1
+            ws.execution_claimed_by = "control-worker-newer"
+            await session.commit()
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+class _BlockUntilCancelledProvisioner:
+    """Signals once provisioning starts, then blocks until cancelled."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
 class _UnusedExecutor:
     async def execute(self, *_args: object, **_kwargs: object) -> None:
         raise AssertionError("saturated worker must not dispatch execution")
