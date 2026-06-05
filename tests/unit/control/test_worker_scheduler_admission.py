@@ -44,7 +44,9 @@ class _RecordingProvisioner:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def provision_claimed(self, workspace_id: str) -> None:
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
         self.calls.append(workspace_id)
 
 
@@ -449,6 +451,118 @@ async def test_live_named_provisioning_claim_is_hidden_from_sibling_stale_scan(
     )
 
     assert [candidate.workspace_id for candidate in candidates] == []
+
+
+class _EpochCapturingProvisioner:
+    """Records the epoch passed and the worker's in-memory epoch at call time."""
+
+    def __init__(self, worker_box: dict[str, ControlWorker]) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+        self.epoch_in_map_at_call: int | None = None
+        self._worker_box = worker_box
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        worker = self._worker_box["worker"]
+        self.epoch_in_map_at_call = worker._execution_claim_epochs.get(workspace_id)  # noqa: SLF001
+        self.calls.append((workspace_id, execution_claim_epoch))
+
+
+@pytest.mark.unit
+async def test_safely_provision_claimed_aborts_when_epoch_is_none(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A workspace not claimed by this worker -> read returns None -> abort, no
+    # provision, no stored epoch.
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    provisioner = _RecordingProvisioner()
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_provisions=1, max_concurrent_executions=1),
+    )
+
+    await worker._safely_provision_claimed(workspace_id)  # noqa: SLF001
+
+    assert provisioner.calls == []
+    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_safely_provision_claimed_stores_passes_and_clears_epoch(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    worker_box: dict[str, ControlWorker] = {}
+    provisioner = _EpochCapturingProvisioner(worker_box)
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(max_concurrent_provisions=1, max_concurrent_executions=1),
+    )
+    worker_box["worker"] = worker
+
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+    expected_epoch = await _workspace_execution_epoch(session_factory, workspace_id)
+    assert expected_epoch == 1
+
+    await worker._safely_provision_claimed(workspace_id)  # noqa: SLF001
+
+    # The epoch read back at provision start is stored and threaded to the
+    # provisioner, then cleared in the finally.
+    assert provisioner.calls == [(workspace_id, 1)]
+    assert provisioner.epoch_in_map_at_call == 1
+    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
+
+    # The claim was released on the stored epoch.
+    claimed_by, _ = await _workspace_execution_claim(session_factory, workspace_id)
+    assert claimed_by is None
+
+
+@pytest.mark.unit
+async def test_refresh_execution_claim_loop_cancels_provision_on_fence(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=_RecordingProvisioner(),  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            execution_claim_lease_seconds=3.0,
+        ),
+    )
+
+    async def _fenced_refresh(_workspace_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(worker, "_refresh_execution_claim", _fenced_refresh)
+    cancelled = asyncio.Event()
+
+    await worker._refresh_execution_claim_loop(  # noqa: SLF001
+        workspace_id,
+        on_claim_lost=cancelled.set,
+    )
+
+    assert cancelled.is_set()
 
 
 @pytest.mark.unit

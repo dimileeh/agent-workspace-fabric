@@ -119,6 +119,13 @@ host ports.
 _ORPHAN_STOP_TIMEOUT_SECONDS: Final = 30.0
 """Maximum time to spend stopping orphan containers after launch races cleanup."""
 
+_EXECUTION_CLAIM_FENCED_REASON_CODE: Final = "EXECUTION_CLAIM_FENCED"
+"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch (D5).
+
+Kept as a node-local literal so ``awf.node`` does not import ``awf.control``; the
+string is the end-to-end contract shared with the worker's
+``EXECUTION_CLAIM_FENCED`` constant."""
+
 _log = get_logger(__name__)
 
 
@@ -205,8 +212,16 @@ class Provisioner:
 
         await self._provision_claimed_workspace(workspace_id, ws)
 
-    async def provision_claimed(self, workspace_id: str) -> None:
-        """Drive a workspace already claimed into ``provisioning`` by the worker."""
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        """Drive a workspace already claimed into ``provisioning`` by the worker.
+
+        ``execution_claim_epoch`` (when supplied) fences this provision against
+        a later claimant: it is verified just before the stack launch and gates
+        the terminal ``provisioning -> ready`` / ``-> failed`` transitions so a
+        stale worker can never force or steal the row (D4/D7).
+        """
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
@@ -224,13 +239,21 @@ class Provisioner:
                 await session.commit()
                 return
 
-        await self._provision_claimed_workspace(workspace_id, ws)
+        await self._provision_claimed_workspace(
+            workspace_id, ws, execution_claim_epoch=execution_claim_epoch
+        )
 
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the node-local worktree path AWF manages for ``workspace_id``."""
         return self._git.get_worktree_path(workspace_id)
 
-    async def _provision_claimed_workspace(self, workspace_id: str, ws: Workspace) -> None:
+    async def _provision_claimed_workspace(
+        self,
+        workspace_id: str,
+        ws: Workspace,
+        *,
+        execution_claim_epoch: int | None = None,
+    ) -> None:
         """Execute the full provisioning pipeline for an already-claimed workspace."""
         if not await self._recheck_status(
             workspace_id,
@@ -321,6 +344,7 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message=str(exc)[:2000],
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
                     )
                     return
@@ -335,6 +359,7 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message="companion host-port check failed; compose not started",
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
                     )
                     return
@@ -383,6 +408,7 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message=str(exc)[:2000],
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
                     )
                     return
@@ -397,6 +423,7 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message="auto-resolved profile host-port check failed; compose not started",
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
                     )
                     return
@@ -442,6 +469,7 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message="pre-launch commit failed; compose_project_name not persisted",
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="PRE_LAUNCH_COMMIT_FATAL",
                     )
                     return
@@ -459,8 +487,30 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message="recheck-before-launch failed; compose not started",
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
                         clear_unlaunched_compose_project=True,
+                    )
+                    return
+
+                # D4: final epoch check on the event loop, immediately before
+                # the stack launch. A later claimant advances the epoch, so a
+                # fenced worker aborts here WITHOUT transitioning the row —
+                # never touching the new claimant's git worktree / compose /
+                # auth state. The residual ms-scale gap to the rmtree inside
+                # the launcher's to_thread is backstopped by the heartbeat
+                # cancel and the terminal-transition CAS (D7).
+                if (
+                    execution_claim_epoch is not None
+                    and not await self._verify_execution_claim_epoch(
+                        workspace_id, execution_claim_epoch
+                    )
+                ):
+                    _log.warning(
+                        "provisioner.execution_claim_fenced",
+                        workspace_id=workspace_id,
+                        phase="pre_launch",
+                        reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
                     )
                     return
 
@@ -492,6 +542,7 @@ class Provisioner:
                 failure_reason=FailureReason.infrastructure_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
             )
             raise
         except ProfileResolutionError as exc:
@@ -505,6 +556,7 @@ class Provisioner:
                 failure_reason=FailureReason.profile_resolution_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
             )
             raise
@@ -521,6 +573,7 @@ class Provisioner:
                 failure_reason=FailureReason.policy_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
                 clear_unlaunched_compose_project=not stack_launch_started,
             )
@@ -538,6 +591,7 @@ class Provisioner:
                     failure_reason=FailureReason.infrastructure_failure,
                     message=str(exc)[:2000],
                     from_status=WorkspaceStatus.provisioning,
+                    execution_claim_epoch=execution_claim_epoch,
                     reason_code=exc.reason_code,
                     clear_unlaunched_compose_project=True,
                 )
@@ -583,6 +637,7 @@ class Provisioner:
                     failure_reason=FailureReason.infrastructure_failure,
                     message="compose-fail backstop commit failed; compose_project_name not persisted",
                     from_status=WorkspaceStatus.provisioning,
+                    execution_claim_epoch=execution_claim_epoch,
                     reason_code="COMPOSE_FAIL_COMMIT_FATAL",
                     compose_launched=True,
                 )
@@ -647,6 +702,7 @@ class Provisioner:
                     failure_reason=FailureReason.service_startup_failure,
                     message=str(exc)[:2000],
                     from_status=WorkspaceStatus.provisioning,
+                    execution_claim_epoch=execution_claim_epoch,
                     event_payload=diagnostics,
                     compose_launched=True,
                 )
@@ -667,6 +723,7 @@ class Provisioner:
                 failure_reason=FailureReason.infrastructure_failure,
                 message=f"unexpected provisioning failure: {exc}"[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
                 compose_launched=stack_launch_started,
                 clear_unlaunched_compose_project=not stack_launch_started,
             )
@@ -739,11 +796,34 @@ class Provisioner:
                 profile=profile,
             )
 
-            await repo.transition(
-                persisted,
-                to=WorkspaceStatus.ready,
-                reason_code="PROVISIONING_COMPLETE",
-            )
+            if execution_claim_epoch is not None:
+                # D7: epoch-CAS the terminal transition. A fenced worker updates
+                # 0 rows -> it knows it lost the claim and must not force the new
+                # claimant's row to ready. The metadata set on ``persisted``
+                # above is autoflushed before this re-SELECT and repopulated
+                # onto the same identity object, so the happy path keeps it; a
+                # fenced CAS leaves the session uncommitted and rolls it back.
+                transitioned = await repo.transition_if_current(
+                    workspace_id,
+                    from_status=WorkspaceStatus.provisioning,
+                    to=WorkspaceStatus.ready,
+                    reason_code="PROVISIONING_COMPLETE",
+                    extra_conditions=(Workspace.execution_claim_epoch == execution_claim_epoch,),
+                )
+                if transitioned is None:
+                    _log.warning(
+                        "provisioner.execution_claim_fenced",
+                        workspace_id=workspace_id,
+                        phase="ready_transition",
+                        reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
+                    )
+                    return
+            else:
+                await repo.transition(
+                    persisted,
+                    to=WorkspaceStatus.ready,
+                    reason_code="PROVISIONING_COMPLETE",
+                )
             await session.commit()
 
         _log.info(
@@ -908,6 +988,7 @@ class Provisioner:
         event_payload: dict[str, Any] | None = None,
         compose_launched: bool = False,
         clear_unlaunched_compose_project: bool = False,
+        execution_claim_epoch: int | None = None,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -991,16 +1072,60 @@ class Provisioner:
                         reason_code=final_reason_code,
                         payload={"workspace_id": workspace_id},
                     )
-                await repo.transition(
-                    ws,
-                    to=WorkspaceStatus.failed,
-                    reason_code=final_reason_code,
-                    payload=event_payload,
-                )
+                if execution_claim_epoch is not None:
+                    # D7: epoch-CAS the terminal failure transition so a fenced
+                    # worker cannot force the new claimant's row to ``failed``.
+                    # The failure metadata set on ``ws`` above is autoflushed
+                    # before the re-SELECT and repopulated; a fenced CAS leaves
+                    # the session uncommitted and rolls it back.
+                    transitioned = await repo.transition_if_current(
+                        workspace_id,
+                        from_status=from_status,
+                        to=WorkspaceStatus.failed,
+                        reason_code=final_reason_code,
+                        payload=event_payload,
+                        extra_conditions=(
+                            Workspace.execution_claim_epoch == execution_claim_epoch,
+                        ),
+                    )
+                    if transitioned is None:
+                        _log.warning(
+                            "provisioner.execution_claim_fenced",
+                            workspace_id=workspace_id,
+                            phase="failed_transition",
+                            reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
+                        )
+                        return
+                else:
+                    await repo.transition(
+                        ws,
+                        to=WorkspaceStatus.failed,
+                        reason_code=final_reason_code,
+                        payload=event_payload,
+                    )
 
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
+
+    async def _verify_execution_claim_epoch(
+        self, workspace_id: str, execution_claim_epoch: int
+    ) -> bool:
+        """Return ``True`` only if the row is still ``provisioning`` at the expected epoch.
+
+        Returns ``False`` when the workspace is gone, has left ``provisioning``,
+        or a later claimant has advanced ``execution_claim_epoch`` past the
+        value this provisioner was dispatched with — i.e. this worker has been
+        fenced (D4). No row lock and no ``run_coroutine_threadsafe`` bridge: a
+        single cheap indexed point-read on the event loop before ``launch()``.
+        """
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            if ws is None:
+                return False
+            if ws.status != WorkspaceStatus.provisioning.value:
+                return False
+            return ws.execution_claim_epoch == execution_claim_epoch
 
     async def _record_egress_audit_if_current(
         self,

@@ -36,6 +36,7 @@ class ProvisionerProtocol(Protocol):
     async def provision_claimed(  # pragma: no cover - Protocol method declaration only.
         self: Any,
         workspace_id: str,
+        execution_claim_epoch: int | None = None,
     ) -> None: ...
 
     def get_worktree_path(  # pragma: no cover - Protocol method declaration only.

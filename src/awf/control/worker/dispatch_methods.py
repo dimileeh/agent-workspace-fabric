@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from functools import partial
 from typing import Any, cast
 
-from awf.control.worker.constants import _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL
+from awf.control.worker.constants import (
+    _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL,
+    EXECUTION_CLAIM_FENCED,
+)
 from awf.control.worker.logging import _log
 from awf.control.worker.types import _ExecutionTaskKind
 from awf.db.enums import (
@@ -216,12 +220,42 @@ def _update_execution_slot_saturation(self: Any, *, dispatched: int) -> None:
 
 
 async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
+    # D2: read our fencing epoch back at provision start. ``None`` means a newer
+    # claimant already superseded us (or the row is gone), so abort before any
+    # work — never touch the new claimant's row.
+    epoch = await self._read_execution_claim_epoch(workspace_id)
+    if epoch is None:
+        _log.warning(
+            "worker.execution_claim_fenced",
+            workspace_id=workspace_id,
+            worker_id=self._worker_id,
+            phase="provision_start",
+            reason_code=EXECUTION_CLAIM_FENCED,
+        )
+        return
+    self._execution_claim_epochs[workspace_id] = epoch
+    provision_task = asyncio.create_task(
+        self._provisioner.provision_claimed(workspace_id, execution_claim_epoch=epoch),
+        name=f"awf-provision-{workspace_id}",
+    )
+    # D4: the heartbeat CAS is epoch-gated; if a later claimant fences us it
+    # returns False and cancels the in-flight provision before any rmtree.
     heartbeat = asyncio.create_task(
-        self._refresh_execution_claim_loop(workspace_id),
+        self._refresh_execution_claim_loop(workspace_id, on_claim_lost=provision_task.cancel),
         name=f"awf-provisioning-claim-{workspace_id}",
     )
     try:
-        await self._provisioner.provision_claimed(workspace_id)
+        await provision_task
+    except asyncio.CancelledError:
+        # Heartbeat-cancel fired: we were fenced mid-provision. The provisioner
+        # leaves the row untouched (D7 CAS), so just abort this attempt.
+        _log.warning(
+            "worker.execution_claim_fenced",
+            workspace_id=workspace_id,
+            worker_id=self._worker_id,
+            phase="provision_cancelled",
+            reason_code=EXECUTION_CLAIM_FENCED,
+        )
     except Exception:
         # Provisioner.provision_claimed() already logged + transitioned to failed;
         # we swallow here so one bad workspace doesn't abort the batch.
@@ -230,7 +264,10 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
+        # Release CAS on the stored epoch so a release issued after a newer
+        # claimant reclaimed the row cannot clobber it (D6).
         await self._release_execution_claim(workspace_id)
+        self._execution_claim_epochs.pop(workspace_id, None)
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:
@@ -341,7 +378,12 @@ async def _refresh_monitoring_pr_claim_loop(self: Any, workspace_id: str) -> Non
             return
 
 
-async def _refresh_execution_claim_loop(self: Any, workspace_id: str) -> None:
+async def _refresh_execution_claim_loop(
+    self: Any,
+    workspace_id: str,
+    *,
+    on_claim_lost: Callable[[], object] | None = None,
+) -> None:
     interval = max(1.0, min(60.0, self._config.execution_claim_lease_seconds / 3))
     while True:
         await asyncio.sleep(interval)
@@ -360,4 +402,9 @@ async def _refresh_execution_claim_loop(self: Any, workspace_id: str) -> None:
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
+            # D4: on the provisioning path this cancels the in-flight provision
+            # task so a fenced worker stops before any destructive filesystem op.
+            # The executor path passes no callback, preserving its behavior.
+            if on_claim_lost is not None:
+                on_claim_lost()
             return

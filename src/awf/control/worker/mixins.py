@@ -27,6 +27,7 @@ class WorkerDelegatesMixin:
         _claims._finish_monitor_recovery_operation_after_cancellation
     )
     _refresh_monitoring_pr_claim = _claims._refresh_monitoring_pr_claim
+    _read_execution_claim_epoch = _claims._read_execution_claim_epoch
     _refresh_execution_claim = _claims._refresh_execution_claim
     _release_execution_claim = _claims._release_execution_claim
     _release_monitoring_pr_claim = _claims._release_monitoring_pr_claim

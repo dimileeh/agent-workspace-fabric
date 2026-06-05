@@ -574,7 +574,9 @@ class _TransitioningProvisioner:
     async def provision(self, workspace_id: str) -> None:
         await self.provision_claimed(workspace_id)
 
-    async def provision_claimed(self, workspace_id: str) -> None:
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
         self.calls.append(workspace_id)
         async with self._session_factory() as s:
             repo = WorkspaceRepository(s)
@@ -1328,7 +1330,9 @@ async def test_safe_worker_paths_swallow_runtime_failures(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     class RaisingProvisioner:
-        async def provision_claimed(self, workspace_id: str) -> None:
+        async def provision_claimed(
+            self, workspace_id: str, execution_claim_epoch: int | None = None
+        ) -> None:
             assert workspace_id == "ws_provision"
             raise RuntimeError("provision failed")
 

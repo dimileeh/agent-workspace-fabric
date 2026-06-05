@@ -719,6 +719,20 @@ async def _refresh_monitoring_pr_claim(self: Any, workspace_id: str) -> bool:
     )
 
 
+async def _read_execution_claim_epoch(self: Any, workspace_id: str) -> int | None:
+    """Read this worker's current execution-claim epoch (D2).
+
+    Returns ``None`` when the claim is no longer held by this worker (a newer
+    claimant reclaimed it, or the row is gone), in which case the caller aborts
+    the provision before doing any work.
+    """
+    async with self._session_factory() as session:
+        return await WorkspaceRepository(session).read_execution_claim_epoch(
+            workspace_id,
+            owner_id=self._worker_id,
+        )
+
+
 async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
     async def _operation(session: AsyncSession) -> bool:
         lease_expires_at = self._execution_claim_expires_at()
@@ -726,6 +740,7 @@ async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
             workspace_id,
             owner_id=self._worker_id,
             lease_expires_at=lease_expires_at,
+            execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),
         )
 
     return await run_db_operation_with_retry(
@@ -743,6 +758,7 @@ async def _release_execution_claim(self: Any, workspace_id: str) -> None:
             released = await WorkspaceRepository(session).release_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
+                execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),
             )
             if released:
                 await session.commit()
