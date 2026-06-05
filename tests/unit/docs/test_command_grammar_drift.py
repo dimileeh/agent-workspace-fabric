@@ -60,7 +60,6 @@ FENCE_RE = re.compile(r"^ {0,3}```")
 VALUE_FLAGS = frozenset({"--project", "--format"})
 # Help flags are always allowed after `awf init` even though they carry no path.
 HELP_FLAGS = frozenset({"--help", "-h"})
-PATHLIKE_PREFIXES = ("/", "./", "../", "~", "$", "<")
 
 # Prose/snippet shapes that (re)introduce no-path `awf init` as machine setup.
 # Keyed on `awf init` so the legitimate `awf service bootstrap` command is never
@@ -118,7 +117,11 @@ def _split_tail(tail: str) -> list[str]:
 
 
 def _looks_pathlike(token: str) -> bool:
-    return token == "." or token.startswith(PATHLIKE_PREFIXES) or "/" in token
+    # In these command lines any positional argument (a non-flag token, i.e. one
+    # that does not start with "-" and is not a preceding flag's value) is a path
+    # or repository. Treat every such token as path-like so bare names without a
+    # slash or recognised prefix (e.g. ``my-project``) are still flagged.
+    return not token.startswith("-")
 
 
 def _init_arg_status(line: str) -> str | None:
