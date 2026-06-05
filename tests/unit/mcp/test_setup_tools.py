@@ -107,6 +107,46 @@ async def test_client_integration_instructions_are_secret_free(
 
 
 @pytest.mark.unit
+async def test_client_integration_instructions_source_checkout_failure_preserves_explicit_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    checkout.mkdir()
+
+    def fail_env_file(source_path: Path | None, _require_existing: bool) -> Path:
+        assert source_path == checkout
+        raise SourceCheckoutError(
+            reason_code=SOURCE_CHECKOUT_INVALID,
+            message="AWF source checkout is missing required assets.",
+            root=checkout,
+            missing_markers=("pyproject.toml",),
+        )
+
+    monkeypatch.setattr(setup_tools, "_resolve_client_env_file", fail_env_file)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude", "codex"], "source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+    expected_command = f"awf setup --client claude --client codex --source-checkout '{checkout}'"
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == SOURCE_CHECKOUT_INVALID
+    assert payload["command"] == expected_command
+    assert payload["next_steps"] == [
+        f"Fix the reported --source-checkout path above, then re-run {expected_command}.",
+    ]
+    assert payload["issues"][0]["details"]["root"] == str(checkout)
+    assert payload["issues"][0]["details"]["missing_markers"] == ["pyproject.toml"]
+
+
+@pytest.mark.unit
 async def test_setup_status_init_and_client_tools_offload_blocking_work(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

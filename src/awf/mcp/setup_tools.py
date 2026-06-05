@@ -562,6 +562,8 @@ def _client_integration_instructions_result(
     clients: list[str],
     source_checkout: str | None,
 ) -> CallToolResult:
+    selected: list[str] = []
+    source_path: Path | None = None
     try:
         selected = normalize_clients(clients)
         if not selected:
@@ -600,9 +602,16 @@ def _client_integration_instructions_result(
             is_error=True,
         )
     except SourceCheckoutError as exc:
+        blocked_payload = _client_source_checkout_blocked_payload(exc)
+        if source_checkout is not None and source_path is not None:
+            blocked_payload = _client_source_checkout_blocked_payload_with_explicit_command(
+                blocked_payload,
+                selected_clients=selected,
+                source_checkout=source_path,
+            )
         return _first_run_result(
             safe_result,
-            _client_source_checkout_blocked_payload(exc),
+            blocked_payload,
             is_error=True,
         )
     except (OSError, RuntimeError, ValueError) as exc:
@@ -984,6 +993,23 @@ def _client_instruction_next_steps(
         for plan in plans
         if plan.action != "no_change"
     ] or ["No client config changes are needed."]
+
+
+def _client_source_checkout_blocked_payload_with_explicit_command(
+    payload: FirstRunPayload,
+    *,
+    selected_clients: list[str],
+    source_checkout: Path,
+) -> FirstRunPayload:
+    command = _client_instruction_command(selected_clients, source_checkout=source_checkout)
+    return payload.model_copy(
+        update={
+            "command": command,
+            "next_steps": (
+                f"Fix the reported --source-checkout path above, then re-run {command}.",
+            ),
+        },
+    )
 
 
 def _client_instruction_command(clients: list[str], *, source_checkout: Path | None) -> str:
