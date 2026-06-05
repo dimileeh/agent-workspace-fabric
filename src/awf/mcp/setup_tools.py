@@ -214,6 +214,8 @@ def register_setup_tools(
         ),
     ) -> StructuredToolResult:
         """Return secret-free MCP client integration instructions."""
+        # clients=None means all currently registered MCP clients; the default
+        # grows automatically as CLIENT_DESCRIPTORS gains new entries.
         return await asyncio.to_thread(
             _client_integration_instructions_result,
             safe_result=safe_result,

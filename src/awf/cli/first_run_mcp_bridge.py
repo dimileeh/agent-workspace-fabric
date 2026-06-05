@@ -11,6 +11,8 @@ from awf.cli import init_ops as _init_ops
 from awf.cli import setup_commands as _setup_commands
 from awf.cli import start_commands as _start_commands
 
+# NOTE: These aliases expose private CLI symbols as the stable MCP import surface.
+# Keep this bridge in sync when refactoring setup/start/init command internals.
 DEFAULT_START_TIMEOUT_SECONDS = _start_commands._DEFAULT_START_TIMEOUT_SECONDS
 StartBootstrapInputs = _start_commands._StartBootstrapInputs
 build_init_project_onboarding_payload = _init_ops._init_project_onboarding_payload
