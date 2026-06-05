@@ -17,6 +17,8 @@ import pytest
 
 # Patch the module that defines the overlay/Claude helpers (see part_001 header).
 from awf.node import auth_mounts_claude as auth_mounts_mod
+from awf.node import auth_mounts_claude_reconcile as reconcile_mod
+from awf.node import auth_mounts_overlay_copy as overlay_copy_mod
 from awf.node.auth_mounts import (
     _reconcile_fallback_edits_into_upper,
 )
@@ -27,6 +29,28 @@ from .test_claude_auth_overlay_part_001 import (
 from .test_claude_auth_overlay_part_001 import (
     _seed_host_claude as _seed_host_claude,
 )
+
+
+def _recording_mknod(recorded: list[dict[str, object]]):
+    """Return a fake ``os.mknod`` recording its args and creating a placeholder.
+
+    A real overlayfs whiteout is a char device 0,0, which ``mknod`` can only create
+    with ``CAP_MKNOD``/root — unavailable in unit tests. The fake records the mode /
+    device / leaf name the production code requested and materializes a 0-byte
+    placeholder at the same ``dir_fd``-relative location so callers can assert the
+    whiteout landed in ``upper`` without real privileges.
+    """
+
+    real_open = os.open
+
+    def _fake_mknod(
+        path: object, mode: int = 0o600, device: int = 0, *, dir_fd: int | None = None
+    ) -> None:
+        recorded.append({"name": os.fspath(path), "mode": mode, "device": device})
+        fd = real_open(os.fspath(path), os.O_WRONLY | os.O_CREAT, 0o000, dir_fd=dir_fd)
+        os.close(fd)
+
+    return _fake_mknod
 
 
 @pytest.mark.unit
@@ -170,7 +194,13 @@ def test_reconcile_skips_unstattable_legacy_file(tmp_path: Path) -> None:
         directory.mkdir()
     (legacy / "dangling").symlink_to(tmp_path / "missing-target")
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     assert list(merged.iterdir()) == []
     assert list(upper.iterdir()) == []
@@ -193,7 +223,13 @@ def test_reconcile_upper_wins_ties(tmp_path: Path) -> None:
     legacy_mtime_ns = (legacy / "f").stat().st_mtime_ns
     os.utime(upper / "f", ns=(legacy_mtime_ns, legacy_mtime_ns))  # equal mtimes
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     assert (upper / "f").read_text() == "upper edit\n"
     assert not (merged / "f").exists()
@@ -229,7 +265,13 @@ def test_reconcile_compares_upper_symlink_own_mtime_not_target(tmp_path: Path) -
         follow_symlinks=False,
     )
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # The strictly-newer legacy edit wins and is forwarded through ``merged``.
     assert (merged / "f").read_text() == "legacy edit\n"
@@ -256,7 +298,13 @@ def test_reconcile_per_file_copy_error_is_skipped(
     # write failure must be swallowed so reconciliation never blocks provisioning.
     monkeypatch.setattr(auth_mounts_mod.shutil, "copyfileobj", _copy_fails)
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # Best-effort: the failure is swallowed and nothing is forwarded into the live
     # overlay's underlying ``upper`` (as with a partial ``copy2``, an empty leaf may be
@@ -301,7 +349,13 @@ def test_reconcile_preserves_destination_when_source_vanishes_after_stat(
 
     monkeypatch.setattr(auth_mounts_mod.os, "open", _os_open_source_vanished)
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # The source open failed and was swallowed best-effort; the destination keeps its
     # original content instead of being truncated to empty.
@@ -339,7 +393,13 @@ def test_reconcile_does_not_create_empty_destination_when_source_open_fails(
 
     monkeypatch.setattr(auth_mounts_mod.os, "open", _os_open_source_vanished)
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # No empty file was materialised in the overlay upper to shadow the base entry.
     assert not (merged / "f").exists()
@@ -363,7 +423,13 @@ def test_reconcile_writes_through_merged_not_directly_into_upper(tmp_path: Path)
     (legacy / "nested").mkdir()
     (legacy / "nested" / "f").write_text("fallback edit\n")
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # Forwarded through ``merged`` (including the copied-up parent dir)...
     assert (merged / "nested" / "f").read_text() == "fallback edit\n"
@@ -393,7 +459,13 @@ def test_reconcile_refuses_symlinked_destination(tmp_path: Path) -> None:
     # The agent-planted destination symlink, surviving in the live merged mount.
     (merged / "f").symlink_to(secret)
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # copy2 must NOT have followed the symlink to overwrite the out-of-tree target.
     assert secret.read_text() == "original\n"
@@ -424,7 +496,13 @@ def test_reconcile_skips_source_symlink_so_target_is_not_disclosed(tmp_path: Pat
     # an out-of-tree root-readable target, so it reads as a brand-new "fallback edit".
     (legacy / "stolen").symlink_to(secret)
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # The link target's contents must NOT be surfaced through the overlay (merged/upper).
     assert not (merged / "stolen").exists()
@@ -451,7 +529,13 @@ def test_reconcile_refuses_symlinked_parent_component(tmp_path: Path) -> None:
     # The agent planted ``nested`` as a symlink to an out-of-tree dir in the upper layer.
     (merged / "nested").symlink_to(outside)
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # The escaped directory must not receive the forwarded file.
     assert not (outside / "f").exists()
@@ -483,7 +567,13 @@ def test_reconcile_refuses_directory_destination(tmp_path: Path) -> None:
     (merged / "f").mkdir()
     (merged / "f" / "f").symlink_to(secret)
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # copy2 must NOT have written through the inner symlink to the out-of-tree target.
     assert secret.read_text() == "original\n"
@@ -507,7 +597,13 @@ def test_reconcile_skips_source_fifo_so_root_worker_cannot_block(tmp_path: Path)
         directory.mkdir()
     os.mkfifo(legacy / "pipe")
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # Nothing was read from or forwarded for the FIFO, and it is left intact.
     assert list(merged.iterdir()) == []
@@ -534,7 +630,13 @@ def test_reconcile_refuses_fifo_destination(tmp_path: Path) -> None:
     # The agent-planted destination FIFO surviving in the live merged mount.
     os.mkfifo(merged / "f")
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     # The FIFO is left intact, never opened/clobbered, and nothing reached ``upper``.
     assert stat.S_ISFIFO((merged / "f").stat().st_mode)
@@ -560,7 +662,13 @@ def test_reconcile_refuses_fifo_destination_with_a_live_reader(tmp_path: Path) -
     # Hold the read end open so the write-side open below succeeds instead of ENXIO.
     reader_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
     try:
-        _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+        _reconcile_fallback_edits_into_upper(
+            legacy=legacy,
+            merged=merged,
+            upper=upper,
+            base=base,
+            host_claude=tmp_path / "host-claude",
+        )
     finally:
         os.close(reader_fd)
 
@@ -587,7 +695,13 @@ def test_reconcile_forwards_into_a_preexisting_merged_parent_dir(tmp_path: Path)
     # The parent dir already exists in ``merged`` (e.g. copied up by an earlier file).
     (merged / "nested").mkdir()
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     assert (merged / "nested" / "f").read_text() == "fallback edit\n"
 
@@ -613,7 +727,13 @@ def test_reconcile_skips_usage_history_dirs_absent_from_base(tmp_path: Path) -> 
         (legacy / history_dir).mkdir()
         (legacy / history_dir / "big").write_text("multi-GB transcript\n")
 
-    _reconcile_fallback_edits_into_upper(legacy=legacy, merged=merged, upper=upper, base=base)
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=tmp_path / "host-claude",
+    )
 
     assert (merged / "settings.json").read_text() == "real fallback edit\n"
     for history_dir in ("projects", "todos", "shell-snapshots", "statsig"):
@@ -706,3 +826,484 @@ def test_safe_overlay_copy_refuses_symlinked_source_parent_component(
     # (nor its parent) is materialized through the escaped parent.
     assert not (merged / "nested" / "f").exists()
     assert secret.read_text() == "root-only contents\n"
+
+
+# --- #404: host-origin vs agent-origin newer legacy mtime ----------------------------
+
+
+def _mkdirs(*paths: Path) -> None:
+    for path in paths:
+        path.mkdir()
+
+
+@pytest.mark.unit
+def test_reconcile_keeps_upper_edit_over_unedited_host_changed_legacy(tmp_path: Path) -> None:
+    # #404: the host ``~/.claude`` changed *after* the agent made an overlay-era ``upper``
+    # edit, then a transient remount failure created a legacy copy *from that changed
+    # host*. The legacy copy is byte/mtime-identical to the new host (the agent never
+    # touched it) and carries a newer host mtime than the agent's older ``upper`` edit.
+    # The mtime-only rule would treat it as a fallback edit and overwrite the agent's
+    # overlay-era change. With the host-divergence guard it is recognised as an unedited
+    # host copy and the ``upper`` edit is preserved — nothing is forwarded.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    # The agent's overlay-era edit, older than the (later) host change.
+    (upper / "settings.json").write_text('{"theme": "agent-overlay-edit"}\n')
+    upper_mtime_ns = (upper / "settings.json").stat().st_mtime_ns
+    # The host changed after that edit (newer mtime) ...
+    (host / "settings.json").write_text('{"theme": "host-changed"}\n')
+    os.utime(
+        host / "settings.json",
+        ns=(upper_mtime_ns + 5_000_000, upper_mtime_ns + 5_000_000),
+    )
+    host_stat = (host / "settings.json").stat()
+    # ... and the legacy copy is a byte/mtime-identical, unedited copy of that new host.
+    (legacy / "settings.json").write_text('{"theme": "host-changed"}\n')
+    os.utime(legacy / "settings.json", ns=(host_stat.st_mtime_ns, host_stat.st_mtime_ns))
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # The agent's overlay-era edit stands; the unedited host copy was not forwarded.
+    assert (upper / "settings.json").read_text() == '{"theme": "agent-overlay-edit"}\n'
+    assert not (merged / "settings.json").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_still_forwards_agent_edited_legacy_diverging_from_host(tmp_path: Path) -> None:
+    # #404 must not regress the tested fallback re-edit forwarding: when the agent
+    # *did* edit the legacy copy during the fallback session, the legacy file diverges
+    # from the live host (different content/mtime) and is strictly newer than the
+    # ``upper`` edit, so it is forwarded over it exactly as before.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (upper / "settings.json").write_text('{"theme": "old-overlay-edit"}\n')
+    upper_mtime_ns = (upper / "settings.json").stat().st_mtime_ns
+    # The live host holds one version ...
+    (host / "settings.json").write_text('{"theme": "host"}\n')
+    os.utime(host / "settings.json", ns=(upper_mtime_ns, upper_mtime_ns))
+    # ... but the agent edited the legacy copy to something else, strictly newer.
+    (legacy / "settings.json").write_text('{"theme": "agent-fallback-edit"}\n')
+    os.utime(
+        legacy / "settings.json",
+        ns=(upper_mtime_ns + 5_000_000, upper_mtime_ns + 5_000_000),
+    )
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # The agent's strictly-newer fallback edit diverges from the host and is forwarded.
+    assert (merged / "settings.json").read_text() == '{"theme": "agent-fallback-edit"}\n'
+
+
+@pytest.mark.unit
+def test_reconcile_forwards_agent_edit_when_host_lacks_file(tmp_path: Path) -> None:
+    # When the live host does not hold the path at all, divergence cannot be disproven,
+    # so a strictly-newer legacy file is treated as an agent edit and forwarded over an
+    # existing ``upper`` regular file — fail safe toward preserving an edit, never
+    # dropping/hiding one. (Host-lacking is the common shape the existing fallback
+    # forwarding relies on.)
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (upper / "settings.json").write_text('{"theme": "old"}\n')
+    upper_mtime_ns = (upper / "settings.json").stat().st_mtime_ns
+    (legacy / "settings.json").write_text('{"theme": "agent-edit"}\n')
+    os.utime(
+        legacy / "settings.json",
+        ns=(upper_mtime_ns + 5_000_000, upper_mtime_ns + 5_000_000),
+    )
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    assert (merged / "settings.json").read_text() == '{"theme": "agent-edit"}\n'
+
+
+@pytest.mark.unit
+def test_reconcile_forwards_agent_edit_matching_host_mtime_size_but_not_bytes(
+    tmp_path: Path,
+) -> None:
+    # #404 host-divergence guard must compare *content*, not just mtime + size. The agent
+    # edited the legacy copy during the fallback session to a *same-length* credential and
+    # the edit's timestamp happens to align with the live host's mtime (e.g. ``touch -r``
+    # or a coincidental ns match on a fixed-width token rewrite). mtime + size alone read
+    # the legacy file as an "unedited host copy" and skip forwarding, reaping the agent's
+    # newer credential so it never reaches ``upper``. Byte-for-byte comparison against the
+    # live host proves the legacy file diverges, so it is correctly forwarded — symmetric
+    # with the #402 deletion pass's content check.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (upper / "settings.json").write_text('{"theme": "old-overlay-edit-X"}\n')
+    upper_mtime_ns = (upper / "settings.json").stat().st_mtime_ns
+    # The live host holds one same-length version ...
+    (host / "settings.json").write_text('{"theme": "host-credential-A"}\n')
+    os.utime(
+        host / "settings.json",
+        ns=(upper_mtime_ns + 5_000_000, upper_mtime_ns + 5_000_000),
+    )
+    host_stat = (host / "settings.json").stat()
+    # ... but the agent edited the legacy copy to a *different, same-length* credential,
+    # strictly newer than ``upper`` yet with an mtime + size identical to the live host.
+    (legacy / "settings.json").write_text('{"theme": "host-credential-B"}\n')
+    assert (legacy / "settings.json").stat().st_size == host_stat.st_size
+    os.utime(legacy / "settings.json", ns=(host_stat.st_mtime_ns, host_stat.st_mtime_ns))
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # The legacy bytes diverge from the host, so the agent's newer credential is forwarded
+    # rather than discarded as a phantom "unedited host copy".
+    assert (merged / "settings.json").read_text() == '{"theme": "host-credential-B"}\n'
+
+
+@pytest.mark.unit
+def test_safe_agent_file_equal_content_guards_agent_path(tmp_path: Path) -> None:
+    # The agent-controlled path is descended from the trusted ``agent_root`` and the leaf
+    # opened with ``O_NOFOLLOW | O_NONBLOCK`` + an ``S_ISREG`` ``fstat`` guard so a swapped
+    # symlink/FIFO can never follow out of tree or block the root worker; the trusted host
+    # arg keeps the plain read.
+    root = tmp_path / "root"
+    root.mkdir()
+    host = tmp_path / "host"
+    host.write_bytes(b"token-aaaa\n")
+    rel = Path("agent")
+    agent = root / rel
+    agent.write_bytes(b"token-aaaa\n")
+    # Byte-identical regular files compare equal.
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is True
+
+    agent.write_bytes(b"token-bbbb\n")  # same length, different bytes
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
+
+    # A reader-less FIFO swapped in for the agent leaf fails safe to ``False`` WITHOUT
+    # blocking: the ``O_RDONLY | O_NONBLOCK`` open succeeds immediately and the ``S_ISREG``
+    # ``fstat`` guard rejects it. If this regressed to a plain ``open("rb")`` the read-side
+    # open would block forever — the test itself would hang.
+    agent.unlink()
+    os.mkfifo(agent)
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
+
+    # A symlink swapped in for the agent leaf is refused by ``O_NOFOLLOW`` (``ELOOP`` ->
+    # ``False``), never followed to read the link target.
+    agent.unlink()
+    agent.symlink_to(host)
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
+
+    # An absent/unreadable *trusted* path fails safe to ``False`` (the inner ``OSError``).
+    agent.unlink()
+    agent.write_bytes(b"token-aaaa\n")
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, tmp_path / "missing") is False
+
+
+@pytest.mark.unit
+def test_safe_agent_file_equal_content_guards_swapped_parent_component(tmp_path: Path) -> None:
+    # PR #414 review (PRRT_kwDOSJAM6s6HQvpP): a full-path ``os.open(..., O_NOFOLLOW)`` only
+    # guards the *leaf*, so an agent that swaps an already-walked *parent* directory of the
+    # legacy file for a symlink before this read would have the root worker resolve through
+    # it and read a file OUTSIDE the ``.claude`` tree. If that out-of-tree file's bytes
+    # match the trusted host, the function returned a false ``True`` and the #404 caller
+    # silently dropped the genuine fallback edit. The fd-anchored component descent must
+    # reject the swapped parent (``ELOOP``) and fail safe to ``False``.
+    root = tmp_path / "root"
+    real_parent = root / "sub"
+    real_parent.mkdir(parents=True)
+    rel = Path("sub") / "agent"
+    (root / rel).write_bytes(b"agent-edit\n")  # the genuine agent fallback edit
+
+    host = tmp_path / "host"
+    host.write_bytes(b"host-bytes\n")
+    # An out-of-tree file whose bytes match the host — what the swapped parent redirects to.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "agent").write_bytes(b"host-bytes\n")
+
+    # The agent swaps the walked parent ``root/sub`` for ``sub -> outside`` after the
+    # caller's check. A leaf-only ``O_NOFOLLOW`` would follow it and read ``outside/agent``
+    # (== host) -> false ``True``; the per-component descent rejects ``sub`` as a symlink.
+    import shutil as _shutil
+
+    _shutil.rmtree(real_parent)
+    (root / "sub").symlink_to(outside)
+    assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
+
+
+@pytest.mark.unit
+def test_safe_agent_file_equal_content_closes_fds_on_partial_descent_failure(
+    tmp_path: Path,
+) -> None:
+    # PR #414 review (PRRT_kwDOSJAM6s6HQ6h7): when the agent-path descent fails *after*
+    # opening one or more directory fds (e.g. a swapped-symlink leaf several levels deep),
+    # the early ``return False`` must still close the directory fds already collected. The
+    # cleanup ``finally`` previously covered only the inner read ``try``, so a partial
+    # descent leaked every opened dir fd during #404 reconciliation. Repeatedly forcing a
+    # mid-descent failure must not grow the process fd table.
+    root = tmp_path / "root"
+    (root / "a" / "b").mkdir(parents=True)
+    rel = Path("a") / "b" / "agent"
+    # A symlink leaf: the descent opens the root, ``a`` and ``b`` directory fds, then the
+    # ``O_NOFOLLOW`` leaf open fails (``ELOOP``) -> the first ``except`` returns ``False``
+    # with three directory fds already collected in ``fds``.
+    (root / rel).symlink_to(root / "a" / "b")  # target irrelevant; never followed
+    host = tmp_path / "host"
+    host.write_bytes(b"x\n")
+
+    fd_dir = Path("/proc/self/fd")
+    before = len(list(fd_dir.iterdir()))
+    for _ in range(100):
+        assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False
+    after = len(list(fd_dir.iterdir()))
+    # Every directory fd opened during the failed descent was closed: no fd growth. Without
+    # the outer ``try``/``finally`` this leaks three fds per call (~300 over the loop).
+    assert after <= before
+
+
+@pytest.mark.unit
+def test_legacy_is_unedited_host_copy_refuses_fifo_swapped_after_caller_check(
+    tmp_path: Path,
+) -> None:
+    # TOCTOU (PR #414 review): the caller's ``is_file()`` pre-check in
+    # ``_reconcile_fallback_edits_into_upper`` is not atomic with the #404 content read
+    # here, and ``legacy_file`` lives under the agent-writable legacy copy. An agent can
+    # ``unlink`` + ``mkfifo`` it in that window; a reader-less FIFO opened with a plain
+    # ``open("rb")`` would block the root provisioning worker forever. Calling
+    # ``_legacy_is_unedited_host_copy`` directly with the captured regular-file stat but a
+    # now-FIFO path models that post-check swap: the stat-gate (mtime + size) still passes,
+    # so control reaches the content compare, which must fail safe to ``False`` (legacy not
+    # provably unedited -> eligible to forward) WITHOUT hanging. (If this regressed, the
+    # test itself would hang.)
+    host = tmp_path / "host-file"
+    host.write_bytes(b"credential\n")
+    host_stat = host.stat()
+    legacy_root = tmp_path / "legacy-root"
+    legacy_root.mkdir()
+    rel = Path("legacy-file")
+    legacy = legacy_root / rel
+    legacy.write_bytes(b"credential\n")  # same content + size as the host
+    os.utime(legacy, ns=(host_stat.st_mtime_ns, host_stat.st_mtime_ns))  # align mtime
+    legacy_stat = legacy.stat()  # the regular-file stat the caller captured pre-swap
+    legacy.unlink()
+    os.mkfifo(legacy)  # the agent swaps the checked-clean file for a reader-less FIFO
+
+    assert reconcile_mod._legacy_is_unedited_host_copy(legacy_root, rel, legacy_stat, host) is False
+    # The FIFO is left intact — never read through, never blocked on.
+    assert stat.S_ISFIFO(os.lstat(legacy).st_mode)
+
+
+# --- #414: host-origin guard also protects an ``upper`` whiteout (agent deletion) -----
+
+
+def _whiteout_stat(mtime_ns: int):
+    """A synthetic ``stat`` for an overlayfs whiteout (char device ``0,0``).
+
+    A real whiteout can only be created with ``CAP_MKNOD``/root (unavailable in unit
+    tests), so model the ``upper`` entry the #404/#414 guard inspects: a char-device
+    ``0,0`` carrying the whiteout's creation mtime. Only the fields the reconcile reads
+    on the ``upper`` entry are populated.
+    """
+
+    import types
+
+    return types.SimpleNamespace(
+        st_mode=stat.S_IFCHR,
+        st_rdev=os.makedev(0, 0),
+        st_mtime_ns=mtime_ns,
+        st_size=0,
+    )
+
+
+def _patch_upper_whiteout_stat(
+    monkeypatch: pytest.MonkeyPatch, upper_path: Path, mtime_ns: int
+) -> None:
+    """Make ``reconcile_mod._safe_stat(upper_path, follow_symlinks=False)`` read a whiteout.
+
+    Delegates every other call (the real legacy/host stats) to the genuine helper so
+    only the agent-controlled ``upper`` leaf reports as a char-device ``0,0``.
+    """
+
+    real_safe_stat = reconcile_mod._safe_stat
+
+    def _fake(path: Path, *, follow_symlinks: bool = True):
+        if not follow_symlinks and Path(path) == upper_path:
+            return _whiteout_stat(mtime_ns)
+        return real_safe_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(reconcile_mod, "_safe_stat", _fake)
+
+
+@pytest.mark.unit
+def test_reconcile_keeps_whiteout_over_unedited_host_changed_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #414: the agent deleted a file in the overlay era (whiteout char device ``0,0`` in
+    # ``upper``), then the host changed that path *after* the deletion and a transient
+    # remount created a legacy copy *from the changed host*. The legacy copy is an
+    # unedited, byte/mtime-identical copy of the live host and carries a newer mtime than
+    # the whiteout's creation mtime. The mtime-only rule plus the old ``S_ISREG``-gated
+    # #404 guard would skip the whiteout and forward the legacy file through ``merged``,
+    # silently un-deleting what the agent removed. The host-origin guard now protects the
+    # whiteout too: an unedited host copy is recognised and the deletion is preserved.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    # The agent's overlay-era deletion whiteout, older than the (later) host change.
+    whiteout_mtime_ns = 1_000_000_000_000_000_000
+    # The host changed after that deletion (newer mtime) ...
+    (host / "settings.json").write_text('{"theme": "host-changed-after-delete"}\n')
+    os.utime(
+        host / "settings.json",
+        ns=(whiteout_mtime_ns + 5_000_000, whiteout_mtime_ns + 5_000_000),
+    )
+    host_stat = (host / "settings.json").stat()
+    # ... and the legacy copy is a byte/mtime-identical, unedited copy of that new host.
+    (legacy / "settings.json").write_text('{"theme": "host-changed-after-delete"}\n')
+    os.utime(legacy / "settings.json", ns=(host_stat.st_mtime_ns, host_stat.st_mtime_ns))
+    _patch_upper_whiteout_stat(monkeypatch, upper / "settings.json", whiteout_mtime_ns)
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # The whiteout (agent deletion) stands; the unedited host copy was not forwarded, so
+    # nothing was un-deleted through ``merged``.
+    assert not (merged / "settings.json").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_forwards_agent_recreated_legacy_over_whiteout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #414 must not over-protect: when the legacy file actually *diverges* from the live
+    # host (the agent re-created the file during the fallback session), it is a genuine
+    # fallback-era edit and is forwarded over the whiteout — correctly un-deleting it,
+    # exactly as before. Only a provably-unedited host copy is held back.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    whiteout_mtime_ns = 1_000_000_000_000_000_000
+    # The live host holds one version ...
+    (host / "settings.json").write_text('{"theme": "host"}\n')
+    os.utime(
+        host / "settings.json",
+        ns=(whiteout_mtime_ns + 5_000_000, whiteout_mtime_ns + 5_000_000),
+    )
+    # ... but the agent re-created the legacy copy to something else, strictly newer.
+    (legacy / "settings.json").write_text('{"theme": "agent-recreated"}\n')
+    os.utime(
+        legacy / "settings.json",
+        ns=(whiteout_mtime_ns + 9_000_000, whiteout_mtime_ns + 9_000_000),
+    )
+    _patch_upper_whiteout_stat(monkeypatch, upper / "settings.json", whiteout_mtime_ns)
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy, merged=merged, upper=upper, base=base, host_claude=host
+    )
+
+    # The legacy bytes diverge from the host, so the agent's fallback re-creation is
+    # forwarded over the whiteout (the deletion is un-done, as intended for a real edit).
+    assert (merged / "settings.json").read_text() == '{"theme": "agent-recreated"}\n'
+
+
+# --- #402: forward fallback-era deletions as overlayfs whiteouts ----------------------
+
+
+@pytest.mark.unit
+def test_reconcile_forwards_agent_deletion_as_whiteout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The agent deleted a Claude auth/config file present in ``base`` during the
+    # fallback session; the live host still holds it unchanged (host == base), so the
+    # legacy absence is a confident agent deletion. With CAP_MKNOD present it is
+    # forwarded as an overlayfs whiteout (char device 0,0) into ``upper`` so the
+    # deletion survives the next remount instead of the lower re-exposing it.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (base / "secret.json").write_text("token\n")
+    base_stat = (base / "secret.json").stat()
+    (host / "secret.json").write_text("token\n")  # same content -> same size
+    os.utime(host / "secret.json", ns=(base_stat.st_atime_ns, base_stat.st_mtime_ns))
+    # ``legacy`` LACKS ``secret.json`` -> the agent removed it. ``upper`` is empty.
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
+    )
+
+    assert len(recorded) == 1
+    # A char device 0,0 written at the deleted path's leaf, inside ``upper``.
+    assert recorded[0]["name"] == "secret.json"
+    assert recorded[0]["mode"] == stat.S_IFCHR
+    assert recorded[0]["device"] == os.makedev(0, 0)
+    assert (upper / "secret.json").exists()
+
+
+@pytest.mark.unit
+def test_reconcile_ambiguous_host_removed_file_is_not_whiteouted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The file is in ``base`` but absent from BOTH the legacy copy and the live host:
+    # the host may itself have removed it, so the legacy absence is host-explained, not
+    # confidently agent-attributable. Fail safe — never whiteout (the credential stays
+    # visible). This is the credential-safety guarantee: ambiguity never hides a file.
+    legacy = tmp_path / "legacy"
+    merged = tmp_path / "merged"
+    upper = tmp_path / "upper"
+    base = tmp_path / "base"
+    host = tmp_path / "host"
+    _mkdirs(legacy, merged, upper, base, host)
+    (base / "secret.json").write_text("token\n")  # host lacks it entirely
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    recorded: list[dict[str, object]] = []
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod(recorded))
+
+    # ``forward_deletions=True`` is required to reach the host-absent guard: the default
+    # (False) early-returns before it runs, making ``recorded == []`` vacuous (#414).
+    _reconcile_fallback_edits_into_upper(
+        legacy=legacy,
+        merged=merged,
+        upper=upper,
+        base=base,
+        host_claude=host,
+        forward_deletions=True,
+    )
+
+    assert recorded == []
+    assert not (upper / "secret.json").exists()
