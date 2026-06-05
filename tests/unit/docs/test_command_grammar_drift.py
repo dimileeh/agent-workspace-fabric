@@ -451,11 +451,16 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
 
 
 def _bootstrap_offenders(text: str) -> list[str]:
-    return [
-        pattern
-        for pattern in INIT_AS_BOOTSTRAP_PATTERNS
-        if re.search(pattern, text, flags=re.IGNORECASE)
-    ]
+    # Return the *matched snippet* (``match.group(0)``), not the raw regex
+    # pattern, so an R3 failure message names the offending text a developer can
+    # grep for instead of an opaque pattern string they would have to re-search
+    # by hand.
+    offenders: list[str] = []
+    for pattern in INIT_AS_BOOTSTRAP_PATTERNS:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            offenders.append(match.group(0))
+    return offenders
 
 
 # --------------------------------------------------------------------------- #
@@ -703,8 +708,18 @@ def test_helper_excludes_no_path_init_prohibition_from_inline_scan() -> None:
 
 
 def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
-    assert _bootstrap_offenders("Run `awf init` without a path to bootstrap Core.")
-    assert _bootstrap_offenders("awf init  # bootstrap the local service")
+    # Offenders are the *matched snippet*, not the raw regex pattern, so an R3
+    # failure message names the offending text (a developer can grep for it)
+    # rather than an opaque pattern. Each returned snippet must be literal text
+    # drawn from the input, never a regex source string.
+    prose = "Run `awf init` without a path to bootstrap Core."
+    prose_offenders = _bootstrap_offenders(prose)
+    assert prose_offenders
+    assert all(snippet in prose for snippet in prose_offenders)
+    fenced = "awf init  # bootstrap the local service"
+    fenced_offenders = _bootstrap_offenders(fenced)
+    assert fenced_offenders
+    assert all(snippet in fenced for snippet in fenced_offenders)
     # `awf service bootstrap` as a command must never be flagged.
     assert _bootstrap_offenders("Run `awf service bootstrap` to start Postgres.") == []
     assert _bootstrap_offenders("awf init .") == []
@@ -784,7 +799,7 @@ def test_no_path_init_is_not_described_as_service_bootstrap() -> None:
     bootstrap_command_docs = 0
     for rel_path in FIRST_RUN_DOCS:
         text = _read(rel_path)
-        offenders.extend(f"{rel_path}: {pattern}" for pattern in _bootstrap_offenders(text))
+        offenders.extend(f"{rel_path}: {snippet}" for snippet in _bootstrap_offenders(text))
         if "awf service bootstrap" in text:
             bootstrap_command_docs += 1
 
