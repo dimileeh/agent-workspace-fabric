@@ -33,6 +33,12 @@ from tests.unit.mcp.setup_tools_test_helpers import _json_text, _payload, _setti
             "then compare awf setup --dry-run output.",
         ),
         (
+            "Fix GitHub auth, then re-run awf setup --dry-run --provider github.",
+            "awf setup --client claude --source-checkout '/tmp/source'",
+            "Fix GitHub auth, then re-run awf setup --client claude "
+            "--source-checkout '/tmp/source'.",
+        ),
+        (
             "Run awf setup --client once; awf setup --client remains as an example.",
             "awf setup --client claude --source-checkout '/tmp/source'",
             "Run awf setup --client claude --source-checkout '/tmp/source' once; "

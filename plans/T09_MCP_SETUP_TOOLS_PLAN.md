@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Client Next-Step Rewrite
+
+### Problem Statement And Scope
+
+The review reports that `_client_instruction_reason_coded_next_step` rewrites
+setup commands with ordered substring replacements while the analogous start
+path uses `_START_REASON_CODED_SETUP_COMMAND_PATTERN`. A next-step template
+containing `awf setup --dry-run --provider github` can therefore leave the
+provider selector dangling after rewriting only the `awf setup --dry-run`
+prefix.
+
+Scope is limited to making the client-instruction reason-coded next-step helper
+use the shared setup-command regex and adding a focused regression for the
+provider-selector case. The setup-status ignored-argument note is already
+satisfied by the current `_value` parameter name.
+
+### Requirements Checklist
+
+- Preserve replacement of only the first setup command in a next-step string.
+- Replace full dry-run provider-selector commands instead of only the dry-run
+  prefix.
+- Keep existing client command rewrites using the shared setup-command regex.
+- Add a focused regression for the dangling-provider case.
+
+### Implementation Steps
+
+1. Add the focused failing regression row to the client-instruction next-step
+   rewrite test.
+2. Change `_client_instruction_reason_coded_next_step` to use
+   `_START_REASON_CODED_SETUP_COMMAND_PATTERN.sub(..., count=1)`.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_instruction_reason_coded_next_step_rewrites_first_command_only -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Write-Before-Payload Failure
 
 ### Problem Statement And Scope

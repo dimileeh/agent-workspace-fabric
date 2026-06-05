@@ -53,6 +53,49 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Client Next-Step Rewrite
+
+### Requirement Status
+
+- Preserve replacement of only the first setup command in a next-step string:
+  Complete.
+- Replace full dry-run provider-selector commands instead of only the dry-run
+  prefix: Complete.
+- Keep existing client command rewrites using the shared setup-command regex:
+  Complete.
+- Add a focused regression for the dangling-provider case: Complete.
+- Treat the setup-status ignored-argument note as already satisfied by the
+  current `_value` parameter name: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_instruction_reason_coded_next_step_rewrites_first_command_only -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because the rewrite
+  left `--provider github` dangling after the inserted client command.
+- Regression test after the implementation change: 4 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Probe Failure Message
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
