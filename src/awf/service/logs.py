@@ -543,12 +543,19 @@ def _service_log_secret_values(
     compose_env_file: Path | None,
 ) -> tuple[str, ...]:
     """Return exact service env values that service logs must redact."""
+    (
+        quoted_multiline_values,
+        quoted_multiline_first_line_values,
+    ) = _service_log_quoted_multiline_secret_context(compose_env_file)
     secret_values = [
         value
         for key, value in compose_env_file_values(compose_env_file).items()
-        if value and len(value) >= 4 and is_secret_env_key(key)
+        if value
+        and len(value) >= 4
+        and is_secret_env_key(key)
+        and (key, value) not in quoted_multiline_first_line_values
     ]
-    secret_values.extend(_service_log_quoted_multiline_secret_values(compose_env_file))
+    secret_values.extend(quoted_multiline_values)
     for source_environ in (os.environ, environ):
         if source_environ is None:
             continue
@@ -560,11 +567,14 @@ def _service_log_secret_values(
     return tuple(dict.fromkeys(secret_values))
 
 
-def _service_log_quoted_multiline_secret_values(compose_env_file: Path | None) -> tuple[str, ...]:
-    """Return Compose quoted multiline secret values for exact redaction."""
+def _service_log_quoted_multiline_secret_context(
+    compose_env_file: Path | None,
+) -> tuple[tuple[str, ...], frozenset[tuple[str, str]]]:
+    """Return full quoted multiline secrets and parsed first-line fragments."""
     if compose_env_file is None or not compose_env_file.exists():
-        return ()
+        return (), frozenset()
     values: list[str] = []
+    first_line_values: set[tuple[str, str]] = set()
     lines = compose_env_file.read_text(encoding="utf-8").splitlines()
     index = 0
     while index < len(lines):
@@ -575,15 +585,19 @@ def _service_log_quoted_multiline_secret_values(compose_env_file: Path | None) -
         key = match.group("key")
         quote = match.group("quote")
         raw_value = quote + match.group("value")
-        value, closed = _consume_service_log_quoted_value(raw_value, quote)
+        first_line_value, closed = _consume_service_log_quoted_value(raw_value, quote)
+        value = first_line_value
+        closed_on_first_line = closed
         while not closed and index + 1 < len(lines):
             index += 1
             raw_value = raw_value + "\n" + lines[index]
             value, closed = _consume_service_log_quoted_value(raw_value, quote)
         if closed and "\n" in value and value and len(value) >= 4 and is_secret_env_key(key):
             values.append(value)
+            if not closed_on_first_line:
+                first_line_values.add((key, first_line_value))
         index += 1
-    return tuple(values)
+    return tuple(values), frozenset(first_line_values)
 
 
 def _consume_service_log_quoted_value(raw_value: str, quote: str) -> tuple[str, bool]:

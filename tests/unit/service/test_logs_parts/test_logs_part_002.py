@@ -935,6 +935,25 @@ def test_service_log_secret_values_skips_short_secret_values(
 
 
 @pytest.mark.unit
+def test_service_log_secret_values_excludes_multiline_first_line_fragment(
+    tmp_path: Path,
+) -> None:
+    """Collect the full multiline secret without treating its first line as exact."""
+    first_line = "prefix-compose-secret"
+    secret = f"{first_line}\nsuffix-compose-secret"
+    compose_env_file = tmp_path / "compose.env"
+    compose_env_file.write_text(
+        f'ANTHROPIC_AUTH_TOKEN="{secret}"\n',
+        encoding="utf-8",
+    )
+
+    values = _service_log_secret_values({}, compose_env_file)
+
+    assert secret in values
+    assert first_line not in values
+
+
+@pytest.mark.unit
 def test_service_log_secret_values_reads_resolved_omitted_compose_env_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
