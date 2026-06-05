@@ -14,10 +14,12 @@ there, restore them in the upgrade shell before `awf start`. Restore the same
 not generate replacement service secrets during upgrade.
 
 Source checkout lanes read the checkout root `.env`, with legacy
-`docker/compose/.env` as a read fallback. If neither file contains
-`AWF_API_TOKEN` or `AWF_POSTGRES_PASSWORD`, restore the same running local Core
-value in the shell before `awf setup` or `awf start`; do not generate
-replacement service secrets during upgrade or rollback.
+`docker/compose/.env` as a read fallback. An empty `AWF_API_TOKEN=` copied from
+`.env.example` keeps the local `local-dev-token` default. If neither file
+contains `AWF_API_TOKEN`, or neither file contains a non-empty
+`AWF_POSTGRES_PASSWORD`, restore the same running local Core value in the shell
+before `awf setup` or `awf start`; do not generate replacement service secrets
+during upgrade or rollback.
 
 ## uv tool
 
@@ -100,6 +102,8 @@ for env_file in .env docker/compose/.env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env docker/compose/.env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before upgrading}"
   export AWF_API_TOKEN
@@ -155,6 +159,8 @@ for env_file in .env docker/compose/.env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env docker/compose/.env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before upgrading}"
   export AWF_API_TOKEN
@@ -231,6 +237,8 @@ for env_file in .env docker/compose/.env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env docker/compose/.env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before rollback}"
   export AWF_API_TOKEN
@@ -279,6 +287,8 @@ for env_file in .env docker/compose/.env; do
 done
 if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then
   export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"
+elif grep -q '^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=' .env docker/compose/.env 2>/dev/null; then
+  export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"
 else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env or docker/compose/.env before rollback}"
   export AWF_API_TOKEN

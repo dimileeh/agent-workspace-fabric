@@ -817,6 +817,72 @@ def test_quickstart_source_checkout_upgrade_accepts_default_api_token(
     assert result.stdout == "local-dev-token\n"
 
 
+def test_upgrade_source_checkout_restore_accepts_default_api_token(tmp_path: Path) -> None:
+    """Assert source upgrade/rollback snippets keep the local default token."""
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    global_rollback_heading = "For the source checkout with global tool install lane"
+    no_global_rollback_heading = "For the source checkout with no global install lane"
+    cases = (
+        (
+            "Upgrade source checkout with global tool install",
+            _markdown_section(upgrade_text, "## Source Checkout With Global Tool Install"),
+        ),
+        (
+            "Upgrade source checkout with no global install",
+            _markdown_section(upgrade_text, "## Source Checkout With No Global Install"),
+        ),
+        (
+            "Global source-checkout rollback",
+            rollback_section.split(global_rollback_heading, maxsplit=1)[1].split(
+                no_global_rollback_heading,
+                maxsplit=1,
+            )[0],
+        ),
+        (
+            "No-global source-checkout rollback",
+            rollback_section.split(no_global_rollback_heading, maxsplit=1)[1],
+        ),
+    )
+
+    for label, section in cases:
+        bash_fences = [
+            fence
+            for fence in _markdown_fences("docs/UPGRADE.md", section)
+            if fence.language == "bash"
+        ]
+        assert len(bash_fences) == 1, label
+        token_restore_start = bash_fences[0].body.index('AWF_PERSISTED_API_TOKEN=""')
+        token_restore_script = (
+            bash_fences[0]
+            .body[token_restore_start:]
+            .split(
+                'AWF_PERSISTED_POSTGRES_PASSWORD=""',
+                maxsplit=1,
+            )[0]
+        )
+        env_file = tmp_path / ".env"
+        env_file.write_text("AWF_API_TOKEN=\n", encoding="utf-8")
+        script = "\n".join(
+            (
+                "unset AWF_API_TOKEN",
+                token_restore_script,
+                'printf "%s\\n" "$AWF_API_TOKEN"',
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == "local-dev-token\n", label
+
+
 def test_package_upgrade_env_restore_detects_only_closing_fi_keyword() -> None:
     """Assert lowercase fi in unrelated text is not treated as a shell keyword."""
     upgrade_line = "pipx upgrade agent-workspace-fabric"
@@ -2151,6 +2217,7 @@ def _assert_source_checkout_api_token_restore(
     lifecycle: str,
 ) -> tuple[int, int]:
     """Assert source-checkout snippets export persisted API tokens before use."""
+    allow_default_api_token = lifecycle in {"upgrading", "rollback"}
     unsafe_default_line = 'export AWF_API_TOKEN="${AWF_API_TOKEN:-$(openssl rand -hex 32)}"'
     unsafe_shared_guard_line = (
         "if ! grep -q '^AWF_API_TOKEN=.' docker/compose/.env .env 2>/dev/null; then"
@@ -2171,6 +2238,14 @@ def _assert_source_checkout_api_token_restore(
     token_loop_end_line = "done"
     token_guard_line = 'if [ -n "$AWF_PERSISTED_API_TOKEN" ]; then'
     token_persisted_export_line = '  export AWF_API_TOKEN="$AWF_PERSISTED_API_TOKEN"'
+    token_default_env_files = (
+        ".env docker/compose/.env" if root_first_token_loop_line in section else ".env"
+    )
+    token_default_guard_line = (
+        "elif grep -q '^[[:space:]]*\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
+        f"AWF_API_TOKEN[[:space:]]*=' {token_default_env_files} 2>/dev/null; then"
+    )
+    token_default_export_line = '  export AWF_API_TOKEN="${AWF_API_TOKEN:-local-dev-token}"'
     token_else_line = "else"
     legacy_first_token_require_line = (
         '  : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core '
@@ -2214,8 +2289,22 @@ def _assert_source_checkout_api_token_restore(
     assert token_persisted_export_line in section, (
         f"{label} must export the persisted AWF_API_TOKEN"
     )
+    if allow_default_api_token:
+        assert token_default_guard_line in section, (
+            f"{label} must recognize empty persisted AWF_API_TOKEN entries"
+        )
+        assert token_default_export_line in section, (
+            f"{label} must fall back to the local default API token"
+        )
+    else:
+        assert token_default_guard_line not in section, (
+            f"{label} must require an explicit API token for {lifecycle}"
+        )
+        assert token_default_export_line not in section, (
+            f"{label} must not default API token for {lifecycle}"
+        )
     assert token_require_line in section, (
-        f"{label} must require AWF_API_TOKEN when no persisted value exists"
+        f"{label} must require AWF_API_TOKEN when no persisted token can be restored"
     )
     assert token_shell_export_line in section, f"{label} must export restored shell AWF_API_TOKEN"
 
@@ -2257,11 +2346,29 @@ def _assert_source_checkout_api_token_restore(
         label,
         start=token_guard_index,
     )
+    token_after_persisted_index = token_persisted_export_index
+    if allow_default_api_token:
+        token_default_guard_index = _required_index(
+            section,
+            token_default_guard_line,
+            label,
+            token_persisted_export_index,
+        )
+        token_default_export_index = _required_index(
+            section,
+            token_default_export_line,
+            label,
+            token_default_guard_index,
+        )
+        assert (
+            token_persisted_export_index < token_default_guard_index < token_default_export_index
+        ), f"{label} must check the default API token path after persisted restore"
+        token_after_persisted_index = token_default_export_index
     token_else_index = _required_index(
         section,
         token_else_line,
         label,
-        token_persisted_export_index,
+        token_after_persisted_index,
     )
     token_require_index = _required_index(
         section,
@@ -2292,11 +2399,12 @@ def _assert_source_checkout_api_token_restore(
         < token_loop_end_index
         < token_guard_index
         < token_persisted_export_index
+        <= token_after_persisted_index
         < token_else_index
         < token_require_index
         < token_shell_export_index
         < token_guard_end_index
-    ), f"{label} must restore persisted API token before continuing"
+    ), f"{label} must restore persisted or required API token before continuing"
     return token_init_index, token_guard_end_index
 
 

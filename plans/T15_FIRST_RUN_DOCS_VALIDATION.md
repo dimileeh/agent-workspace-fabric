@@ -106,6 +106,10 @@ Source contract: `docs/awf-plans/ws_b77253c13d91444db1348fc1.md`
   source-checkout upgrade snippets to export the documented `local-dev-token`
   when the copied `.env.example` leaves `AWF_API_TOKEN=` empty and the upgrade
   shell has no token.
+- Complete: Address PR thread `PRRT_kwDOSJAM6s6HV58P` by allowing
+  `docs/UPGRADE.md` source-checkout upgrade and rollback snippets to export
+  `local-dev-token` when source env files contain an empty `AWF_API_TOKEN=`
+  entry, while keeping `AWF_POSTGRES_PASSWORD` restore strict.
 - Complete: Leave broad AWF/GitHub validation to post-agent infrastructure.
 
 ## Files Changed
@@ -2250,6 +2254,43 @@ uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public
 
 Final focused repair result: `2 passed in 0.68s`; `5 passed in 0.84s`;
 `All checks passed!`; `1 file already formatted`.
+
+Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
+validation were intentionally not run in the agent phase; AWF owns those broad
+gates after agent completion.
+
+Post-review repair for PR thread `PRRT_kwDOSJAM6s6HV58P`:
+
+- `docs/UPGRADE.md` now documents that source-checkout `AWF_API_TOKEN=` entries
+  copied from `.env.example` keep the local `local-dev-token` default.
+- Source-checkout upgrade and rollback snippets in `docs/UPGRADE.md` now export
+  `local-dev-token` when `.env` or legacy `docker/compose/.env` contains an
+  empty `AWF_API_TOKEN=` entry and the shell has no token.
+- `AWF_POSTGRES_PASSWORD` restore behavior is unchanged: source-checkout
+  snippets still require a persisted non-empty value or an explicit shell value.
+- `tests/unit/docs/test_public_docs_status.py` now executes the UPGRADE source
+  API-token restore snippets against an empty copied `.env` entry and requires
+  the fallback in the shared source restore assertion for upgrade/rollback
+  lifecycles only.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_source_checkout_restore_accepts_default_api_token tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+```
+
+Red-phase result after updating the focused regression: failed with the expected
+assertions that UPGRADE source-checkout upgrade and rollback snippets still
+required `AWF_API_TOKEN` instead of accepting the empty copied `.env` default.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py::test_upgrade_source_checkout_restore_accepts_default_api_token tests/unit/docs/test_public_docs_status.py::test_source_checkout_upgrade_docs_refresh_persisted_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_global_source_checkout_rollback_refreshes_metadata tests/unit/docs/test_public_docs_status.py::test_upgrade_no_global_source_checkout_rollback_uses_uv_run -q
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_status.py
+```
+
+Final focused repair result: initial regression run failed as expected with
+`4 failed`; final focused pytest result was `4 passed in 0.77s`; final
+`ruff check` passed; final `ruff format --check` reported
+`1 file already formatted`.
 
 Full AWF/GitHub validation, full coverage, OpenAPI drift checks, and frontend
 validation were intentionally not run in the agent phase; AWF owns those broad
