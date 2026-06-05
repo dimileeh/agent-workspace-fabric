@@ -1051,13 +1051,20 @@ async def test_start_local_service_bootstrap_path_runtime_error_is_first_run_fai
     from awf.mcp import setup_tools
 
     leaked_detail = "Could not determine home directory for ~nosuchuser/work"
+    migration_payload = {
+        "status": "migrated",
+        "canonical_env_file": str(tmp_path / ".env"),
+        "legacy_env_file": str(tmp_path / "docker" / "compose" / ".env"),
+        "imported_keys": ["OPENAI_API_KEY"],
+        "conflict_keys": [],
+    }
     inputs = SimpleNamespace(
         settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
         compose_file=tmp_path / "compose.yml",
         compose_env_file=None,
         asset_root=None,
         service_env={"AWF_HOST_WORK_DIR": "~nosuchuser/work"},
-        env_migration=None,
+        env_migration=SimpleNamespace(to_dict=lambda: migration_payload),
     )
 
     async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
@@ -1080,6 +1087,7 @@ async def test_start_local_service_bootstrap_path_runtime_error_is_first_run_fai
     bootstrap = payload["issues"][0]["details"]["bootstrap"]
     assert bootstrap["reason_code"] == "START_BOOTSTRAP_EXECUTION_FAILED"
     assert bootstrap["message"] == "could not execute local service bootstrap"
+    assert payload["issues"][0]["details"]["env_migration"] == migration_payload
     assert leaked_detail not in rendered
 
 

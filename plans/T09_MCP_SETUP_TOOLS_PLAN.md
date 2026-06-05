@@ -84,6 +84,48 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HObk-
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_start_local_service` includes resolved
+`env_migration` metadata on the normal structured bootstrap failure path, but
+drops that metadata when `run_service_bootstrap()` raises a non-
+`ServiceBootstrapError` that is converted into a synthetic first-run bootstrap
+execution failure.
+
+Scope is limited to preserving env-migration metadata on the existing MCP
+bootstrap-path error response. The sanitized bootstrap error shape and redaction
+behavior stay unchanged.
+
+### Requirements Checklist
+
+- Preserve the existing sanitized `START_BOOTSTRAP_EXECUTION_FAILED` payload for
+  non-`ServiceBootstrapError` bootstrap exceptions.
+- Include resolved `env_migration` metadata in that payload when startup inputs
+  were already resolved.
+- Keep input-resolution failures unchanged because they do not have resolved
+  migration metadata.
+- Add a focused regression for the bootstrap-path error branch.
+
+### Implementation Steps
+
+1. Extend the existing bootstrap-path error regression so it expects the same
+   env-migration metadata included by the structured bootstrap failure path.
+2. Thread `inputs.env_migration` through `_start_bootstrap_path_error_result`.
+3. Run the targeted regression and focused checks for the changed files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_path_runtime_error_is_first_run_failure -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HOWVn
 
 ### Problem Statement And Scope

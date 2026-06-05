@@ -53,6 +53,47 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HObk-
+
+### Requirement Status
+
+- Preserve the existing sanitized `START_BOOTSTRAP_EXECUTION_FAILED` payload for
+  non-`ServiceBootstrapError` bootstrap exceptions: Complete.
+- Include resolved `env_migration` metadata in that payload when startup inputs
+  were already resolved: Complete.
+- Keep input-resolution failures unchanged because they do not have resolved
+  migration metadata: Complete.
+- Add a focused regression for the bootstrap-path error branch: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_path_runtime_error_is_first_run_failure -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change with
+  `KeyError: 'env_migration'`.
+- Regression test after the implementation change: 1 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HOWVn
 
 ### Requirement Status

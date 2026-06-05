@@ -356,7 +356,11 @@ async def _start_local_service_result(
             is_error=True,
         )
     except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
-        return _start_bootstrap_path_error_result(safe_result, exc)
+        return _start_bootstrap_path_error_result(
+            safe_result,
+            exc,
+            env_migration=inputs.env_migration,
+        )
 
     return _first_run_result(
         safe_result,
@@ -390,13 +394,19 @@ def _start_input_resolution_error_result(
 def _start_bootstrap_path_error_result(
     safe_result: SafeResult,
     exc: CalledProcessError | OSError | RuntimeError | ValueError,
+    *,
+    env_migration: object | None = None,
 ) -> CallToolResult:
     failure = ServiceBootstrapError(
         reason_code=START_BOOTSTRAP_EXECUTION_FAILED,
         message="could not execute local service bootstrap",
         stderr=f"error_type={type(exc).__name__}",
     )
-    return _first_run_result(safe_result, _start_failure_payload(failure), is_error=True)
+    return _first_run_result(
+        safe_result,
+        _start_failure_payload(failure, env_migration=env_migration),
+        is_error=True,
+    )
 
 
 def _initialize_project_profile_result(
