@@ -188,6 +188,55 @@ async def test_fenced_before_pre_launch_commit_does_not_write_metadata(
 
 
 @pytest.mark.unit
+async def test_fenced_before_pre_launch_commit_skips_recheck_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_repo: Path,
+) -> None:
+    # A later claimant supersedes this worker after profile resolution but before
+    # the pre-launch commit (epoch -> 2 while the row stays provisioning). The
+    # fenced worker must abort early — it must NOT fall through to
+    # ``_recheck_before_launch``, which commits a ``provisioning_launching`` event
+    # gated only on status (epoch-blind). A spurious event on the new claimant's
+    # timeline would mislead a future async stopper into stopping the live stack.
+    from sqlalchemy import select
+
+    from awf.db.models import WorkspaceEvent
+    from awf.db.repositories.base import PROVISIONING_LAUNCHING_EVENT_TYPE
+
+    ws_id = await _create_provisioning(session_factory, origin_repo, epoch=1)
+
+    class _ReclaimAtHostPortCheckProvisioner(Provisioner):
+        async def _check_auto_resolved_profile_host_ports(self, **kwargs: Any) -> None:
+            await super()._check_auto_resolved_profile_host_ports(**kwargs)
+            await _advance_epoch(session_factory, ws_id)
+
+    launcher = _RecordingStackLauncher()
+    provisioner = _ReclaimAtHostPortCheckProvisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        stack_launcher=launcher,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+
+    await provisioner.provision_claimed(ws_id, execution_claim_epoch=1)
+
+    assert launcher.requests == []
+    async with session_factory() as s:
+        rows = (
+            await s.execute(
+                select(WorkspaceEvent.event_type).where(
+                    WorkspaceEvent.workspace_id == ws_id,
+                    WorkspaceEvent.event_type == PROVISIONING_LAUNCHING_EVENT_TYPE,
+                )
+            )
+        ).all()
+    # The fenced worker returned before the launch-guard recheck, so no
+    # provisioning_launching event was written into the new claimant's timeline.
+    assert rows == []
+
+
+@pytest.mark.unit
 async def test_matching_epoch_transitions_to_ready_with_metadata_intact(
     session_factory: async_sessionmaker[AsyncSession],
     git_manager: GitManager,

@@ -425,28 +425,38 @@ class Provisioner(ProvisionerHostPortCheckMixin):
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
                     )
                     return
+                pre_launch_fenced = False
                 try:
                     async with self._session_factory() as pre_launch_session:
                         pre_launch_repo = WorkspaceRepository(pre_launch_session)
                         pre_launch_ws = await pre_launch_repo.get_for_update(workspace_id)
                         if (
                             pre_launch_ws is not None
-                            and pre_launch_ws.compose_project_name is None
-                            and pre_launch_ws.status == WorkspaceStatus.provisioning.value
-                            # Fence (row-locked): a later claimant that superseded
-                            # us after profile resolution advanced
+                            and execution_claim_epoch is not None
+                            and pre_launch_ws.execution_claim_epoch != execution_claim_epoch
+                        ):
+                            # D4 (early, row-locked): a later claimant superseded us
+                            # after profile resolution — it advanced
                             # execution_claim_epoch while the row stayed
                             # ``provisioning``. The status guard alone cannot see
-                            # that, so without this epoch predicate a fenced worker
-                            # would commit compose_project_name / resolved_profile
-                            # into the new claimant's row before the D4 verify
-                            # aborts it — letting the new provisioner reuse a stale
-                            # auto-resolved profile. The SELECT FOR UPDATE makes
-                            # this read-and-write atomic against the reclaim.
-                            and (
-                                execution_claim_epoch is None
-                                or pre_launch_ws.execution_claim_epoch == execution_claim_epoch
-                            )
+                            # that, so we detect the fence here and abort once the
+                            # lock releases. Aborting now (not only at the downstream
+                            # D4 _verify_execution_claim_epoch) keeps the fenced-exit
+                            # path free of side effects: we must not write
+                            # compose_project_name / resolved_profile into the new
+                            # claimant's row, and we must not fall through to
+                            # _recheck_before_launch, which would commit a
+                            # ``provisioning_launching`` event into the new claimant's
+                            # timeline (that recheck is epoch-blind, gated only on
+                            # status). The early return also stops any future code
+                            # inserted before D4 from running under a stale claim. The
+                            # SELECT FOR UPDATE makes this epoch read atomic against
+                            # the reclaim.
+                            pre_launch_fenced = True
+                        elif (
+                            pre_launch_ws is not None
+                            and pre_launch_ws.compose_project_name is None
+                            and pre_launch_ws.status == WorkspaceStatus.provisioning.value
                             # Guard (row-locked): a cancel/stop that wins the race
                             # is serialized behind this SELECT FOR UPDATE, so it
                             # cannot commit a terminal transition between our read
@@ -483,6 +493,14 @@ class Provisioner(ProvisionerHostPortCheckMixin):
                         from_status=WorkspaceStatus.provisioning,
                         execution_claim_epoch=execution_claim_epoch,
                         reason_code="PRE_LAUNCH_COMMIT_FATAL",
+                    )
+                    return
+                if pre_launch_fenced:
+                    _log.warning(
+                        "provisioner.execution_claim_fenced",
+                        workspace_id=workspace_id,
+                        phase="pre_launch_session",
+                        reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
                     )
                     return
                 try:
