@@ -97,6 +97,7 @@ _START_REASON_CODED_SETUP_COMMAND_PATTERN = re.compile(
     rf"|\s+--client(?:\s+(?:<client>|{_START_REASON_CODED_CLIENT_VALUE_PATTERN}))?"
     rf")?"
 )
+_START_REMEDIATION_COMMAND_PATTERN = re.compile(r"^awf start(?:\s|$)")
 _SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN = re.compile(
     r"(?P<setup>\bawf setup --dry-run(?P<setup_suffix>[.,;):]|$|\s+to\b))"
     r"|(?P<start_source>\bawf start\s+--source-checkout(?:=|\s+)"
@@ -559,7 +560,30 @@ def _start_payload_with_command(
     update: dict[str, Any] = {"command": command}
     if payload.command == "awf setup":
         update["next_steps"] = _start_reason_coded_next_steps(payload.next_steps, command=command)
+    if payload.issues:
+        update["issues"] = _start_issues_with_command(payload.issues, command=command)
     return payload.model_copy(update=update)
+
+
+def _start_issues_with_command(
+    issues: tuple[FirstRunIssue, ...],
+    *,
+    command: str,
+) -> tuple[FirstRunIssue, ...]:
+    return tuple(_start_issue_with_command(issue, command=command) for issue in issues)
+
+
+def _start_issue_with_command(issue: FirstRunIssue, *, command: str) -> FirstRunIssue:
+    remediation = issue.remediation
+    if not _is_start_remediation_command(remediation.related_command):
+        return issue
+    return issue.model_copy(
+        update={"remediation": remediation.model_copy(update={"related_command": command})}
+    )
+
+
+def _is_start_remediation_command(command: str | None) -> bool:
+    return command is not None and _START_REMEDIATION_COMMAND_PATTERN.match(command) is not None
 
 
 def _start_reason_coded_next_steps(

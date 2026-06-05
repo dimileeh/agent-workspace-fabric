@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HYP7k Start Remediation Command
+
+### Problem Statement And Scope
+
+The review reports that `awf_start_local_service` rewrites the top-level start
+payload command when callers pass start context such as `source_checkout`,
+`rebuild`, or a custom timeout, but leaves per-issue start remediation commands
+from the reason catalog unchanged. A reason-coded bootstrap failure such as
+`START_PORT_CONFLICT` can therefore render `remediation.related_command` as
+plain `awf start` even though the failed invocation was more specific.
+
+Scope is limited to preserving start invocation context in nested issue
+remediation commands that are themselves start retry commands. Diagnostic
+remediation commands such as `awf service status` or service logs stay unchanged.
+
+### Requirements Checklist
+
+- Preserve the existing top-level start command rewrite behavior.
+- Rewrite nested issue `remediation.related_command` values that point at
+  `awf start...` to the contextual start command.
+- Preserve non-start remediation related commands.
+- Add a focused regression for a reason-coded bootstrap failure with explicit
+  start context.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for nested related-command rewriting
+   on a reason-coded start bootstrap failure.
+2. Extend `_start_payload_with_command` to rebuild issue remediation payloads
+   whose related command is an `awf start` command with the contextual command.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_reports_structured_failure tests/unit/mcp/test_setup_tools.py::test_start_local_service_rewrites_reason_coded_bootstrap_remediation_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Client Next-Step Rewrite
 
 ### Problem Statement And Scope

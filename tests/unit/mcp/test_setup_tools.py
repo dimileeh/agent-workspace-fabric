@@ -25,6 +25,7 @@ from awf.host_setup.rendering import (
     SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
     START_HEALTH_TIMEOUT,
+    START_PORT_CONFLICT,
     first_run_failure_payload,
     first_run_success_payload,
 )
@@ -37,6 +38,7 @@ from awf.host_setup.source_assets import (
 from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
 from awf.service.bootstrap import (
+    SERVICE_BOOTSTRAP_STAGE_FAILED,
     SERVICE_BOOTSTRAP_TIMEOUT,
     ServiceBootstrapError,
     ServiceBootstrapResult,
@@ -989,6 +991,7 @@ async def test_start_local_service_reports_structured_failure(
     assert payload["status"] == "failed"
     assert payload["reason_code"] == START_HEALTH_TIMEOUT
     assert payload["issues"][0]["details"]["bootstrap"]["reason_code"] == SERVICE_BOOTSTRAP_TIMEOUT
+    assert payload["issues"][0]["remediation"]["related_command"] == "awf service status"
     assert payload["issues"][0]["details"]["env_migration"] == migration_payload
     assert raw_token not in rendered
     assert REDACTION_MARKER in rendered
@@ -1030,6 +1033,55 @@ async def test_start_local_service_preserves_explicit_source_checkout_bootstrap_
     assert payload["status"] == "failed"
     assert payload["command"] == f"awf start --source-checkout '{checkout}'"
     assert payload["issues"][0]["details"]["bootstrap"]["reason_code"] == SERVICE_BOOTSTRAP_TIMEOUT
+
+
+@pytest.mark.unit
+async def test_start_local_service_rewrites_reason_coded_bootstrap_remediation_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    checkout.mkdir()
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+        compose_file=checkout / "docker" / "compose" / "compose.yml",
+        compose_env_file=None,
+        asset_root=checkout,
+        service_env={},
+        env_migration=None,
+    )
+
+    async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        raise ServiceBootstrapError(
+            reason_code=SERVICE_BOOTSTRAP_STAGE_FAILED,
+            message="compose up failed",
+            stage="compose_up",
+            stderr="Bind for 0.0.0.0:8000 failed: port is already allocated",
+        )
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fail_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_start_local_service",
+        {
+            "rebuild": True,
+            "timeout_seconds": 42.5,
+            "source_checkout": str(checkout),
+        },
+    )
+    payload = _payload(result)
+    expected_command = f"awf start --rebuild --timeout-seconds 42.5 --source-checkout '{checkout}'"
+
+    assert result.isError is True
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == START_PORT_CONFLICT
+    assert payload["command"] == expected_command
+    assert payload["issues"][0]["remediation"]["related_command"] == expected_command
 
 
 @pytest.mark.unit
