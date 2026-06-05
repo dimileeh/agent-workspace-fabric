@@ -515,6 +515,98 @@ async def _pre_push_validation_worktree_check(
     )
 
 
+async def _head_descends_from(
+    self: Any,
+    *,
+    worktree_path: Path,
+    ancestor: str,
+    descendant: str,
+) -> bool:
+    """Return True when ``descendant`` is a descendant of ``ancestor``.
+
+    Uses ``git merge-base --is-ancestor`` which exits 0 when the first ref is an
+    ancestor of the second and non-zero otherwise. Callers only invoke this with
+    distinct SHAs, so a 0 exit means the fix-pass agent advanced HEAD on top of
+    the pre-fix commit rather than moving it sideways or backward.
+    """
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        )
+    )
+    return bool(result.ok)
+
+
+async def _head_preserves_fix_tree(
+    self: Any,
+    *,
+    worktree_path: Path,
+    fix_start_head: str,
+    current_head: str,
+) -> bool:
+    """Return True when ``current_head``'s tree preserves ``fix_start_head``'s work.
+
+    A fix-pass agent can self-commit a valid repair by rewriting the tip (e.g.
+    ``git commit --amend``), producing a HEAD that is **not** a descendant of
+    ``fix_start_head``. ``_head_descends_from`` rejects that, but a rewrite that
+    *preserves* the validation-fix work is still a good repair. An amend and the
+    work-dropping ``git reset --hard HEAD~1`` + recommit are topologically
+    indistinguishable (both leave HEAD as a new commit whose parent is
+    ``fix_start_head``'s parent), so we discriminate by **tree content**, never by
+    topology.
+
+    ``git merge-tree --write-tree <current_head> <fix_start_head>`` performs a real
+    three-way merge using the merge-base of the two commits — their shared parent in
+    both the amend and reset+recommit case. On a clean merge it exits 0 and prints the
+    merged tree OID on the first stdout line:
+
+    - **Merged tree == ``current_head``'s own tree ⇒ work preserved (amend):**
+      ``current_head`` already contains every change ``fix_start_head`` introduced, so
+      re-merging it adds nothing. Accept.
+    - **Merged tree != ``current_head``'s tree ⇒ work dropped (reset+recommit hole):**
+      re-merging ``fix_start_head`` would re-introduce content ``current_head`` is
+      missing. Reject.
+    - **Merge conflict (non-zero exit), empty output, or any merge-tree/rev-parse
+      failure ⇒ treat as NOT preserved.** Rollback restores the known-good
+      ``fix_start_head``, so defaulting to rollback on any ambiguity never pushes a
+      wrong revision.
+    """
+    merge = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "merge-tree",
+            "--write-tree",
+            current_head,
+            fix_start_head,
+        )
+    )
+    if not merge.ok:
+        return False
+    merged_lines = merge.stdout.splitlines()
+    if not merged_lines:
+        return False
+    merged_tree_oid = merged_lines[0].strip()
+    if not merged_tree_oid:
+        return False
+    current_tree = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "rev-parse",
+            f"{current_head}^{{tree}}",
+        )
+    )
+    if not current_tree.ok:
+        return False
+    current_tree_oid = current_tree.stdout.strip()
+    if not current_tree_oid:
+        return False
+    return bool(merged_tree_oid == current_tree_oid)
+
+
 async def _pre_push_validation_cleanup(
     self: Any,
     *,
@@ -737,6 +829,64 @@ async def _run_pre_push_validation_fix_pass(
             return False, rollback_failure_reason
         return False, None
     if not committed:
+        current_head = await self._rev_parse_head(worktree_path)
+        if current_head is not None and current_head != fix_start_head:
+            # The fix-pass agent self-committed a valid repair (the worktree is clean,
+            # so ``_commit_dirty_worktree`` had nothing to commit and returned False).
+            # Accept the new head when EITHER:
+            #   - it strictly descends from ``fix_start_head`` (the agent advanced HEAD
+            #     on top of the pre-fix commit, issue #406), OR
+            #   - it is a non-descendant rewrite (e.g. ``git commit --amend``) whose
+            #     tree still PRESERVES ``fix_start_head``'s work (issue #408).
+            # Rolling back an accepted head would orphan the agent's commit and
+            # re-validate the stale failing head forever. A non-descendant rewrite that
+            # DROPS work (the ``git reset --hard HEAD~1`` + recommit hole closed by
+            # e05b47b6c) fails the tree-preservation check and falls through to the
+            # rollback below, so we restore the pre-fix-pass state instead of pushing
+            # the wrong revision. Amend and reset+recommit are topologically
+            # indistinguishable, so the discriminator is tree content, not topology.
+            advanced = await _head_descends_from(
+                self,
+                worktree_path=worktree_path,
+                ancestor=fix_start_head,
+                descendant=current_head,
+            )
+            preserved = False
+            if not advanced:
+                preserved = await _head_preserves_fix_tree(
+                    self,
+                    worktree_path=worktree_path,
+                    fix_start_head=fix_start_head,
+                    current_head=current_head,
+                )
+            if advanced or preserved:
+                _log.info(
+                    "monitor.pre_push_validation_fix_self_commit_detected",
+                    workspace_id=workspace_id,
+                    pass_number=pass_number,
+                    fix_start_head=fix_start_head,
+                    committed_head=current_head,
+                    self_commit_kind="advance" if advanced else "preserving_rewrite",
+                )
+                cleanup_failure_reason = await _cleanup_committed_pre_push_validation_fix_pass(
+                    self,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    committed_head=current_head,
+                    pass_number=pass_number,
+                )
+                return True, cleanup_failure_reason
+            # HEAD moved but neither descends from nor preserves ``fix_start_head``'s
+            # tree: the fix-pass agent reset/checked out a non-descendant revision or
+            # rewrote the tip in a way that dropped the validation-fix work. Roll back
+            # to the pre-fix-pass head rather than accepting the divergent revision.
+            _log.warning(
+                "monitor.pre_push_validation_fix_head_not_descendant",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                fix_start_head=fix_start_head,
+                current_head=current_head,
+            )
         rollback_failure_reason = await _rollback_failed_pre_push_validation_fix_pass(
             self,
             workspace_id=workspace_id,
@@ -747,33 +897,58 @@ async def _run_pre_push_validation_fix_pass(
         )
         if rollback_failure_reason is not None:
             return False, rollback_failure_reason
-    if committed:
-        committed_head = await self._rev_parse_head(worktree_path)
-        if committed_head is None:
-            _log.warning(
-                "monitor.pre_push_validation_fix_commit_head_unavailable",
-                workspace_id=workspace_id,
-                pass_number=pass_number,
-            )
-            return True, PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
-        cleanup = await _pre_push_validation_cleanup(
-            self,
-            worktree_path=worktree_path,
-            restore_ref=committed_head,
-        )
-        ok = bool(cleanup.ok)
-        log = _log.info if ok else _log.warning
-        log(
-            "monitor.pre_push_validation_fix_commit_cleanup",
+        return False, None
+
+    committed_head = await self._rev_parse_head(worktree_path)
+    if committed_head is None:
+        _log.warning(
+            "monitor.pre_push_validation_fix_commit_head_unavailable",
             workspace_id=workspace_id,
             pass_number=pass_number,
-            restore_ref=committed_head,
-            reason_code=None if ok else cleanup.reason_code,
-            cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
         )
-        if not ok:
-            return True, cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
-    return committed, None
+        return True, PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON
+    cleanup_failure_reason = await _cleanup_committed_pre_push_validation_fix_pass(
+        self,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        committed_head=committed_head,
+        pass_number=pass_number,
+    )
+    return True, cleanup_failure_reason
+
+
+async def _cleanup_committed_pre_push_validation_fix_pass(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    committed_head: str,
+    pass_number: int,
+) -> str | None:
+    """Clean validation side effects against a committed fix head.
+
+    Used for both the dirty-worktree commit produced by ``_commit_dirty_worktree``
+    and the agent self-commit detected when HEAD advanced but the worktree is
+    clean. Returns a failure reason code when cleanup fails, otherwise ``None``.
+    """
+    cleanup = await _pre_push_validation_cleanup(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=committed_head,
+    )
+    ok = bool(cleanup.ok)
+    log = _log.info if ok else _log.warning
+    log(
+        "monitor.pre_push_validation_fix_commit_cleanup",
+        workspace_id=workspace_id,
+        pass_number=pass_number,
+        restore_ref=committed_head,
+        reason_code=None if ok else cleanup.reason_code,
+        cleanup_stderr=(cleanup.cleanup_stderr or "")[:400],
+    )
+    if not ok:
+        return cleanup.reason_code or VALIDATION_WORKTREE_CLEANUP_FAILED
+    return None
 
 
 async def _rollback_failed_pre_push_validation_fix_pass(

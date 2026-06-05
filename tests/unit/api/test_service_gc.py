@@ -139,6 +139,45 @@ async def test_service_gc_maps_request_params_to_entrypoint(
     assert captured["limit"] == 5
     assert list(captured["include_statuses"]) == [WorkspaceStatus.completed]
     assert list(captured["exclude_statuses"]) == [WorkspaceStatus.failed]
+    # GC-B wiring (#389): the route threads the host home and the (default-on)
+    # base-GC flag into the entrypoint.
+    assert isinstance(captured["host_home"], Path)
+    assert captured["reap_claude_bases"] is True
+
+
+@pytest.mark.unit
+async def test_service_gc_passes_disabled_base_reap_flag(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    monkeypatch.setenv("AWF_CLAUDE_BASE_GC_ENABLED", "false")
+    captured: dict[str, object] = {}
+
+    async def _fake_entrypoint(_session_factory: object, **kwargs: object) -> _FakeGCResult:
+        captured.update(kwargs)
+        return _FakeGCResult(
+            {
+                "dry_run": True,
+                "status": "dry_run",
+                "reason_code": "CLEANUP_DRY_RUN",
+                "candidate_count": 0,
+                "preserved_count": 0,
+                "deleted_path_count": 0,
+                "total_estimated_bytes": 0,
+            }
+        )
+
+    with patch(
+        "awf.api.routes.service.run_service_workspace_gc",
+        new=AsyncMock(side_effect=_fake_entrypoint),
+    ):
+        response = await client.post("/v1/service/gc", json={})
+
+    assert response.status_code == 200, response.text
+    # The operator disabled GC-B; the route forwards the flag as-is.
+    assert captured["reap_claude_bases"] is False
 
 
 @pytest.mark.unit

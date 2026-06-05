@@ -151,7 +151,7 @@ def _worker_running(args: list[str], **_kwargs: object) -> Any:
     assert args[:2] == ["docker", "compose"]
     assert args[-6:] == [
         "-f",
-        "docker/compose/local-service.yml",
+        "compose.yaml",
         "ps",
         "worker",
         "--format",
@@ -344,7 +344,7 @@ def test_doctor_worker_inspection_honors_explicit_null_compose_env_file(
     assert report.to_dict()["status"] == "ok"
     assert args[:2] == ["docker", "compose"]
     assert "--env-file" not in args
-    assert "AWF_POSTGRES_PASSWORD" not in env
+    assert env["AWF_POSTGRES_PASSWORD"] == "awf_dev"
 
 
 @pytest.mark.unit

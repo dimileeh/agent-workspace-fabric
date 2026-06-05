@@ -11,6 +11,7 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BOOTSTRAP_ASSET_PATHS = (
+    "compose.yaml",
     ".env.example",
     "docker/agent-runtime.Dockerfile",
     "docker/compose/local-service.yml",
@@ -130,6 +131,7 @@ def _compose_published_host_port(mapping: str) -> str:
     ("mapping", "expected"),
     [
         ("${AWF_API_HOST_PORT:-8000}:8000", "${AWF_API_HOST_PORT:-8000}"),
+        ("127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000", "${AWF_API_HOST_PORT:-8000}"),
         ("127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432", "${AWF_POSTGRES_HOST_PORT:-5433}"),
         ("0.0.0.0:${AWF_POSTGRES_HOST_PORT:-5433}:5432", "${AWF_POSTGRES_HOST_PORT:-5433}"),
         (
@@ -153,7 +155,15 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     data = yaml.safe_load(compose_path.read_text())
     services = data["services"]
 
-    assert {"postgres", "migrate", "api", "worker", "ollama-bridge"}.issubset(services)
+    assert {
+        "agent-runtime",
+        "postgres",
+        "migrate",
+        "api",
+        "worker",
+        "console",
+        "ollama-bridge",
+    }.issubset(services)
 
     for service_name in ("migrate", "api", "worker"):
         assert services[service_name]["image"] == "awf-control-plane:local"
@@ -234,12 +244,13 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert expected_auth_mounts.issubset(set(volumes))
         environment = services[service_name]["environment"]
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"
-        assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:?set AWF_API_TOKEN}"
+        assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"
         assert environment["AWF_DATABASE_URL"] == (
-            "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:?set "
-            "AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+            "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD:-awf_dev}@postgres:5432/awf"
         )
-        assert "awf_dev" not in environment["AWF_DATABASE_URL"]
+        assert environment["AWF_AGENT_RUNTIME_IMAGE"] == (
+            "${AWF_AGENT_RUNTIME_IMAGE:-awf-agent-runtime:latest}"
+        )
         assert environment["AWF_WORK_DIR"] == expected_work_dir
         assert environment["AWF_HOST_HOME"] == expected_host_home
         assert (
@@ -252,6 +263,9 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
             "${AWF_AGENT_IDLE_TIMEOUT_SECONDS:-3600}"
         )
         assert environment["AWF_AUTO_CLEANUP_ORPHANS"] == "${AWF_AUTO_CLEANUP_ORPHANS:-false}"
+        # GC-B base reaper is default-on, so its kill-switch must be forwarded into
+        # the API/worker containers or operators could never disable it.
+        assert environment["AWF_CLAUDE_BASE_GC_ENABLED"] == ("${AWF_CLAUDE_BASE_GC_ENABLED:-true}")
         assert environment["AWF_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS"] == (
             "${AWF_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS:-3600}"
         )
@@ -280,16 +294,17 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert environment["SSH_AUTH_SOCK"] == expected_ssh_auth_sock_target
 
     postgres = services["postgres"]
-    assert postgres["environment"]["POSTGRES_PASSWORD"] == (
-        "${AWF_POSTGRES_PASSWORD:?set AWF_POSTGRES_PASSWORD}"
-    )
-    assert "awf_dev" not in yaml.safe_dump(postgres["environment"])
+    assert postgres["environment"]["POSTGRES_PASSWORD"] == "${AWF_POSTGRES_PASSWORD:-awf_dev}"
     assert postgres["ports"] == ["127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"]
 
     api = services["api"]
-    assert api["ports"] == ["${AWF_API_HOST_PORT:-8000}:8000"]
+    assert api["ports"] == ["127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000"]
 
     assert "awf-work" not in data.get("volumes", {})
+    agent_runtime = services["agent-runtime"]
+    assert agent_runtime["image"] == "${AWF_AGENT_RUNTIME_IMAGE:-awf-agent-runtime:latest}"
+    assert agent_runtime["command"] == 'sh -c "true"'
+    assert agent_runtime["restart"] == "no"
     migrate_command = services["migrate"]["command"]
     assert "alembic upgrade head" in migrate_command
     assert "uv run" not in migrate_command
@@ -297,8 +312,21 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     for service_name in ("api", "worker"):
         assert "uv run" not in services[service_name]["command"]
         depends_on = services[service_name]["depends_on"]
+        assert depends_on["agent-runtime"]["condition"] == "service_completed_successfully"
         assert depends_on["postgres"]["condition"] == "service_healthy"
         assert depends_on["migrate"]["condition"] == "service_completed_successfully"
+
+    console = services["console"]
+    assert console["image"] == "awf-console:local"
+    assert console["build"]["args"]["NEXT_PUBLIC_AWF_CONSOLE_POLL_MS"] == (
+        "${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS:-5000}"
+    )
+    assert console["environment"]["AWF_API_BASE_URL"] == "http://api:8000"
+    assert console["environment"]["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"
+    assert console["environment"]["NEXT_PUBLIC_AWF_CONSOLE_POLL_MS"] == (
+        "${NEXT_PUBLIC_AWF_CONSOLE_POLL_MS:-5000}"
+    )
+    assert console["ports"] == ["127.0.0.1:${AWF_CONSOLE_HOST_PORT:-3000}:3000"]
 
     bridge = services["ollama-bridge"]
     assert bridge["profiles"] == ["ollama-bridge"]
@@ -342,26 +370,9 @@ def test_init_env_seeding_uses_real_source_checkout_compose_paths(
 
     compose_file, env_file, env_example = cli_init_ops._resolve_service_compose_paths()  # noqa: SLF001
 
-    assert compose_file == checkout / "docker" / "compose" / "local-service.yml"
-    assert env_file == checkout / "docker" / "compose" / ".env"
+    assert compose_file == checkout / "compose.yaml"
+    assert env_file == checkout / ".env"
     assert env_example == checkout / ".env.example"
-    assert not env_file.exists()
-
-    action, error, overlay_keys = cli_init_ops._seed_env_file(  # noqa: SLF001
-        env_file,
-        env_example,
-        env_overlay=cli_init_ops._init_env_overlay_source(env_file, env_example),  # noqa: SLF001
-    )
-
-    assert action == "wrote_from_example"
-    assert error is None
-    assert overlay_keys == ("AWF_ROOT_ONLY",)
-    env_text = env_file.read_text(encoding="utf-8")
-    assert "AWF_API_TOKEN=operator-token\n" in env_text
-    assert "AWF_POSTGRES_PASSWORD=operator-password\n" in env_text
-    assert "AWF_WORKSPACE_STEADY_CPU=3\n" in env_text
-    assert "# Operator Docker socket\nAWF_DOCKER_HOST=unix:///tmp/awf-review.sock\n" in env_text
-    assert "AWF_ROOT_ONLY=operator-only\n" in env_text
 
     active_env_file, compose_env_file = cli_init_ops._resolve_service_env_files(env_file)  # noqa: SLF001
 
@@ -386,7 +397,7 @@ def test_local_service_compose_port_templates_support_default_and_override_value
     api_host = _compose_published_host_port(api_mapping)
 
     assert postgres_mapping == "127.0.0.1:${AWF_POSTGRES_HOST_PORT:-5433}:5432"
-    assert api_mapping == "${AWF_API_HOST_PORT:-8000}:8000"
+    assert api_mapping == "127.0.0.1:${AWF_API_HOST_PORT:-8000}:8000"
 
     assert _compose_template_value(postgres_host, {}) == "5433"
     assert _compose_template_value(api_host, {}) == "8000"

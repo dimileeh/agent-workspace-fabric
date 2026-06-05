@@ -113,3 +113,36 @@ def test_single_provider_seam_http_probe_is_bounded(tmp_path: Path) -> None:
 
     assert result["ok"] is True
     assert seen and all(timeout > 0 for timeout in seen.values())
+
+
+@pytest.mark.unit
+def test_claude_code_readiness_includes_mount_propagation(tmp_path: Path) -> None:
+    host_home = tmp_path / "home"
+    host_home.mkdir()
+    (host_home / ".claude").mkdir()
+    result = check_single_provider_readiness(
+        _settings(tmp_path),
+        provider="claude_code",
+        environ={
+            "ANTHROPIC_API_KEY": "sk-test-value",
+            "AWF_WORK_DIR_BIND_PROPAGATION": "rprivate",
+        },
+        run_subprocess=_unexpected_subprocess,
+    )
+    assert result["ok"] is True
+    assert result.get("mount_propagation") == "rprivate"
+
+
+@pytest.mark.unit
+def test_claude_code_readiness_omits_mount_propagation_when_absent(tmp_path: Path) -> None:
+    host_home = tmp_path / "home"
+    host_home.mkdir()
+    (host_home / ".claude").mkdir()
+    result = check_single_provider_readiness(
+        _settings(tmp_path),
+        provider="claude_code",
+        environ={"ANTHROPIC_API_KEY": "sk-test-value"},
+        run_subprocess=_unexpected_subprocess,
+    )
+    assert result["ok"] is True
+    assert "mount_propagation" not in result

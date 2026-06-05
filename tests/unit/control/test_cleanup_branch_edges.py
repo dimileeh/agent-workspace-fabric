@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy.exc import InterfaceError
 
 from awf.control.worker import cleanup as worker_cleanup
+from awf.control.worker import cleanup_auth_overlay as worker_overlay
 from awf.control.worker.types import _TerminalRuntimeCandidate
 from awf.db.enums import WorkspaceStatus
 from awf.node.cleanup import (
@@ -62,6 +63,16 @@ def _partial_cleanup() -> WorkspaceCleanupResult:
             ),
         ),
     )
+
+
+async def _noop_retry_overlay_unmounts(*, limit: int | None) -> None:
+    """Async no-op stand-in for the deferred auth-overlay umount re-sweep.
+
+    Added to the existing ``_release_terminal_runtime_resources`` workers so the
+    new guarded sweep call is a no-op: it must not perturb their release-error
+    aggregation, resume-scan, or final re-raise / CancelledError invariants.
+    """
+    del limit
 
 
 class _RecordingLog:
@@ -114,6 +125,7 @@ async def test_release_resources_logs_transient_db_warning_for_candidate(
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=_release,
         _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_noop_retry_overlay_unmounts,
     )
 
     with pytest.raises(InterfaceError):
@@ -152,10 +164,55 @@ async def test_release_resources_reraises_resume_failure_when_no_release_errors(
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=None,
         _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_noop_retry_overlay_unmounts,
     )
 
     with pytest.raises(RuntimeError, match="resume scan failed"):
         await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+    # No "resume scan failed after release error" warning when no release errors.
+    assert log.warnings == []
+
+
+@pytest.mark.unit
+async def test_release_resources_runs_overlay_sweep_before_reraising_resume_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resume-scan failure with no release errors must not skip the independent
+    best-effort overlay sweep: the sweep still runs, then the resume failure
+    propagates."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+
+    async def _list_candidates(*, limit: int | None) -> list[_TerminalRuntimeCandidate]:
+        del limit
+        return []
+
+    resume_error = RuntimeError("resume scan failed")
+
+    async def _resume(*, limit: int | None) -> None:
+        del limit
+        raise resume_error
+
+    sweep_calls: list[int | None] = []
+
+    async def _retry_overlay(*, limit: int | None) -> None:
+        sweep_calls.append(limit)
+
+    worker = SimpleNamespace(
+        _config=SimpleNamespace(terminal_runtime_release_max_per_scan=7),
+        _runtime_cleaner=object(),
+        _list_terminal_runtime_candidates=_list_candidates,
+        _release_terminal_runtime_for_candidate=None,
+        _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_retry_overlay,
+    )
+
+    with pytest.raises(RuntimeError, match="resume scan failed"):
+        await worker_cleanup._release_terminal_runtime_resources(worker)  # noqa: SLF001
+
+    # The deferred overlay sweep ran despite the resume-scan failure (independent
+    # best-effort work is not gated behind the resume scan succeeding).
+    assert sweep_calls == [7]
     # No "resume scan failed after release error" warning when no release errors.
     assert log.warnings == []
 
@@ -183,6 +240,7 @@ async def test_release_resources_propagates_cancelled_from_resume_scan(
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=None,
         _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_noop_retry_overlay_unmounts,
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -219,6 +277,7 @@ async def test_release_resources_swallows_resume_failure_after_release_error(
         _list_terminal_runtime_candidates=_list_candidates,
         _release_terminal_runtime_for_candidate=_release,
         _resume_pending_planning_scope_auto_retries_after_terminal_release=_resume,
+        _retry_pending_terminal_auth_overlay_unmounts=_noop_retry_overlay_unmounts,
     )
 
     with pytest.raises(ValueError, match="non-transient release failure"):
@@ -868,6 +927,9 @@ async def test_release_candidate_overlay_unmount_failure_does_not_block_release(
     ``auth_overlay_unmounted=False``, and never blocks the runtime release."""
     log = _RecordingLog()
     monkeypatch.setattr(worker_cleanup, "_log", log)
+    # ``_teardown_terminal_auth_overlay`` (extracted to ``cleanup_auth_overlay``) logs
+    # the umount-failed warning via that module's ``_log``; capture it too.
+    monkeypatch.setattr(worker_overlay, "_log", log)
     candidate = _candidate("ws_overlay_fail")
 
     kernel_reason = "umount: /…/merged: target is busy."
@@ -925,6 +987,9 @@ async def test_release_candidate_overlay_unverifiable_does_not_abort_sweep(
 
     log = _RecordingLog()
     monkeypatch.setattr(worker_cleanup, "_log", log)
+    # ``_teardown_terminal_auth_overlay`` (extracted to ``cleanup_auth_overlay``) logs
+    # the umount-failed warning via that module's ``_log``; capture it too.
+    monkeypatch.setattr(worker_overlay, "_log", log)
     candidate = _candidate("ws_overlay_unverifiable")
 
     def _teardown(**_kwargs: Any) -> None:

@@ -73,6 +73,12 @@ class _TerminalRuntimeCandidate:
     compose_project_name: str | None
     compose_file_path: str | None
     repo_url: str
+    # ``event_order`` of the ``terminal_runtime_released`` event the candidate was listed
+    # under (the current effective-release cycle's floor). Carried only for deferred
+    # overlay-umount candidates so the marker-write guards can verify, under the row lock,
+    # that the latest release cycle is still the one that was retried before recording a
+    # terminal/pending marker. ``None`` for candidates produced by other paths.
+    release_cycle_floor: int | None = None
 
 
 @dataclass(frozen=True)

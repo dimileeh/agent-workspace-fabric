@@ -70,29 +70,38 @@ passing formula audit; it is not a supported install channel yet.
 
 ### Recommended First-Run Sequence
 
-Once AWF is installed, the current runnable first-run sequence is local Core
-startup, health check, then project onboarding. Export the required local
-service values before bootstrapping Core so Compose can interpolate the API,
-worker, and Postgres service environment:
+Once AWF is installed, the recommended first-run sequence is setup, start,
+health check, then project onboarding. Keep local runtime values in the install
+root `.env` so the CLI, worker, MCP server, and raw Docker Compose lane all read
+the same configuration:
 
 ```bash
-export AWF_API_TOKEN="$(openssl rand -hex 32)"
-export AWF_POSTGRES_PASSWORD="${AWF_POSTGRES_PASSWORD:-awf_dev}"
-export AWF_GITHUB_TOKEN="$(gh auth token)"
-awf service bootstrap
+cp .env.example .env
+awf setup
+awf start
 awf service status --format pretty
 ```
 
-`awf service bootstrap` starts the local AWF Core stack, and
+`awf setup` checks host readiness, imports any legacy `docker/compose/.env`
+values into root `.env`, and configures supported clients such as MCP when
+requested. `awf start` starts the local AWF Core stack, and
 `awf service status --format pretty` confirms API, database, Docker, image,
-disk, provider, and cleanup health.
+disk, provider, and cleanup health. The lower-level
+`awf service bootstrap` command remains available for service-only development
+and is what `awf start` delegates to.
 
-`awf setup` and `awf start` are reserved first-run command surfaces. They are
-present in help for the future grammar, but today `awf setup` exits with
-`AWF_SETUP_PLACEHOLDER` and `awf start` exits with `AWF_START_PLACEHOLDER`; use
-`awf service bootstrap` until those setup and start slices land.
+For source checkouts or raw Docker installs, root Compose can bring up the full
+local stack with safe loopback-only defaults:
 
-If service bootstrap, startup, or first-run health checks fail, use the
+```bash
+docker compose up --build
+```
+
+Open <http://127.0.0.1:3000> for the console, or call the API at
+<http://127.0.0.1:8000>. Protected local API calls use
+`Authorization: Bearer local-dev-token` unless you set `AWF_API_TOKEN`.
+
+If setup, startup, or first-run health checks fail, use the
 [First run troubleshooting guide](TROUBLESHOOTING.md#first-run-troubleshooting)
 before continuing with provider or workspace-level work.
 
@@ -115,17 +124,13 @@ monitor policy, idempotency, console inspection, and mocked-local validation.
 
 ### Configure Environment
 
-In source checkouts that include local Compose assets, `awf service bootstrap`
-uses `docker/compose/.env` for Compose-interpolated service values. The
-repo-root `.env` is still useful for Python `awf` commands in package or
-non-source contexts.
-
-Transition note: `awf service status`, `awf service doctor`, and
-`awf service bootstrap` resolve `docker/compose/.env` from verified AWF source
-checkouts with local service Compose assets. In package installs, AWF uses the
-bundled Compose assets and reads `.env` from the working directory; copy any
-existing `docker/compose/.env` values to `.env` or run `awf service bootstrap`
-from the directory where you want local service settings to live.
+Root `.env` is the single local runtime env file for source checkouts and
+package installs when you want to override local defaults. `awf setup`,
+`awf start`, `awf service bootstrap`, and raw root `docker compose` all use that
+file. Existing legacy
+`docker/compose/.env` files are treated only as a migration source; setup/start
+bootstrap imports missing keys into root `.env`, backs up the legacy file, and
+reports only key names.
 
 Local service development should use Postgres via the Compose stack. The
 service worker needs a GitHub token for PR creation, review-thread inspection,
@@ -137,22 +142,13 @@ export AWF_API_TOKEN="$(openssl rand -hex 32)"
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 export AWF_POSTGRES_HOST_PORT=${AWF_POSTGRES_HOST_PORT:-5433}
 export AWF_API_HOST_PORT=${AWF_API_HOST_PORT:-8000}
-# Persist Compose-interpolated values into docker/compose/.env.
-env_example=docker/compose/.env.example
-if [ ! -f "$env_example" ]; then
-  env_example=.env.example
-fi
-if [ ! -f "$env_example" ]; then
-  echo "Missing env template: docker/compose/.env.example or .env.example" >&2
-  exit 1
-fi
 {
-  grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' "$env_example"
+  grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' .env.example
   printf 'AWF_API_TOKEN=%s\n' "$AWF_API_TOKEN"
   printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN"
   printf 'AWF_POSTGRES_HOST_PORT=%s\n' "$AWF_POSTGRES_HOST_PORT"
   printf 'AWF_API_HOST_PORT=%s\n' "$AWF_API_HOST_PORT"
-} > docker/compose/.env
+} > .env
 uv run --python 3.12 --extra dev awf service bootstrap
 ```
 

@@ -32,8 +32,7 @@ def _default_local_service_compose_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
-    compose_file.parent.mkdir(parents=True)
+    compose_file = tmp_path / "compose.yaml"
     compose_file.write_text("services: {}")
     monkeypatch.chdir(tmp_path)
 
@@ -1291,8 +1290,7 @@ def test_service_logs_default_follow_runner_replaces_invalid_bytes(
 def test_service_logs_finds_default_compose_file_from_parent_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
-    compose_file.parent.mkdir(parents=True)
+    compose_file = tmp_path / "compose.yaml"
     compose_file.write_text("services: {}")
     nested_dir = tmp_path / "nested" / "project"
     nested_dir.mkdir(parents=True)
@@ -1323,8 +1321,7 @@ def test_service_logs_finds_default_compose_file_from_parent_directory(
 def test_service_logs_defaults_to_relative_compose_path_in_cwd(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    compose_file = tmp_path / "docker" / "compose" / "local-service.yml"
-    compose_file.parent.mkdir(parents=True)
+    compose_file = tmp_path / "compose.yaml"
     compose_file.write_text("services: {}")
     calls: list[list[str]] = []
 
@@ -1370,7 +1367,7 @@ def test_resolve_local_service_compose_file_stops_at_home_directory(
     repo_nested = repo_root / "nested"
     repo_nested.mkdir(parents=True)
     outside_home = tmp_path.parent / "outside-home"
-    compose_file = outside_home / "docker" / "compose" / "local-service.yml"
+    compose_file = outside_home / "compose.yaml"
     compose_file.parent.mkdir(parents=True)
     compose_file.write_text("services: {}")
 

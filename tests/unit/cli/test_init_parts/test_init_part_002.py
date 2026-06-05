@@ -270,372 +270,6 @@ def _read_written_profile(project: Path) -> dict[str, Any]:
 
 
 @pytest.mark.unit
-def test_init_without_path_preserves_root_env_header_before_overlay_only_keys(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Keep root `.env` headers at the top even before root-only keys."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=compose-example",
-                "AWF_COMPOSE_ONLY=compose-default",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "# Existing root .env migrated by awf init.",
-                "# Operators may keep local service overrides here.",
-                "CI_TOKEN=root-ci-token",
-                "DEPLOY_ENV=local",
-                "AWF_API_TOKEN=migrated-token",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap()
-
-    assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_text(encoding="utf-8") == (
-        "\n".join(
-            [
-                "# Existing root .env migrated by awf init.",
-                "# Operators may keep local service overrides here.",
-                "AWF_API_TOKEN=migrated-token",
-                "AWF_COMPOSE_ONLY=compose-default",
-                "CI_TOKEN=root-ci-token",
-                "DEPLOY_ENV=local",
-            ]
-        )
-        + "\n"
-    )
-
-
-@pytest.mark.unit
-def test_init_without_path_merges_root_env_into_root_example_when_compose_example_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Preserve root-template-only defaults while applying existing root env values."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (tmp_path / ".env.example").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=root-example",
-                "AWF_POSTGRES_PASSWORD=root-example",
-                "AWF_TEMPLATE_ONLY=root-default",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "",
-                "# Existing operator override",
-                "AWF_DOCKER_HOST=unix:///tmp/awf-docker.sock",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap()
-
-    assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_text(encoding="utf-8") == (
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "AWF_POSTGRES_PASSWORD=root-example",
-                "AWF_TEMPLATE_ONLY=root-default",
-                "",
-                "# Existing operator override",
-                "AWF_DOCKER_HOST=unix:///tmp/awf-docker.sock",
-            ]
-        )
-        + "\n"
-    )
-    assert "wrote docker/compose/.env from .env.example" in result.output
-    assert "migrated-token" not in result.output
-
-
-@pytest.mark.unit
-def test_init_without_path_preserves_context_before_seed_overlay_key(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Keep root `.env` comments attached to seed-template override keys."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=compose-example",
-                "AWF_DOCKER_HOST=",
-                "AWF_COMPOSE_ONLY=compose-default",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    docker_host = f"unix://{tmp_path / 'docker.sock'}"
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "",
-                "# My custom Docker host",
-                "AWF_DOCKER_HOST=" + docker_host,
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap()
-
-    assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_text(encoding="utf-8") == (
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "",
-                "# My custom Docker host",
-                "AWF_DOCKER_HOST=" + docker_host,
-                "AWF_COMPOSE_ONLY=compose-default",
-            ]
-        )
-        + "\n"
-    )
-
-
-@pytest.mark.unit
-def test_init_without_path_deduplicates_root_only_overlay_keys(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Keep dotenv last-value semantics while avoiding repeated root-only keys."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=compose-example",
-                "AWF_COMPOSE_ONLY=compose-default",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "",
-                "# Stale root-only service setting",
-                "AWF_ROOT_ONLY=stale-value",
-                "",
-                "# Final root-only service setting",
-                "AWF_ROOT_ONLY=final-value",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap()
-
-    assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_text(encoding="utf-8") == (
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "AWF_COMPOSE_ONLY=compose-default",
-                "",
-                "# Final root-only service setting",
-                "AWF_ROOT_ONLY=final-value",
-            ]
-        )
-        + "\n"
-    )
-
-
-@pytest.mark.unit
-def test_init_without_path_preserves_trailing_root_env_overlay_context(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Keep comments that trail the final root-only assignment during merge."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=compose-example",
-                "AWF_COMPOSE_ONLY=compose-default",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "",
-                "# Root-only service setting",
-                "AWF_ROOT_ONLY=root-value",
-                "",
-                "# Keep this note with the migrated root-only setting",
-                "# It documents why AWF_ROOT_ONLY exists.",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap()
-
-    assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_text(encoding="utf-8") == (
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "AWF_COMPOSE_ONLY=compose-default",
-                "",
-                "# Root-only service setting",
-                "AWF_ROOT_ONLY=root-value",
-                "",
-                "# Keep this note with the migrated root-only setting",
-                "# It documents why AWF_ROOT_ONLY exists.",
-            ]
-        )
-        + "\n"
-    )
-
-
-@pytest.mark.unit
-def test_init_without_path_preserves_comment_only_root_env_overlay(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Keep comment-only root env overlays as operator context."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text(
-        "AWF_API_TOKEN=compose-example\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "# Operator left this file as documentation.",
-                "# Keep this note in the seeded compose env.",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap()
-
-    assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_text(encoding="utf-8") == (
-        "\n".join(
-            [
-                "AWF_API_TOKEN=compose-example",
-                "# Operator left this file as documentation.",
-                "# Keep this note in the seeded compose env.",
-            ]
-        )
-        + "\n"
-    )
-
-
-@pytest.mark.unit
-def test_init_without_path_keeps_trailing_shared_overlay_context_with_seed_key(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Keep final shared-key overlay comments at the end of the seeded file."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    (compose / ".env.example").write_text(
-        "\n".join(
-            [
-                "AWF_API_TOKEN=compose-example",
-                "AWF_COMPOSE_ONLY=compose-default",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".env").write_text(
-        "\n".join(
-            [
-                "# Root-only service setting",
-                "AWF_ROOT_ONLY=root-value",
-                "AWF_API_TOKEN=migrated-token",
-                "",
-                "# Keep this note with the migrated API token.",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-
-    result = invoke_init_service_bootstrap()
-
-    assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_text(encoding="utf-8") == (
-        "\n".join(
-            [
-                "AWF_API_TOKEN=migrated-token",
-                "AWF_COMPOSE_ONLY=compose-default",
-                "# Root-only service setting",
-                "AWF_ROOT_ONLY=root-value",
-                "",
-                "# Keep this note with the migrated API token.",
-            ]
-        )
-        + "\n"
-    )
-
-
-@pytest.mark.unit
 def test_init_without_path_does_not_seed_non_root_compose_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -661,13 +295,11 @@ def test_init_without_path_does_not_seed_non_root_compose_dir(
     result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
-    expected_env_file = workspace_compose / ".env"
+    expected_env_file = workspace_root / ".env"
     assert expected_env_file.exists()
     assert expected_env_file.read_bytes() == workspace_example.read_bytes()
     assert not (compose / ".env").exists()
-    assert (
-        "wrote ../workspace-root/docker/compose/.env from ../workspace-root/.env.example"
-    ) in result.output
+    assert "wrote ../workspace-root/.env from ../workspace-root/.env.example" in result.output
 
 
 @pytest.mark.unit
@@ -780,7 +412,7 @@ def test_service_env_resolution_does_not_rediscover_asset_root_for_literal_env_f
 def test_service_env_resolution_does_not_forward_root_env_without_asset_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Root `.env` remains a read source, not a Docker Compose `--env-file`."""
+    """Root `.env` is the Docker Compose env file for the raw root Compose lane."""
     from awf.cli import init_ops as cli_main
     from awf.service import bootstrap as bootstrap_mod
 
@@ -795,7 +427,7 @@ def test_service_env_resolution_does_not_forward_root_env_without_asset_root(
     active_env_file, compose_env_file = cli_main._resolve_service_env_files(Path(".env"))  # noqa: SLF001
 
     assert active_env_file == Path(".env")
-    assert compose_env_file is None
+    assert compose_env_file == Path(".env")
 
 
 @pytest.mark.unit
@@ -1016,10 +648,10 @@ def test_init_without_path_prefers_asset_root_compose_env_from_subdirectory(
     result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
-    env_file = compose / ".env"
+    env_file = workspace_root / ".env"
     assert env_file.exists()
     assert env_file.read_bytes() == example.read_bytes()
-    assert "wrote ../docker/compose/.env from ../.env.example" in result.output
+    assert "wrote ../.env from ../.env.example" in result.output
 
 
 @pytest.mark.unit
@@ -1080,7 +712,7 @@ def test_init_without_path_passes_seeded_asset_root_env_to_bootstrap_readiness(
     assert "provider_environ" not in bootstrap_call
     service_environ = bootstrap_call["service_environ"]
     assert service_environ["AWF_GITHUB_TOKEN"] == secret
-    assert bootstrap_call["env_file"] == workspace_root / "docker" / "compose" / ".env"
+    assert bootstrap_call["env_file"] == workspace_root / ".env"
     assert secret not in result.output
 
 
@@ -1118,7 +750,7 @@ def test_init_without_path_uses_asset_root_compose_env_for_preflight(
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
 
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
-    (compose / ".env").write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
+    (workspace_root / ".env").write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
 
     project_subdir = workspace_root / "project"
     project_subdir.mkdir()
@@ -1150,14 +782,14 @@ def test_init_without_path_uses_asset_root_compose_env_for_preflight(
     assert result.exit_code == 0, result.output
     assert captured["preflight_settings"].docker_host == docker_host
     doctor_kwargs = captured["doctor_kwargs"]
-    assert doctor_kwargs["compose_file"] == compose / "local-service.yml"
-    assert doctor_kwargs["compose_env_file"] == compose / ".env"
+    assert doctor_kwargs["compose_file"] == workspace_root / "compose.yaml"
+    assert doctor_kwargs["compose_env_file"] == workspace_root / ".env"
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
-    assert captured["bootstrap_kwargs"]["compose_file"] == compose / "local-service.yml"
+    assert captured["bootstrap_kwargs"]["compose_file"] == workspace_root / "compose.yaml"
     assert "provider_environ" not in captured["bootstrap_kwargs"]
     assert captured["bootstrap_kwargs"]["service_environ"]["AWF_DOCKER_HOST"] == docker_host
-    assert captured["bootstrap_kwargs"]["env_file"] == compose / ".env"
+    assert captured["bootstrap_kwargs"]["env_file"] == workspace_root / ".env"
 
 
 @pytest.mark.unit
@@ -1175,8 +807,8 @@ def test_init_without_path_uses_seeded_compose_env_for_preflight(
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
 
     docker_host = f"unix://{tmp_path / 'docker.sock'}"
-    compose_example = compose / ".env.example"
-    compose_example.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
+    root_example = workspace_root / ".env.example"
+    root_example.write_text(f"AWF_DOCKER_HOST={docker_host}\n", encoding="utf-8")
 
     project_subdir = workspace_root / "project"
     project_subdir.mkdir()
@@ -1206,29 +838,27 @@ def test_init_without_path_uses_seeded_compose_env_for_preflight(
     result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
-    assert (compose / ".env").read_bytes() == compose_example.read_bytes()
+    assert (workspace_root / ".env").read_bytes() == root_example.read_bytes()
     assert captured["preflight_settings"].docker_host == docker_host
     doctor_kwargs = captured["doctor_kwargs"]
-    assert doctor_kwargs["compose_env_file"] == compose / ".env"
+    assert doctor_kwargs["compose_env_file"] == workspace_root / ".env"
     assert doctor_kwargs["environ"]["AWF_DOCKER_HOST"] == docker_host
     assert doctor_kwargs["provider_environ"]["AWF_DOCKER_HOST"] == docker_host
     assert "provider_environ" not in captured["bootstrap_kwargs"]
     assert captured["bootstrap_kwargs"]["service_environ"]["AWF_DOCKER_HOST"] == docker_host
-    assert captured["bootstrap_kwargs"]["env_file"] == compose / ".env"
+    assert captured["bootstrap_kwargs"]["env_file"] == workspace_root / ".env"
 
 
 @pytest.mark.unit
 def test_init_without_path_prefers_asset_root_compose_example_from_subdirectory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Prefer sibling compose examples from non-CWD AWF asset roots."""
+    """Prefer root env examples from non-CWD AWF asset roots."""
     workspace_root = tmp_path / "workspace"
     compose = workspace_root / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
 
-    compose_example = compose / ".env.example"
-    compose_example.write_text("AWF_API_TOKEN=from_compose\n", encoding="utf-8")
     root_example = workspace_root / ".env.example"
     root_example.write_text("AWF_API_TOKEN=from_asset_root\n", encoding="utf-8")
 
@@ -1242,24 +872,24 @@ def test_init_without_path_prefers_asset_root_compose_example_from_subdirectory(
     result = invoke_init_service_bootstrap()
 
     assert result.exit_code == 0, result.output
-    env_file = compose / ".env"
+    env_file = workspace_root / ".env"
     assert env_file.exists()
-    assert env_file.read_bytes() == compose_example.read_bytes()
-    assert ("wrote ../docker/compose/.env from ../docker/compose/.env.example") in result.output
-    assert not (workspace_root / ".env").exists()
+    assert env_file.read_bytes() == root_example.read_bytes()
+    assert "wrote ../.env from ../.env.example" in result.output
+    assert not (compose / ".env").exists()
 
 
 @pytest.mark.unit
-def test_init_without_path_does_not_overwrite_existing_source_compose_env(
+def test_init_without_path_does_not_overwrite_existing_root_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Keep existing compose `.env` values during bootstrap seeding."""
+    """Keep existing root `.env` values during bootstrap seeding."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    env_file = compose / ".env"
+    env_file = tmp_path / ".env"
     env_file.write_text("AWF_API_TOKEN=already_set\n", encoding="utf-8")
     example = tmp_path / ".env.example"
     example.write_text("AWF_API_TOKEN=example\n", encoding="utf-8")
@@ -1269,8 +899,8 @@ def test_init_without_path_does_not_overwrite_existing_source_compose_env(
 
     assert result.exit_code == 0, result.output
     assert env_file.read_text(encoding="utf-8") == "AWF_API_TOKEN=already_set\n"
-    assert "kept existing docker/compose/.env" in result.output
-    assert not (tmp_path / ".env").exists()
+    assert "kept existing .env" in result.output
+    assert not (compose / ".env").exists()
 
 
 @pytest.mark.unit
@@ -1336,14 +966,14 @@ def test_init_without_path_does_not_emit_seeded_token_values(
 def test_init_without_path_does_not_emit_seeded_compose_token_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Avoid printing secret values copied during compose `awf init` seeding."""
+    """Avoid printing secret values copied during asset-root `awf init` seeding."""
     secret = "super-secret-token"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
     compose = tmp_path / "docker" / "compose"
     compose.mkdir(parents=True)
     (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
-    example = compose / ".env.example"
+    example = tmp_path / ".env.example"
     example.write_text(f"AWF_API_TOKEN={secret}\n", encoding="utf-8")
     _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
 
@@ -1423,8 +1053,8 @@ def test_init_without_path_warns_when_compose_env_templates_missing(
     assert result.exit_code == 0, result.output
     assert not (compose / ".env").exists()
     assert "no env template found" in result.stdout
-    assert "looked for docker/compose/.env.example, .env.example" in result.stdout
-    assert "skipped docker/compose/.env creation" in result.stdout
+    assert "looked for .env.example" in result.stdout
+    assert "skipped .env creation" in result.stdout
     assert "no env template found" not in result.stderr
 
 
@@ -1448,27 +1078,20 @@ def test_init_env_example_search_paths_deduplicates_all_candidates(
 def test_init_without_path_warns_when_compose_env_parent_creation_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Warn about directory creation failures separately from file writes."""
+    """Warn about root env write failures separately from local checks."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
-    compose = tmp_path / "docker" / "compose"
-    compose.mkdir(parents=True)
-    (compose / "local-service.yml").write_text("services: {}\n", encoding="utf-8")
     (tmp_path / ".env.example").write_text("AWF_API_TOKEN=local\n", encoding="utf-8")
     captured = _stub_bootstrap_mode(monkeypatch, asset_root=tmp_path)
-    _fail_path_mkdir(monkeypatch, failing_path="docker/compose")
+    _fail_path_write(monkeypatch, failing_path=".env")
 
     result = invoke_init_service_bootstrap()
     output = result.output
 
     assert result.exit_code == 0, output
-    assert not (compose / ".env").exists()
-    assert (
-        "warning: could not create parent directory docker/compose "
-        "for docker/compose/.env: permission denied"
-    ) in result.stdout
-    assert "warning: could not create parent directory" not in result.stderr
-    assert "warning: could not write docker/compose/.env" not in output
+    assert not (tmp_path / ".env").exists()
+    assert "warning: could not write .env from .env.example: permission denied" in result.stdout
+    assert "warning: could not write" not in result.stderr
     assert len(captured["bootstrap_calls"]) == 1
     assert "Traceback" not in output
 

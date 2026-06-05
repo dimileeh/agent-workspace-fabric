@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
-from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
 
 from awf.common.config import (
@@ -25,17 +24,23 @@ from awf.common.config import (
     settings_constructor_fields,
     validate_production_settings,
 )
+from awf.service.environment import compose_env_file_values
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
 DEFAULT_LOCAL_SERVICE_API_BASE_URL = str(Settings.model_fields["api_base_url"].default)
+DEFAULT_LOCAL_SERVICE_API_TOKEN = "local-dev-token"
+DEFAULT_LOCAL_SERVICE_POSTGRES_PASSWORD = "awf_dev"
 DEFAULT_LOCAL_SERVICE_WORK_DIR = "~/.awf/service"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 _PROJECT_DEFAULT_WORK_DIR = str(Settings.model_fields["work_dir"].default)
-LOCAL_SERVICE_COMPOSE_FILE = Path("docker/compose/local-service.yml")
-LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
+LOCAL_SERVICE_COMPOSE_FILE = Path("compose.yaml")
+LOCAL_SERVICE_INCLUDED_COMPOSE_FILE = Path("docker/compose/local-service.yml")
+LOCAL_SERVICE_COMPOSE_ENV_FILE = Path(".env")
+LEGACY_LOCAL_SERVICE_COMPOSE_ENV_FILE = Path("docker/compose/.env")
 _AWF_SOURCE_ROOT_MARKERS = (
     "pyproject.toml",
     "src/awf/__init__.py",
+    "compose.yaml",
     "docker/compose/local-service.yml",
 )
 
@@ -43,12 +48,16 @@ _AWF_SOURCE_ROOT_MARKERS = (
 __all__ = [
     "COMPOSE_ENV_FILE_OMITTED",
     "DEFAULT_LOCAL_SERVICE_API_BASE_URL",
+    "DEFAULT_LOCAL_SERVICE_API_TOKEN",
     "DEFAULT_LOCAL_SERVICE_DATABASE_URL",
+    "DEFAULT_LOCAL_SERVICE_POSTGRES_PASSWORD",
     "DEFAULT_LOCAL_SERVICE_WORK_DIR",
     "ComposeEnvFileInput",
     "ComposeEnvFileOmitted",
+    "LEGACY_LOCAL_SERVICE_COMPOSE_ENV_FILE",
     "LOCAL_SERVICE_COMPOSE_ENV_FILE",
     "LOCAL_SERVICE_COMPOSE_FILE",
+    "LOCAL_SERVICE_INCLUDED_COMPOSE_FILE",
     "ServiceSettings",
     "local_service_environ",
     "resolve_local_service_compose_env_file",
@@ -93,6 +102,7 @@ class ServiceSettings:
     agent_idle_timeout_seconds: float = 3600
     planning_max_iterations_default: int = 3
     host_home: str = "~"
+    claude_base_gc_enabled: bool = True
     node_id: str | None = None
     branch_prefix: str = "awf"
     service_startup_log_tail_lines: int = 200
@@ -154,11 +164,7 @@ class _ProjectDotenvLookup:
         cache_key = env_file.resolve()
         values = self._values_by_file.get(cache_key)
         if values is None:
-            values = {
-                env_key: env_value
-                for env_key, env_value in dotenv_values(env_file).items()
-                if env_value is not None
-            }
+            values = compose_env_file_values(env_file)
             self._values_by_file[cache_key] = values
         return values
 
@@ -222,7 +228,8 @@ def resolve_service_settings(
         work_dir=work_dir,
         min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
-        api_token=_empty_to_none(settings.api_token),
+        claude_base_gc_enabled=settings.claude_base_gc_enabled,
+        api_token=_resolve_service_api_token(settings, service_env),
         github_token=_resolve_github_token(settings.github_token, env),
         worker_poll_interval_seconds=settings.worker_poll_interval_seconds,
         worker_max_concurrent_provisions=settings.worker_max_concurrent_provisions,
@@ -255,6 +262,16 @@ def resolve_service_settings(
     )
 
 
+def _resolve_service_api_token(
+    settings: Settings, service_environ: Mapping[str, str]
+) -> str | None:
+    """Return the API token visible to local service containers and host CLI calls."""
+
+    return _empty_to_none(settings.api_token) or _empty_to_none(
+        _env_value(service_environ, "AWF_API_TOKEN")
+    )
+
+
 def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
     """Return JSON-serializable service settings with secrets redacted."""
 
@@ -279,8 +296,8 @@ def local_service_environ(
 
     Docker Compose resolves variables from its env file and then lets the host
     shell override them. The CLI uses this merged view for readiness checks so a
-    token present in ``docker/compose/.env`` is not incorrectly reported as
-    missing just because it is absent from the host shell.
+    token present in root ``.env`` is not incorrectly reported as missing just
+    because it is absent from the host shell.
     """
 
     merged: dict[str, str] = {}
@@ -288,15 +305,11 @@ def local_service_environ(
         env_file is not None
         and (resolved_env_file := resolve_local_service_compose_env_file(env_file)) is not None
     ):
-        merged.update(
-            {
-                key: value
-                for key, value in dotenv_values(resolved_env_file).items()
-                if value is not None
-            }
-        )
+        caller_environ = os.environ if environ is None else environ
+        merged.update(compose_env_file_values(resolved_env_file, environ=caller_environ))
     merged.update(os.environ if environ is None else dict(environ))
     _populate_compose_postgres_password(merged)
+    _populate_local_compose_defaults(merged)
     return merged
 
 
@@ -361,20 +374,31 @@ def _can_use_adjacent_provider_env_file(candidate: Path, compose_file: Path) -> 
 def _is_local_service_compose_file_path(path: Path) -> bool:
     """Return true for the default local-service compose file path."""
 
-    if path == LOCAL_SERVICE_COMPOSE_FILE:
+    if path in (LOCAL_SERVICE_COMPOSE_FILE, LOCAL_SERVICE_INCLUDED_COMPOSE_FILE):
         return True
-    expected = _local_service_asset_path(LOCAL_SERVICE_COMPOSE_FILE)
-    if expected is None:
-        expected = Path.cwd() / LOCAL_SERVICE_COMPOSE_FILE
-    return path.resolve() == expected.resolve()
+    expected_paths = [
+        candidate
+        for candidate in (
+            _local_service_asset_path(LOCAL_SERVICE_COMPOSE_FILE),
+            _local_service_asset_path(LOCAL_SERVICE_INCLUDED_COMPOSE_FILE),
+        )
+        if candidate is not None
+    ]
+    if not expected_paths:
+        expected_paths = [
+            Path.cwd() / LOCAL_SERVICE_COMPOSE_FILE,
+            Path.cwd() / LOCAL_SERVICE_INCLUDED_COMPOSE_FILE,
+        ]
+    resolved_path = path.resolve()
+    return any(resolved_path == expected.resolve() for expected in expected_paths)
 
 
 def _is_local_service_compose_env_path(path: Path) -> bool:
-    """Return true for the compose env file under the verified AWF asset root."""
+    """Return true for the canonical service env file under the verified asset root."""
 
     expected = _local_service_asset_path(LOCAL_SERVICE_COMPOSE_ENV_FILE)
     if expected is None:
-        return False
+        expected = Path.cwd() / LOCAL_SERVICE_COMPOSE_ENV_FILE
     return path.resolve() == expected.resolve()
 
 
@@ -409,10 +433,12 @@ def resolve_local_service_compose_env_file(
 
     candidates: list[Path] = []
     if expanded == LOCAL_SERVICE_COMPOSE_ENV_FILE:
-        candidates.append(Path.cwd().resolve() / expanded)
-        candidates.extend(
-            root / expanded for root in _awf_source_search_roots(Path.cwd().resolve())
-        )
+        cwd = Path.cwd().resolve()
+        source_roots = _awf_source_search_roots(cwd)
+        if source_roots:
+            candidates.extend(root / expanded for root in source_roots)
+        else:
+            candidates.append(cwd / expanded)
         module_file = Path(__file__).resolve()
         candidates.extend(root / expanded for root in _awf_source_search_roots(module_file.parent))
     else:
@@ -457,6 +483,15 @@ def _populate_compose_postgres_password(environ: dict[str, str]) -> None:
         return
     if password:
         environ["AWF_POSTGRES_PASSWORD"] = password
+
+
+def _populate_local_compose_defaults(environ: dict[str, str]) -> None:
+    """Mirror root Compose's safe loopback-only local defaults."""
+
+    if not environ.get("AWF_API_TOKEN"):
+        environ["AWF_API_TOKEN"] = DEFAULT_LOCAL_SERVICE_API_TOKEN
+    if not environ.get("AWF_POSTGRES_PASSWORD"):
+        environ["AWF_POSTGRES_PASSWORD"] = DEFAULT_LOCAL_SERVICE_POSTGRES_PASSWORD
 
 
 def _default_local_service_database_url(environ: Mapping[str, str]) -> str:

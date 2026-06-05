@@ -42,9 +42,13 @@ jobs:
         # against them generates noise without catching real bugs.
         run: .venv/bin/mypy
 
-  python-full-coverage:
+  python-coverage-shards:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     services:
       postgres:
         image: postgres:16
@@ -78,18 +82,85 @@ jobs:
           docker version
           docker compose version
 
-      - name: Build agent runtime image
-        run: docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
-
-      - name: Full coverage
+      - name: Run coverage shard
         env:
           CI: "true"
           AWF_DATABASE_URL: postgresql+asyncpg://awf:awf_ci@localhost:5432/awf
           AWF_TEST_DATABASE_URL: postgresql+asyncpg://awf:awf_ci@localhost:5432/awf
-        run: uv run --python 3.12 pytest -n 8 --dist=loadscope --timeout=300 --cov=awf --cov-report=term-missing --cov-report=xml --cov-fail-under=99
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          uv run --python 3.12 coverage erase
+          uv run --python 3.12 coverage run --parallel-mode -m pytest \
+            --splits 8 \
+            --group "${{ matrix.shard }}" \
+            --timeout=300
+          mkdir -p coverage-artifacts
+          coverage_files=(.coverage.*)
+          if [ "${#coverage_files[@]}" -ne 1 ]; then
+            echo "Expected exactly one coverage data file, found ${#coverage_files[@]}."
+            printf '%s\n' "${coverage_files[@]}"
+            exit 1
+          fi
+          mv "${coverage_files[0]}" "coverage-artifacts/.coverage.shard-${{ matrix.shard }}"
 
-      - name: Enforce exact coverage threshold
-        run: uv run --python 3.12 python scripts/ci/check_coverage_threshold.py coverage.xml --minimum-percent 99
+      - name: Upload coverage shard
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage-shard-${{ matrix.shard }}
+          path: coverage-artifacts/.coverage.shard-${{ matrix.shard }}
+          include-hidden-files: true
+          retention-days: 14
+
+  python-full-coverage:
+    runs-on: ubuntu-latest
+    needs: python-coverage-shards
+    if: ${{ always() }}
+    timeout-minutes: 15
+    steps:
+      - name: Verify coverage shards passed
+        if: ${{ needs.python-coverage-shards.result != 'success' }}
+        run: |
+          echo "python-coverage-shards result: ${{ needs.python-coverage-shards.result }}"
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.31"
+          github-token: ""
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --extra dev
+
+      - name: Download coverage shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: python-coverage-shard-*
+          path: coverage-artifacts
+          merge-multiple: true
+
+      - name: Combine coverage and enforce threshold
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          find coverage-artifacts -type f -name '.coverage.*' -print
+          coverage_files=(coverage-artifacts/.coverage.*)
+          if [ "${#coverage_files[@]}" -eq 0 ]; then
+            echo "No coverage shard artifacts were downloaded."
+            exit 1
+          fi
+          cp "${coverage_files[@]}" .
+          uv run --python 3.12 coverage combine
+          uv run --python 3.12 coverage xml
+          uv run --python 3.12 coverage report --show-missing --fail-under=99
+          uv run --python 3.12 python scripts/ci/check_coverage_threshold.py coverage.xml --minimum-percent 99
 
       - name: Upload full coverage artifact
         if: always()

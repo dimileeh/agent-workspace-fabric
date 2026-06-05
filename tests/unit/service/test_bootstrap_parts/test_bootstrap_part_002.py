@@ -50,6 +50,10 @@ def _write_source_checkout(root: Path) -> Path:
         "services: {}\n",
         encoding="utf-8",
     )
+    (root / "compose.yaml").write_text(
+        "include:\n  - ./docker/compose/local-service.yml\n",
+        encoding="utf-8",
+    )
     (root / "pyproject.toml").write_text("[project]\nname = 'awf'\n", encoding="utf-8")
     (root / "src" / "awf").mkdir(parents=True)
     (root / "src" / "awf" / "__init__.py").write_text("", encoding="utf-8")
@@ -173,7 +177,7 @@ def test_bootstrap_starts_optional_ollama_bridge_when_profile_enabled(
         "docker",
         "compose",
         "-f",
-        str(source_root / "docker/compose/local-service.yml"),
+        str(source_root / "compose.yaml"),
         "up",
         "-d",
         "--build",
@@ -214,7 +218,7 @@ def test_bootstrap_starts_optional_ollama_bridge_with_lowercase_compose_profiles
         "docker",
         "compose",
         "-f",
-        str(source_root / "docker/compose/local-service.yml"),
+        str(source_root / "compose.yaml"),
         "up",
         "-d",
         "--build",
@@ -590,7 +594,7 @@ def test_bootstrap_skip_agent_runtime_build_omits_build_command(
     source_checkout_root: Path,
 ) -> None:
     calls: list[list[str]] = []
-    compose_file = str(source_checkout_root / "docker/compose/local-service.yml")
+    compose_file = str(source_checkout_root / "compose.yaml")
 
     def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -641,6 +645,7 @@ def test_bootstrap_skip_agent_runtime_build_omits_build_command(
             "up",
             "-d",
             "--build",
+            "--no-deps",
             "api",
             "worker",
         ],
