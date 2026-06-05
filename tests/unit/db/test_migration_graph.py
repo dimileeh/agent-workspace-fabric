@@ -73,6 +73,9 @@ class _ScalarOneResult:
     def scalar_one(self) -> int:
         return self._value
 
+    def scalar_one_or_none(self) -> int | None:
+        return self._value
+
 
 class _AtomicReserveConnection:
     dialect = postgresql.dialect()
@@ -115,7 +118,81 @@ def test_auth_overlay_unmount_backfill_reserves_event_order_atomically() -> None
     statement = connection.statements[0]
     assert statement.lstrip().startswith("update workspaces set")
     assert "greatest(" in statement
+    assert "not (exists" in statement
     assert "returning workspaces.event_sequence" in statement
+
+
+@pytest.mark.unit
+def test_auth_overlay_unmount_backfill_skips_reservation_when_marker_appears() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = _load_auth_overlay_backfill_migration(repo_root)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspaces (
+                        id VARCHAR(36) PRIMARY KEY,
+                        event_sequence INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspace_events (
+                        id VARCHAR(36) PRIMARY KEY,
+                        workspace_id VARCHAR(36) NOT NULL,
+                        event_type VARCHAR(64) NOT NULL,
+                        event_order INTEGER
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspaces (id, event_sequence)
+                    VALUES ('ws_race_marker', 4)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspace_events (
+                        id, workspace_id, event_type, event_order
+                    )
+                    VALUES (
+                        'evt_race_marker', 'ws_race_marker',
+                        :pending_type, 4
+                    )
+                    """
+                ),
+                {"pending_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE},
+            )
+
+            event_order = migration._reserve_workspace_event_order(
+                conn,
+                workspace_id="ws_race_marker",
+                cycle_floor=4,
+            )
+            sequence = conn.execute(
+                text(
+                    """
+                    SELECT event_sequence
+                    FROM workspaces
+                    WHERE id = 'ws_race_marker'
+                    """
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert event_order is None
+    assert sequence == 4
 
 
 @pytest.mark.unit

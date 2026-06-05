@@ -16,6 +16,7 @@ from typing import Any, Final, cast
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
+from sqlalchemy.sql.elements import ColumnElement
 
 revision: str = "0f1e2d3c4b5a"
 down_revision: str | Sequence[str] | None = "f9a0b1c2d3e4"
@@ -116,11 +117,7 @@ def backfill_auth_overlay_unmount_pending(connection: Connection) -> int:
             workspace_id=workspace_id,
             cycle_floor=cycle_floor,
         )
-        if _has_current_cycle_auth_overlay_marker(
-            connection,
-            workspace_id=workspace_id,
-            cycle_floor=cycle_floor,
-        ):
+        if event_order is None:
             continue
 
         connection.execute(
@@ -249,20 +246,38 @@ def _has_current_cycle_auth_overlay_marker(
     workspace_id: str,
     cycle_floor: int,
 ) -> bool:
+    marker = connection.execute(
+        sa.select(sa.literal(1))
+        .where(
+            _current_cycle_auth_overlay_marker_exists(
+                workspace_id=workspace_id,
+                cycle_floor=cycle_floor,
+            )
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    return marker is not None
+
+
+def _current_cycle_auth_overlay_marker_exists(
+    *,
+    workspace_id: str,
+    cycle_floor: int,
+) -> ColumnElement[bool]:
     event_order_matches_cycle = _WORKSPACE_EVENTS.c.event_order >= cycle_floor
     if cycle_floor == -1:
         event_order_matches_cycle = sa.or_(
             event_order_matches_cycle,
             _WORKSPACE_EVENTS.c.event_order.is_(None),
         )
-    marker = connection.execute(
-        sa.select(_WORKSPACE_EVENTS.c.id)
+    return (
+        sa.select(sa.literal(1))
+        .select_from(_WORKSPACE_EVENTS)
         .where(_WORKSPACE_EVENTS.c.workspace_id == workspace_id)
         .where(_WORKSPACE_EVENTS.c.event_type.in_(_AUTH_OVERLAY_MARKER_EVENT_TYPES))
         .where(event_order_matches_cycle)
-        .limit(1)
-    ).scalar_one_or_none()
-    return marker is not None
+        .exists()
+    )
 
 
 def _reserve_workspace_event_order(
@@ -270,7 +285,7 @@ def _reserve_workspace_event_order(
     *,
     workspace_id: str,
     cycle_floor: int,
-) -> int:
+) -> int | None:
     current_sequence = sa.func.coalesce(_WORKSPACES.c.event_sequence, 0)
     if connection.dialect.name == "postgresql":
         sequence_floor = sa.func.greatest(current_sequence, cycle_floor)
@@ -279,10 +294,18 @@ def _reserve_workspace_event_order(
     event_order = connection.execute(
         _WORKSPACES.update()
         .where(_WORKSPACES.c.id == workspace_id)
+        .where(
+            sa.not_(
+                _current_cycle_auth_overlay_marker_exists(
+                    workspace_id=workspace_id,
+                    cycle_floor=cycle_floor,
+                )
+            )
+        )
         .values(event_sequence=sequence_floor + 1)
         .returning(_WORKSPACES.c.event_sequence)
-    ).scalar_one()
-    return int(event_order)
+    ).scalar_one_or_none()
+    return int(event_order) if event_order is not None else None
 
 
 def _pending_event_id(*, workspace_id: str, release_event_id: str) -> str:
