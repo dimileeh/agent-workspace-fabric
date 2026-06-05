@@ -14,7 +14,9 @@ from awf.host_setup.rendering import (
     CLIENT_CONFIG_CONFLICT,
     SETUP_CLIENT_UNKNOWN,
     SETUP_READINESS_FAILED,
+    START_COMPOSE_ASSETS_MISSING,
 )
+from awf.host_setup.source_assets import SOURCE_CHECKOUT_MARKERS
 from awf.host_setup.system_checks import SetupCheckError
 from awf.mcp.server import build_mcp_server
 from tests.unit.mcp.setup_tools_test_helpers import _json_text, _payload, _settings
@@ -51,6 +53,17 @@ def test_client_instruction_reason_coded_next_step_rewrites_first_command_only(
     from awf.mcp import setup_tools
 
     assert setup_tools._client_instruction_reason_coded_next_step(step, command=command) == expected
+
+
+def _make_source_checkout(root: Path) -> Path:
+    for marker in SOURCE_CHECKOUT_MARKERS:
+        target = root / marker.path
+        if marker.kind == "dir":
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("x", encoding="utf-8")
+    return root
 
 
 @pytest.mark.unit
@@ -123,12 +136,58 @@ async def test_client_integration_instructions_preserve_explicit_source_checkout
 
     expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
     assert result.isError is False
-    assert resolve_calls == [(checkout, False)]
+    assert resolve_calls == [(checkout, True)]
     assert payload["command"] == expected_command
     assert payload["clients"][0]["apply_command"] == expected_command
     assert payload["next_steps"] == [
         f"Run `{expected_command}` to apply the claude client integration."
     ]
+
+
+@pytest.mark.unit
+async def test_client_integration_instructions_missing_source_env_blocks_before_apply_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = _make_source_checkout(tmp_path / "source checkout")
+    root_env = checkout / ".env"
+    assert (checkout / ".env.example").is_file()
+    assert not root_env.exists()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    monkeypatch.setattr(setup_tools, "_client_home", lambda: home)
+    monkeypatch.setattr(setup_tools, "_client_which", lambda _binary: None)
+    monkeypatch.setattr(setup_tools, "_client_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    monkeypatch.setattr(setup_tools, "_client_env", lambda: {})
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_client_integration_instructions",
+        {"clients": ["claude"], "source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+    expected_command = f"awf setup --client claude --source-checkout '{checkout}'"
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == START_COMPOSE_ASSETS_MISSING
+    assert payload["command"] == expected_command
+    assert payload["summary"] == (
+        "AWF could not register the MCP client: the env file does not exist yet."
+    )
+    assert payload["issues"][0]["details"] == {
+        "check": "client_env_file",
+        "env_file": str(root_env),
+    }
+    assert payload["next_steps"] == [
+        f"Run awf service bootstrap to create the env file, then re-run {expected_command}.",
+    ]
+    assert "clients" not in payload
+    assert "apply_command" not in rendered
 
 
 @pytest.mark.unit
@@ -168,7 +227,7 @@ async def test_client_integration_instructions_resolves_relative_source_checkout
     resolved_checkout = checkout.resolve()
     expected_command = f"awf setup --client claude --source-checkout '{resolved_checkout}'"
     assert result.isError is False
-    assert resolve_calls == [(resolved_checkout, False)]
+    assert resolve_calls == [(resolved_checkout, True)]
     assert payload["clients"][0]["apply_command"] == expected_command
     assert payload["next_steps"] == [
         f"Run `{expected_command}` to apply the claude client integration."

@@ -14,8 +14,10 @@ from awf.cli import start_commands as _start_commands
 # NOTE: These aliases expose private CLI symbols as the stable MCP import surface.
 # Keep this bridge in sync when refactoring setup/start/init command internals.
 DEFAULT_START_TIMEOUT_SECONDS = _start_commands._DEFAULT_START_TIMEOUT_SECONDS
+ClientEnvFileMissingError = _setup_commands.ClientEnvFileMissingError
 StartBootstrapInputs = _start_commands._StartBootstrapInputs
 build_init_project_onboarding_payload = _init_ops._init_project_onboarding_payload
+client_env_file_missing_payload = _setup_commands._client_env_file_missing_payload
 client_setup_environ = _setup_commands._client_env
 client_setup_home = _setup_commands._client_home
 client_setup_now = _setup_commands._client_now
@@ -34,8 +36,10 @@ start_success_payload = _start_commands._start_success_payload
 
 __all__ = (
     "DEFAULT_START_TIMEOUT_SECONDS",
+    "ClientEnvFileMissingError",
     "StartBootstrapInputs",
     "build_init_project_onboarding_payload",
+    "client_env_file_missing_payload",
     "client_setup_environ",
     "client_setup_home",
     "client_setup_now",

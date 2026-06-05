@@ -53,6 +53,61 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HWzCQ
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve the explicit empty-client fast return without resolving the source
+  checkout or env file: Complete.
+- Preserve successful client-instruction payloads when the resolved env file
+  exists: Complete.
+- Block client-instruction responses when a valid source checkout resolves a
+  missing root `.env`, before returning any client apply commands: Complete.
+- Preserve explicit `source_checkout` in the returned retry command and
+  next-step guidance: Complete.
+- Add focused MCP regression coverage for the missing-env instruction path:
+  Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `src/awf/cli/first_run_mcp_bridge.py`
+- `tests/unit/mcp/test_setup_tools_client_integration.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_source_env_blocks_before_apply_commands -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/test_setup_tools_import_contract.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `awf_get_client_integration_instructions` returned success and advertised
+  an apply command when the explicit source checkout had `.env.example` but no
+  root `.env`.
+- Regression test after the implementation change: 1 passed.
+- Focused client-integration MCP test file: 14 passed.
+- Bridge import-contract smoke test: 2 passed.
+- Focused ruff: passed.
+- Focused ruff format check: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HR9IF
 
 ### Requirement Status

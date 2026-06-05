@@ -53,7 +53,9 @@ from awf.service.bootstrap import (
 )
 
 _DEFAULT_START_TIMEOUT_SECONDS = _first_run_mcp_bridge.DEFAULT_START_TIMEOUT_SECONDS
+_ClientEnvFileMissingError = _first_run_mcp_bridge.ClientEnvFileMissingError
 _StartBootstrapInputs = _first_run_mcp_bridge.StartBootstrapInputs
+_client_env_file_missing_payload = _first_run_mcp_bridge.client_env_file_missing_payload
 _client_env = _first_run_mcp_bridge.client_setup_environ
 _client_home = _first_run_mcp_bridge.client_setup_home
 _client_now = _first_run_mcp_bridge.client_setup_now
@@ -713,7 +715,7 @@ def _client_integration_instructions_result(
             return safe_result(empty_payload)
 
         source_path = _resolve_client_source_checkout_path(source_checkout)
-        env_file = _resolve_client_env_file(source_path, False)
+        env_file = _resolve_client_env_file(source_path, True)
         home = _client_home()
         env = _client_env()
         plans = [
@@ -743,6 +745,17 @@ def _client_integration_instructions_result(
     except SourceCheckoutError as exc:
         blocked_payload = _client_source_checkout_blocked_payload_with_explicit_command(
             _client_source_checkout_blocked_payload(exc),
+            selected_clients=selected,
+            source_checkout=source_path,
+        )
+        return _first_run_result(
+            safe_result,
+            blocked_payload,
+            is_error=True,
+        )
+    except _ClientEnvFileMissingError as exc:
+        blocked_payload = _client_env_file_missing_payload_with_explicit_command(
+            _client_env_file_missing_payload(exc.env_file),
             selected_clients=selected,
             source_checkout=source_path,
         )
@@ -1165,6 +1178,25 @@ def _client_source_checkout_blocked_payload_with_explicit_command(
     )
 
 
+def _client_env_file_missing_payload_with_explicit_command(
+    payload: FirstRunPayload,
+    *,
+    selected_clients: list[str],
+    source_checkout: Path | None,
+) -> FirstRunPayload:
+    command = _client_instruction_command(selected_clients, source_checkout=source_checkout)
+    return payload.model_copy(
+        update={
+            "command": command,
+            "next_steps": _client_instruction_reason_coded_next_steps(
+                payload.reason_code or SETUP_READINESS_FAILED,
+                payload.next_steps,
+                command=command,
+            ),
+        },
+    )
+
+
 def _client_instruction_reason_coded_payload(
     reason_code: str,
     summary: str,
@@ -1210,6 +1242,8 @@ def _client_instruction_reason_coded_next_steps(
 def _client_instruction_reason_coded_next_step(step: str, *, command: str) -> str:
     if "awf setup --dry-run" in step:
         return step.replace("awf setup --dry-run", command, 1)
+    if "awf setup --client <client>" in step:
+        return step.replace("awf setup --client <client>", command, 1)
     if "awf setup --client" in step:
         return step.replace("awf setup --client", command, 1)
     return step.replace("awf setup", command, 1)

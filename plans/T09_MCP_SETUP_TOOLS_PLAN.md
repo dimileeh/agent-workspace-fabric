@@ -84,6 +84,58 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HWzCQ
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_client_integration_instructions` resolves
+the client MCP env file with `require_existing=False`. For an explicit or
+persisted valid source checkout that only has `.env.example`, the instruction
+tool can therefore return success and advertise apply commands that immediately
+block in the CLI non-dry-run path because the root `.env` does not exist.
+
+Scope is limited to making MCP client-integration instructions enforce the same
+env-file existence prerequisite before returning apply commands, and to reuse
+the existing CLI missing-env blocked payload shape instead of returning a
+generic readiness failure.
+
+### Requirements Checklist
+
+- Preserve the explicit empty-client fast return without resolving the source
+  checkout or env file.
+- Preserve successful client-instruction payloads when the resolved env file
+  exists.
+- Block client-instruction responses when a valid source checkout resolves a
+  missing root `.env`, before returning any client apply commands.
+- Preserve explicit `source_checkout` in the returned retry command and
+  next-step guidance.
+- Add focused MCP regression coverage for the missing-env instruction path.
+
+### Implementation Steps
+
+1. Add a focused failing MCP regression for a valid explicit source checkout
+   that has `.env.example` but no root `.env`.
+2. Expose the existing CLI `ClientEnvFileMissingError` and missing-env payload
+   through the first-run MCP bridge.
+3. Require the resolved client env file to exist before building MCP
+   instruction plans, and return the existing missing-env blocked payload with
+   the explicit client-instruction retry command.
+4. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_missing_source_env_blocks_before_apply_commands -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_import_contract.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/test_setup_tools_import_contract.py
+uv run --python 3.12 --extra dev ruff format --check tests/unit/mcp/test_setup_tools_client_integration.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py src/awf/cli/first_run_mcp_bridge.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HR9IF
 
 ### Problem Statement And Scope
