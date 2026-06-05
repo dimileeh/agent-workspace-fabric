@@ -77,7 +77,6 @@ _AUTH_OVERLAY_MARKER_EVENT_TYPES: Final = (
 def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        bind.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
         bind.execute(sa.text("SET LOCAL statement_timeout = '10min'"))
         # Per-workspace event-order reservations may wait behind ordinary
         # writers; leave total runtime bounded by statement_timeout instead.

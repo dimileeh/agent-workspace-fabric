@@ -125,17 +125,17 @@ def test_auth_overlay_unmount_backfill_reserves_event_order_atomically() -> None
 
 
 @pytest.mark.unit
-def test_auth_overlay_unmount_backfill_resets_lock_timeout_before_dml() -> None:
+def test_auth_overlay_unmount_backfill_sets_timeout_guardrails_before_dml() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     migration_path = repo_root / "migrations" / "versions" / _AUTH_OVERLAY_BACKFILL_FILENAME
     migration = migration_path.read_text(encoding="utf-8")
 
-    lock_timeout_index = migration.index("SET LOCAL lock_timeout = '5s'")
     statement_timeout_index = migration.index("SET LOCAL statement_timeout = '10min'")
-    reset_lock_timeout_index = migration.index("SET LOCAL lock_timeout = '0'")
+    lock_timeout_index = migration.index("SET LOCAL lock_timeout = '0'")
     backfill_index = migration.index("backfill_auth_overlay_unmount_pending(bind)")
 
-    assert lock_timeout_index < statement_timeout_index < reset_lock_timeout_index < backfill_index
+    assert "SET LOCAL lock_timeout = '5s'" not in migration
+    assert statement_timeout_index < lock_timeout_index < backfill_index
 
 
 @pytest.mark.unit
