@@ -908,6 +908,23 @@ def test_persist_env_values_match_compose_interpolation(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_persist_preserves_operator_force_copy_override(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("AWF_CLAUDE_AUTH_FORCE_COPY=true\n", encoding="utf-8")
+
+    result = WorkDirPropagationResult(
+        propagation="rshared",
+        force_copy=False,
+        reason_code="SERVICE_BOOTSTRAP_WORK_DIR_PROPAGATION_ENSURED",
+        detail="made rshared",
+    )
+    bootstrap._persist_work_dir_propagation_result(env_file, result)  # noqa: SLF001
+
+    values = _read_env_file_values(env_file)
+    assert values["AWF_CLAUDE_AUTH_FORCE_COPY"] == "true"
+
+
+@pytest.mark.unit
 def test_bootstrap_persist_called_after_preflight(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

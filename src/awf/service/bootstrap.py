@@ -284,13 +284,19 @@ def _persist_work_dir_propagation_result(
     directory and ``os.replace()``.
     """
     now_iso = datetime.now(tz=UTC).isoformat()
+    effective_force_copy = result.force_copy
+    try:
+        pre_existing_env = compose_env_file_values(env_file) if env_file.exists() else {}
+        effective_force_copy = result.force_copy or _force_copy_already_requested(pre_existing_env)
+    except OSError:
+        pre_existing_env = {}
     new_posture = PersistedPropagationPosture(
         propagation=result.propagation,
-        force_copy="true" if result.force_copy else "false",
+        force_copy="true" if effective_force_copy else "false",
         timestamp=now_iso,
     )
     try:
-        existing = compose_env_file_values(env_file) if env_file.exists() else {}
+        existing = pre_existing_env
         existing[AWF_WORK_DIR_BIND_PROPAGATION_ENV] = new_posture.propagation
         existing[AWF_CLAUDE_AUTH_FORCE_COPY_ENV] = new_posture.force_copy
         existing[AWF_WORK_DIR_PROPAGATION_TIMESTAMP_ENV] = new_posture.timestamp
