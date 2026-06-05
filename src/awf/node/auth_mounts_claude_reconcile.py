@@ -22,6 +22,9 @@ from pathlib import Path
 
 from awf.common.logging import get_logger
 from awf.node.auth_mounts_caps import _has_cap_mknod
+from awf.node.auth_mounts_overlay_copy import (
+    _safe_agent_file_equal_content as _safe_agent_file_equal_content,
+)
 from awf.node.auth_mounts_overlay_copy import _safe_files_equal_content as _safe_files_equal_content
 from awf.node.auth_mounts_overlay_copy import _safe_mtime_ns as _safe_mtime_ns
 from awf.node.auth_mounts_overlay_copy import _safe_overlay_copy as _safe_overlay_copy
@@ -93,7 +96,13 @@ def _legacy_is_unedited_host_copy(
     # byte-for-byte match with the live host proves the legacy file is unedited and may
     # protect the existing ``upper`` edit; any divergence (or an unreadable side, which
     # fails safe to ``False``) leaves it eligible to forward.
-    return _safe_files_equal_content(legacy_file, host_file)
+    #
+    # ``legacy_file`` lives under the agent-writable legacy copy, and the caller's
+    # ``is_file()`` pre-check is not atomic with this read: an agent can swap it for a
+    # symlink or a reader-less FIFO in the window, which a plain ``open("rb")`` would
+    # follow out of tree or block on forever. Use the agent-safe compare (``O_NOFOLLOW |
+    # O_NONBLOCK`` + ``S_ISREG`` guard) for it; ``host_file`` is the trusted live host.
+    return _safe_agent_file_equal_content(legacy_file, host_file)
 
 
 def _forward_fallback_deletions_as_whiteouts(

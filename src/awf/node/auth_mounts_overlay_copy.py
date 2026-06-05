@@ -23,6 +23,7 @@ import os
 import shutil
 import stat
 from pathlib import Path
+from typing import IO
 
 
 def _safe_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result | None:
@@ -66,6 +67,24 @@ def _safe_mtime_ns(path: Path, *, follow_symlinks: bool = True) -> int | None:
         return None
 
 
+def _streams_equal_bytes(fa: IO[bytes], fb: IO[bytes]) -> bool:
+    """True iff two already-open binary streams yield identical bytes through EOF.
+
+    The shared chunked-compare loop behind both :func:`_safe_files_equal_content` (two
+    non-agent trees) and :func:`_safe_agent_file_equal_content` (an agent-controlled
+    first path). Each caller owns opening — and *safely* opening — its file descriptors;
+    this only walks them in lock-step so the two open paths cannot drift apart.
+    """
+
+    while True:
+        chunk_a = fa.read(65536)
+        chunk_b = fb.read(65536)
+        if chunk_a != chunk_b:
+            return False
+        if not chunk_a:
+            return True
+
+
 def _safe_files_equal_content(a: Path, b: Path) -> bool:
     """True iff ``a`` and ``b`` are both readable and byte-for-byte identical.
 
@@ -79,26 +98,79 @@ def _safe_files_equal_content(a: Path, b: Path) -> bool:
     valid* credential — hiding it. Comparing content closes that window in this
     safety-sensitive, credential-hiding direction.
 
-    Both arguments are *non-agent* trees — the read-only overlay ``base`` lower
+    **Both arguments must be *non-agent* trees** — the read-only overlay ``base`` lower
     (materialized via ``copytree(symlinks=False)``, so no symlinks) and the trusted
-    live host ``~/.claude`` — so a plain streamed read is sufficient here; the
-    fd-based symlink-safe descent that :func:`_safe_overlay_copy` needs for the
-    agent-controlled ``merged``/``legacy`` trees is unnecessary. Any read error (a
-    racing unlink, a permission failure) fails safe to ``False`` — "not provably
-    equal", so the caller declines the whiteout and the credential stays visible.
+    live host ``~/.claude`` — because the plain ``open("rb")`` here follows symlinks
+    and *blocks* on a reader-less FIFO. A call site whose argument lives under an
+    agent-writable tree (e.g. the ``rw`` legacy copy) must use
+    :func:`_safe_agent_file_equal_content` instead, which adds the ``O_NOFOLLOW |
+    O_NONBLOCK`` + ``S_ISREG`` guard against a swapped symlink/FIFO; without that an
+    agent could hang the root provisioning worker forever. The fd-based symlink-safe
+    descent that :func:`_safe_overlay_copy` needs for the agent-controlled
+    ``merged``/``legacy`` trees is otherwise unnecessary for these two trusted trees.
+    Any read error (a racing unlink, a permission failure) fails safe to ``False`` —
+    "not provably equal", so the caller declines the whiteout and the credential stays
+    visible.
     """
 
     try:
         with a.open("rb") as fa, b.open("rb") as fb:
-            while True:
-                chunk_a = fa.read(65536)
-                chunk_b = fb.read(65536)
-                if chunk_a != chunk_b:
-                    return False
-                if not chunk_a:
-                    return True
+            return _streams_equal_bytes(fa, fb)
     except OSError:
         return False
+
+
+def _safe_agent_file_equal_content(agent_file: Path, trusted_file: Path) -> bool:
+    """True iff ``agent_file`` and ``trusted_file`` are both readable and byte-identical.
+
+    Content-equality variant of :func:`_safe_files_equal_content` for the case where the
+    *first* path lives under an **agent-controlled** tree — the ``rw`` legacy
+    ``~/.claude`` copy that #404's
+    :func:`~awf.node.auth_mounts_claude_reconcile._legacy_is_unedited_host_copy` reads.
+    The caller's ``is_file()`` pre-check in
+    :func:`~awf.node.auth_mounts_claude_reconcile._reconcile_fallback_edits_into_upper`
+    is *not* atomic with this read, and the agent can swap ``agent_file`` for a symlink
+    or a reader-less FIFO in that window: the plain ``open("rb")`` that
+    :func:`_safe_files_equal_content` uses for its two non-agent trees would then follow
+    the link out of the ``.claude`` tree or block the root provisioning worker forever
+    (the same DoS that :func:`_safe_overlay_copy` already defends against on its
+    agent-controlled source).
+
+    So ``agent_file`` is opened with ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK`` and an
+    ``S_ISREG`` ``fstat`` guard — the identical leaf protections
+    :func:`_safe_overlay_copy` applies: ``O_NOFOLLOW`` rejects a swapped symlink
+    (``ELOOP``), ``O_NONBLOCK`` makes a reader-less FIFO fail (``ENXIO``) instead of
+    blocking, and the ``S_ISREG`` guard refuses any other non-regular leaf (e.g. a FIFO
+    with a live reader) before a byte is read. ``trusted_file`` is the live host
+    ``~/.claude`` copy (non-agent), so it keeps the plain streamed read.
+
+    Any open/read error — a swapped special file, a racing unlink, a permission
+    failure — fails safe to ``False`` ("not provably equal"), exactly as
+    :func:`_safe_files_equal_content` does. The #404 caller then treats the legacy file
+    as eligible to forward (where :func:`_safe_overlay_copy` independently re-validates
+    it with the same fd-based descent), so this never silently hides or drops a
+    credential — it only declines the "unedited host copy" protection.
+    """
+
+    try:
+        agent_fd = os.open(agent_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        # A swapped symlink (``ELOOP``), a reader-less FIFO is *not* caught here (a
+        # read-only FIFO open succeeds even with no writer — the ``S_ISREG`` guard below
+        # rejects it), a racing unlink, or a permission failure. Fail safe.
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(agent_fd).st_mode):
+            # A FIFO (reader-less or with a live reader), device, socket, or directory the
+            # agent swapped in after the caller's ``is_file()`` check: never read it.
+            return False
+        with os.fdopen(agent_fd, "rb", closefd=False) as fa, trusted_file.open("rb") as fb:
+            return _streams_equal_bytes(fa, fb)
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(agent_fd)
 
 
 def _safe_overlay_copy(merged: Path, rel: Path, src_root: Path) -> None:
