@@ -9,6 +9,7 @@ routing, fallback, and unmount-before-remove.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,7 +17,10 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from awf.node import auth_mounts as auth_mounts_mod
+# The overlay primitives and Claude auth subsystem live in ``auth_mounts_claude``;
+# ``auth_mounts`` re-exports them. Patch the module that *defines* the helpers so
+# the consumers (which resolve them in that namespace) observe the override.
+from awf.node import auth_mounts_claude as auth_mounts_mod
 from awf.node.auth_mounts import (
     _host_claude_signature,
     _shared_claude_base_dir,
@@ -279,6 +283,36 @@ def test_signature_terminates_on_circular_symlink(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_signature_keeps_dir_whose_stat_races_to_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ``os.walk(followlinks=True)`` classifies a directory from ``scandir`` (no stat
+    # call on a populated ``d_type``), but the per-child ``child.stat()`` in the dirs
+    # loop can still raise — a directory deleted/permission-flipped in the window
+    # (a TOCTOU), or an ``EACCES`` race. That ``except`` must keep the entry so the
+    # files loop signs it as ``missing`` and record an ``ancestors_by_path`` entry so
+    # the "every walked path has an entry" invariant holds for any descendant that
+    # resolves before the walk descends. Signing must terminate and stay stable.
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    (host_home / ".claude" / "racingdir").mkdir()
+
+    base_path_cls = type(Path())
+
+    class _StatRacingPath(base_path_cls):  # type: ignore[valid-type, misc]
+        def stat(self, *args: object, **kwargs: object) -> os.stat_result:
+            if self.name == "racingdir":
+                raise PermissionError("simulated stat race")
+            return super().stat(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(auth_mounts_mod, "Path", _StatRacingPath)
+
+    signature = _host_claude_signature(host_home)
+    assert len(signature) == 16
+    assert signature == _host_claude_signature(host_home)
+
+
+@pytest.mark.unit
 def test_signature_tracks_duplicate_symlinks_to_same_target(tmp_path: Path) -> None:
     # Two directory symlinks to the same target are NOT a cycle: ``copytree(
     # symlinks=False)`` copies each linked path separately, so the base gains both
@@ -424,6 +458,48 @@ def test_overlay_unavailable_falls_back_to_legacy_copy(
     # Every fallback path — overlay unsupported and mount failure alike — emits a
     # clear reason so the copy fallback is never silent (issue #361 requirement).
     assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reserved", [",", ":"])
+def test_reserved_char_work_dir_falls_back_to_legacy_copy(tmp_path: Path, reserved: str) -> None:
+    """A ``,``/``:`` in the work dir degrades to copy instead of a broken mount.
+
+    overlayfs's ``mount -o lowerdir=..,upperdir=..,workdir=..`` payload splits on
+    ``,`` and stacks lower layers on ``:`` — neither is escapable in that legacy API.
+    A literal comma/colon in ``AWF_WORK_DIR`` would tear the option string apart or
+    be misread as an extra lower layer, so the overlay branch must never attempt the
+    mount: it falls back to the per-workspace copy (PRRT_kwDOSJAM6s6HOnML).
+    """
+
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / f"wo{reserved}rk"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_reserved",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    claude_root = work_dir / "auth" / "ws_reserved" / "claude"
+    # The mount is never attempted — the paths cannot be expressed as overlay options.
+    assert mounter.mounts == []
+    # Legacy full copy took over: the mount source is the copied ``.claude`` tree.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert not (claude_root / "merged").exists()
+    # The degrade is logged with a distinct reason so it is never silent.
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
+        and entry.get("reason") == "overlay_path_reserved_chars"
+        for entry in logs
+    )
 
 
 @pytest.mark.unit
@@ -709,6 +785,77 @@ def test_live_mount_reuse_pins_actual_base_when_host_changed(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_live_mount_reuse_reconciles_against_actual_base_when_host_changed(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    # An extra host file present at provision time becomes part of base A.
+    (host_home / ".claude" / "keeper.json").write_text('{"k": 1}\n')
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_recon",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_recon" / "claude"
+    signature_a = _host_claude_signature(host_home)
+    base_a = _shared_claude_base_dir(work_dir, signature_a)
+
+    # The agent accumulated writable overlay data, making ``upper`` non-empty so the
+    # surviving overlay overrides the legacy-copy guard on the retry.
+    (claude_root / "upper" / "agent.json").write_text('{"agent": true}\n')
+
+    # A transient remount failure on a prior provision degraded to a *legacy full
+    # copy* the agent then mutated. Reconstruct that copy: an unedited baseline file
+    # matching base A (``copy2`` preserves its mtime), plus one genuine fallback edit
+    # that is absent from base A.
+    legacy = claude_root / ".claude"
+    legacy.mkdir(parents=True)
+    shutil.copy2(base_a / "keeper.json", legacy / "keeper.json")
+    (legacy / "edited.json").write_text('{"fallback": "edit"}\n')
+
+    # Worker killed after ``mount()`` (against base A) but before the pin write.
+    (claude_root / "base.signature").unlink()
+
+    # The operator *removed* ``keeper.json`` from the host before the retry, so a base
+    # recomputed from the current host (base B) lacks it entirely and has a different
+    # signature than the live overlay's actual base A.
+    (host_home / ".claude" / "keeper.json").unlink()
+    signature_b = _host_claude_signature(host_home)
+    assert signature_b != signature_a
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_recon",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    upper = claude_root / "upper"
+    merged = claude_root / "merged"
+    # Reconciliation compared legacy files against the base the live mount *actually*
+    # uses (base A, recovered from the mount), not the freshly recomputed base B that
+    # is missing ``keeper.json``. The unedited baseline file therefore stays out of the
+    # overlay — comparing against base B would have mis-copied it as a "new" edit.
+    assert not (merged / "keeper.json").exists()
+    assert not (upper / "keeper.json").exists()
+    # A genuine fallback edit (absent from base A) is still forwarded — written through
+    # the live ``merged`` mount (in production the kernel copies it up into ``upper``;
+    # the fake mounter has no real copy-up, so it lands in ``merged`` here).
+    assert (merged / "edited.json").read_text() == '{"fallback": "edit"}\n'
+    # The legacy copy is reaped once reconciled.
+    assert not legacy.exists()
+    # The pin records the base the live overlay is actually mounted against.
+    assert (claude_root / "base.signature").read_text() == signature_a
+
+
+@pytest.mark.unit
 def test_live_mount_reuse_skips_pin_when_lowerdir_unrecoverable(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
@@ -785,470 +932,224 @@ def test_live_mount_reuse_skips_pin_when_lowerdir_not_a_shared_base(tmp_path: Pa
 
 
 @pytest.mark.unit
-def test_overlay_retry_after_teardown_pins_original_base_when_host_changed(
+def test_live_mount_reuse_defers_reconcile_when_lowerdir_unrecoverable(
     tmp_path: Path,
 ) -> None:
+    """Live overlay reused but its real base is unrecoverable: do not reconcile.
+
+    When ``_live_overlay_pin_signature`` cannot recover the live mount's lowerdir, the
+    host-recomputed base is *not* the tree the overlay is mounted against (the host
+    changed since the kill). Reconciling the legacy copy's fallback edits against that
+    wrong base could copy baseline noise into the overlay or skip a real edit before
+    the legacy copy is reaped. So both the reconcile and the reap must be deferred,
+    leaving the legacy copy intact for a later provision that can pin the true base.
+    """
+
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
     _seed_host_claude(host_home)
-    mounter = FakeOverlayMounter(supported=True)
+    # An extra host file present at provision time becomes part of base A.
+    (host_home / ".claude" / "keeper.json").write_text('{"k": 1}\n')
 
-    resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_reboot",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
-    claude_root = work_dir / "auth" / "ws_reboot" / "claude"
-    # The agent accumulated writable overlay data in ``upper`` during the run.
-    overlay_data = claude_root / "upper" / "settings.json"
-    overlay_data.write_text('{"theme": "agent-edited"}\n')
-
-    # The merged mount is gone (e.g. a host reboot) but ``upper``/``work`` survive
-    # on disk, and the operator updated ``~/.claude`` before the retry.
-    mounter.mounted.clear()
-    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
-    base_b = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
-    assert base_b != base_a
-
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_reboot",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-
-    by_target = {m.target: m for m in mounts}
-    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    # The remount pins the *original* base the surviving upper was built against,
-    # never the recomputed base from the changed host — so no config leak and no
-    # upper/work mismatch that would rmtree the agent's mutations.
-    assert mounter.mounts[-1]["lowerdir"] == base_a
-    assert mounter.mounts[-1]["lowerdir"] != base_b
-    # The changed-host base is never even built on the pinned retry.
-    assert not base_b.is_dir()
-    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
-    assert not (claude_root / ".claude").exists()
-
-
-@pytest.mark.unit
-def test_overlay_retry_rebuilds_when_pinned_base_missing(tmp_path: Path) -> None:
-    host_home = tmp_path / "host-home"
-    work_dir = tmp_path / "work"
-    _seed_host_claude(host_home)
-    mounter = FakeOverlayMounter(supported=True)
-
-    resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_basegone",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
-    claude_root = work_dir / "auth" / "ws_basegone" / "claude"
-    overlay_data = claude_root / "upper" / "settings.json"
-    overlay_data.write_text('{"theme": "agent-edited"}\n')
-
-    # The overlay is torn down and the pinned base no longer exists on disk (a
-    # future reaper removed it). With nothing to pin to, the retry must rebuild a
-    # fresh base from the current host rather than failing.
-    mounter.mounted.clear()
-    shutil.rmtree(base_a)
-
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_basegone",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-
-    by_target = {m.target: m for m in mounts}
-    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    # A fresh base (current signature, same content) is rebuilt and used.
-    assert mounter.mounts[-1]["lowerdir"] == base_a
-    assert base_a.is_dir()
-    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
-
-
-@pytest.mark.unit
-def test_overlay_retry_without_pin_marker_recomputes_base(tmp_path: Path) -> None:
-    host_home = tmp_path / "host-home"
-    work_dir = tmp_path / "work"
-    _seed_host_claude(host_home)
-    mounter = FakeOverlayMounter(supported=True)
-
-    # An overlay left behind by a pre-pin build: ``upper``/``work`` exist but no
-    # base-signature marker was recorded, so the original base is unknowable.
-    claude_root = work_dir / "auth" / "ws_nomarker" / "claude"
-    (claude_root / "upper").mkdir(parents=True)
-    (claude_root / "work").mkdir(parents=True)
-
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_nomarker",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-
-    by_target = {m.target: m for m in mounts}
-    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    # Falls back to the current-host base and records the marker for next time.
-    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
-    assert mounter.mounts[-1]["lowerdir"] == base
-    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
-
-
-@pytest.mark.unit
-def test_overlay_capable_retry_preserves_prior_legacy_copy(tmp_path: Path) -> None:
-    host_home = tmp_path / "host-home"
-    work_dir = tmp_path / "work"
-    _seed_host_claude(host_home)
-
-    # First provision predates overlay support (legacy/pre-upgrade): a
-    # per-workspace ``.claude`` copy is written and the agent mutates it.
-    resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_upgrade",
-        host_env={},
-        overlay_mounter=FakeOverlayMounter(supported=False),
-    )
-    claude_root = work_dir / "auth" / "ws_upgrade" / "claude"
-    legacy_copy = claude_root / ".claude" / "settings.json"
-    assert legacy_copy.read_text() == '{"theme": "dark"}\n'
-    legacy_copy.write_text('{"theme": "agent-edited"}\n')
-
-    # AWF is upgraded and overlay support becomes available on the retry. The
-    # existing legacy copy (with the agent's mutations) must be reused, not
-    # dropped for a fresh shared-base overlay that would seed from the host.
-    mounter = FakeOverlayMounter(supported=True)
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_upgrade",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-
-    by_target = {m.target: m for m in mounts}
-    # The mount keeps pointing at the legacy copy and no overlay is mounted.
-    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
-    assert mounter.mounts == []
-    assert not (claude_root / "merged").exists()
-    # The agent's mutation survives the retry rather than being overwritten.
-    assert legacy_copy.read_text() == '{"theme": "agent-edited"}\n'
-
-
-@pytest.mark.unit
-def test_mount_ebusy_after_concurrent_mount_reuses_live_overlay(tmp_path: Path) -> None:
-    host_home = tmp_path / "host-home"
-    work_dir = tmp_path / "work"
-    _seed_host_claude(host_home)
-
-    class RacingOverlayMounter(FakeOverlayMounter):
-        """Models a concurrent provision winning the mount race.
-
-        ``is_mounted`` is false at the pre-check, then ``mount`` simulates a
-        concurrent caller having mounted the same ``merged`` path in the window
-        (the overlay becomes live) and our own attempt colliding with EBUSY.
-        """
-
-        def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
-            # The racing winner's overlay is now live at ``merged`` ...
-            self.mounted.add(Path(merged))
-            # ... and our attempt onto the busy mountpoint fails.
-            raise OSError("device or resource busy")
-
-    mounter = RacingOverlayMounter(supported=True)
-    claude_root = work_dir / "auth" / "ws_race_mount" / "claude"
-    # Stand in for the writable layer the racing winner accumulated.
-    upper_data = claude_root / "upper" / "settings.json"
-
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_race_mount",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-
-    by_target = {m.target: m for m in mounts}
-    # The live overlay is reused rather than torn down on EBUSY ...
-    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    assert by_target["/home/agent/.claude"].mode == "rw"
-    # ... so the writable upper layer survives and no full-copy fallback ran.
-    assert (claude_root / "upper").is_dir()
-    assert (claude_root / "work").is_dir()
-    assert not (claude_root / ".claude").exists()
-    # Sanity: a marker written into ``upper`` would not be deleted by the handler.
-    upper_data.write_text('{"theme": "race-winner"}\n')
-    assert upper_data.read_text() == '{"theme": "race-winner"}\n'
-
-
-@pytest.mark.unit
-def test_mount_ebusy_after_concurrent_mount_pins_actual_base_when_host_changed(
-    tmp_path: Path,
-) -> None:
-    host_home = tmp_path / "host-home"
-    work_dir = tmp_path / "work"
-    _seed_host_claude(host_home)
-
-    # First provision establishes a live overlay against base A, then the racing
-    # winner is modelled as killed before its post-mount pin write: ``upper`` is
-    # live on disk and ``base.signature`` is missing when the retry runs.
-    seed_mounter = FakeOverlayMounter(supported=True)
-    resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_race_pin",
-        host_env={},
-        overlay_mounter=seed_mounter,
-    )
-    claude_root = work_dir / "auth" / "ws_race_pin" / "claude"
-    signature_a = _host_claude_signature(host_home)
-    base_a = _shared_claude_base_dir(work_dir, signature_a)
-    (claude_root / "base.signature").unlink()
-
-    # The operator edits ``~/.claude`` before the retry, so a signature recomputed
-    # from the host now names a *different* base than the one the live overlay (the
-    # racing winner's) is actually mounted against.
-    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
-    signature_b = _host_claude_signature(host_home)
-    assert signature_b != signature_a
-
-    class RacingOverlayMounter(FakeOverlayMounter):
-        """The pre-check sees ``merged`` unmounted; our ``mount`` then loses the
-        race to a concurrent provision that wins the mount (against base A) and
-        collides with EBUSY."""
-
-        def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
-            # The racing winner's live overlay runs against the original base A,
-            # not the base recomputed from the since-changed host.
-            self.mounts.append(
-                {"lowerdir": base_a, "upperdir": upperdir, "workdir": workdir, "merged": merged}
-            )
-            self.mounted.add(Path(merged))
-            raise OSError("device or resource busy")
-
-    mounter = RacingOverlayMounter(supported=True)
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_race_pin",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-
-    by_target = {m.target: m for m in mounts}
-    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    # The pin records the base the live overlay is *actually* mounted against
-    # (base A recovered from the mount), never the guessed base B from the changed
-    # host — so a later teardown + remount reuses the correct lowerdir instead of
-    # tripping the upper/base mismatch whose failure path ``rmtree``s the agent's
-    # overlay mutations.
-    assert (claude_root / "base.signature").read_text() == signature_a
-    assert base_a != _shared_claude_base_dir(work_dir, signature_b)
-
-
-@pytest.mark.unit
-def test_mount_ebusy_after_concurrent_mount_skips_pin_when_lowerdir_unrecoverable(
-    tmp_path: Path,
-) -> None:
-    host_home = tmp_path / "host-home"
-    work_dir = tmp_path / "work"
-    _seed_host_claude(host_home)
-
-    seed_mounter = FakeOverlayMounter(supported=True)
-    resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_race_norecover",
-        host_env={},
-        overlay_mounter=seed_mounter,
-    )
-    claude_root = work_dir / "auth" / "ws_race_norecover" / "claude"
-    (claude_root / "base.signature").unlink()
-
-    class UnrecoverableRacingMounter(FakeOverlayMounter):
-        """Wins the race (overlay live, EBUSY for us) but exposes no lowerdir."""
-
-        def mount(self, *, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
-            self.mounted.add(Path(merged))
-            raise OSError("device or resource busy")
+    class UnrecoverableLowerdirMounter(FakeOverlayMounter):
+        """A live overlay whose lowerdir cannot be recovered from the mount table."""
 
         def active_lowerdir(self, merged: Path) -> Path | None:
             return None
 
-    mounter = UnrecoverableRacingMounter(supported=True)
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_race_norecover",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-
-    by_target = {m.target: m for m in mounts}
-    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    # No pin is guessed when the racing winner's base cannot be recovered; a later
-    # teardown + retry recomputes from the host instead of locking to a guess.
-    assert not (claude_root / "base.signature").exists()
-
-
-@pytest.mark.unit
-def test_transient_mount_failure_preserves_surviving_upper(tmp_path: Path) -> None:
-    host_home = tmp_path / "host-home"
-    work_dir = tmp_path / "work"
-    _seed_host_claude(host_home)
-    mounter = FakeOverlayMounter(supported=True)
-
+    mounter = UnrecoverableLowerdirMounter(supported=True)
     resolve_service_auth_mounts(
         host_home=host_home,
         work_dir=work_dir,
-        workspace_id="ws_transient",
+        workspace_id="ws_defer",
         host_env={},
         overlay_mounter=mounter,
     )
-    claude_root = work_dir / "auth" / "ws_transient" / "claude"
-    # The agent accumulated writable overlay data in ``upper`` during the run.
-    overlay_data = claude_root / "upper" / "settings.json"
-    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    claude_root = work_dir / "auth" / "ws_defer" / "claude"
+    signature_a = _host_claude_signature(host_home)
+    base_a = _shared_claude_base_dir(work_dir, signature_a)
 
-    # The overlay is torn down normally (``upper``/``work`` persist on disk) and a
-    # later provision retry hits a *transient* mount failure with ``merged`` not
-    # mounted. The cleanup must not wipe the surviving ``upper``/``work`` layers
-    # (the agent's mutations); only the unused ``merged`` mountpoint is removed and
-    # we degrade to the legacy copy so the retry can later recover the overlay.
-    mounter.mounted.clear()
-    mounter._mount_error = OSError("transient remount failure")
+    # The agent accumulated writable overlay data, making ``upper`` non-empty so the
+    # surviving overlay overrides the legacy-copy guard on the retry.
+    (claude_root / "upper" / "agent.json").write_text('{"agent": true}\n')
+
+    # A transient remount failure on a prior provision degraded to a *legacy full
+    # copy* the agent then mutated: an unedited baseline file matching base A plus a
+    # genuine fallback edit absent from base A.
+    legacy = claude_root / ".claude"
+    legacy.mkdir(parents=True)
+    shutil.copy2(base_a / "keeper.json", legacy / "keeper.json")
+    (legacy / "edited.json").write_text('{"fallback": "edit"}\n')
+
+    # Worker killed after ``mount()`` (against base A) but before the pin write.
+    (claude_root / "base.signature").unlink()
+
+    # The operator changed the host so a base recomputed now (base B) differs from the
+    # live overlay's actual base A — exactly the case where reconciling against the
+    # host guess would be wrong.
+    (host_home / ".claude" / "keeper.json").unlink()
+    assert _host_claude_signature(host_home) != signature_a
 
     with capture_logs() as logs:
         mounts = resolve_service_auth_mounts(
             host_home=host_home,
             work_dir=work_dir,
-            workspace_id="ws_transient",
+            workspace_id="ws_defer",
             host_env={},
             overlay_mounter=mounter,
         )
 
     by_target = {m.target: m for m in mounts}
-    # Degraded to the legacy full copy for this provision ...
-    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
-    assert any(entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNAVAILABLE" for entry in logs)
-    # ... but the agent's surviving overlay mutations are intact for a future
-    # retry to remount, and the unused mountpoint is cleaned up.
-    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
-    assert (claude_root / "work").is_dir()
-    assert not (claude_root / "merged").exists()
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The legacy copy is NOT reaped: its fallback edits are preserved on disk for a
+    # later provision that can recover/pin the true base and reconcile correctly.
+    assert legacy.exists()
+    assert (legacy / "edited.json").read_text() == '{"fallback": "edit"}\n'
+    # No reconcile ran against the wrong (host-recomputed) base: neither the genuine
+    # edit nor baseline noise was copied into the live overlay.
+    merged = claude_root / "merged"
+    upper = claude_root / "upper"
+    assert not (merged / "edited.json").exists()
+    assert not (merged / "keeper.json").exists()
+    assert not (upper / "edited.json").exists()
+    assert not (upper / "keeper.json").exists()
+    # No pin is guessed when the live overlay's base cannot be recovered.
+    assert not (claude_root / "base.signature").exists()
+    # The deferral is logged (not silent) so an operator can see the legacy copy lingers.
+    assert any(e.get("event") == "claude_auth_overlay_reconcile_deferred" for e in logs)
 
 
 @pytest.mark.unit
-def test_retry_after_transient_fallback_remounts_surviving_upper(tmp_path: Path) -> None:
+def test_live_mount_reuse_defers_reconcile_when_recovered_base_dir_is_gone(
+    tmp_path: Path,
+) -> None:
+    """Live overlay reused but its recovered lowerdir no longer exists on disk.
+
+    A live overlay keeps serving off kernel-held inodes even after its lowerdir
+    *path* is removed/renamed on the host, and ``active_lowerdir`` still reports that
+    stale path. ``_live_overlay_pin_signature`` resolves it with ``strict=False`` (no
+    existence proof), so without the ``is_dir`` guard ``base`` would be realigned to a
+    vanished tree and ``_reconcile_fallback_edits_into_upper`` — reading every missing
+    ``base[rel]`` as "legacy is newer than base" — would copy the *whole* legacy tree
+    into the live overlay. The recovered base must still be a real directory; otherwise
+    the reconcile and reap are deferred (and no pin is written).
+    """
+
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
     _seed_host_claude(host_home)
+    # An extra host file present at provision time becomes part of base A.
+    (host_home / ".claude" / "keeper.json").write_text('{"k": 1}\n')
     mounter = FakeOverlayMounter(supported=True)
 
-    # Provision 1: overlay succeeds and the agent mutates the writable ``upper``.
     resolve_service_auth_mounts(
         host_home=host_home,
         work_dir=work_dir,
-        workspace_id="ws_recover",
+        workspace_id="ws_gone",
         host_env={},
         overlay_mounter=mounter,
     )
-    claude_root = work_dir / "auth" / "ws_recover" / "claude"
-    overlay_data = claude_root / "upper" / "settings.json"
-    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    claude_root = work_dir / "auth" / "ws_gone" / "claude"
+    signature_a = _host_claude_signature(host_home)
+    base_a = _shared_claude_base_dir(work_dir, signature_a)
 
-    # Provision 2: teardown leaves ``upper``/``work`` on disk, then a transient
-    # remount failure degrades to a *fresh* legacy ``.claude`` copy (no mutations).
-    mounter.mounted.clear()
-    mounter._mount_error = OSError("transient remount failure")
-    resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_recover",
-        host_env={},
-        overlay_mounter=mounter,
-    )
-    # The fresh legacy copy now exists alongside the surviving overlay ``upper``.
-    assert (claude_root / ".claude").is_dir()
-    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+    # The agent accumulated writable overlay data, making ``upper`` non-empty so the
+    # surviving overlay overrides the legacy-copy guard on the retry.
+    (claude_root / "upper" / "agent.json").write_text('{"agent": true}\n')
 
-    # Provision 3: the mount works again. The surviving overlay ``upper`` must be
-    # remounted (recovering the agent's mutations) rather than skipped in favor of
-    # the stale fresh legacy copy created by the transient failure.
-    mounter.mounted.clear()
-    mounter._mount_error = None
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_recover",
-        host_env={},
-        overlay_mounter=mounter,
-    )
+    # A transient remount failure on a prior provision degraded to a *legacy full copy*
+    # the agent then mutated: an unedited baseline file matching base A plus a genuine
+    # fallback edit absent from base A.
+    legacy = claude_root / ".claude"
+    legacy.mkdir(parents=True)
+    shutil.copy2(base_a / "keeper.json", legacy / "keeper.json")
+    (legacy / "edited.json").write_text('{"fallback": "edit"}\n')
+
+    # Worker killed after ``mount()`` (against base A) but before the pin write.
+    (claude_root / "base.signature").unlink()
+
+    # The live overlay's lowerdir *path* was removed on the host (the mount lives on via
+    # kernel-held inodes, and ``active_lowerdir`` still reports the now-stale path). The
+    # operator also changed ``~/.claude`` so a base recomputed now (base B) differs from
+    # base A — base A therefore stays gone across the retry rather than being rebuilt.
+    (host_home / ".claude" / "keeper.json").unlink()
+    assert _host_claude_signature(host_home) != signature_a
+    shutil.rmtree(base_a)
+    assert not base_a.is_dir()
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_gone",
+            host_env={},
+            overlay_mounter=mounter,
+        )
 
     by_target = {m.target: m for m in mounts}
-    # Auth is served from the live overlay (``merged``), not the stale legacy copy.
     assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    # The remount reused the surviving ``upper`` carrying the agent's mutations.
-    call = mounter.mounts[-1]
-    assert call["upperdir"] == claude_root / "upper"
-    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
-    # The stale fresh legacy copy from provision 2 is now unmounted dead weight
-    # (~1.7 GB) superseded by the live overlay — it must be reaped, not orphaned.
-    assert not (claude_root / ".claude").exists()
+    # The legacy copy is NOT reaped and its whole tree is NOT copied into the overlay:
+    # a vanished recovered base is treated as untrustworthy, so the reconcile is deferred.
+    assert legacy.exists()
+    assert (legacy / "edited.json").read_text() == '{"fallback": "edit"}\n'
+    merged = claude_root / "merged"
+    upper = claude_root / "upper"
+    assert not (merged / "keeper.json").exists()
+    assert not (merged / "edited.json").exists()
+    assert not (upper / "keeper.json").exists()
+    assert not (upper / "edited.json").exists()
+    # No pin is guessed against a base directory that no longer exists.
+    assert not (claude_root / "base.signature").exists()
+    # The deferral is logged (not silent) so an operator can see the legacy copy lingers.
+    assert any(e.get("event") == "claude_auth_overlay_reconcile_deferred" for e in logs)
 
 
 @pytest.mark.unit
-def test_empty_surviving_upper_does_not_shadow_mutated_legacy_copy(tmp_path: Path) -> None:
+def test_live_mount_reuse_pins_when_work_dir_is_symlinked(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
+    # ``AWF_WORK_DIR`` reached through a symlink (e.g. a bind-mount alias): the kernel
+    # records the live overlay lowerdir in ``/proc/mounts`` in resolved form, while
+    # ``_shared_claude_base_dir`` builds the unresolved (symlinked) path.
+    real_work = tmp_path / "real-work"
+    real_work.mkdir()
     work_dir = tmp_path / "work"
+    work_dir.symlink_to(real_work, target_is_directory=True)
     _seed_host_claude(host_home)
 
-    # Provision 1: the very first overlay attempt fails its mount, so ``upper`` is
-    # created on disk but never goes live — it stays *empty*. Provisioning degrades
-    # to a fresh legacy ``.claude`` copy, which the agent then mutates.
-    mounter = FakeOverlayMounter(supported=True, mount_error=OSError("transient mount failure"))
+    class ResolvedLowerdirMounter(FakeOverlayMounter):
+        """Mirror the kernel: ``/proc/mounts`` reports the lowerdir resolved."""
+
+        def active_lowerdir(self, merged: Path) -> Path | None:
+            live = super().active_lowerdir(merged)
+            return live.resolve(strict=False) if live is not None else None
+
+    mounter = ResolvedLowerdirMounter(supported=True)
     resolve_service_auth_mounts(
         host_home=host_home,
         work_dir=work_dir,
-        workspace_id="ws_empty_upper",
+        workspace_id="ws_symlink",
         host_env={},
         overlay_mounter=mounter,
     )
-    claude_root = work_dir / "auth" / "ws_empty_upper" / "claude"
-    # An empty leftover upper survives alongside the mutated legacy copy.
-    assert (claude_root / "upper").is_dir()
-    assert not any((claude_root / "upper").iterdir())
-    legacy_copy = claude_root / ".claude" / "settings.json"
-    assert legacy_copy.read_text() == '{"theme": "dark"}\n'
-    legacy_copy.write_text('{"theme": "agent-edited"}\n')
+    claude_root = work_dir / "auth" / "ws_symlink" / "claude"
+    signature = _host_claude_signature(host_home)
+    # Worker killed after ``mount()`` but before the pin write: overlay stays live
+    # while ``base.signature`` is missing.
+    (claude_root / "base.signature").unlink()
 
-    # Provision 2: the mount works again. The empty surviving ``upper`` carries no
-    # agent data, so it must NOT override the legacy-copy guard and shadow the
-    # mutated legacy copy behind a fresh shared-base overlay. The legacy copy (with
-    # the agent's mutations) must keep serving auth.
-    mounter._mount_error = None
-    mounter.mounted.clear()
     mounts = resolve_service_auth_mounts(
         host_home=host_home,
         work_dir=work_dir,
-        workspace_id="ws_empty_upper",
+        workspace_id="ws_symlink",
         host_env={},
         overlay_mounter=mounter,
     )
 
     by_target = {m.target: m for m in mounts}
-    # Auth keeps pointing at the legacy copy; no overlay is mounted over the empty
-    # upper, so the agent's mutations are not hidden.
-    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
-    assert mounter.mounts == []
-    assert legacy_copy.read_text() == '{"theme": "agent-edited"}\n'
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The live mount was reused — no remount onto the busy mountpoint.
+    assert len(mounter.mounts) == 1
+    # The pin is recorded even though the resolved live lowerdir and the unresolved
+    # ``_shared_claude_base_dir`` path diverge string-wise: both sides are resolved
+    # before comparing, so the symlinked ``work_dir`` no longer drops a valid base.
+    assert (claude_root / "base.signature").read_text() == signature
