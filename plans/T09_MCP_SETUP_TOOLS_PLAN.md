@@ -84,6 +84,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HP5Q8
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_start_local_service` returns
+`_reason_coded_payload(...)` unchanged when start bootstrap input resolution
+raises `SetupCheckError`. That renders the generic `awf setup` command on a
+start-tool failure, and it does not preserve an explicit `source_checkout` in
+the command field.
+
+Scope is limited to the start local-service `SetupCheckError` branch and
+focused regressions for its command rendering.
+
+### Requirements Checklist
+
+- Preserve the existing reason-coded issue, details, redaction, and MCP error
+  behavior for start input-resolution `SetupCheckError` failures.
+- Render bare start input-resolution `SetupCheckError` failures with
+  `command="awf start"`.
+- Preserve explicit `source_checkout` in that command as
+  `awf start --source-checkout <path>`.
+- Add focused regression coverage for the bare and explicit-checkout command
+  paths.
+
+### Implementation Steps
+
+1. Extend the existing start input-resolution `SetupCheckError` regression to
+   assert the bare start command.
+2. Add a focused explicit-checkout regression for the same error branch.
+3. Wrap the existing reason-coded payload in a start-command helper before
+   returning it from the `SetupCheckError` branch.
+4. Run the targeted regressions and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_setup_check_input_resolution_failure_is_reason_coded tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_setup_check_input_resolution_failure_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Write Errors And Empty Client Env File
 
 ### Problem Statement And Scope

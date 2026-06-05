@@ -359,7 +359,10 @@ async def _start_local_service_result(
     except SetupCheckError as exc:
         return _first_run_result(
             safe_result,
-            _reason_coded_payload(exc.reason_code, str(exc), exc.details),
+            _start_payload_with_source_checkout_command(
+                _reason_coded_payload(exc.reason_code, str(exc), exc.details),
+                source_path,
+            ),
             is_error=True,
         )
     except SourceCheckoutError as exc:
@@ -463,9 +466,10 @@ def _start_payload_with_source_checkout_command(
     payload: FirstRunPayload,
     source_checkout: Path | None,
 ) -> FirstRunPayload:
-    if source_checkout is None:
-        return payload
-    return payload.model_copy(update={"command": _start_source_checkout_command(source_checkout)})
+    command = "awf start"
+    if source_checkout is not None:
+        command = _start_source_checkout_command(source_checkout)
+    return payload.model_copy(update={"command": command})
 
 
 def _initialize_project_profile_result(

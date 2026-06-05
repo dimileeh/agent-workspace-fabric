@@ -1584,12 +1584,56 @@ async def test_start_local_service_setup_check_input_resolution_failure_is_reaso
 
     assert result.isError is True
     assert payload["status"] == "blocked"
+    assert payload["command"] == "awf start"
     assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["issues"][0]["reason_code"] == SETUP_READINESS_FAILED
     assert payload["issues"][0]["details"]["check"] == "docker"
     assert bootstrap_calls == []
     assert raw_token not in rendered
     assert REDACTION_MARKER in rendered
+
+
+@pytest.mark.unit
+async def test_start_local_service_preserves_explicit_source_checkout_setup_check_input_resolution_failure_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    checkout.mkdir()
+
+    def resolve_source_checkout(source_path: Path | None) -> object:
+        assert source_path == checkout
+        return object()
+
+    def fail_bootstrap_inputs(_verified: object) -> SimpleNamespace:
+        raise SetupCheckError(
+            "startup readiness failed",
+            reason_code=SETUP_READINESS_FAILED,
+            details={"check": "docker"},
+        )
+
+    bootstrap_calls: list[bool] = []
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        bootstrap_calls.append(True)
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", resolve_source_checkout)
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", fail_bootstrap_inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {"source_checkout": str(checkout)})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["command"] == f"awf start --source-checkout '{checkout}'"
+    assert payload["reason_code"] == SETUP_READINESS_FAILED
+    assert payload["issues"][0]["details"]["check"] == "docker"
+    assert bootstrap_calls == []
 
 
 @pytest.mark.unit

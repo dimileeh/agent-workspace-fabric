@@ -53,6 +53,51 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HP5Q8
+
+### Requirement Status
+
+- Preserve the existing reason-coded issue, details, redaction, and MCP error
+  behavior for start input-resolution `SetupCheckError` failures: Complete.
+- Render bare start input-resolution `SetupCheckError` failures with
+  `command="awf start"`: Complete.
+- Preserve explicit `source_checkout` in that command as
+  `awf start --source-checkout <path>`: Complete.
+- Add focused regression coverage for the bare and explicit-checkout command
+  paths: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_setup_check_input_resolution_failure_is_reason_coded tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_setup_check_input_resolution_failure_command -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -k start_local_service -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression tests failed before the implementation change because
+  `payload["command"]` was `awf setup` on both the bare and explicit-checkout
+  start input-resolution `SetupCheckError` paths.
+- Regression tests after the implementation change: 2 passed.
+- Focused `start_local_service` subset: 16 passed, 20 deselected.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523 Write Errors And Empty Client Env File
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
