@@ -144,7 +144,7 @@ IMPLEMENTED_PARITY_COVERAGE_REFERENCES: dict[str, tuple[str, ...]] = {
         "tests/unit/mcp/test_setup_tools.py::test_setup_tools_are_registered",
         "tests/unit/mcp/test_setup_tools.py::test_get_setup_status_returns_only_status_and_safe_refs",
         "tests/unit/mcp/test_setup_tools.py::test_start_local_service_offloads_sync_preparation",
-        "tests/unit/mcp/test_setup_tools.py::test_initialize_project_profile_uses_onboarding_writer",
+        "tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_uses_onboarding_writer",
         "tests/unit/mcp/test_setup_tools.py::test_client_integration_instructions_are_secret_free",
     ),
 }
