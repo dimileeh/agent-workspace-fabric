@@ -84,6 +84,52 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HelbK Setup-Status Issue Remediation
+
+### Problem Statement And Scope
+
+The PR review reports that setup-status reason-coded failures rewrite the
+top-level `command` and `next_steps` to the read-only `awf setup --dry-run ...`
+status command, but leave `issues[].remediation.related_command` at the generic
+catalog remediation command such as `awf setup`. MCP clients following the
+nested issue remediation can therefore run the mutating setup flow and lose the
+status request's provider selectors or explicit source checkout.
+
+Scope is limited to reason-coded payloads built by
+`_setup_status_reason_coded_payload` and focused regression coverage for corrupt
+host setup config handling.
+
+### Requirements Checklist
+
+- Preserve the existing structured setup-status error payload, reason code,
+  issue details, redaction, and MCP error behavior.
+- Keep the top-level setup-status command and next-step rewriting unchanged.
+- Rewrite setup remediation `issues[].remediation.related_command` values to the
+  matching read-only setup-status dry-run command, including selected providers
+  and explicit source checkout.
+- Preserve issue remediation entries that do not carry a setup retry command.
+
+### Implementation Steps
+
+1. Extend the corrupt host-config setup-status regression to assert the nested
+   issue remediation command and confirm it fails before implementation.
+2. Add a narrow setup-status issue-copy helper mirroring the existing
+   client-integration reason-coded remediation rewrite.
+3. Apply the helper only from `_setup_status_reason_coded_payload`.
+4. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_host_config_error_without_source_checkout_is_structured -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HeS3M Preserve Client Issue Remediation Context
 
 ### Problem Statement And Scope

@@ -1161,20 +1161,48 @@ def _setup_status_reason_coded_payload(
     providers: list[str],
     source_checkout: Path | None,
 ) -> FirstRunPayload:
+    command = _setup_status_dry_run_command(
+        selected_providers=providers,
+        source_checkout=source_checkout,
+    )
     payload = _reason_coded_payload(reason_code, summary, details)
-    return payload.model_copy(
-        update={
-            "command": _setup_status_dry_run_command(
-                selected_providers=providers,
-                source_checkout=source_checkout,
-            ),
-            "next_steps": _setup_status_reason_coded_next_steps(
-                reason_code,
-                payload.next_steps,
-                providers=providers,
-                source_checkout=source_checkout,
-            ),
-        }
+    update: dict[str, Any] = {
+        "command": command,
+        "next_steps": _setup_status_reason_coded_next_steps(
+            reason_code,
+            payload.next_steps,
+            providers=providers,
+            source_checkout=source_checkout,
+        ),
+    }
+    if payload.issues:
+        update["issues"] = _setup_status_reason_coded_issues_with_command(
+            payload.issues,
+            command=command,
+        )
+    return payload.model_copy(update=update)
+
+
+def _setup_status_reason_coded_issues_with_command(
+    issues: tuple[FirstRunIssue, ...],
+    *,
+    command: str,
+) -> tuple[FirstRunIssue, ...]:
+    return tuple(
+        _setup_status_reason_coded_issue_with_command(issue, command=command) for issue in issues
+    )
+
+
+def _setup_status_reason_coded_issue_with_command(
+    issue: FirstRunIssue,
+    *,
+    command: str,
+) -> FirstRunIssue:
+    remediation = issue.remediation
+    if not _is_setup_remediation_command(remediation.related_command):
+        return issue
+    return issue.model_copy(
+        update={"remediation": remediation.model_copy(update={"related_command": command})}
     )
 
 

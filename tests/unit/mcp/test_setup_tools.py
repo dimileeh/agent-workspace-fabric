@@ -413,6 +413,7 @@ async def test_get_setup_status_setup_check_error_returns_matching_dry_run_comma
     assert payload["reason_code"] == SETUP_PROVIDER_UNKNOWN
     assert payload["issues"][0]["reason_code"] == SETUP_PROVIDER_UNKNOWN
     assert payload["issues"][0]["details"]["provider"] == "bogus"
+    assert payload["issues"][0]["remediation"]["related_command"] == "awf setup --help"
 
 
 @pytest.mark.unit
@@ -509,6 +510,10 @@ async def test_get_setup_status_host_config_error_without_source_checkout_is_str
         "error_type": "ParserError",
         "path": str(tmp_path / ".awf" / "config.yml"),
     }
+    assert (
+        payload["issues"][0]["remediation"]["related_command"]
+        == "awf setup --dry-run --provider github"
+    )
 
 
 @pytest.mark.unit
@@ -548,6 +553,7 @@ async def test_get_setup_status_run_setup_oserror_is_structured_and_redacted(
     assert payload["reason_code"] == SETUP_READINESS_FAILED
     assert payload["summary"] == "could not inspect local setup readiness"
     assert payload["issues"][0]["details"] == {"error_type": "OSError"}
+    assert payload["issues"][0]["remediation"]["related_command"] == expected_command
     assert leaked_detail not in rendered
     assert raw_token not in rendered
 
