@@ -114,3 +114,24 @@ Focused validation:
 
 Full AWF/GitHub validation, full coverage, and broad external docstring
 coverage remain managed after agent completion.
+
+## Current rebase follow-up validation
+
+After the latest merge from `origin/development`, a fresh diff-scoped AST audit
+found one new PR-touched helper without a docstring:
+`tests/unit/docs/test_public_docs_status.py:2431 _assert_package_env_quote_strip_lines`.
+This iteration added a concise behavior-neutral helper docstring only.
+
+Focused validation:
+
+- Pre-fix diff-scoped AST audit against `origin/development...HEAD`:
+  `changed_python_files=2`, `touched_defs=70`, `missing_docstrings=1`.
+- Post-fix diff-scoped AST audit against `origin/development...HEAD`:
+  `changed_python_files=2`, `touched_defs=70`, `missing_docstrings=0`.
+- `uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_status.py`:
+  passed.
+- `uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_status.py -q`:
+  `74 passed in 3.74s`.
+
+Full AWF/GitHub validation, full coverage, and broad external docstring
+coverage remain managed after agent completion.

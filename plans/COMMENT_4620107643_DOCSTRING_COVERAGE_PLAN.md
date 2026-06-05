@@ -64,6 +64,16 @@ behavior-neutral test docstring, re-run the diff-scoped AST audit, run focused
 Ruff/pytest checks for the touched docs test file, and update the validation
 record.
 
+## Current rebase follow-up iteration
+
+A fresh re-audit after the latest merge from `origin/development` found one new
+PR-touched helper without a docstring:
+`_assert_package_env_quote_strip_lines` in
+`tests/unit/docs/test_public_docs_status.py`. This iteration will add a concise
+behavior-neutral helper docstring, re-run the diff-scoped AST audit, run focused
+Ruff/pytest checks for the touched docs test file, and update the validation
+record.
+
 ## Verification commands and pass criteria
 
 - Diff-scoped AST audit over `origin/development...HEAD` reports

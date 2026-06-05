@@ -2435,6 +2435,7 @@ def _assert_package_env_quote_strip_lines(
     lines: tuple[str, ...],
     start: int,
 ) -> tuple[int, ...]:
+    """Assert package-lane env restore snippets strip quoted dotenv values."""
     indexes: list[int] = []
     current_index = start
     for line in lines:
