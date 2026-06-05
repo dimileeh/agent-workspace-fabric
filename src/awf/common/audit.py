@@ -145,7 +145,7 @@ def _redact_string(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
 
 def _redact_assignment(match: re.Match[str]) -> str:
     """Redact a regex-matched key/value secret assignment."""
-    quote = match.group("quote")
+    quote = match.group("quote") or ""
     return f"{match.group('key')}{match.group('separator')}{quote}{REDACTION_MARKER}{quote}"
 
 

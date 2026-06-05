@@ -76,7 +76,7 @@ Files changed:
 - `tests/unit/runtime/test_log_redaction.py`
 - `tests/unit/service/test_logs_parts/test_logs_part_002.py`
 - `tests/unit/service/test_doctor.py`
-- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `tests/unit/mcp/test_mcp_server_redaction_helpers.py`
 - `tests/unit/mcp/test_mcp_operator_surfaces_parts/test_mcp_operator_surfaces_part_002.py`
 
 Focused checks run:
@@ -2441,4 +2441,62 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/s
 
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 # Success: no issues found in 1 source file
+```
+
+## Review-Level Comment `issue:4620175517` Exact Byte API Token And Quoted PEM Whitespace Iteration
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: `_redact_exact_secret_bytes()` now includes
+  `service_settings.api_token` in its explicit byte-secret set, so the helper
+  no longer depends on `extra_secrets` for that configured token.
+- Complete: quoted PEM private-key assignments redact the full multiline PEM
+  value when whitespace appears between the PEM footer and the closing quote.
+- Complete: unquoted PEM private-key matching remains bounded to the PEM
+  footer and does not consume the following log newline, covered by the
+  adjacent multiline PEM assignment regression.
+- Complete: ordinary quoted and unquoted assignment redaction remains covered
+  by the adjacent runtime assignment regression.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub
+  validation, full coverage, OpenAPI drift, and frontend builds were not run
+  locally; AWF owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/mcp/server.py`
+- `src/awf/common/token_patterns.py`
+- `src/awf/common/audit.py`
+- `tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py`
+- `tests/unit/common/test_token_patterns.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+The helper regression initially lived in part 003 for the failing check, then
+was moved to `tests/unit/mcp/test_mcp_server_redaction_helpers.py` before the
+final commit so the private-key detection hook did not rescan unrelated
+existing PEM fixture literals in part 003.
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_parts/test_mcp_server_part_003.py::test_redact_exact_secret_bytes_includes_service_api_token_without_extra_secret tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_quoted_pem_private_key_with_trailing_whitespace -q --tb=short -ra
+# 2 failed: service API token remained in byte-redacted content and quoted PEM assignment with trailing whitespace did not match.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_includes_service_api_token_without_extra_secret tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_quoted_pem_private_key_with_trailing_whitespace -q --tb=short -ra
+# 2 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_quoted_pem_private_key_with_trailing_whitespace tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/common/test_token_patterns.py::test_token_assignment_pattern_guards_multiline_private_key_branch tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_includes_service_api_token_without_extra_secret -q --tb=short -ra
+# 20 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py src/awf/common/token_patterns.py src/awf/common/audit.py tests/unit/mcp/test_mcp_server_redaction_helpers.py tests/unit/common/test_token_patterns.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py src/awf/common/token_patterns.py src/awf/common/audit.py
+# Success: no issues found in 3 source files
 ```

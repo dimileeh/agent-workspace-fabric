@@ -2041,3 +2041,53 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_
 uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
 uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
 ```
+
+## Review-Level Comment `issue:4620175517` Exact Byte API Token And Quoted PEM Whitespace Plan
+
+### Problem Statement And Scope
+
+The review-level comment reports two remaining redaction fragility issues:
+MCP byte-level exact redaction omits `service_settings.api_token` from its
+explicit configured-secret set, and the shared token-assignment regex handles
+quoted PEM private-key assignments only when the closing quote immediately
+follows the PEM footer. A quoted PEM value with whitespace before the closing
+quote can therefore fail to redact as a complete multiline assignment.
+
+This repair is limited to MCP exact byte-secret collection,
+assignment-pattern quoted PEM handling, focused regressions, and this
+plan/validation evidence. It does not change branch management, pushing,
+broad validation, full coverage, or unrelated redaction surfaces.
+
+### Requirements Checklist
+
+- `_redact_exact_secret_bytes()` must redact `service_settings.api_token`
+  even when `extra_secrets` is incomplete.
+- Quoted PEM private-key assignments must redact the full multiline value when
+  whitespace appears between the PEM footer and the closing quote.
+- Unquoted PEM private-key assignments must not consume the following log
+  newline solely to satisfy the quoted-whitespace case.
+- Existing assignment redaction output for quoted and unquoted ordinary values
+  remains compatible.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add focused failing regressions for service API-token byte redaction and a
+   quoted PEM private-key assignment with trailing whitespace before the closing
+   quote.
+2. Add `service_settings.api_token` to the MCP byte exact-secret set.
+3. Update the shared token-assignment quote handling so quoted values can have
+   whitespace before the matching closing quote without broadening unquoted PEM
+   matching.
+4. Run the focused regressions, adjacent token-pattern/log-redaction checks,
+   and narrow lint/type checks for touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_includes_service_api_token_without_extra_secret tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_quoted_pem_private_key_with_trailing_whitespace -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_quoted_pem_private_key_with_trailing_whitespace tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values tests/unit/common/test_token_patterns.py::test_token_assignment_pattern_guards_multiline_private_key_branch tests/unit/runtime/test_log_redaction.py::test_redact_secrets_handles_token_assignments_and_bearer_values tests/unit/mcp/test_mcp_server_redaction_helpers.py::test_redact_exact_secret_bytes_includes_service_api_token_without_extra_secret -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/server.py src/awf/common/token_patterns.py src/awf/common/audit.py tests/unit/mcp/test_mcp_server_redaction_helpers.py tests/unit/common/test_token_patterns.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/server.py src/awf/common/token_patterns.py src/awf/common/audit.py
+```

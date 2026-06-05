@@ -28,14 +28,14 @@ TOKEN_ASSIGNMENT_PATTERN: Final = (
     r"|PASSWORD|PASSWD|SECRET"
     r")\b"
     r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<quote>[\"']?)"
+    r"(?P<quote>[\"'])?"
     r"(?P<value>"
     r"(?=-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----)"
     r"-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----[\s\S]*?"
     r"-----END [A-Z0-9 -]*PRIVATE KEY-----"
     r"|[^\s\"'`,;)}\]]+"
     r")"
-    r"(?P=quote)"
+    r"(?(quote)\s*(?P=quote)|)"
 )
 PROVIDER_REF_PATTERN: Final = (
     # Match from the start of a URI-like scheme token so hyphen-prefixed

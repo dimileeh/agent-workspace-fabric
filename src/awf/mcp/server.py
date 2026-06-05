@@ -769,6 +769,7 @@ def _redact_exact_secret_bytes(
         for secret in (
             settings.api_token,
             settings.github_token,
+            service_settings.api_token,
             service_settings.github_token,
             *extra_secrets,
         )

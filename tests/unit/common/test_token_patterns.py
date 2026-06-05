@@ -91,6 +91,31 @@ def test_shared_assignment_redactors_mask_multiline_private_key_values(
 
 
 @pytest.mark.unit
+def test_shared_assignment_redactors_mask_quoted_pem_private_key_with_trailing_whitespace() -> None:
+    """Verify quoted PEM assignments redact when whitespace precedes the closing quote."""
+    pem_kind = "OPENSSH PRIVATE" + " KEY"
+    pem_value = (
+        f"-----BEGIN {pem_kind}-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ==\n"
+        f"-----END {pem_kind}-----"
+    )
+    text = f'PRIVATE_KEY="{pem_value}\n  "\nstatus=ready'
+    match = compile_token_assignment_re().search(text)
+
+    assert match is not None
+    assert match.group("value") == pem_value
+    runtime_redacted = redaction.redact_secrets(text)
+    audit_redacted = audit.redact_audit_text(text, limit=5000)
+
+    for redacted in (runtime_redacted, audit_redacted):
+        assert "OPENSSH PRIVATE KEY" not in redacted
+        assert "b3BlbnNzaC1rZXktdjE" not in redacted
+        assert "status=ready" in redacted
+    assert 'PRIVATE_KEY="<redacted>' in runtime_redacted
+    assert 'PRIVATE_KEY="[redacted]' in audit_redacted
+
+
+@pytest.mark.unit
 def test_token_assignment_pattern_guards_multiline_private_key_branch() -> None:
     """Verify PEM private-key matching is explicitly gated before scanning."""
     assignment_re = compile_token_assignment_re()
