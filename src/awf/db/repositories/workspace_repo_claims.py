@@ -122,6 +122,13 @@ async def claim_worker_restart_recovery_execution(
             active_worker_restart_recovery,
             claim_available,
         )
+        # Deliberately *not* bumping ``execution_claim_epoch`` here. Unlike the
+        # requested-claim blocks (_apply_execution_claim), the three D3
+        # recovery-clear sites, and the stale-clear branch in
+        # claim_monitoring_pr, this is the executor-path restart recovery: the
+        # executor heartbeat/release pass ``epoch=None`` and run no epoch-gated
+        # CAS, so there is no fence to advance past (D6 single-worker safety).
+        # Incrementing here would be a no-op the executor never reads.
         .values(
             execution_claimed_by=owner_id,
             execution_claim_expires_at=lease_expires_at,

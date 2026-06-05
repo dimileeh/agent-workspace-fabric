@@ -281,8 +281,12 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
                 reason_code=EXECUTION_CLAIM_FENCED,
             )
         except Exception:
-            # Provisioner.provision_claimed() already logged + transitioned to failed;
-            # we swallow here so one bad workspace doesn't abort the batch.
+            # Provisioner.provision_claimed() logs the failure and attempts to
+            # transition to ``failed``; on the fenced path the epoch-CAS in
+            # _mark_failed updates 0 rows, so the workspace stays in
+            # ``provisioning`` for the new claimant rather than landing in
+            # ``failed``. Swallow either way so one bad workspace doesn't abort
+            # the batch.
             _log.exception("worker.provision_failed", workspace_id=workspace_id)
         finally:
             heartbeat.cancel()
