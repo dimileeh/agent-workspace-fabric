@@ -84,6 +84,50 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## CI Repair: PR393 Full-Coverage Exact Threshold Gap
+
+### Problem Statement And Scope
+
+GitHub Actions CI run `27041662264` passed all Python coverage shards but failed
+the aggregate `python-full-coverage` job because combined line+branch coverage
+was `98.996%`, below the required `99.00%`. The downloaded `coverage.xml`
+artifact shows uncovered branches in the new MCP setup-status payload helpers,
+including invalid issue/check filtering, credential-ref scheme metadata, and
+client updated-at projection.
+
+Scope is limited to adding meaningful focused coverage for the new MCP
+setup-status payload projection behavior. No source behavior, thresholds, or CI
+configuration should change.
+
+### Requirements Checklist
+
+- Cover setup-status provider/client projection with safe metadata only.
+- Cover malformed setup-status issue/check inputs being ignored rather than
+  leaking or failing.
+- Cover blocking source-checkout issues hiding persisted/probed checkout
+  metadata.
+- Run focused helper tests and focused lint only; full AWF/GitHub validation
+  remains managed by AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused unit test module for `awf.mcp.setup_status_payload`.
+2. Assert provider credential metadata exposes only presence/scheme, clients
+   include `updated_at` only when configured, invalid checks/issues are filtered,
+   and blocking source-checkout issues suppress checkout status.
+3. Run the new focused test, focused ruff, and the line-limit guard.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_status_payload.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_status_payload.py
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523 Start Settings Secret Field Discovery
 
 ### Problem Statement And Scope

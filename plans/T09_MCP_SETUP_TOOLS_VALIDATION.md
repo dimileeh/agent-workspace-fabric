@@ -53,6 +53,60 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## CI Repair: PR393 Full-Coverage Exact Threshold Gap
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Cover setup-status provider/client projection with safe metadata only:
+  Complete.
+- Cover malformed setup-status issue/check inputs being ignored rather than
+  leaking or failing: Complete.
+- Cover blocking source-checkout issues hiding persisted/probed checkout
+  metadata: Complete.
+- Run focused helper tests and focused lint only; full AWF/GitHub validation
+  remains managed by AWF after agent completion: Complete.
+
+### Evidence
+
+Root cause:
+
+- GitHub Actions CI run `27041662264` passed all Python coverage shards but
+  failed `python-full-coverage` because combined line+branch coverage was
+  `98.996%`, below the required `99.00%`.
+- The downloaded `full-coverage-report` artifact showed uncovered branches in
+  `mcp/setup_status_payload.py` for safe setup-status payload projection:
+  credential-ref scheme handling, client `updated_at` projection, invalid
+  issue/check filtering, and source-checkout issue handling.
+
+Files changed:
+
+- `tests/unit/mcp/test_setup_status_payload.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_status_payload.py -q
+uv run --python 3.12 --extra dev ruff check tests/unit/mcp/test_setup_status_payload.py
+uv run --python 3.12 --extra dev pytest tests/unit/test_core_decomposition_maintainability.py::test_first_party_code_files_stay_under_line_limit -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_status_payload.py --cov=awf.mcp.setup_status_payload --cov-report=term-missing -q
+```
+
+Latest results:
+
+- Focused setup-status payload helper tests: 3 passed.
+- Focused ruff: passed.
+- First-party line-limit guard: 1 passed.
+- Helper-only coverage for `awf.mcp.setup_status_payload`: 100.00% line and
+  branch coverage.
+
+Full AWF/GitHub validation and repository-wide coverage gates were not run in
+the agent phase; AWF owns broad validation, provenance, logs, timeouts, and
+merge gating after agent completion.
+
 ## Review Repair: issue:4620143523 Start Settings Secret Field Discovery
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
