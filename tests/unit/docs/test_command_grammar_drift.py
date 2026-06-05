@@ -407,23 +407,27 @@ def test_first_run_install_lanes_present_and_curl_gated() -> None:
 
     Each document is asserted independently rather than against a concatenation:
     these are two public first-run entry points, so dropping every lane marker
-    from one must fail even if the sibling doc still carries them. README's
-    summary table and Quickstart's lane headers spell the two source-checkout
-    lanes with different casing, so the expected markers are tracked per file.
+    from one must fail even if the sibling doc still carries them. The two
+    source-checkout lanes are anchored on the distinctive install *command token*
+    (`uv tool install . --force` vs `uv run --python 3.12 --extra dev awf`) rather
+    than the section heading text, so a benign heading reword or capitalisation
+    tweak does not trip a false "lane missing", while dropping the lane's actual
+    install instruction still fails. The expected markers are tracked per file so
+    the per-document independence holds.
     """
     expected_lane_markers = {
         "README.md": (
             "release-installed",
             "package-manager",
-            "Source checkout with global tool install",
-            "Source checkout with no global install",
+            "uv tool install . --force",
+            "uv run --python 3.12 --extra dev awf",
             "release-gated",
         ),
         "docs/QUICKSTART.md": (
             "release-installed",
             "package-manager",
-            "Source Checkout With Global Tool Install",
-            "Source Checkout With No Global Install",
+            "uv tool install . --force",
+            "uv run --python 3.12 --extra dev awf",
             "release-gated",
         ),
     }
