@@ -1466,3 +1466,65 @@ def test_overlay_reap_clears_marker_before_legacy_rmtree(
     assert marker_present_at_legacy_rmtree == [False]
     assert not legacy_copy.exists()
     assert not marker.exists()
+
+
+@pytest.mark.unit
+def test_overlay_reap_deferred_when_marker_unlink_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reviewer's #414 PRRT_kwDOSJAM6s6HSOLN case: clearing the completeness marker
+    # before the legacy reap is the one non-best-effort step in this cleanup path. If it
+    # hits a non-``FileNotFoundError`` ``OSError`` (readonly mount, EPERM, transient I/O),
+    # auth provisioning must NOT fail over a cleanup-only fault — the overlay is already
+    # prepared and reconciled. The reap is skipped too: a marker we could not clear, left
+    # over a tree the ``rmtree`` then partially removes, is the credential-hiding state the
+    # clear-before-reap ordering exists to prevent. The still-complete legacy tree and its
+    # valid marker are both left intact for a later provision to retry.
+    host_home, work_dir, claude_root = _seed_overlay_reuse_with_deletion_shaped_legacy(
+        tmp_path, "ws_reap_deferred"
+    )
+    marker = claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER
+    marker.touch()
+
+    monkeypatch.setattr(reconcile_mod, "_has_cap_mknod", lambda: True)
+    monkeypatch.setattr(overlay_copy_mod.os, "mknod", _recording_mknod([]))
+
+    legacy_copy = claude_root / ".claude"
+    real_unlink = Path.unlink
+
+    def _failing_unlink(self: Path, *args: object, **kwargs: object) -> None:
+        if self.name == auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER:
+            raise OSError("read-only file system")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _failing_unlink)
+
+    real_rmtree = auth_mounts_mod.shutil.rmtree
+    legacy_reaped: list[Path] = []
+
+    def _recording_rmtree(path: object, *args: object, **kwargs: object) -> object:
+        if Path(str(path)) == legacy_copy:
+            legacy_reaped.append(legacy_copy)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(auth_mounts_mod.shutil, "rmtree", _recording_rmtree)
+
+    with capture_logs() as logs:
+        # A cleanup-only marker fault must not raise out of provisioning.
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_reap_deferred",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=True),
+        )
+
+    # The reap was skipped: the still-complete legacy tree and its valid marker both
+    # survive intact for a later provision to retry.
+    assert legacy_reaped == []
+    assert legacy_copy.exists()
+    assert marker.exists()
+    # The deferral is surfaced once for diagnosability.
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_LEGACY_REAP_DEFERRED" for entry in logs
+    )

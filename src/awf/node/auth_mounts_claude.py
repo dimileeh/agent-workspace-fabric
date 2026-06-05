@@ -89,6 +89,14 @@ _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
 # legacy-copy reap are both deferred to a later provision that can pin the true base,
 # rather than reconciling against a wrong tree (which would mis-copy or drop edits).
 _CLAUDE_AUTH_OVERLAY_RECONCILE_DEFERRED = "CLAUDE_AUTH_OVERLAY_RECONCILE_DEFERRED"
+# Logged when clearing the legacy-copy completeness marker before its reap fails with a
+# non-``FileNotFoundError`` ``OSError`` (readonly mount, EPERM, transient I/O). The reap
+# is best-effort and the overlay is already prepared+reconciled, so a cleanup-only fault
+# must not fail auth provisioning. We deliberately skip the reap too: a marker we could
+# not clear over a tree the ``rmtree`` then partially removes is the credential-hiding
+# state the clear-before-reap ordering exists to prevent, so the still-complete tree and
+# its valid marker are both left intact for a later provision to retry.
+_CLAUDE_AUTH_OVERLAY_LEGACY_REAP_DEFERRED = "CLAUDE_AUTH_OVERLAY_LEGACY_REAP_DEFERRED"
 # Raised by ``teardown_workspace_auth_overlay`` when a process that lacks
 # ``CAP_SYS_ADMIN`` (the CLI / API container) is asked to release a workspace's
 # overlay it cannot see in its own mount namespace and no capable process has
@@ -690,8 +698,27 @@ def _prepare_isolated_claude_auth(
                     # makes an interrupted cleanup degrade to the safe direction instead.
                     # We already captured ``legacy_complete`` above, so the reconcile's
                     # deletion-forwarding decision is unaffected by removing it now.
-                    (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).unlink(missing_ok=True)
-                    shutil.rmtree(legacy_claude_copy, ignore_errors=True)
+                    try:
+                        (target_root / _CLAUDE_LEGACY_COMPLETE_MARKER).unlink(missing_ok=True)
+                    except OSError as exc:
+                        # Clearing the marker is the one non-best-effort step in this
+                        # cleanup path, and the overlay is already prepared+reconciled
+                        # above. A transient/readonly/permission failure removing it must
+                        # not fail auth provisioning over a cleanup-only problem. Crucially
+                        # we must NOT fall through to the ``rmtree``: a marker we could not
+                        # clear, left over a tree the reap then partially removes, is the
+                        # exact credential-hiding state the clear-before-reap ordering
+                        # exists to prevent. Leaving both the still-complete legacy tree and
+                        # its valid marker intact keeps the "marker present ⟹ complete tree"
+                        # invariant true, so a later provision can retry the reap safely.
+                        _log.info(
+                            "claude_auth_overlay_legacy_reap_deferred",
+                            reason_code=_CLAUDE_AUTH_OVERLAY_LEGACY_REAP_DEFERRED,
+                            workspace_auth_root=str(target_root),
+                            error=str(exc),
+                        )
+                    else:
+                        shutil.rmtree(legacy_claude_copy, ignore_errors=True)
         else:
             target_dir = legacy_claude_copy
             target_root.mkdir(parents=True, exist_ok=True)
