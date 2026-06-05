@@ -129,7 +129,7 @@ def _mount_propagation_check_payload(
             force_copy_raw = file_values.get(force_copy_key)
 
     if propagation is not None:
-        fc = force_copy_raw is not None and force_copy_raw.lower() in ("true", "1", "yes")
+        fc = force_copy_raw is not None and force_copy_raw.lower() in ("true", "1", "yes", "on")
         return {
             "ok": True,
             "status": "ok",

@@ -92,6 +92,20 @@ def test_mount_propagation_check_environ_takes_precedence(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
+def test_mount_propagation_check_force_copy_on() -> None:
+    payload = status_mod._mount_propagation_check_payload(  # noqa: SLF001
+        environ={
+            "AWF_WORK_DIR_BIND_PROPAGATION": "rprivate",
+            "AWF_CLAUDE_AUTH_FORCE_COPY": "on",
+        },
+        compose_env_file=None,
+    )
+    assert payload["ok"] is True
+    assert payload["status"] == "ok"
+    assert payload["force_copy"] is True
+
+
+@pytest.mark.unit
 def test_mount_propagation_partial_environ_falls_back_to_env_file(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
