@@ -21,6 +21,7 @@ from tests.unit.docs.public_docs_status_helpers import (
     _assert_source_checkout_stop_prefers_root_env,
     _markdown_fences,
     _markdown_section,
+    _markdown_section_between,
     _package_env_restore_script,
     _quickstart_upgrade_section,
     _required_index,
@@ -982,12 +983,11 @@ def test_getting_started_first_run_urls_match_smoke_defaults() -> None:
     )
     startup_heading = "### Recommended First-Run Sequence"
     configure_heading = "### Configure Environment"
-    assert startup_heading in getting_started_text
-    assert configure_heading in getting_started_text
-    startup_section = getting_started_text.split(startup_heading, maxsplit=1)[1].split(
+    startup_section = _markdown_section_between(
+        getting_started_text,
+        startup_heading,
         configure_heading,
-        maxsplit=1,
-    )[0]
+    )
 
     assert not re.search(
         r"using\s+`127\.0\.0\.1`\s+for host-facing loopback",
@@ -1022,6 +1022,32 @@ def test_markdown_section_reports_missing_heading_clearly() -> None:
     """Assert missing section headings fail with a useful assertion message."""
     with pytest.raises(AssertionError, match=r"Markdown heading '## Missing' not found"):
         _markdown_section("## Present\nbody\n", "## Missing")
+
+
+def test_markdown_section_between_reports_missing_start_heading_clearly() -> None:
+    """Assert missing start headings fail with a useful assertion message."""
+    with pytest.raises(AssertionError, match=r"Markdown heading '### Missing' not found"):
+        _markdown_section_between(
+            "### Present\nbody\n### Next\nother\n",
+            "### Missing",
+            "### Next",
+        )
+
+
+def test_markdown_section_between_reports_missing_end_heading_clearly() -> None:
+    """Assert missing end headings identify the preceding heading."""
+    with pytest.raises(
+        AssertionError,
+        match=(
+            r"Markdown heading '### Missing' not found after "
+            r"'### Recommended First-Run Sequence'"
+        ),
+    ):
+        _markdown_section_between(
+            "### Recommended First-Run Sequence\nbody\n",
+            "### Recommended First-Run Sequence",
+            "### Missing",
+        )
 
 
 @pytest.mark.parametrize("heading", ("### Target", "#### Target"))
@@ -1126,14 +1152,16 @@ def test_raw_docker_compose_source_path_is_single_command() -> None:
 def test_getting_started_uses_runnable_startup_path() -> None:
     """Assert Getting Started uses setup/start before project initialization."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
-    startup_section = getting_started_text.split(
+    startup_section = _markdown_section_between(
+        getting_started_text,
         "### Recommended First-Run Sequence",
-        maxsplit=1,
-    )[1].split("### Configure Environment", maxsplit=1)[0]
-    configure_section = getting_started_text.split(
         "### Configure Environment",
-        maxsplit=1,
-    )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
+    )
+    configure_section = _markdown_section_between(
+        getting_started_text,
+        "### Configure Environment",
+        "### Local vs Production Configuration",
+    )
 
     assert len(re.findall(r"(?m)^awf setup\s*$", startup_section)) == 1
     assert len(re.findall(r"(?m)^awf start\s*$", startup_section)) == 1

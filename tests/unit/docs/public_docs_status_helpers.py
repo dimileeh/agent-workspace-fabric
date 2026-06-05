@@ -288,6 +288,15 @@ def _markdown_section(text: str, heading: str) -> str:
     return normalized_text[start : start + next_heading.start()]
 
 
+def _markdown_section_between(text: str, start_heading: str, end_heading: str) -> str:
+    """Return text between two required Markdown headings."""
+    _, found_start_heading, after_start_heading = text.partition(start_heading)
+    assert found_start_heading, f"Markdown heading {start_heading!r} not found"
+    section, found_end_heading, _ = after_start_heading.partition(end_heading)
+    assert found_end_heading, f"Markdown heading {end_heading!r} not found after {start_heading!r}"
+    return section
+
+
 def _quickstart_upgrade_section(text: str, heading: str) -> str:
     """Return the lane's upgrade block between upgrade and uninstall labels."""
     section = _markdown_section(text, heading)

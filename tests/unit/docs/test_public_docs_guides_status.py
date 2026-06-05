@@ -23,6 +23,7 @@ from tests.unit.docs.public_docs_status_helpers import (
     _fence_delimiter_count_is_even,
     _markdown_fences,
     _markdown_section,
+    _markdown_section_between,
     _public_docs,
     _required_index,
 )
@@ -33,10 +34,11 @@ def test_getting_started_first_run_persists_service_env_for_upgrade() -> None:
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
         encoding="utf-8",
     )
-    startup_section = getting_started_text.split(
+    startup_section = _markdown_section_between(
+        getting_started_text,
         "### Recommended First-Run Sequence",
-        maxsplit=1,
-    )[1].split("### Configure Environment", maxsplit=1)[0]
+        "### Configure Environment",
+    )
     package_heading = "For package-manager or virtualenv installs:"
     source_global_heading = (
         "For a source checkout with a global `awf` executable, run from the checkout:"
@@ -132,10 +134,11 @@ def test_getting_started_package_first_run_url_encodes_custom_postgres_password(
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
         encoding="utf-8",
     )
-    startup_section = getting_started_text.split(
+    startup_section = _markdown_section_between(
+        getting_started_text,
         "### Recommended First-Run Sequence",
-        maxsplit=1,
-    )[1].split("### Configure Environment", maxsplit=1)[0]
+        "### Configure Environment",
+    )
     package_section = startup_section.split(
         "For package-manager or virtualenv installs:",
         maxsplit=1,
@@ -184,10 +187,11 @@ def test_getting_started_package_first_run_uses_generated_root_env() -> None:
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(
         encoding="utf-8",
     )
-    startup_section = getting_started_text.split(
+    startup_section = _markdown_section_between(
+        getting_started_text,
         "### Recommended First-Run Sequence",
-        maxsplit=1,
-    )[1].split("### Configure Environment", maxsplit=1)[0]
+        "### Configure Environment",
+    )
     package_section = startup_section.split(
         "For package-manager or virtualenv installs:",
         maxsplit=1,
@@ -214,10 +218,11 @@ def test_getting_started_package_first_run_uses_generated_root_env() -> None:
 def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
     """Assert Getting Started first-run smoke does not require GitHub CLI auth."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
-    startup_section = getting_started_text.split(
+    startup_section = _markdown_section_between(
+        getting_started_text,
         "### Recommended First-Run Sequence",
-        maxsplit=1,
-    )[1].split("### Configure Environment", maxsplit=1)[0]
+        "### Configure Environment",
+    )
 
     assert re.search(r"without requiring live GitHub\s+or provider credentials", startup_section)
     assert (
@@ -237,10 +242,11 @@ def test_getting_started_mocked_smoke_keeps_github_auth_optional() -> None:
 def test_getting_started_configure_environment_uses_root_env() -> None:
     """Assert source-checkout configuration writes root `.env`."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
-    configure_section = getting_started_text.split(
+    configure_section = _markdown_section_between(
+        getting_started_text,
         "### Configure Environment",
-        maxsplit=1,
-    )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
+        "### Local vs Production Configuration",
+    )
     root_env_snippet_start = _required_index(
         configure_section,
         "grep -vE '^(AWF_API_TOKEN|AWF_GITHUB_TOKEN)=' .env.example",
@@ -263,10 +269,11 @@ def test_getting_started_configure_environment_uses_root_env() -> None:
 def test_getting_started_cli_host_port_derivation_matches_cli_default() -> None:
     """Assert Getting Started documents the CLI's localhost host-port derivation."""
     getting_started_text = (REPO_ROOT / "docs" / "GETTING_STARTED.md").read_text(encoding="utf-8")
-    configure_section = getting_started_text.split(
+    configure_section = _markdown_section_between(
+        getting_started_text,
         "### Configure Environment",
-        maxsplit=1,
-    )[1].split("### Local vs Production Configuration", maxsplit=1)[0]
+        "### Local vs Production Configuration",
+    )
 
     assert (
         "`AWF_API_HOST_PORT` is present, the CLI derives `http://localhost:<port>`"
