@@ -127,13 +127,20 @@ def test_overlay_retry_rebuilds_when_pinned_base_missing(tmp_path: Path) -> None
 
 @pytest.mark.unit
 def test_overlay_reboot_without_pin_rebuilds_and_repins(tmp_path: Path) -> None:
-    # #405: a prior provision's base-pin WRITE failed (keep-live, no hard-fail), so the
-    # overlay went live with no ``base.signature``. The agent mutated ``upper``; then the
-    # host rebooted (the merged mount is gone) while ``upper``/``work`` survive on disk.
-    # The next provision has no pin to trust and no live mount to recover the base from,
-    # so it rebuilds the base from the current host, remounts the surviving ``upper``, and
-    # — crucially — records the pin so all later remounts are durable. No credential loss,
-    # no hard-fail.
+    # #405 (owner decision, supersedes the original "preserve the surviving upper"
+    # encoding): a prior provision's base-pin WRITE failed (keep-live, no hard-fail), so
+    # the overlay went live with no ``base.signature``. The agent mutated ``upper``; then
+    # the host rebooted (the merged mount is gone) while ``upper``/``work`` survive on
+    # disk. The next provision has no pin to trust and no live mount to recover the base
+    # from, so the surviving NON-EMPTY upper is *unverifiable*: mounting it over a base
+    # rebuilt from the current host would stack it over a GUESSED lower (a wrong-base
+    # correctness gap if ``~/.claude`` had changed). The owner ruled wrong-base-correctness
+    # WINS over credential-preservation for unverifiable bases, so the unpinned upper is
+    # DISCARDED and a fresh empty upper is mounted over the current-host base. There is no
+    # operator-visible credential loss: ``~/.claude`` (credentials included) is re-derived
+    # from the CURRENT host base, which is exactly what the operator refreshed. The discard
+    # is made LOUD via ``CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT`` so it is
+    # auditable and never silent.
     host_home = tmp_path / "host-home"
     work_dir = tmp_path / "work"
     _seed_host_claude(host_home)
@@ -155,23 +162,145 @@ def test_overlay_reboot_without_pin_rebuilds_and_repins(tmp_path: Path) -> None:
     # Reboot: the merged mount is gone; ``upper``/``work`` persist; host unchanged.
     mounter.mounted.clear()
 
-    mounts = resolve_service_auth_mounts(
-        host_home=host_home,
-        work_dir=work_dir,
-        workspace_id="ws_reboot_nopin",
-        host_env={},
-        overlay_mounter=mounter,
-    )
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_reboot_nopin",
+            host_env={},
+            overlay_mounter=mounter,
+        )
 
     by_target = {m.target: m for m in mounts}
     assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
-    # The surviving upper is remounted against the rebuilt base ...
+    # A fresh empty upper is mounted over the base rebuilt from the current host ...
     assert mounter.mounts[-1]["lowerdir"] == base_a
     assert mounter.mounts[-1]["upperdir"] == claude_root / "upper"
-    # ... the pin is now durable for future remounts ...
+    # ... the unpinned/unverifiable upper was discarded (its agent edit is gone) ...
+    assert not overlay_data.exists()
+    # ... the discard is loud and auditable (never silent) ...
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
+        for entry in logs
+    )
+    # ... and the pin is now durable for future remounts (recorded post-mount).
     assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
-    # ... and the agent's overlay data survived the reboot (no credential loss).
-    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+    # No operator-visible credential loss: the mount is backed by the current-host base,
+    # so ~/.claude (credentials included) is re-derived fresh from the current host.
+    assert base_a.is_dir()
+
+
+@pytest.mark.unit
+def test_unpinned_upper_after_host_change_discarded_and_rebuilt(tmp_path: Path) -> None:
+    # #405 owner decision, point 6 — the exact deferred edge case: an unpinned NON-EMPTY
+    # overlay ``upper`` survives a reboot AND the operator changed ``~/.claude`` in the
+    # meantime. There is no pin and no live mount to recover the true base, so the only
+    # bases available are GUESSED from the changed host. Mounting the stale upper over such
+    # a guessed base is the wrong-base correctness gap #405 escalated. Owner ruling:
+    # discard the unverifiable upper, rebuild from the CURRENT host base, and emit the loud
+    # reason code. From the operator's perspective there is no credential loss — credentials
+    # are re-pulled fresh from the current host (which they just refreshed).
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    # Provision 1: a live overlay against base A; the agent mutates the writable upper.
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_unpinned_hostchange",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_unpinned_hostchange" / "claude"
+    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    # Model the pin-write failure / pre-pin state: live but no ``base.signature``.
+    (claude_root / "base.signature").unlink()
+
+    # The operator changes the host ``~/.claude`` so a base rebuilt from it differs.
+    (host_home / ".claude" / "settings.json").write_text('{"theme": "light"}\n')
+    base_b = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    assert base_b != base_a
+
+    # Reboot: the merged mount is gone; ``upper``/``work`` persist on disk.
+    mounter.mounted.clear()
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_unpinned_hostchange",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The mount is backed by the base rebuilt from the CURRENT host (base B), never the
+    # stale upper over a guessed base — so credentials are re-derived from the current host.
+    assert mounter.mounts[-1]["lowerdir"] == base_b
+    assert mounter.mounts[-1]["lowerdir"] != base_a
+    # The stale unpinned upper edit is discarded.
+    assert not overlay_data.exists()
+    # The discard is loud and auditable.
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
+        for entry in logs
+    )
+    # The pin is re-recorded to the NEW host signature (durable, post-mount).
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
+
+
+@pytest.mark.unit
+def test_pinned_upper_with_unmatchable_signature_discarded(tmp_path: Path) -> None:
+    # #405 owner decision, point 1(b): "a pin that cannot be matched to an available/known
+    # base". A non-empty upper carries a ``base.signature`` naming a base that is neither on
+    # disk nor equal to the current-host signature — the base is unverifiable, so a rebuild
+    # would mount the stale upper over a GUESSED base. The owner ruling applies: discard +
+    # rebuild from the current host + loud reason code.
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    # A surviving overlay whose pin names a foreign/stale base that does not exist on disk
+    # and does not equal the current host signature.
+    claude_root = work_dir / "auth" / "ws_unmatchable_pin" / "claude"
+    (claude_root / "upper").mkdir(parents=True)
+    (claude_root / "work").mkdir(parents=True)
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    foreign_signature = "deadbeefdeadbeef"
+    assert foreign_signature != _host_claude_signature(host_home)
+    assert not _shared_claude_base_dir(work_dir, foreign_signature).is_dir()
+    (claude_root / "base.signature").write_text(foreign_signature)
+
+    with capture_logs() as logs:
+        mounts = resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_unmatchable_pin",
+            host_env={},
+            overlay_mounter=mounter,
+        )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # Rebuilt from the current host (the foreign pin is not trusted) ...
+    base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    assert mounter.mounts[-1]["lowerdir"] == base
+    # ... the stale upper edit is discarded ...
+    assert not overlay_data.exists()
+    # ... loudly ...
+    assert any(
+        entry.get("reason_code") == "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
+        for entry in logs
+    )
+    # ... and the pin is corrected to the current-host signature.
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
 
 
 @pytest.mark.unit

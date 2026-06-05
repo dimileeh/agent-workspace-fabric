@@ -83,6 +83,21 @@ _CLAUDE_BASE_DIRNAME = "claude-base"
 _CLAUDE_BASE_BUILD_LOCK_NAME = ".build.lock"
 _CLAUDE_AUTH_OVERLAY_UNAVAILABLE = "CLAUDE_AUTH_OVERLAY_UNAVAILABLE"
 _CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED = "CLAUDE_AUTH_OVERLAY_BASE_PIN_WRITE_FAILED"
+# Logged when a surviving *non-empty* overlay ``upper`` whose base cannot be verified is
+# DISCARDED and rebuilt rather than remounted over a base guessed from the current host
+# (#405). The upper is unverifiable when there is no ``base.signature`` pin, or a pin that
+# resolves to neither a base still on disk (:func:`_pinned_overlay_base`) nor the
+# current-host signature (:func:`_pin_matches_signature`) — and no live overlay remains to
+# recover the true lowerdir from. Remounting the upper over such a guessed base is a
+# wrong-base correctness gap (it could expose a changed host's config/credentials through an
+# upper built against a different lower). The owner ruled wrong-base-correctness WINS over
+# credential-preservation here: discard the upper and rebuild ~/.claude (credentials
+# included) fresh from the CURRENT host base, so from the operator's perspective there is no
+# credential loss (they changed ~/.claude precisely because they refreshed something). The
+# discard is deliberately LOUD via this reason code so it is auditable and never silent.
+_CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT = (
+    "CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT"
+)
 _CLAUDE_AUTH_SHARED_BASE_FAILED = "CLAUDE_AUTH_SHARED_BASE_FAILED"
 # Logged when a reused live overlay's real lowerdir could not be recovered, so the
 # host-recomputed base is untrustworthy: the fallback-edit reconcile (#381) and the
@@ -844,6 +859,24 @@ def _pinned_overlay_base(work_dir: Path, sig_marker: Path) -> Path | None:
     return base if base.is_dir() else None
 
 
+def _pin_matches_signature(sig_marker: Path, signature: str) -> bool:
+    """Return whether ``base.signature`` pins exactly the current-host ``signature``.
+
+    A surviving overlay ``upper`` is *verifiable* when either the pinned base is still
+    on disk (:func:`_pinned_overlay_base`) or — even if that base dir was reaped — the
+    pin names the same signature a current-host rebuild would reproduce. This probe is
+    the second case: ``True`` iff the marker exists and its stripped contents equal
+    ``signature``, so rebuilding the base from the current host yields exactly the lower
+    the upper was built against (no guess). An absent/unreadable marker (``OSError``) is
+    not a match, so the caller treats the upper as unverifiable and discards it (#405).
+    """
+
+    try:
+        return sig_marker.read_text().strip() == signature
+    except OSError:
+        return False
+
+
 def _record_overlay_base_pin(sig_marker: Path, signature: str, claude_root: Path) -> None:
     """Persist the base-signature pin for an already-established overlay.
 
@@ -988,6 +1021,40 @@ def _prepare_claude_overlay_mount(
     fresh_signature: str | None = None
     if base is None:
         fresh_signature = _host_claude_signature(host_home)
+        # #405 owner decision: a surviving *non-empty* ``upper`` whose base cannot be
+        # verified must NOT be remounted over a base guessed from the current host —
+        # that would stack an upper built against an unknown lower over a different
+        # base (a wrong-base correctness gap if ``~/.claude`` changed). The base is
+        # unverifiable here only because ``_pinned_overlay_base`` already returned
+        # ``None`` (no pin, or a pin whose base dir is gone); it is still *verifiable*
+        # when the pin names the current-host signature, so a rebuild reproduces the
+        # exact lower (``_pin_matches_signature`` — the ``test_overlay_retry_rebuilds_
+        # when_pinned_base_missing`` KEEP case). A live overlay still mounted is also
+        # verifiable: the reuse branch below recovers its real lowerdir, so an unpinned
+        # upper there is never discarded (``not is_mounted`` keeps the live-reuse tests
+        # green). An *empty* leftover upper carries no agent data and is a fresh start,
+        # so the silent normal path handles it (``_overlay_upper_has_data`` — the
+        # ``test_crash_before_mount`` provision-2 case). When all three say the upper is
+        # non-empty, unverifiable, and not live, discard + rebuild from the current host
+        # so ~/.claude (credentials included) is re-derived fresh — the owner ruling that
+        # wrong-base-correctness wins over credential-preservation. Made LOUD so it is
+        # auditable and never a silent discard.
+        if (
+            upper.exists()
+            and _overlay_upper_has_data(upper)
+            and not _pin_matches_signature(sig_marker, fresh_signature)
+            and not overlay_mounter.is_mounted(merged)
+        ):
+            _log.warning(
+                "claude_auth_overlay_unpinned_upper_discarded_rebuilt",
+                reason_code=_CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT,
+                workspace_auth_root=str(claude_root),
+            )
+            # Drop the unverifiable upper/work so the dirs are recreated empty below and
+            # a fresh empty upper is mounted over the current-host base. ``ignore_errors``
+            # mirrors the sibling reaps: a stuck cleanup must not fail provisioning.
+            shutil.rmtree(upper, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
         try:
             base = _ensure_shared_claude_base(
                 host_home=host_home,

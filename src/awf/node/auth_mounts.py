@@ -16,6 +16,9 @@ from awf.node.auth_mounts_claude import (
     _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE as _CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE,
 )
 from awf.node.auth_mounts_claude import (
+    _CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT as _CLAUDE_AUTH_OVERLAY_UNPINNED_UPPER_DISCARDED_REBUILT,
+)
+from awf.node.auth_mounts_claude import (
     _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED as _CLAUDE_AUTH_OVERLAY_WHITEOUT_FAILED,
 )
 from awf.node.auth_mounts_claude import (
