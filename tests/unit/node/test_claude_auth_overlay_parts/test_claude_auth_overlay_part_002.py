@@ -24,6 +24,7 @@ from awf.node.auth_mounts import (
     _OVERLAY_UNMOUNTED_MARKER,
     OverlayUnmountUnverifiableError,
     _claude_base_staging_build_is_live,
+    _has_cap_mknod,
     _has_cap_sys_admin,
     _host_claude_signature,
     _overlay_filesystem_available,
@@ -538,11 +539,18 @@ def test_shared_base_build_replace_failure_logs_and_falls_back(
     _seed_host_claude(host_home)
     base = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
 
-    def _replace_fails(self: Path, target: Path) -> None:
+    real_replace = auth_mounts_mod.Path.replace
+
+    def _replace_fails(self: Path, target: Path) -> object:
         # A genuine failure (e.g. permissions) leaves ``base`` absent — this is
         # not a lost race, so it must surface log evidence rather than silently
-        # returning a non-existent base.
-        raise PermissionError("operation not permitted")
+        # returning a non-existent base. Scope the failure to the shared-base
+        # staging replace (``.claude-base-*``); the legacy full-copy fallback also
+        # materializes via staging + ``replace`` (``.claude-legacy-*``) and must be
+        # allowed to complete so the degrade path it exercises actually succeeds.
+        if ".claude-base-" in str(self):
+            raise PermissionError("operation not permitted")
+        return real_replace(self, target)
 
     monkeypatch.setattr(auth_mounts_mod.Path, "replace", _replace_fails)
 
@@ -605,6 +613,127 @@ def test_shared_base_build_copytree_failure_cleans_staging_and_falls_back(
     assert any(entry.get("reason_code") == "CLAUDE_AUTH_SHARED_BASE_FAILED" for entry in logs)
     # No orphaned staging dir remains under the shared root.
     assert list(base.parent.glob(".claude-base-*")) == []
+
+
+@pytest.mark.unit
+def test_interrupted_legacy_copy_leaves_no_reusable_partial_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted legacy ``copytree`` must not leave a reusable partial ``.claude``.
+
+    The #402 deletion pass reads ``base``-present / ``legacy``-absent as a *confident*
+    agent deletion and whiteouts the lower credential. A legacy ``.claude`` left
+    *incomplete* by an interrupted ``copytree`` (crash/SIGKILL mid-tree) — then adopted
+    by the ``not target_dir.exists()`` reuse guard on the next provision — would make
+    every never-copied credential read as a deletion and be hidden from ``merged``
+    (PRRT_kwDOSJAM6s6HRGv0). The copy is materialized via a staging dir + atomic
+    ``replace``, so ``.claude`` only ever exists as a *whole* copy: an interrupted
+    attempt leaves no reusable partial and no orphaned staging dir, and the next
+    provision rebuilds a complete copy from scratch.
+    """
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    real_copytree = auth_mounts_mod.shutil.copytree
+
+    def _interrupted_copytree(src: object, dst: object, *args: object, **kwargs: object) -> object:
+        # Model a copy killed partway through the tree: the destination dir and a
+        # single file already exist when the failure hits — the exact partial shape
+        # that, if reused, would flag the rest of ``~/.claude`` as agent deletions.
+        dst_path = Path(dst)
+        dst_path.mkdir(parents=True, exist_ok=True)
+        (dst_path / "settings.json").write_text("partial")
+        raise OSError("copy interrupted mid-tree")
+
+    # Overlay unsupported → the legacy full-copy branch runs (no shared base build).
+    monkeypatch.setattr(auth_mounts_mod.shutil, "copytree", _interrupted_copytree)
+    with pytest.raises(OSError):
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=work_dir,
+            workspace_id="ws_partial",
+            host_env={},
+            overlay_mounter=FakeOverlayMounter(supported=False),
+        )
+
+    claude_root = work_dir / "auth" / "ws_partial" / "claude"
+    # The partial copy landed only in the throwaway staging dir, never at ``.claude``,
+    # so the ``not target_dir.exists()`` reuse guard cannot adopt it ...
+    assert not (claude_root / ".claude").exists()
+    # ... and the staging dir was reclaimed rather than orphaned under the auth root.
+    assert list(claude_root.glob(".claude-legacy-*")) == []
+
+    # A clean retry rebuilds a *complete* legacy copy from scratch (no partial reuse):
+    # every host credential is present, so the deletion pass sees no spurious absences.
+    monkeypatch.setattr(auth_mounts_mod.shutil, "copytree", real_copytree)
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_partial",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=False),
+    )
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    assert (claude_root / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert (claude_root / ".claude" / "skills" / "demo" / "SKILL.md").exists()
+
+
+@pytest.mark.unit
+def test_legacy_copy_race_loss_to_partial_winner_omits_completeness_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost legacy-copy ``replace`` race must not mark the winner's copy complete.
+
+    When this provision's atomic ``staged_copy.replace(target_dir)`` loses the race —
+    ``target_dir`` already exists, so the ``OSError`` is swallowed and the winner's
+    ``.claude`` is reused — the completeness marker must be written only by the side
+    whose own atomic ``replace`` landed the copy, never by the loser. The winner is not
+    guaranteed to be this atomic path: a concurrent older *pre-atomic-staging* provision
+    may have left a *partial* tree straight in ``.claude``. Marking such a copy complete
+    would make a later overlay-reconcile read its never-copied files as confident agent
+    deletions and whiteout still-valid lower credentials (PRRT_kwDOSJAM6s6HRnsP). A
+    missing marker is the safe direction — the reconcile then skips the whiteout pass.
+    """
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+
+    real_replace = auth_mounts_mod.Path.replace
+
+    def _lost_legacy_race(self: Path, target: Path) -> object:
+        # Model a concurrent (possibly older, non-atomic) provision that already
+        # materialized a *partial* ``.claude`` straight into ``target_dir``: only
+        # ``settings.json`` landed, ``skills`` was never copied. Renaming our complete
+        # staged tree onto that now non-empty dir fails — the lost-race path.
+        if ".claude-legacy-" in str(self):
+            target_dir = Path(target)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / "settings.json").write_text('{"theme": "dark"}\n')
+            raise OSError("legacy .claude populated by a concurrent provision")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(auth_mounts_mod.Path, "replace", _lost_legacy_race)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_legacy_race",
+        host_env={},
+        overlay_mounter=FakeOverlayMounter(supported=False),
+    )
+
+    claude_root = work_dir / "auth" / "ws_legacy_race" / "claude"
+    by_target = {m.target: m for m in mounts}
+    # The race winner's ``.claude`` is reused rather than the run failing.
+    assert by_target["/home/agent/.claude"].source == str(claude_root / ".claude")
+    # ...but because *this* provision did not land the copy, it does not vouch for the
+    # winner's completeness: no marker, so a later reconcile fails safe (keeps lower
+    # credentials visible) for what may be a partial tree.
+    assert not (claude_root / auth_mounts_mod._CLAUDE_LEGACY_COMPLETE_MARKER).exists()
+    # The throwaway staging dir was reclaimed, never orphaned under the auth root.
+    assert list(claude_root.glob(".claude-legacy-*")) == []
 
 
 @pytest.mark.unit
@@ -895,6 +1024,25 @@ def test_has_cap_sys_admin_parses_proc_status(tmp_path: Path) -> None:
     assert _has_cap_sys_admin(no_line) is False
     assert _has_cap_sys_admin(bad_hex) is False
     assert _has_cap_sys_admin(tmp_path / "missing") is False
+
+
+@pytest.mark.unit
+def test_has_cap_mknod_parses_proc_status(tmp_path: Path) -> None:
+    # CAP_MKNOD is capability bit 27; mirror the CAP_SYS_ADMIN probe. ``0xfffffff``
+    # (28 low bits set) holds bit 27; ``0x7ffffff`` (27 low bits) does not.
+    granted = tmp_path / "granted"
+    granted.write_text("Name:\tworker\nCapEff:\t000000000fffffff\n")
+    denied = tmp_path / "denied"
+    denied.write_text("Name:\tagent\nCapEff:\t0000000007ffffff\n")
+    no_line = tmp_path / "no-line"
+    no_line.write_text("Name:\tagent\n")
+    bad_hex = tmp_path / "bad-hex"
+    bad_hex.write_text("CapEff:\tnot-hex\n")
+    assert _has_cap_mknod(granted) is True
+    assert _has_cap_mknod(denied) is False
+    assert _has_cap_mknod(no_line) is False
+    assert _has_cap_mknod(bad_hex) is False
+    assert _has_cap_mknod(tmp_path / "missing") is False
 
 
 @pytest.mark.unit

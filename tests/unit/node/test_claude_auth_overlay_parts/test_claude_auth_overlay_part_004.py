@@ -119,6 +119,58 @@ def test_overlay_retry_rebuilds_when_pinned_base_missing(tmp_path: Path) -> None
     # A fresh base (current signature, same content) is rebuilt and used.
     assert mounter.mounts[-1]["lowerdir"] == base_a
     assert base_a.is_dir()
+    # #405: a stale pin pointing at a now-vanished base is not trusted — the rebuild
+    # re-pins ``base.signature`` to the freshly built base so future remounts are durable.
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
+    assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
+
+
+@pytest.mark.unit
+def test_overlay_reboot_without_pin_rebuilds_and_repins(tmp_path: Path) -> None:
+    # #405: a prior provision's base-pin WRITE failed (keep-live, no hard-fail), so the
+    # overlay went live with no ``base.signature``. The agent mutated ``upper``; then the
+    # host rebooted (the merged mount is gone) while ``upper``/``work`` survive on disk.
+    # The next provision has no pin to trust and no live mount to recover the base from,
+    # so it rebuilds the base from the current host, remounts the surviving ``upper``, and
+    # — crucially — records the pin so all later remounts are durable. No credential loss,
+    # no hard-fail.
+    host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
+    _seed_host_claude(host_home)
+    mounter = FakeOverlayMounter(supported=True)
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reboot_nopin",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+    claude_root = work_dir / "auth" / "ws_reboot_nopin" / "claude"
+    base_a = _shared_claude_base_dir(work_dir, _host_claude_signature(host_home))
+    overlay_data = claude_root / "upper" / "settings.json"
+    overlay_data.write_text('{"theme": "agent-edited"}\n')
+    # Model the earlier pin-write failure: the overlay is live but carries no pin.
+    (claude_root / "base.signature").unlink()
+    # Reboot: the merged mount is gone; ``upper``/``work`` persist; host unchanged.
+    mounter.mounted.clear()
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_reboot_nopin",
+        host_env={},
+        overlay_mounter=mounter,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.claude"].source == str(claude_root / "merged")
+    # The surviving upper is remounted against the rebuilt base ...
+    assert mounter.mounts[-1]["lowerdir"] == base_a
+    assert mounter.mounts[-1]["upperdir"] == claude_root / "upper"
+    # ... the pin is now durable for future remounts ...
+    assert (claude_root / "base.signature").read_text() == _host_claude_signature(host_home)
+    # ... and the agent's overlay data survived the reboot (no credential loss).
     assert overlay_data.read_text() == '{"theme": "agent-edited"}\n'
 
 
