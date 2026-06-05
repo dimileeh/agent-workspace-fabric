@@ -51,7 +51,10 @@ responses, and return only status, paths, command arguments, and safe
 credential-reference metadata. For setup status, `source_checkout.marker_count`
 is `integer | null`: persisted host config supplies an integer marker count,
 while dry-run probe metadata uses `null` because the probe verifies the checkout
-without enumerating markers.
+without enumerating markers. For client-integration instructions, `env_file` is
+present only when at least one selected client plan is returned; explicit
+zero-client selections omit it because they intentionally skip source-checkout
+and env-file resolution.
 
 ## Status Vocabulary
 

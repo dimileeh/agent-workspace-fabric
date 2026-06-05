@@ -534,7 +534,7 @@ def _initialize_project_profile_result(
                 "project profile already exists; pass force=true to overwrite",
                 detail={"project_path": str(repository), "force": force},
             )
-        except OSError as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             return _error_result(
                 safe_result,
                 PROJECT_INIT_FAILED,

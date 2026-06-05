@@ -271,6 +271,7 @@ def test_first_run_setup_tools_are_documented_as_local_secret_free_mcp_surface()
     assert "safe refs/status only" in security_cell
     assert "source_checkout.marker_count" in parity_doc
     assert "integer | null" in parity_doc
+    assert "explicit zero-client selections omit it" in " ".join(parity_doc.split())
     for tool_name in FIRST_RUN_SETUP_TOOLS:
         assert tool_name in mcp_ref
 

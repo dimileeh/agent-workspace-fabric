@@ -121,6 +121,56 @@ async def test_initialize_project_profile_file_exists_is_structured_mcp_error(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("exc_type", [RuntimeError, ValueError])
+async def test_initialize_project_profile_write_runtime_and_value_errors_are_structured(
+    exc_type: type[Exception],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    raw_token = "sk-proj-" + "f" * 40
+    leaked_detail = f"{project}/draft.yaml contains {raw_token}"
+    preview = SimpleNamespace(
+        path=project,
+        draft=SimpleNamespace(template="generic"),
+        to_dict=lambda: {
+            "path": str(project),
+            "inspection": {"detected_template": "generic"},
+            "draft": {"template": "generic", "yaml": "name: generic\n"},
+            "diagnostics": {},
+        },
+    )
+    monkeypatch.setattr(setup_tools, "preview_project_onboarding", lambda *_a, **_k: preview)
+
+    def fail_write(_preview: Any, *, force: bool) -> Path:
+        _ = force
+        raise exc_type(leaked_detail)
+
+    monkeypatch.setattr(setup_tools, "write_workspace_profile", fail_write)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "write_profile": True, "force": True},
+    )
+    payload = _payload(result)
+    rendered = _json_text(result)
+
+    assert result.isError is True
+    assert payload["error_code"] == "PROJECT_INIT_FAILED"
+    assert payload["message"] == f"could not write project profile: {exc_type.__name__}"
+    assert payload["detail"] == {
+        "project_path": str(project.resolve()),
+        "force": True,
+    }
+    assert leaked_detail not in rendered
+    assert raw_token not in rendered
+
+
+@pytest.mark.unit
 async def test_initialize_project_profile_path_expanduser_failure_returns_structured_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

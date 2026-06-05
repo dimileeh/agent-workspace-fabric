@@ -53,6 +53,58 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Write Errors And Empty Client Env File
+
+Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+
+### Requirement Status
+
+- Preserve the dedicated `PROJECT_PROFILE_EXISTS` response for
+  `FileExistsError`: Complete.
+- Convert `OSError`, `RuntimeError`, and `ValueError` from
+  `write_workspace_profile` into sanitized `PROJECT_INIT_FAILED` MCP errors:
+  Complete.
+- Do not surface raw write exception text or token-like values in the MCP
+  response: Complete.
+- Preserve the explicit empty-client client-instruction fast return without
+  source-checkout or env-file resolution: Complete.
+- Document that `env_file` is present only when at least one client integration
+  plan is returned: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_project_profile.py`
+- `tests/unit/mcp/test_mcp_client_parity_docs.py`
+- `docs/MCP_CLIENT_PARITY.md`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_write_runtime_and_value_errors_are_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_file_exists_is_structured_mcp_error tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_write_runtime_and_value_errors_are_structured tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_preserves_explicit_empty_clients tests/unit/mcp/test_mcp_client_parity_docs.py::test_first_run_setup_tools_are_documented_as_local_secret_free_mcp_surface -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/test_mcp_client_parity_docs.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- New project-profile write regression failed before the implementation change
+  for both `RuntimeError` and `ValueError` because raw exceptions escaped
+  through FastMCP.
+- Project-profile write regression after implementation: 2 passed.
+- Focused project-profile, empty-client, and docs contract set: 5 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HPtNg
 
 ### Requirement Status

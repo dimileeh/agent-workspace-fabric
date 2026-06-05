@@ -84,6 +84,61 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Write Errors And Empty Client Env File
+
+### Problem Statement And Scope
+
+The review reports two MCP setup-tool edge cases:
+
+- `awf_initialize_project_profile` only catches `FileExistsError` and
+  `OSError` from `write_workspace_profile`, letting `RuntimeError` and
+  `ValueError` escape the MCP tool boundary.
+- The explicit empty-client response from
+  `awf_get_client_integration_instructions` omits `env_file`, while non-empty
+  client responses include it.
+
+Scope is limited to the project-profile write error boundary and documenting
+the empty-client `env_file` contract. Existing regression coverage requires the
+empty-client fast path to avoid source-checkout and env-file resolution, so this
+repair documents `env_file` as optional for zero selected clients instead of
+changing that behavior.
+
+### Requirements Checklist
+
+- Preserve the dedicated `PROJECT_PROFILE_EXISTS` response for
+  `FileExistsError`.
+- Convert `OSError`, `RuntimeError`, and `ValueError` from
+  `write_workspace_profile` into sanitized `PROJECT_INIT_FAILED` MCP errors.
+- Do not surface raw write exception text or token-like values in the MCP
+  response.
+- Preserve the explicit empty-client client-instruction fast return without
+  source-checkout or env-file resolution.
+- Document that `env_file` is present only when at least one client integration
+  plan is returned.
+
+### Implementation Steps
+
+1. Add focused failing project-profile write regressions for `RuntimeError` and
+   `ValueError`.
+2. Broaden the non-FileExists project-profile write exception handler to match
+   the comparable MCP setup-tool pattern.
+3. Update the MCP client-parity documentation and docs assertion for the
+   optional empty-client `env_file` contract.
+4. Run targeted project-profile, client-integration, docs, lint, and type
+   checks for the touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_write_runtime_and_value_errors_are_structured -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_file_exists_is_structured_mcp_error tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_write_runtime_and_value_errors_are_structured tests/unit/mcp/test_setup_tools_client_integration.py::test_client_integration_instructions_preserves_explicit_empty_clients tests/unit/mcp/test_mcp_client_parity_docs.py::test_first_run_setup_tools_are_documented_as_local_secret_free_mcp_surface -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py tests/unit/mcp/test_setup_tools_client_integration.py tests/unit/mcp/test_mcp_client_parity_docs.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: PRRT_kwDOSJAM6s6HPtNg
 
 ### Problem Statement And Scope
