@@ -271,16 +271,18 @@ def _reserve_workspace_event_order(
     workspace_id: str,
     cycle_floor: int,
 ) -> int:
-    current_sequence = connection.execute(
-        sa.select(_WORKSPACES.c.event_sequence).where(_WORKSPACES.c.id == workspace_id)
-    ).scalar_one()
-    event_order = max(int(current_sequence or 0), cycle_floor) + 1
-    connection.execute(
+    current_sequence = sa.func.coalesce(_WORKSPACES.c.event_sequence, 0)
+    if connection.dialect.name == "postgresql":
+        sequence_floor = sa.func.greatest(current_sequence, cycle_floor)
+    else:
+        sequence_floor = sa.func.max(current_sequence, cycle_floor)
+    event_order = connection.execute(
         _WORKSPACES.update()
         .where(_WORKSPACES.c.id == workspace_id)
-        .values(event_sequence=event_order)
-    )
-    return event_order
+        .values(event_sequence=sequence_floor + 1)
+        .returning(_WORKSPACES.c.event_sequence)
+    ).scalar_one()
+    return int(event_order)
 
 
 def _pending_event_id(*, workspace_id: str, release_event_id: str) -> str:

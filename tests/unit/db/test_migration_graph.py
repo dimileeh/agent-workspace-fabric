@@ -14,6 +14,7 @@ import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.dialects import postgresql
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -65,6 +66,28 @@ def _load_auth_overlay_backfill_migration(repo_root: Path) -> ModuleType:
     return module
 
 
+class _ScalarOneResult:
+    def __init__(self, value: int) -> None:
+        self._value = value
+
+    def scalar_one(self) -> int:
+        return self._value
+
+
+class _AtomicReserveConnection:
+    dialect = postgresql.dialect()
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute(self, statement: object) -> _ScalarOneResult:
+        compiled = str(statement.compile(dialect=self.dialect)).lower()
+        self.statements.append(compiled)
+        if compiled.lstrip().startswith("select"):
+            raise AssertionError("event-order reservation must be one atomic UPDATE")
+        return _ScalarOneResult(8)
+
+
 @pytest.mark.unit
 def test_alembic_revision_graph_has_single_head() -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -73,6 +96,26 @@ def test_alembic_revision_graph_has_single_head() -> None:
     script = ScriptDirectory.from_config(config)
 
     assert script.get_heads() == [_AUTH_OVERLAY_BACKFILL_REVISION]
+
+
+@pytest.mark.unit
+def test_auth_overlay_unmount_backfill_reserves_event_order_atomically() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = _load_auth_overlay_backfill_migration(repo_root)
+    connection = _AtomicReserveConnection()
+
+    event_order = migration._reserve_workspace_event_order(
+        connection,
+        workspace_id="ws_atomic",
+        cycle_floor=5,
+    )
+
+    assert event_order == 8
+    assert len(connection.statements) == 1
+    statement = connection.statements[0]
+    assert statement.lstrip().startswith("update workspaces set")
+    assert "greatest(" in statement
+    assert "returning workspaces.event_sequence" in statement
 
 
 @pytest.mark.unit
