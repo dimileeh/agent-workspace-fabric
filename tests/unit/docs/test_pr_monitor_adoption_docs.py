@@ -57,9 +57,10 @@ def _real_cli_commands(app: typer.Typer, prefix: str = "awf") -> set[str]:
 
 
 async def _real_mcp_tools() -> set[str]:
+    from awf.common.config import Settings
     from awf.mcp.server import build_mcp_server
 
-    mcp = build_mcp_server(service=MagicMock(), settings=MagicMock())
+    mcp = build_mcp_server(service=MagicMock(), settings=Settings(_env_file=None))
     return {tool.name for tool in await mcp.list_tools()}
 
 

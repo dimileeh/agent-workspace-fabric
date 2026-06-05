@@ -84,6 +84,22 @@ KNOWN_SECRET_ENV_KEYS = frozenset(
         "GOOGLE_APPLICATION_CREDENTIALS_JSON",
     )
 )
+_SECRET_ENV_KEY_SUFFIXES = (
+    "_TOKEN",
+    "_API_KEY",
+    "_API_TOKEN",
+    "_ACCESS_KEY",
+    "_PRIVATE_KEY",
+    "_PASSWORD",
+    "_PASSWD",
+    "_SECRET",
+)
+_SECRET_ENV_KEY_NAMES = {
+    *{suffix.removeprefix("_") for suffix in _SECRET_ENV_KEY_SUFFIXES},
+    "ACCESSKEY",
+    "APIKEY",
+    "PRIVATEKEY",
+}
 
 URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
 _GITHUB_TOKEN_PATTERNS = (
@@ -115,6 +131,16 @@ _LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
 }
 _RedactionSegment = tuple[Literal["literal", "redaction"], str]
 _log = logging.getLogger(__name__)
+
+
+def is_secret_env_key(key: str) -> bool:
+    """Return true when an env key conventionally carries a secret value."""
+    normalized = key.upper().replace("-", "_")
+    return (
+        normalized in KNOWN_SECRET_ENV_KEYS
+        or normalized in _SECRET_ENV_KEY_NAMES
+        or normalized.endswith(_SECRET_ENV_KEY_SUFFIXES)
+    )
 
 
 class CompletedProcessLike(Protocol):
