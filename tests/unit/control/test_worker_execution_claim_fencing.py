@@ -34,13 +34,21 @@ def test_fence_reason_code_is_in_lockstep_across_layers() -> None:
     ``awf.node.provisioner`` keeps its own literal so it need not import
     ``awf.control`` (a layering inversion), but the string is the end-to-end
     contract that monitoring alerts and log parsers key on. Nothing else
-    enforces the two stay equal, so a rename on either side would silently
+    enforces the copies stay equal, so a rename on any side would silently
     break that contract — this assert locks them together.
+
+    ``provisioner_host_ports_check`` also inlines its own copy (rather than
+    importing from ``provisioner``) to avoid a module-level import cycle, so it
+    is pinned here too.
     """
     from awf.control.worker.constants import EXECUTION_CLAIM_FENCED
     from awf.node.provisioner import _EXECUTION_CLAIM_FENCED_REASON_CODE
+    from awf.node.provisioner_host_ports_check import (
+        _EXECUTION_CLAIM_FENCED_REASON_CODE as _HOST_PORTS_FENCED_REASON_CODE,
+    )
 
     assert _EXECUTION_CLAIM_FENCED_REASON_CODE == EXECUTION_CLAIM_FENCED
+    assert _HOST_PORTS_FENCED_REASON_CODE == EXECUTION_CLAIM_FENCED
 
 
 def _git(args: list[str], cwd: Path) -> None:

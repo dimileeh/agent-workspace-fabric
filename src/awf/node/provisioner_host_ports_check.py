@@ -29,6 +29,17 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+_EXECUTION_CLAIM_FENCED_REASON_CODE = "EXECUTION_CLAIM_FENCED"
+"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch (D5).
+
+Inlined here (rather than imported from ``awf.node.provisioner``) so this module
+never imports back into ``provisioner.py`` — ``provisioner`` already imports
+:class:`ProvisionerHostPortCheckMixin` from here at module load, and a reverse
+import would close a true module-level cycle. The string is the end-to-end
+contract shared with ``provisioner._EXECUTION_CLAIM_FENCED_REASON_CODE`` and the
+worker's ``EXECUTION_CLAIM_FENCED``; ``test_fence_reason_code_is_in_lockstep_across_layers``
+guards all three against drift."""
+
 
 async def _check_auto_resolved_profile_host_ports(
     self: Any,
@@ -162,10 +173,6 @@ async def _check_auto_resolved_profile_host_ports(
                 # Fenced: skip the publish (a no-op commit follows). Emit a log
                 # here so the timeline shows the fence at the publish site rather
                 # than only at the later D4 pre-launch verify a few awaits on.
-                # Local import avoids the ``awf.node.provisioner`` import cycle
-                # while keeping a single source of truth for the reason code.
-                from awf.node.provisioner import _EXECUTION_CLAIM_FENCED_REASON_CODE
-
                 _log.warning(
                     "provisioner.execution_claim_fenced",
                     workspace_id=workspace_id,
