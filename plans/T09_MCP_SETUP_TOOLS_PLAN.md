@@ -84,6 +84,54 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: PRRT_kwDOSJAM6s6HO7lM
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_start_local_service` starts from an explicit
+`source_checkout` but returns first-run payloads with `command="awf start"` on
+success and the adjacent bootstrap-execution failure path. Copying that command
+would rerun default or persisted assets instead of the checkout the MCP tool just
+validated and started.
+
+Scope is limited to MCP start payload command rendering for explicit
+`source_checkout` values and focused MCP regressions.
+
+### Requirements Checklist
+
+- Preserve existing `awf_start_local_service` behavior when `source_checkout` is
+  not provided.
+- When explicit `source_checkout` is provided and startup succeeds, render the
+  resolved checkout in the payload command.
+- When explicit `source_checkout` is provided and bootstrap fails after input
+  resolution, render the resolved checkout in the structured first-run failure
+  payload command.
+- Keep existing bootstrap diagnostics, redaction, and env-migration metadata
+  unchanged.
+- Add focused regressions for the success and adjacent bootstrap-execution
+  failure paths.
+
+### Implementation Steps
+
+1. Add failing MCP regressions that assert explicit-checkout start success and
+   structured bootstrap failure payloads use `awf start --source-checkout ...`.
+2. Add a small MCP helper that overrides only the first-run payload `command`
+   when a resolved explicit checkout path is available.
+3. Thread the resolved MCP checkout path into the success and bootstrap-execution
+   failure payload paths.
+4. Run the targeted regressions and focused checks for the changed MCP files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_success_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_bootstrap_failure_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_bootstrap_path_failure_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## Review Repair: issue:4620143523
 
 ### Problem Statement And Scope

@@ -358,7 +358,10 @@ async def _start_local_service_result(
     except ServiceBootstrapError as exc:
         return _first_run_result(
             safe_result,
-            _start_failure_payload(exc, env_migration=inputs.env_migration),
+            _start_payload_with_source_checkout_command(
+                _start_failure_payload(exc, env_migration=inputs.env_migration),
+                source_path,
+            ),
             is_error=True,
         )
     except (CalledProcessError, OSError, RuntimeError, ValueError) as exc:
@@ -366,14 +369,18 @@ async def _start_local_service_result(
             safe_result,
             exc,
             env_migration=inputs.env_migration,
+            source_checkout=source_path,
         )
 
     return _first_run_result(
         safe_result,
-        _start_success_payload(
-            inputs.settings,
-            result,
-            env_migration=inputs.env_migration,
+        _start_payload_with_source_checkout_command(
+            _start_success_payload(
+                inputs.settings,
+                result,
+                env_migration=inputs.env_migration,
+            ),
+            source_path,
         ),
     )
 
@@ -402,6 +409,7 @@ def _start_bootstrap_path_error_result(
     exc: CalledProcessError | OSError | RuntimeError | ValueError,
     *,
     env_migration: object | None = None,
+    source_checkout: Path | None = None,
 ) -> CallToolResult:
     failure = ServiceBootstrapError(
         reason_code=START_BOOTSTRAP_EXECUTION_FAILED,
@@ -410,9 +418,21 @@ def _start_bootstrap_path_error_result(
     )
     return _first_run_result(
         safe_result,
-        _start_failure_payload(failure, env_migration=env_migration),
+        _start_payload_with_source_checkout_command(
+            _start_failure_payload(failure, env_migration=env_migration),
+            source_checkout,
+        ),
         is_error=True,
     )
+
+
+def _start_payload_with_source_checkout_command(
+    payload: FirstRunPayload,
+    source_checkout: Path | None,
+) -> FirstRunPayload:
+    if source_checkout is None:
+        return payload
+    return payload.model_copy(update={"command": _start_source_checkout_command(source_checkout)})
 
 
 def _initialize_project_profile_result(

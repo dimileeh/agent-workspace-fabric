@@ -53,6 +53,54 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: PRRT_kwDOSJAM6s6HO7lM
+
+### Requirement Status
+
+- Preserve existing `awf_start_local_service` behavior when `source_checkout` is
+  not provided: Complete.
+- When explicit `source_checkout` is provided and startup succeeds, render the
+  resolved checkout in the payload command: Complete.
+- When explicit `source_checkout` is provided and bootstrap fails after input
+  resolution, render the resolved checkout in the structured first-run failure
+  payload command: Complete.
+- Keep existing bootstrap diagnostics, redaction, and env-migration metadata
+  unchanged: Complete.
+- Add focused regressions for the success and adjacent bootstrap-execution
+  failure paths: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_success_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_bootstrap_failure_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_bootstrap_path_failure_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_start_local_service_reuses_bootstrap_and_is_idempotent tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_success_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_reports_structured_failure tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_bootstrap_failure_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_path_runtime_error_is_first_run_failure tests/unit/mcp/test_setup_tools.py::test_start_local_service_preserves_explicit_source_checkout_bootstrap_path_failure_command tests/unit/mcp/test_setup_tools.py::test_start_local_service_bootstrap_called_process_error_is_structured -q
+```
+
+Latest results:
+
+- Regression tests failed before implementation because success, structured
+  bootstrap failure, and bootstrap-execution failure payloads all returned
+  `command="awf start"` for explicit `source_checkout`.
+- Regression tests after implementation: 3 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+- Nearby start-tool regression sweep: 7 passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## Review Repair: issue:4620143523
 
 Plan reference: `plans/T09_MCP_SETUP_TOOLS_PLAN.md`

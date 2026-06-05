@@ -997,6 +997,40 @@ async def test_start_local_service_reuses_bootstrap_and_is_idempotent(
 
 
 @pytest.mark.unit
+async def test_start_local_service_preserves_explicit_source_checkout_success_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    checkout.mkdir()
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+        compose_file=checkout / "docker" / "compose" / "compose.yml",
+        compose_env_file=None,
+        asset_root=checkout,
+        service_env={},
+        env_migration=None,
+    )
+
+    async def fake_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        return ServiceBootstrapResult(stages=(), service_status={"status": "ok", "checks": {}})
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fake_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    payload = _payload(
+        await mcp.call_tool("awf_start_local_service", {"source_checkout": str(checkout)})
+    )
+
+    assert payload["status"] == "success"
+    assert payload["command"] == f"awf start --source-checkout '{checkout}'"
+
+
+@pytest.mark.unit
 async def test_start_local_service_reports_structured_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1046,6 +1080,44 @@ async def test_start_local_service_reports_structured_failure(
 
 
 @pytest.mark.unit
+async def test_start_local_service_preserves_explicit_source_checkout_bootstrap_failure_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    checkout.mkdir()
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+        compose_file=checkout / "docker" / "compose" / "compose.yml",
+        compose_env_file=None,
+        asset_root=checkout,
+        service_env={},
+        env_migration=None,
+    )
+
+    async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        raise ServiceBootstrapError(
+            reason_code=SERVICE_BOOTSTRAP_TIMEOUT,
+            message="timed out",
+        )
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fail_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {"source_checkout": str(checkout)})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "failed"
+    assert payload["command"] == f"awf start --source-checkout '{checkout}'"
+    assert payload["issues"][0]["details"]["bootstrap"]["reason_code"] == SERVICE_BOOTSTRAP_TIMEOUT
+
+
+@pytest.mark.unit
 async def test_start_local_service_bootstrap_path_runtime_error_is_first_run_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1091,6 +1163,41 @@ async def test_start_local_service_bootstrap_path_runtime_error_is_first_run_fai
     assert bootstrap["message"] == "could not execute local service bootstrap"
     assert payload["issues"][0]["details"]["env_migration"] == migration_payload
     assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
+async def test_start_local_service_preserves_explicit_source_checkout_bootstrap_path_failure_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+    checkout.mkdir()
+    inputs = SimpleNamespace(
+        settings=SimpleNamespace(api_base_url="http://localhost:8000", console_url=None),
+        compose_file=checkout / "docker" / "compose" / "compose.yml",
+        compose_env_file=None,
+        asset_root=checkout,
+        service_env={},
+        env_migration=None,
+    )
+
+    async def fail_bootstrap(*_args: Any, **_kwargs: Any) -> ServiceBootstrapResult:
+        raise RuntimeError("local bootstrap path failed")
+
+    monkeypatch.setattr(setup_tools, "_resolve_start_source_checkout", lambda _path: object())
+    monkeypatch.setattr(setup_tools, "_resolve_start_bootstrap_inputs", lambda _verified: inputs)
+    monkeypatch.setattr(setup_tools, "run_service_bootstrap", fail_bootstrap)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool("awf_start_local_service", {"source_checkout": str(checkout)})
+    payload = _payload(result)
+
+    assert result.isError is True
+    assert payload["status"] == "failed"
+    assert payload["command"] == f"awf start --source-checkout '{checkout}'"
+    assert payload["reason_code"] == "START_BOOTSTRAP_EXECUTION_FAILED"
 
 
 @pytest.mark.unit
