@@ -487,25 +487,28 @@ def test_first_run_install_lanes_present_and_curl_gated() -> None:
     these are two public first-run entry points, so dropping every lane marker
     from one must fail even if the sibling doc still carries them. The two
     source-checkout lanes are anchored on the distinctive install *command token*
-    (`uv tool install . --force` vs `uv run --python 3.12 --extra dev awf`) rather
-    than the section heading text, so a benign heading reword or capitalisation
-    tweak does not trip a false "lane missing", while dropping the lane's actual
-    install instruction still fails. The expected markers are tracked per file so
-    the per-document independence holds.
+    (`uv tool install . --force` vs `--extra dev awf`) rather than the section
+    heading text, so a benign heading reword or capitalisation tweak does not trip
+    a false "lane missing", while dropping the lane's actual install instruction
+    still fails. The `uv run` lane token deliberately omits the pinned Python minor
+    version (`--python 3.12`) so a docs bump to a newer interpreter does not report
+    an intact lane as missing, while `awf` keeps it distinct from non-`awf`
+    `uv run` commands. The expected markers are tracked per file so the
+    per-document independence holds.
     """
     expected_lane_markers = {
         "README.md": (
             "release-installed",
             "package-manager",
             "uv tool install . --force",
-            "uv run --python 3.12 --extra dev awf",
+            "--extra dev awf",
             "release-gated",
         ),
         "docs/QUICKSTART.md": (
             "release-installed",
             "package-manager",
             "uv tool install . --force",
-            "uv run --python 3.12 --extra dev awf",
+            "--extra dev awf",
             "release-gated",
         ),
     }
