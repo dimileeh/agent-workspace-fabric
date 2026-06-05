@@ -648,7 +648,49 @@ def _initialize_project_profile_result(
             detail={"project_path": str(repository), "template": template},
         )
 
-    written_path: Path | None = None
+    mode = "write" if write_profile else "preview"
+    planned_written_path = repository / ".awf" / "workspace.yml" if write_profile else None
+    if (
+        planned_written_path is not None
+        and existing_profile_path is None
+        and planned_written_path.exists()
+    ):
+        existing_profile_path = planned_written_path
+    if planned_written_path is not None and existing_profile_path is not None and not force:
+        return _error_result(
+            safe_result,
+            PROJECT_PROFILE_EXISTS,
+            "project profile already exists; pass force=true to overwrite",
+            detail={"project_path": str(repository), "force": force},
+        )
+
+    try:
+        payload = _init_project_onboarding_payload(
+            preview=preview,
+            existing_profile_path=existing_profile_path,
+            written_path=planned_written_path,
+            service_status={
+                "service": "awf",
+                "status": "not_checked",
+                "source": "mcp",
+            },
+            doctor_status="not_checked",
+            local_checks_ready=False,
+            guided=False,
+            mode=mode,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "could not build project onboarding MCP payload",
+            extra={"project_path": str(repository), "mode": mode},
+        )
+        return _error_result(
+            safe_result,
+            PROJECT_INIT_FAILED,
+            "could not build onboarding payload",
+            detail={"project_path": str(repository), "mode": mode},
+        )
+
     if write_profile:
         try:
             written_path = write_workspace_profile(preview, force=force)
@@ -671,34 +713,8 @@ def _initialize_project_profile_result(
                 f"could not write project profile: {type(exc).__name__}",
                 detail={"project_path": str(repository), "force": force},
             )
-
-    mode = "write" if write_profile else "preview"
-    try:
-        payload = _init_project_onboarding_payload(
-            preview=preview,
-            existing_profile_path=existing_profile_path,
-            written_path=written_path,
-            service_status={
-                "service": "awf",
-                "status": "not_checked",
-                "source": "mcp",
-            },
-            doctor_status="not_checked",
-            local_checks_ready=False,
-            guided=False,
-            mode=mode,
-        )
-    except Exception:
-        _LOGGER.exception(
-            "could not build project onboarding MCP payload",
-            extra={"project_path": str(repository), "mode": mode},
-        )
-        return _error_result(
-            safe_result,
-            PROJECT_INIT_FAILED,
-            "could not build onboarding payload",
-            detail={"project_path": str(repository), "mode": mode},
-        )
+        if planned_written_path is not None and written_path != planned_written_path:
+            payload["written_path"] = str(written_path)
     return safe_result(cast(dict[str, Any], payload))
 
 

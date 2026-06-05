@@ -53,6 +53,53 @@ Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
 
+## Review Repair: issue:4620143523 Write-Before-Payload Failure
+
+### Requirement Status
+
+- Preserve the structured `PROJECT_INIT_FAILED` response and redaction behavior
+  when onboarding payload construction fails: Complete.
+- Prevent a failed payload build from leaving a newly written
+  `.awf/workspace.yml` behind: Complete.
+- Preserve idempotent retry behavior for the same failing call without
+  requiring `force=true`: Complete.
+- Add a focused regression proving write-mode payload failure does not leave the
+  profile file and retries keep the original error code: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools_project_profile.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_write_payload_failure_does_not_leave_profile_or_change_retry_error -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_setup_tools_are_registered tests/unit/mcp/test_setup_tools.py::test_setup_status_init_and_client_tools_offload_blocking_work -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because the retry
+  returned `PROJECT_PROFILE_EXISTS` after the first failed call wrote
+  `.awf/workspace.yml`.
+- Regression test after the implementation change: 1 passed.
+- Focused project-profile MCP test file: 13 passed.
+- Focused registration/offload MCP tests: 2 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.
+
 ## CI Repair: Client Planner Exception Tests Depend On Ambient Env File
 
 ### Requirement Status

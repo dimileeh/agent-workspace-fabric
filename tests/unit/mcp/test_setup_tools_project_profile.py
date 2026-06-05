@@ -465,6 +465,75 @@ async def test_initialize_project_profile_payload_assembly_failure_is_structured
 
 
 @pytest.mark.unit
+async def test_initialize_project_profile_write_payload_failure_does_not_leave_profile_or_change_retry_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    profile_path = project / ".awf" / "workspace.yml"
+    leaked_detail = "/srv/awf/internal/onboarding-preview contains secret refs"
+    preview = SimpleNamespace(
+        path=project,
+        draft=SimpleNamespace(template="generic", yaml="name: generic\n"),
+        to_dict=lambda: {
+            "path": str(project),
+            "inspection": {"detected_template": "generic"},
+            "draft": {"template": "generic", "yaml": "name: generic\n"},
+            "diagnostics": {},
+        },
+    )
+
+    def fail_payload_assembly(**_kwargs: Any) -> dict[str, Any]:
+        raise AttributeError(leaked_detail)
+
+    def fake_write(item: Any, *, force: bool) -> Path:
+        assert item is preview
+        if profile_path.exists() and not force:
+            raise FileExistsError(17, "File exists", profile_path)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(item.draft.yaml, encoding="utf-8")
+        return profile_path
+
+    monkeypatch.setattr(setup_tools, "preview_project_onboarding", lambda *_a, **_k: preview)
+    monkeypatch.setattr(setup_tools, "write_workspace_profile", fake_write)
+    monkeypatch.setattr(
+        setup_tools,
+        "_init_project_onboarding_payload",
+        fail_payload_assembly,
+    )
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    first_result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "template": "generic", "write_profile": True},
+    )
+    retry_result = await mcp.call_tool(
+        "awf_initialize_project_profile",
+        {"project_path": str(project), "template": "generic", "write_profile": True},
+    )
+    first_payload = _payload(first_result)
+    retry_payload = _payload(retry_result)
+    rendered = _json_text(first_result) + _json_text(retry_result)
+
+    assert first_result.isError is True
+    assert retry_result.isError is True
+    assert first_payload["error_code"] == "PROJECT_INIT_FAILED"
+    assert retry_payload["error_code"] == "PROJECT_INIT_FAILED"
+    assert first_payload["message"] == "could not build onboarding payload"
+    assert retry_payload["message"] == "could not build onboarding payload"
+    assert first_payload["detail"] == {
+        "project_path": str(project.resolve()),
+        "mode": "write",
+    }
+    assert retry_payload["detail"] == first_payload["detail"]
+    assert not profile_path.exists()
+    assert leaked_detail not in rendered
+
+
+@pytest.mark.unit
 async def test_initialize_project_profile_existing_profile_probe_failure_logs_probe_context(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

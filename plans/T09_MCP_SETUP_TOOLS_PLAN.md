@@ -84,6 +84,51 @@ uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
 
+## Review Repair: issue:4620143523 Write-Before-Payload Failure
+
+### Problem Statement And Scope
+
+The PR review reports that `_initialize_project_profile_result` writes
+`.awf/workspace.yml` before building the MCP response payload. If payload
+construction fails after the write, the first call returns `PROJECT_INIT_FAILED`
+while leaving a profile on disk; a plain retry with `write_profile=true` and
+`force=false` can then return `PROJECT_PROFILE_EXISTS`.
+
+Scope is limited to the project-profile MCP initialization write/payload
+ordering and its focused regression.
+
+### Requirements Checklist
+
+- Preserve the structured `PROJECT_INIT_FAILED` response and redaction behavior
+  when onboarding payload construction fails.
+- Prevent a failed payload build from leaving a newly written
+  `.awf/workspace.yml` behind.
+- Preserve idempotent retry behavior for the same failing call without requiring
+  `force=true`.
+- Add a focused regression proving write-mode payload failure does not leave the
+  profile file and retries keep the original error code.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for write-mode payload assembly
+   failure and retry behavior.
+2. Reorder `_initialize_project_profile_result` so the response payload is
+   constructed before `write_workspace_profile(...)` runs for write mode.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py::test_initialize_project_profile_write_payload_failure_does_not_leave_profile_or_change_retry_error -q
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools_project_profile.py -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools_project_profile.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.
+
 ## CI Repair: Client Planner Exception Tests Depend On Ambient Env File
 
 ### Problem Statement And Scope
