@@ -1866,3 +1866,50 @@ uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py -q
 
 Full AWF/GitHub validation and coverage gates remain managed by AWF after the
 agent phase.
+
+## Review Repair: PRRT_kwDOSJAM6s6HPk73
+
+### Problem Statement And Scope
+
+The PR review reports that `awf_get_setup_status` returns
+`_reason_coded_payload(...)` unchanged when `_run_setup` raises
+`SetupCheckError` before normal setup-status payload transformation, such as an
+unsupported provider selector. That error payload renders the generic
+`awf setup` command, so an MCP operator copying it can run the mutating setup
+flow instead of the matching read-only `awf setup --dry-run ...` status check.
+It also drops the explicit `source_checkout` context from the retry command.
+
+Scope is limited to the setup-status `SetupCheckError` branch and a focused
+regression for the returned command.
+
+### Requirements Checklist
+
+- Preserve the existing reason-coded setup-status error payload shape,
+  redaction, reason code, issue details, and MCP error behavior.
+- Render the setup-status `SetupCheckError` command as
+  `awf setup --dry-run` with the original provider selectors.
+- Preserve explicit `source_checkout` in that dry-run retry command.
+- Keep setup-status provider-selector guidance read-only by rendering
+  `awf setup --dry-run` in the top-level next step.
+- Add a focused regression proving the early error path returns the matching
+  dry-run status command.
+
+### Implementation Steps
+
+1. Add the focused failing MCP regression for setup-status `SetupCheckError`
+   command rendering.
+2. Wrap the existing reason-coded payload in the setup-status command helper
+   before returning it from the `SetupCheckError` branch.
+3. Run the targeted regression and focused lint/type checks for the changed
+   files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_setup_check_error_returns_matching_dry_run_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Full AWF/GitHub validation and coverage gates remain managed by AWF after the
+agent phase.

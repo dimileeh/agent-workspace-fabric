@@ -1948,3 +1948,47 @@ Latest results:
 Full AWF/GitHub validation and coverage gates were not run in the agent phase;
 AWF owns broad validation, provenance, logs, timeouts, and merge gating after
 agent completion.
+
+## Review Repair: PRRT_kwDOSJAM6s6HPk73
+
+### Requirement Status
+
+- Preserve the existing reason-coded setup-status error payload shape,
+  redaction, reason code, issue details, and MCP error behavior: Complete.
+- Render the setup-status `SetupCheckError` command as
+  `awf setup --dry-run` with the original provider selectors: Complete.
+- Preserve explicit `source_checkout` in that dry-run retry command: Complete.
+- Keep setup-status provider-selector guidance read-only by rendering
+  `awf setup --dry-run` in the top-level next step: Complete.
+- Add a focused regression proving the early error path returns the matching
+  dry-run status command: Complete.
+
+### Evidence
+
+Files changed:
+
+- `src/awf/mcp/setup_tools.py`
+- `tests/unit/mcp/test_setup_tools.py`
+- `plans/T09_MCP_SETUP_TOOLS_PLAN.md`
+- `plans/T09_MCP_SETUP_TOOLS_VALIDATION.md`
+
+Focused checks run:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/mcp/test_setup_tools.py::test_get_setup_status_setup_check_error_returns_matching_dry_run_command -q
+uv run --python 3.12 --extra dev ruff check src/awf/mcp/setup_tools.py tests/unit/mcp/test_setup_tools.py
+uv run --python 3.12 --extra dev mypy src/awf/mcp/setup_tools.py
+```
+
+Latest results:
+
+- Regression test failed before the implementation change because
+  `payload["command"]` was `awf setup` on the setup-status
+  `SetupCheckError` path.
+- Regression test after the implementation change: 1 passed.
+- Focused ruff: passed.
+- Focused mypy: passed.
+
+Full AWF/GitHub validation and coverage gates were not run in the agent phase;
+AWF owns broad validation, provenance, logs, timeouts, and merge gating after
+agent completion.

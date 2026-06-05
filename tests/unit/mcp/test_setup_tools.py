@@ -22,6 +22,7 @@ from awf.host_setup.config import (
     ProviderConfig,
 )
 from awf.host_setup.rendering import (
+    SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
     START_HEALTH_TIMEOUT,
     first_run_failure_payload,
@@ -429,6 +430,47 @@ async def test_get_setup_status_marks_blocked_and_failed_readiness_as_mcp_error(
     assert payload["issues"] == [
         {"reason_code": SETUP_READINESS_FAILED, "severity": status, "check": "docker"}
     ]
+
+
+@pytest.mark.unit
+async def test_get_setup_status_setup_check_error_returns_matching_dry_run_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.mcp import setup_tools
+
+    checkout = tmp_path / "source checkout"
+
+    def fail_run_setup(**kwargs: Any) -> Any:
+        assert kwargs["providers"] == ["bogus"]
+        assert kwargs["dry_run"] is True
+        assert kwargs["source_checkout"] == checkout
+        raise SetupCheckError(
+            "Unsupported provider selector: 'bogus'.",
+            reason_code=SETUP_PROVIDER_UNKNOWN,
+            details={"provider": "bogus", "known_providers": ["codex", "github"]},
+        )
+
+    monkeypatch.setattr(setup_tools, "_run_setup", fail_run_setup)
+    mcp = build_mcp_server(service=MagicMock(), settings=_settings(tmp_path))
+
+    result = await mcp.call_tool(
+        "awf_get_setup_status",
+        {"providers": ["bogus"], "source_checkout": str(checkout)},
+    )
+    payload = _payload(result)
+    expected_command = f"awf setup --dry-run --provider bogus --source-checkout '{checkout}'"
+
+    assert result.isError is True
+    assert payload["status"] == "blocked"
+    assert payload["command"] == expected_command
+    assert payload["next_steps"] == [
+        f"Re-run awf setup --dry-run --source-checkout '{checkout}' with a supported "
+        "--provider; the accepted names are listed under known_providers in the issue details.",
+    ]
+    assert payload["reason_code"] == SETUP_PROVIDER_UNKNOWN
+    assert payload["issues"][0]["reason_code"] == SETUP_PROVIDER_UNKNOWN
+    assert payload["issues"][0]["details"]["provider"] == "bogus"
 
 
 @pytest.mark.unit

@@ -57,6 +57,7 @@ from awf.host_setup.config import (
 )
 from awf.host_setup.rendering import (
     CLIENT_CONFIG_CONFLICT,
+    SETUP_PROVIDER_UNKNOWN,
     SETUP_READINESS_FAILED,
     FirstRunPayload,
     render_first_run_json,
@@ -247,7 +248,13 @@ def _get_setup_status_result(
     except SetupCheckError as exc:
         return _first_run_result(
             safe_result,
-            _reason_coded_payload(exc.reason_code, str(exc), exc.details),
+            _setup_status_reason_coded_payload(
+                exc.reason_code,
+                str(exc),
+                exc.details,
+                providers=providers,
+                source_checkout=source_path,
+            ),
             is_error=True,
         )
     except HostSetupConfigError as exc:
@@ -803,6 +810,56 @@ def _setup_status_command(
     return _setup_status_dry_run_command(
         selected_providers=selected_providers,
         source_checkout=source_checkout,
+    )
+
+
+def _setup_status_reason_coded_payload(
+    reason_code: str,
+    summary: str,
+    details: dict[str, Any],
+    *,
+    providers: list[str],
+    source_checkout: Path | None,
+) -> FirstRunPayload:
+    payload = _reason_coded_payload(reason_code, summary, details)
+    return payload.model_copy(
+        update={
+            "command": _setup_status_dry_run_command(
+                selected_providers=providers,
+                source_checkout=source_checkout,
+            ),
+            "next_steps": _setup_status_reason_coded_next_steps(
+                reason_code,
+                payload.next_steps,
+                providers=providers,
+                source_checkout=source_checkout,
+            ),
+        }
+    )
+
+
+def _setup_status_reason_coded_next_steps(
+    reason_code: str,
+    next_steps: tuple[str, ...],
+    *,
+    providers: list[str],
+    source_checkout: Path | None,
+) -> tuple[str, ...]:
+    if reason_code == SETUP_PROVIDER_UNKNOWN:
+        command = _setup_status_dry_run_command(
+            selected_providers=[],
+            source_checkout=source_checkout,
+        )
+        return (
+            f"Re-run {command} with a supported --provider; the accepted names are "
+            "listed under known_providers in the issue details.",
+        )
+    return tuple(
+        _setup_status_next_steps(
+            list(next_steps),
+            selected_providers=providers,
+            source_checkout=source_checkout,
+        )
     )
 
 
