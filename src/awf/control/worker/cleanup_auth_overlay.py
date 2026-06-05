@@ -13,7 +13,7 @@ import asyncio
 import subprocess
 from typing import Any
 
-from sqlalchemy import and_, func, literal, or_, select
+from sqlalchemy import func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.control.worker.config import effective_worker_config_node_id
@@ -432,11 +432,10 @@ async def _list_pending_terminal_auth_overlay_unmount_candidates(
         .where(
             or_(
                 effective_node == worker_node_id,
-                and_(
-                    Workspace.node_id.is_(None),
-                    active_reservation_node.is_(None),
-                    latest_reservation_node.is_(None),
-                ),
+                # ``coalesce(...) IS NULL`` holds iff every coalesced arg is NULL,
+                # so this captures the legacy "no node_id and no reservation"
+                # fallback without re-inlining the reservation subqueries.
+                effective_node.is_(None),
             )
         )
         .where(pending_exists)
