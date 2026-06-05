@@ -115,6 +115,8 @@ def backfill_auth_overlay_unmount_pending(connection: Connection) -> int:
         event_order = _reserve_workspace_event_order(
             connection,
             workspace_id=workspace_id,
+            release_event_id=release_event_id,
+            release_event_order=row["release_event_order"],
             cycle_floor=cycle_floor,
         )
         if event_order is None:
@@ -145,11 +147,33 @@ def backfill_auth_overlay_unmount_pending(connection: Connection) -> int:
 
 
 def _latest_effective_release_stmt() -> sa.Select[tuple[Any, ...]]:
+    latest_release_or_revoke = _latest_release_or_revoke_subquery()
+    return (
+        sa.select(
+            _WORKSPACES.c.id.label("workspace_id"),
+            _WORKSPACES.c.status.label("status"),
+            _WORKSPACES.c.compose_project_name.label("compose_project_name"),
+            latest_release_or_revoke.c.release_event_id,
+            latest_release_or_revoke.c.payload,
+            latest_release_or_revoke.c.release_event_order,
+        )
+        .join(
+            latest_release_or_revoke,
+            latest_release_or_revoke.c.workspace_id == _WORKSPACES.c.id,
+        )
+        .where(latest_release_or_revoke.c.row_number == 1)
+        .where(latest_release_or_revoke.c.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+        .where(latest_release_or_revoke.c.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE)
+        .order_by(_WORKSPACES.c.id.asc())
+    )
+
+
+def _latest_release_or_revoke_subquery() -> Any:
     event_order_nulls_last = sa.case(
         (_WORKSPACE_EVENTS.c.event_order.is_(None), 1),
         else_=0,
     )
-    latest_release_or_revoke = (
+    return (
         sa.select(
             _WORKSPACE_EVENTS.c.id.label("release_event_id"),
             _WORKSPACE_EVENTS.c.workspace_id.label("workspace_id"),
@@ -186,24 +210,6 @@ def _latest_effective_release_stmt() -> sa.Select[tuple[Any, ...]]:
             )
         )
         .subquery()
-    )
-    return (
-        sa.select(
-            _WORKSPACES.c.id.label("workspace_id"),
-            _WORKSPACES.c.status.label("status"),
-            _WORKSPACES.c.compose_project_name.label("compose_project_name"),
-            latest_release_or_revoke.c.release_event_id,
-            latest_release_or_revoke.c.payload,
-            latest_release_or_revoke.c.release_event_order,
-        )
-        .join(
-            latest_release_or_revoke,
-            latest_release_or_revoke.c.workspace_id == _WORKSPACES.c.id,
-        )
-        .where(latest_release_or_revoke.c.row_number == 1)
-        .where(latest_release_or_revoke.c.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
-        .where(latest_release_or_revoke.c.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE)
-        .order_by(_WORKSPACES.c.id.asc())
     )
 
 
@@ -284,6 +290,8 @@ def _reserve_workspace_event_order(
     connection: Connection,
     *,
     workspace_id: str,
+    release_event_id: str,
+    release_event_order: int | str | bytes | bytearray | None,
     cycle_floor: int,
 ) -> int | None:
     current_sequence = sa.func.coalesce(_WORKSPACES.c.event_sequence, 0)
@@ -294,6 +302,13 @@ def _reserve_workspace_event_order(
     event_order = connection.execute(
         _WORKSPACES.update()
         .where(_WORKSPACES.c.id == workspace_id)
+        .where(
+            _latest_effective_release_matches(
+                workspace_id=workspace_id,
+                release_event_id=release_event_id,
+                release_event_order=release_event_order,
+            )
+        )
         .where(
             sa.not_(
                 _current_cycle_auth_overlay_marker_exists(
@@ -306,6 +321,37 @@ def _reserve_workspace_event_order(
         .returning(_WORKSPACES.c.event_sequence)
     ).scalar_one_or_none()
     return int(event_order) if event_order is not None else None
+
+
+def _latest_effective_release_matches(
+    *,
+    workspace_id: str,
+    release_event_id: str,
+    release_event_order: int | str | bytes | bytearray | None,
+) -> ColumnElement[bool]:
+    latest_release_or_revoke = _latest_release_or_revoke_subquery()
+    release_order = _event_order_value(release_event_order)
+    if release_order is None:
+        release_order_matches = latest_release_or_revoke.c.release_event_order.is_(None)
+    else:
+        release_order_matches = latest_release_or_revoke.c.release_event_order == release_order
+    return (
+        sa.select(sa.literal(1))
+        .select_from(latest_release_or_revoke)
+        .where(latest_release_or_revoke.c.workspace_id == workspace_id)
+        .where(latest_release_or_revoke.c.row_number == 1)
+        .where(latest_release_or_revoke.c.event_type == _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE)
+        .where(latest_release_or_revoke.c.reason_code == _TERMINAL_RUNTIME_RELEASE_REASON_CODE)
+        .where(latest_release_or_revoke.c.release_event_id == release_event_id)
+        .where(release_order_matches)
+        .exists()
+    )
+
+
+def _event_order_value(value: int | str | bytes | bytearray | None) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 def _pending_event_id(*, workspace_id: str, release_event_id: str) -> str:

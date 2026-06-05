@@ -110,6 +110,8 @@ def test_auth_overlay_unmount_backfill_reserves_event_order_atomically() -> None
     event_order = migration._reserve_workspace_event_order(
         connection,
         workspace_id="ws_atomic",
+        release_event_id="evt_atomic_release",
+        release_event_order=5,
         cycle_floor=5,
     )
 
@@ -146,6 +148,9 @@ def test_auth_overlay_unmount_backfill_skips_reservation_when_marker_appears() -
                         id VARCHAR(36) PRIMARY KEY,
                         workspace_id VARCHAR(36) NOT NULL,
                         event_type VARCHAR(64) NOT NULL,
+                        reason_code VARCHAR(64),
+                        payload JSON,
+                        occurred_at DATETIME NOT NULL,
                         event_order INTEGER
                     )
                     """
@@ -163,20 +168,36 @@ def test_auth_overlay_unmount_backfill_skips_reservation_when_marker_appears() -
                 text(
                     """
                     INSERT INTO workspace_events (
-                        id, workspace_id, event_type, event_order
+                        id, workspace_id, event_type, reason_code, payload,
+                        occurred_at, event_order
                     )
                     VALUES (
+                        'evt_race_release', 'ws_race_marker',
+                        :release_type, :release_reason,
+                        '{"auth_overlay_unmounted": false}',
+                        '2026-06-01 00:00:00+00', 4
+                    ),
+                    (
                         'evt_race_marker', 'ws_race_marker',
-                        :pending_type, 4
+                        :pending_type, :pending_reason,
+                        '{"attempt": 2}',
+                        '2026-06-01 00:00:01+00', 4
                     )
                     """
                 ),
-                {"pending_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE},
+                {
+                    "release_type": TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    "release_reason": TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    "pending_type": _AUTH_OVERLAY_PENDING_EVENT_TYPE,
+                    "pending_reason": _AUTH_OVERLAY_PENDING_REASON_CODE,
+                },
             )
 
             event_order = migration._reserve_workspace_event_order(
                 conn,
                 workspace_id="ws_race_marker",
+                release_event_id="evt_race_release",
+                release_event_order=4,
                 cycle_floor=4,
             )
             sequence = conn.execute(
@@ -193,6 +214,103 @@ def test_auth_overlay_unmount_backfill_skips_reservation_when_marker_appears() -
 
     assert event_order is None
     assert sequence == 4
+
+
+@pytest.mark.unit
+def test_auth_overlay_unmount_backfill_skips_stale_release_cycle_reservation() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    migration = _load_auth_overlay_backfill_migration(repo_root)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspaces (
+                        id VARCHAR(36) PRIMARY KEY,
+                        event_sequence INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE workspace_events (
+                        id VARCHAR(36) PRIMARY KEY,
+                        workspace_id VARCHAR(36) NOT NULL,
+                        event_type VARCHAR(64) NOT NULL,
+                        reason_code VARCHAR(64),
+                        payload JSON,
+                        event_order INTEGER,
+                        occurred_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspaces (id, event_sequence)
+                    VALUES ('ws_stale_release_cycle', 6)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO workspace_events (
+                        id, workspace_id, event_type, reason_code, payload,
+                        event_order, occurred_at
+                    )
+                    VALUES (
+                        'evt_old_release', 'ws_stale_release_cycle',
+                        :release_type, :release_reason,
+                        '{"auth_overlay_unmounted": false}', 4,
+                        '2026-06-01 00:00:00+00'
+                    ),
+                    (
+                        'evt_old_release_revoked', 'ws_stale_release_cycle',
+                        :revoked_type, :revoked_reason,
+                        '{}', 5, '2026-06-01 00:00:01+00'
+                    ),
+                    (
+                        'evt_new_release', 'ws_stale_release_cycle',
+                        :release_type, :release_reason,
+                        '{"auth_overlay_unmounted": true}', 6,
+                        '2026-06-01 00:00:02+00'
+                    )
+                    """
+                ),
+                {
+                    "release_type": TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+                    "release_reason": TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+                    "revoked_type": TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
+                    "revoked_reason": TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
+                },
+            )
+
+            event_order = migration._reserve_workspace_event_order(
+                conn,
+                workspace_id="ws_stale_release_cycle",
+                release_event_id="evt_old_release",
+                release_event_order=4,
+                cycle_floor=4,
+            )
+            sequence = conn.execute(
+                text(
+                    """
+                    SELECT event_sequence
+                    FROM workspaces
+                    WHERE id = 'ws_stale_release_cycle'
+                    """
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert event_order is None
+    assert sequence == 6
 
 
 @pytest.mark.unit
