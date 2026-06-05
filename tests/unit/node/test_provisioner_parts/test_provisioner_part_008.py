@@ -317,3 +317,28 @@ async def test_epoch_none_path_transitions_to_ready_unguarded(
     reloaded = await _reload(session_factory, ws_id)
     assert reloaded is not None
     assert reloaded.status == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_verify_execution_claim_epoch_false_when_missing_or_not_provisioning(
+    session_factory: async_sessionmaker[AsyncSession],
+    git_manager: GitManager,
+    origin_repo: Path,
+) -> None:
+    provisioner = Provisioner(
+        session_factory=session_factory,
+        git=git_manager,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    # Missing workspace -> fenced.
+    assert await provisioner._verify_execution_claim_epoch("ws_missing", 1) is False  # noqa: SLF001
+
+    # A workspace that has left ``provisioning`` -> fenced even if the epoch
+    # matches (the claim no longer applies).
+    ws_id = await _create_provisioning(session_factory, origin_repo, epoch=1)
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.status = WorkspaceStatus.failed.value
+        await s.commit()
+    assert await provisioner._verify_execution_claim_epoch(ws_id, 1) is False  # noqa: SLF001

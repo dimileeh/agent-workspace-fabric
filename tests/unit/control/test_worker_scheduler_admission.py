@@ -530,6 +530,68 @@ async def test_safely_provision_claimed_stores_passes_and_clears_epoch(
     assert claimed_by is None
 
 
+class _FenceThenBlockProvisioner:
+    """Advances the epoch (a later claimant) then blocks until cancelled."""
+
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+        self.cancelled = False
+        self.started = asyncio.Event()
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).get(workspace_id)
+            assert ws is not None
+            ws.execution_claim_epoch = ws.execution_claim_epoch + 1
+            ws.execution_claimed_by = "control-worker-newer"
+            await session.commit()
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+@pytest.mark.unit
+async def test_safely_provision_claimed_heartbeat_fence_cancels_provision(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _create_requested(
+        session_factory,
+        create_attempt=False,
+        node_id=None,
+    )
+    provisioner = _FenceThenBlockProvisioner(session_factory)
+    worker = ControlWorker(
+        session_factory=session_factory,
+        provisioner=provisioner,  # type: ignore[arg-type]
+        executor=_UnusedExecutor(),  # type: ignore[arg-type]
+        config=WorkerConfig(
+            max_concurrent_provisions=1,
+            max_concurrent_executions=1,
+            execution_claim_lease_seconds=3.0,
+        ),
+    )
+
+    assert await worker._claim_requested_for_provisioning(workspace_id)  # noqa: SLF001
+
+    # The provision starts at epoch 1, advances the row to epoch 2 (a later
+    # claimant), then blocks; the heartbeat CAS then fences us and cancels it.
+    await asyncio.wait_for(
+        worker._safely_provision_claimed(workspace_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert provisioner.cancelled is True
+    assert workspace_id not in worker._execution_claim_epochs  # noqa: SLF001
+    # The fenced worker's release did not clobber the newer claimant.
+    claimed_by, _ = await _workspace_execution_claim(session_factory, workspace_id)
+    assert claimed_by == "control-worker-newer"
+
+
 @pytest.mark.unit
 async def test_refresh_execution_claim_loop_cancels_provision_on_fence(
     session_factory: async_sessionmaker[AsyncSession],
