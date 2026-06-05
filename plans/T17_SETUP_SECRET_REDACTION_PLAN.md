@@ -2140,3 +2140,52 @@ uv run --python 3.12 --extra dev pytest tests/unit/service/test_environment.py::
 uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py tests/unit/service/test_environment.py tests/unit/service/test_provider_readiness_parts/test_provider_readiness_part_001.py tests/unit/service/test_logs_parts/test_logs_part_002.py tests/unit/mcp/test_mcp_multiline_compose_redaction.py
 uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HWqVq` Follow PEM Assignment Plan
+
+### Problem Statement And Scope
+
+The inline review reports that `awf service logs --follow` can leak the body
+and footer of a multiline private-key assignment emitted by the container when
+that value was not collected as an exact `extra_secret`. Captured logs call the
+shared redactor with the whole output, but the follow path redacts flushable
+chunks independently and currently only keeps multiline context for exact
+caller-supplied secrets.
+
+This repair is limited to preserving enough follow-stream context for the
+shared PEM assignment pattern, adding a focused regression, and recording
+focused verification evidence. It does not change unrelated redaction patterns,
+branch management, pushing, broad validation, full coverage, OpenAPI drift, or
+frontend validation.
+
+### Requirements Checklist
+
+- Followed service-log output must redact the complete multiline
+  `PRIVATE_KEY`/`SSH_PRIVATE_KEY` PEM assignment even when it is not present in
+  `extra_secrets`.
+- Ordinary non-PEM followed output must continue streaming without requiring
+  full-stream buffering.
+- Existing exact multiline secret buffering behavior must remain covered.
+- Run only focused tests and narrow lint/type checks for touched files; leave
+  broad AWF/GitHub validation and full coverage to AWF after agent completion.
+
+### Implementation Steps
+
+1. Add a focused failing regression to the service-log follow tests using a
+   fake followed process that emits a multiline `SSH_PRIVATE_KEY=-----BEGIN`
+   assignment.
+2. Extend the followed-stream pending/flush logic to hold possible PEM
+   assignment context until the footer is available, then redact with the
+   shared `redact_secrets()` helper.
+3. Keep the existing exact multiline secret flush rules intact.
+4. Run the focused regression, adjacent follow-redaction regressions, and
+   narrow lint/type checks for touched files.
+
+### Verification Commands
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_private_key_assignment_without_exact_secret -q --tb=short -ra
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_private_key_assignment_without_exact_secret tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_compose_env_secret_from_streamed_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_overlapping_multiline_secret_candidates tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_flushes_multiline_secret_prefix_at_eof tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values -q --tb=short -ra
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+```

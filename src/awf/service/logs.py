@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from typing import IO, Literal, Protocol
 import yaml
 
 from awf.common.redaction import redact_secrets
+from awf.common.token_patterns import compile_token_assignment_re
 from awf.service.config import (
     COMPOSE_ENV_FILE_OMITTED,
     LOCAL_SERVICE_COMPOSE_ENV_FILE,
@@ -44,6 +46,28 @@ _STREAMING_DOWNSTREAM_WRITE_TIMEOUT_SECONDS = 5.0
 _STREAMING_DOWNSTREAM_WRITE_POLL_SECONDS = 0.05
 _STREAMING_BLOCKED_THREAD_JOIN_TIMEOUT_SECONDS = 0.05
 _LOCAL_SERVICE_PROJECT_NAME = "awf-local-service"
+_TOKEN_ASSIGNMENT_RE = compile_token_assignment_re()
+_TOKEN_ASSIGNMENT_KEY_PATTERN = (
+    r"(?:[A-Za-z][A-Za-z0-9_]*_)?TOKEN"
+    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY)"
+    r"|(?:AUTH|GITHUB|GH)[_-]?TOKEN"
+    r"|PASSWORD|PASSWD|SECRET"
+)
+_MULTILINE_PEM_ASSIGNMENT_START_RE = re.compile(
+    rf"\b(?:{_TOKEN_ASSIGNMENT_KEY_PATTERN})\b"
+    r"\s*[:=]\s*"
+    r"(?:[\"'])?"
+    r"\s*-----BEGIN [A-Z0-9 -]*PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+_PENDING_PEM_ASSIGNMENT_PREFIX_RE = re.compile(
+    rf"\b(?:{_TOKEN_ASSIGNMENT_KEY_PATTERN})\b"
+    r"\s*[:=]\s*"
+    r"(?:[\"'])?"
+    r"\s*$",
+    re.IGNORECASE,
+)
+_PEM_FOOTER_RE = re.compile(r"-----END [A-Z0-9 -]*PRIVATE KEY-----", re.IGNORECASE)
 
 
 def _resolve_local_service_compose_file(compose_file: Path) -> Path:
@@ -451,18 +475,15 @@ def _stream_redacted_pipe(
 
     try:
         for line in source:
-            if multiline_secret_values:
-                pending += line
-                flush_length = _stream_redaction_flushable_length(
-                    pending,
-                    multiline_secret_values,
-                )
-                if flush_length <= 0:
-                    continue
-                chunk = pending[:flush_length]
-                pending = pending[flush_length:]
-            else:
-                chunk = line
+            pending += line
+            flush_length = _stream_redaction_flushable_length(
+                pending,
+                multiline_secret_values,
+            )
+            if flush_length <= 0:
+                continue
+            chunk = pending[:flush_length]
+            pending = pending[flush_length:]
             redacted_chunk = redact_secrets(chunk, extra_secrets=extra_secret_values)
             if not write_redacted_chunk(redacted_chunk):
                 return
@@ -490,9 +511,15 @@ def _multiline_exact_secret_values(extra_secrets: Iterable[str]) -> tuple[str, .
 
 def _stream_redaction_flushable_length(text: str, multiline_secrets: Sequence[str]) -> int:
     """Return the prefix length safe to redact and write from a pending stream."""
-    held_suffix_length = _pending_multiline_secret_prefix_length(text, multiline_secrets)
+    held_suffix_length = max(
+        _pending_multiline_secret_prefix_length(text, multiline_secrets),
+        _pending_pem_assignment_prefix_length(text),
+    )
     flush_length = len(text) - held_suffix_length
     spans = _multiline_exact_secret_spans(text, multiline_secrets)
+    unclosed_pem_assignment_start = _unclosed_multiline_pem_assignment_start(text)
+    if unclosed_pem_assignment_start is not None:
+        spans.append((unclosed_pem_assignment_start, len(text) + 1))
     while flush_length > 0:
         next_flush_length = flush_length
         for start, end in spans:
@@ -502,6 +529,36 @@ def _stream_redaction_flushable_length(text: str, multiline_secrets: Sequence[st
             return flush_length
         flush_length = next_flush_length
     return 0
+
+
+def _pending_pem_assignment_prefix_length(text: str) -> int:
+    """Return a held suffix that may become a multiline PEM assignment."""
+    match = _PENDING_PEM_ASSIGNMENT_PREFIX_RE.search(text)
+    if match is None:
+        return 0
+    return len(text) - match.start()
+
+
+def _unclosed_multiline_pem_assignment_start(text: str) -> int | None:
+    """Return the first PEM assignment start that needs more stream context."""
+    complete_spans = _complete_multiline_pem_assignment_spans(text)
+    for match in _MULTILINE_PEM_ASSIGNMENT_START_RE.finditer(text):
+        start = match.start()
+        if not any(span_start <= start < span_end for span_start, span_end in complete_spans):
+            return start
+    return None
+
+
+def _complete_multiline_pem_assignment_spans(text: str) -> list[tuple[int, int]]:
+    """Find complete PEM assignment spans matched by the shared redactor pattern."""
+    if "-----BEGIN" not in text or "PRIVATE KEY-----" not in text:
+        return []
+    spans: list[tuple[int, int]] = []
+    for match in _TOKEN_ASSIGNMENT_RE.finditer(text):
+        value = match.group("value")
+        if value.startswith("-----BEGIN") and _PEM_FOOTER_RE.search(value):
+            spans.append(match.span())
+    return spans
 
 
 def _pending_multiline_secret_prefix_length(text: str, multiline_secrets: Sequence[str]) -> int:

@@ -1131,6 +1131,45 @@ def test_service_logs_follow_redacts_multiline_compose_env_secret_from_streamed_
 
 @pytest.mark.usefixtures("_default_local_service_compose_file")
 @pytest.mark.unit
+def test_service_logs_follow_redacts_multiline_private_key_assignment_without_exact_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """Keep PEM assignment context for followed streams without exact secrets."""
+    pem_kind = "OPENSSH PRIVATE KEY"
+    pem_body = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ=="
+    private_key = f"-----BEGIN {pem_kind}-----\n{pem_body}\n-----END {pem_kind}-----"
+
+    class _FollowProcess:
+        """Follow process double that streams an uncollected PEM assignment."""
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Expose stdout containing a private-key assignment split by lines."""
+            self.stdout = io.StringIO(f"SSH_PRIVATE_KEY={private_key}\nstatus=ready\n")
+            self.stderr = io.StringIO("")
+
+        def wait(self, timeout: float | None = None) -> int:
+            """Finish immediately after the streaming threads read both pipes."""
+            assert timeout is None
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FollowProcess)
+
+    result = run_service_logs(
+        services=[ServiceLogName.api],
+        follow=True,
+    )
+
+    rendered = capfd.readouterr().out
+    assert result == ServiceLogsResult(stdout="", stderr="")
+    assert pem_kind not in rendered
+    assert pem_body not in rendered
+    assert "status=ready" in rendered
+    assert "SSH_PRIVATE_KEY=<redacted>" in rendered
+
+
+@pytest.mark.usefixtures("_default_local_service_compose_file")
+@pytest.mark.unit
 def test_service_logs_follow_redacts_overlapping_multiline_secret_candidates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -2553,3 +2553,51 @@ uv run --python 3.12 --extra dev ruff check src/awf/service/environment.py src/a
 uv run --python 3.12 --extra dev mypy src/awf/service/environment.py src/awf/service/provider_readiness.py src/awf/service/logs.py src/awf/mcp/server.py
 # Success: no issues found in 4 source files
 ```
+
+## Review Thread `PRRT_kwDOSJAM6s6HWqVq` Follow PEM Assignment Validation
+
+Plan reference: `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+
+Requirement status:
+
+- Complete: followed service-log output now keeps PEM assignment context until
+  the shared redactor can redact the complete multiline `SSH_PRIVATE_KEY`
+  value, even when it is not present in `extra_secrets`.
+- Complete: ordinary output still flushes line-by-line because the pending
+  buffer drains immediately when no exact multiline secret, PEM assignment
+  prefix, or unclosed PEM assignment span is present.
+- Complete: existing exact multiline secret buffering remains covered by the
+  adjacent follow-redaction regressions.
+- Complete: focused tests, ruff, and mypy passed. Broad AWF/GitHub validation,
+  full coverage, OpenAPI drift, and frontend builds were not run locally; AWF
+  owns those gates after agent completion.
+
+Additional files changed:
+
+- `src/awf/service/logs.py`
+- `tests/unit/service/test_logs_parts/test_logs_part_002.py`
+- `plans/T17_SETUP_SECRET_REDACTION_PLAN.md`
+- `plans/T17_SETUP_SECRET_REDACTION_VALIDATION.md`
+
+Focused failing check before implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_private_key_assignment_without_exact_secret -q --tb=short -ra
+# 1 failed: the followed stream printed the PEM key kind, body, and footer.
+```
+
+Focused passing checks after implementation:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_private_key_assignment_without_exact_secret -q --tb=short -ra
+# 1 passed
+
+uv run --python 3.12 --extra dev pytest tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_private_key_assignment_without_exact_secret tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_multiline_compose_env_secret_from_streamed_output tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_redacts_overlapping_multiline_secret_candidates tests/unit/service/test_logs_parts/test_logs_part_002.py::test_service_logs_follow_flushes_multiline_secret_prefix_at_eof tests/unit/common/test_token_patterns.py::test_shared_assignment_redactors_mask_multiline_private_key_values -q --tb=short -ra
+# 6 passed
+
+uv run --python 3.12 --extra dev ruff check src/awf/service/logs.py tests/unit/service/test_logs_parts/test_logs_part_002.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev mypy src/awf/service/logs.py
+# Success: no issues found in 1 source file
+```
