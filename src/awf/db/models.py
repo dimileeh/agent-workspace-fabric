@@ -180,6 +180,20 @@ class Workspace(Base):
     )
     """Lease expiry for ``execution_claimed_by`` so crashed workers can be recovered."""
 
+    execution_claim_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), default=0
+    )
+    """Monotonic fencing token for the active-execution claim.
+
+    Unlike ``version`` (which bumps on every status transition and would
+    spuriously fence a live worker), this advances only when the claim changes
+    hands — on claim (``requested -> provisioning``) and at every recovery site
+    that clears the claim. A later claimant always holds a strictly higher
+    epoch, so a stale worker's owner-keyed heartbeat/release/terminal CAS
+    updates 0 rows and the worker aborts before any destructive filesystem op.
+    Backfilled to ``0`` for pre-migration rows; the first lease action bumps an
+    in-flight row to ``1``."""
+
     # Terminal-state metadata
     pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)

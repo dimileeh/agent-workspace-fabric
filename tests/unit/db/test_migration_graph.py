@@ -31,6 +31,7 @@ _AUTH_OVERLAY_BACKFILL_REVISION = "0f1e2d3c4b5a"
 _AUTH_OVERLAY_BACKFILL_FILENAME = (
     f"{_AUTH_OVERLAY_BACKFILL_REVISION}_backfill_auth_overlay_unmount_pending.py"
 )
+_EXECUTION_CLAIM_EPOCH_REVISION = "b2d4f6a8c0e1"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -98,7 +99,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_AUTH_OVERLAY_BACKFILL_REVISION]
+    assert script.get_heads() == [_EXECUTION_CLAIM_EPOCH_REVISION]
 
 
 @pytest.mark.unit
@@ -637,6 +638,126 @@ def test_auth_overlay_unmount_backfill_sqlite_parses_payloads_without_json_predi
     existing_marker = markers_by_workspace["ws_sqlite_existing_null_marker"]
     assert existing_marker.id == "evt_sqlite_existing_marker"
     assert existing_marker.event_order is None
+
+
+@pytest.mark.unit
+async def test_execution_claim_epoch_migration_backfills_existing_rows_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upgrading over an in-flight row backfills ``execution_claim_epoch`` to 0."""
+    repo_root = Path(__file__).resolve().parents[3]
+    async with postgres_empty_test_url() as database_url:
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": database_url,
+        }
+
+        def _alembic(*args: str) -> None:
+            _run_alembic(repo_root, env, *args)
+
+        monkeypatch.chdir(repo_root)
+        with postgres_alembic_subprocess_lock(database_url):
+            _alembic("upgrade", _AUTH_OVERLAY_BACKFILL_REVISION)
+
+            engine = make_engine(database_url)
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            """
+                            INSERT INTO workspaces (
+                                id, status, version, repo_url, branch_base,
+                                task_title, task_prompt, agent, test_commands,
+                                requires_database, execution_claimed_by,
+                                created_at, updated_at
+                            )
+                            VALUES (
+                                'ws_epoch_backfill', 'provisioning', 0,
+                                'git@example.com:repo.git', 'main',
+                                'in-flight row', 'do work', 'codex', '[]'::json,
+                                false, 'control-worker-stale',
+                                '2026-06-01 00:00:00+00', '2026-06-01 00:00:00+00'
+                            )
+                            """
+                        )
+                    )
+            finally:
+                await engine.dispose()
+
+            _alembic("upgrade", _EXECUTION_CLAIM_EPOCH_REVISION)
+
+        engine = make_engine(database_url)
+        try:
+            async with engine.connect() as conn:
+                epoch = await conn.scalar(
+                    text(
+                        """
+                        SELECT execution_claim_epoch
+                        FROM workspaces
+                        WHERE id = 'ws_epoch_backfill'
+                        """
+                    )
+                )
+                nullable = await conn.run_sync(
+                    lambda sync_conn: {
+                        column["name"]: column["nullable"]
+                        for column in inspect(sync_conn).get_columns("workspaces")
+                    }
+                )
+        finally:
+            await engine.dispose()
+
+    assert epoch == 0
+    assert nullable["execution_claim_epoch"] is False
+
+
+@pytest.mark.unit
+async def test_execution_claim_epoch_migration_round_trips_down_and_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Downgrade drops the column and re-upgrade re-adds it (correct inverse)."""
+    repo_root = Path(__file__).resolve().parents[3]
+    async with postgres_empty_test_url() as database_url:
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": database_url,
+        }
+
+        def _alembic(*args: str) -> None:
+            _run_alembic(repo_root, env, *args)
+
+        monkeypatch.chdir(repo_root)
+        with postgres_alembic_subprocess_lock(database_url):
+            _alembic("upgrade", _EXECUTION_CLAIM_EPOCH_REVISION)
+            engine = make_engine(database_url)
+            try:
+                async with engine.connect() as conn:
+                    after_upgrade = await conn.run_sync(
+                        lambda sync_conn: {
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("workspaces")
+                        }
+                    )
+            finally:
+                await engine.dispose()
+
+            _alembic("downgrade", _AUTH_OVERLAY_BACKFILL_REVISION)
+            engine = make_engine(database_url)
+            try:
+                async with engine.connect() as conn:
+                    after_downgrade = await conn.run_sync(
+                        lambda sync_conn: {
+                            column["name"]
+                            for column in inspect(sync_conn).get_columns("workspaces")
+                        }
+                    )
+            finally:
+                await engine.dispose()
+
+            _alembic("upgrade", _EXECUTION_CLAIM_EPOCH_REVISION)
+
+    assert "execution_claim_epoch" in after_upgrade
+    assert "execution_claim_epoch" not in after_downgrade
 
 
 @pytest.mark.unit
