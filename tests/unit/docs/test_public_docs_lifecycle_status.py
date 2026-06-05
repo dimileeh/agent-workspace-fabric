@@ -465,6 +465,183 @@ def test_package_upgrade_env_restore_exports_persisted_dotenv_over_stale_shell(
         assert result.stdout == f'tok$en\np@ss"quote\\tail\n{persisted_database_url}\n', label
 
 
+def test_lifecycle_env_restore_uses_last_dotenv_assignment(tmp_path: Path) -> None:
+    """Assert documented restore snippets match Compose duplicate-key precedence."""
+    persisted_database_url = "postgresql+asyncpg://awf:last@localhost:15433/awf"
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "AWF_API_TOKEN=stale-token",
+                "export AWF_API_TOKEN=last-token",
+                "AWF_POSTGRES_PASSWORD=stale-password",
+                "export AWF_POSTGRES_PASSWORD=last-password",
+                "AWF_POSTGRES_HOST_PORT=5433",
+                "export AWF_POSTGRES_HOST_PORT=15433",
+                "AWF_DATABASE_URL=postgresql+asyncpg://awf:stale@localhost:5433/awf",
+                f"export AWF_DATABASE_URL={persisted_database_url}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    quickstart_text = (REPO_ROOT / "docs" / "QUICKSTART.md").read_text(encoding="utf-8")
+    upgrade_text = (REPO_ROOT / "docs" / "UPGRADE.md").read_text(encoding="utf-8")
+    rollback_section = _markdown_section(upgrade_text, "## Rollback")
+    global_rollback_heading = "For the source checkout with global tool install lane"
+    no_global_rollback_heading = "For the source checkout with no global install lane"
+    release_rollback_section = _required_rollback_subsection(
+        rollback_section,
+        "For release-installed lanes",
+        end_marker=global_rollback_heading,
+    )
+
+    package_cases = (
+        (
+            "Quickstart Lane 1",
+            _quickstart_upgrade_section(quickstart_text, "## Lane 1: uv tool or pipx"),
+        ),
+        ("Upgrade uv tool", _markdown_section(upgrade_text, "## uv tool")),
+        ("Upgrade pipx", _markdown_section(upgrade_text, "## pipx")),
+        ("Upgrade virtualenv / pip", _markdown_section(upgrade_text, "## Virtualenv / pip")),
+        ("Release-installed rollback", release_rollback_section),
+    )
+
+    for label, section in package_cases:
+        script = "\n".join(
+            (
+                "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD AWF_DATABASE_URL",
+                _package_env_restore_script(section, label),
+                (
+                    'printf "%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
+                    '"$AWF_POSTGRES_PASSWORD" "$AWF_DATABASE_URL"'
+                ),
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == f"last-token\nlast-password\n{persisted_database_url}\n", label
+
+    source_cases = (
+        (
+            "Quickstart Lane 2",
+            "docs/QUICKSTART.md",
+            _quickstart_upgrade_section(
+                quickstart_text,
+                "## Lane 2: Source Checkout With Global Tool Install",
+            ),
+        ),
+        (
+            "Quickstart Lane 3",
+            "docs/QUICKSTART.md",
+            _quickstart_upgrade_section(
+                quickstart_text,
+                "## Lane 3: Source Checkout With No Global Install",
+            ),
+        ),
+        (
+            "Upgrade source checkout with global tool install",
+            "docs/UPGRADE.md",
+            _markdown_section(upgrade_text, "## Source Checkout With Global Tool Install"),
+        ),
+        (
+            "Upgrade source checkout with no global install",
+            "docs/UPGRADE.md",
+            _markdown_section(upgrade_text, "## Source Checkout With No Global Install"),
+        ),
+    )
+
+    for label, path, section in source_cases:
+        bash_fences = [
+            fence for fence in _markdown_fences(path, section) if fence.language == "bash"
+        ]
+        assert len(bash_fences) == 1, label
+        body = bash_fences[0].body
+        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        stop_start = body.index("if [ -f .env ]; then", restore_start)
+        script = "\n".join(
+            (
+                (
+                    "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD "
+                    "AWF_POSTGRES_HOST_PORT AWF_DATABASE_URL"
+                ),
+                body[restore_start:stop_start],
+                (
+                    'printf "%s\\n%s\\n%s\\n%s\\n" "$AWF_API_TOKEN" '
+                    '"$AWF_POSTGRES_PASSWORD" "$AWF_POSTGRES_HOST_PORT" '
+                    '"$AWF_DATABASE_URL"'
+                ),
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == (f"last-token\nlast-password\n15433\n{persisted_database_url}\n"), (
+            label
+        )
+
+    source_rollback_cases = (
+        (
+            "Global source-checkout rollback",
+            _required_rollback_subsection(
+                rollback_section,
+                global_rollback_heading,
+                end_marker=no_global_rollback_heading,
+            ),
+        ),
+        (
+            "No-global source-checkout rollback",
+            _required_rollback_subsection(
+                rollback_section,
+                no_global_rollback_heading,
+            ),
+        ),
+    )
+
+    for label, section in source_rollback_cases:
+        bash_fences = [
+            fence
+            for fence in _markdown_fences("docs/UPGRADE.md", section)
+            if fence.language == "bash"
+        ]
+        assert len(bash_fences) == 1, label
+        body = bash_fences[0].body
+        restore_start = body.index(DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES[0])
+        stop_start = body.index("if [ -f .env ]; then", restore_start)
+        script = "\n".join(
+            (
+                "unset AWF_API_TOKEN AWF_POSTGRES_PASSWORD",
+                body[restore_start:stop_start],
+                'printf "%s\\n%s\\n" "$AWF_API_TOKEN" "$AWF_POSTGRES_PASSWORD"',
+            )
+        )
+
+        result = subprocess.run(  # noqa: S602
+            ["bash", "-c", script],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert result.stdout == "last-token\nlast-password\n", label
+
+
 def test_upgrade_env_restore_strips_unquoted_inline_dotenv_comments(
     tmp_path: Path,
 ) -> None:
@@ -936,7 +1113,7 @@ def test_source_checkout_env_restore_decodes_quoted_dotenv_entries(
             [
                 *DOTENV_DOUBLE_QUOTE_DECODE_FUNCTION_LINES,
                 'env_file="$1"',
-                f'{persisted_var}="$(sed -n {shlex.quote(expression)} "$env_file" | head -n 1)"',
+                f'{persisted_var}="$(sed -n {shlex.quote(expression)} "$env_file" | tail -n 1)"',
                 *SOURCE_CHECKOUT_ENV_QUOTE_STRIP_LINES[key],
                 f'printf "%s\\n" "${{{persisted_var}}}"',
             ]

@@ -69,7 +69,7 @@ print(value, end="")' "$1"
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
   esac
 }
-AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
 case "$AWF_PERSISTED_API_TOKEN" in
   \"*\")
@@ -88,7 +88,7 @@ else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
-AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
   \"*\")
@@ -107,7 +107,7 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
-AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
 case "$AWF_PERSISTED_DATABASE_URL" in
   \"*\")
@@ -178,7 +178,7 @@ print(value, end="")' "$1"
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
   esac
 }
-AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
 case "$AWF_PERSISTED_API_TOKEN" in
   \"*\")
@@ -197,7 +197,7 @@ else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
-AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
   \"*\")
@@ -216,7 +216,7 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
-AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
 case "$AWF_PERSISTED_DATABASE_URL" in
   \"*\")
@@ -290,7 +290,7 @@ print(value, end="")' "$1"
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
   esac
 }
-AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
 case "$AWF_PERSISTED_API_TOKEN" in
   \"*\")
@@ -309,7 +309,7 @@ else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before upgrading}"
   export AWF_API_TOKEN
 fi
-AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
   \"*\")
@@ -328,7 +328,7 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before upgrading}"
   export AWF_POSTGRES_PASSWORD
 fi
-AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
 case "$AWF_PERSISTED_DATABASE_URL" in
   \"*\")
@@ -405,7 +405,7 @@ print(value, end="")' "$1"
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
   case "$AWF_PERSISTED_API_TOKEN" in
     \"*\")
@@ -431,7 +431,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
     \"*\")
@@ -455,7 +455,7 @@ fi
 AWF_PERSISTED_POSTGRES_HOST_PORT=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_HOST_PORT="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_HOST_PORT="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_HOST_PORT")"
   case "$AWF_PERSISTED_POSTGRES_HOST_PORT" in
     \"*\")
@@ -476,7 +476,7 @@ fi
 AWF_PERSISTED_DATABASE_URL=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
   case "$AWF_PERSISTED_DATABASE_URL" in
     \"*\")
@@ -565,7 +565,7 @@ print(value, end="")' "$1"
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
   case "$AWF_PERSISTED_API_TOKEN" in
     \"*\")
@@ -591,7 +591,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
     \"*\")
@@ -615,7 +615,7 @@ fi
 AWF_PERSISTED_POSTGRES_HOST_PORT=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_HOST_PORT="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_HOST_PORT="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_POSTGRES_HOST_PORT="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_HOST_PORT")"
   case "$AWF_PERSISTED_POSTGRES_HOST_PORT" in
     \"*\")
@@ -636,7 +636,7 @@ fi
 AWF_PERSISTED_DATABASE_URL=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
   case "$AWF_PERSISTED_DATABASE_URL" in
     \"*\")
@@ -736,7 +736,7 @@ print(value, end="")' "$1"
     *) printf "%s" "$1" | sed 's/[[:space:]]#.*$//; s/[[:space:]]*$//' ;;
   esac
 }
-AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
 case "$AWF_PERSISTED_API_TOKEN" in
   \"*\")
@@ -755,7 +755,7 @@ else
   : "${AWF_API_TOKEN:?restore the AWF_API_TOKEN used for the running local Core or persist it in .env before rollback}"
   export AWF_API_TOKEN
 fi
-AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
 case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
   \"*\")
@@ -774,7 +774,7 @@ else
   : "${AWF_POSTGRES_PASSWORD:?restore the AWF_POSTGRES_PASSWORD used for the running local Core or persist it in .env before rollback}"
   export AWF_POSTGRES_PASSWORD
 fi
-AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)"
+AWF_PERSISTED_DATABASE_URL="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)"
 AWF_PERSISTED_DATABASE_URL="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_DATABASE_URL")"
 case "$AWF_PERSISTED_DATABASE_URL" in
   \"*\")
@@ -848,7 +848,7 @@ print(value, end="")' "$1"
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
   case "$AWF_PERSISTED_API_TOKEN" in
     \"*\")
@@ -874,7 +874,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
     \"*\")
@@ -957,7 +957,7 @@ print(value, end="")' "$1"
 AWF_PERSISTED_API_TOKEN=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_API_TOKEN="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_API_TOKEN="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_API_TOKEN")"
   case "$AWF_PERSISTED_API_TOKEN" in
     \"*\")
@@ -983,7 +983,7 @@ fi
 AWF_PERSISTED_POSTGRES_PASSWORD=""
 for env_file in .env docker/compose/.env; do
   [ -f "$env_file" ] || continue
-  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | head -n 1)"
+  AWF_PERSISTED_POSTGRES_PASSWORD="$(sed -n 's/^[[:space:]]*\(export[[:space:]][[:space:]]*\)\{0,1\}AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' "$env_file" | tail -n 1)"
   AWF_PERSISTED_POSTGRES_PASSWORD="$(awf_strip_unquoted_dotenv_inline_comment "$AWF_PERSISTED_POSTGRES_PASSWORD")"
   case "$AWF_PERSISTED_POSTGRES_PASSWORD" in
     \"*\")

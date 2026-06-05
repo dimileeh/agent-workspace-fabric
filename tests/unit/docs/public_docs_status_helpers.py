@@ -69,19 +69,19 @@ PACKAGE_ENV_READ_LINES = {
     "AWF_API_TOKEN": (
         "AWF_PERSISTED_API_TOKEN=\"$(sed -n 's/^[[:space:]]*"
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
-        "AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | head -n 1)\""
+        "AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | tail -n 1)\""
     ),
     "AWF_POSTGRES_PASSWORD": (
         "AWF_PERSISTED_POSTGRES_PASSWORD=\"$(sed -n 's/^[[:space:]]*"
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
         "AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | "
-        'head -n 1)"'
+        'tail -n 1)"'
     ),
     "AWF_DATABASE_URL": (
         "AWF_PERSISTED_DATABASE_URL=\"$(sed -n 's/^[[:space:]]*"
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
         "AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p' .env 2>/dev/null | "
-        'head -n 1)"'
+        'tail -n 1)"'
     ),
 }
 PACKAGE_ENV_INLINE_COMMENT_STRIP_LINES = {
@@ -162,22 +162,22 @@ SOURCE_CHECKOUT_ENV_READ_LINES = {
     "AWF_API_TOKEN": (
         "  AWF_PERSISTED_API_TOKEN=\"$(sed -n 's/^[[:space:]]*"
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
-        'AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
+        'AWF_API_TOKEN[[:space:]]*=[[:space:]]*//p\' "$env_file" | tail -n 1)"'
     ),
     "AWF_POSTGRES_PASSWORD": (
         "  AWF_PERSISTED_POSTGRES_PASSWORD=\"$(sed -n 's/^[[:space:]]*"
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
-        'AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
+        'AWF_POSTGRES_PASSWORD[[:space:]]*=[[:space:]]*//p\' "$env_file" | tail -n 1)"'
     ),
     "AWF_POSTGRES_HOST_PORT": (
         "  AWF_PERSISTED_POSTGRES_HOST_PORT=\"$(sed -n 's/^[[:space:]]*"
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
-        'AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
+        'AWF_POSTGRES_HOST_PORT[[:space:]]*=[[:space:]]*//p\' "$env_file" | tail -n 1)"'
     ),
     "AWF_DATABASE_URL": (
         "  AWF_PERSISTED_DATABASE_URL=\"$(sed -n 's/^[[:space:]]*"
         "\\(export[[:space:]][[:space:]]*\\)\\{0,1\\}"
-        'AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p\' "$env_file" | head -n 1)"'
+        'AWF_DATABASE_URL[[:space:]]*=[[:space:]]*//p\' "$env_file" | tail -n 1)"'
     ),
 }
 SOURCE_CHECKOUT_ENV_INLINE_COMMENT_STRIP_LINES = {

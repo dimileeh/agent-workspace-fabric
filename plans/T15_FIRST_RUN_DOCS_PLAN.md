@@ -930,6 +930,55 @@ git diff --check
 # No whitespace errors.
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbDiq`
+
+Problem statement and scope:
+upgrade and lifecycle restore snippets read persisted AWF service values with
+`head -n 1`, which selects the first matching dotenv assignment. Docker Compose
+and AWF's `compose_env_file_values()` parser keep the later assignment when a
+dotenv file repeats a key, so the documented shell can export stale
+`AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, or `AWF_DATABASE_URL` values before
+`awf start`. Keep the repair scoped to the repeated docs restore snippets,
+focused docs lifecycle tests, and these T15 plan artifacts.
+
+Requirements checklist:
+
+- Package and virtualenv restore snippets must select the last matching `.env`
+  assignment for persisted `AWF_API_TOKEN`, `AWF_POSTGRES_PASSWORD`, and
+  `AWF_DATABASE_URL`.
+- Source-checkout restore snippets must select the last matching assignment in
+  the selected env file for persisted service values while preserving root
+  `.env` before legacy `docker/compose/.env` file precedence.
+- Regression coverage must execute duplicate-key dotenv restore snippets and
+  prove the last assignment is exported.
+- Do not run full AWF/GitHub-owned validation, full coverage, full frontend
+  builds, or push/rebase/branch-management commands in the agent phase.
+
+Implementation steps:
+
+1. Add a focused docs lifecycle regression that executes package and
+   source-checkout restore snippets against duplicate dotenv assignments.
+2. Update the shared docs test constants from `head -n 1` to `tail -n 1`.
+3. Replace the documented restore reads in the lifecycle docs with
+   `tail -n 1`.
+4. Run focused docs lifecycle tests, focused ruff checks, and `git diff --check`.
+
+Verification commands and pass criteria:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_lifecycle_env_restore_uses_last_dotenv_assignment -q
+# Red phase fails before the docs update; final result passes.
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py -q
+# Focused lifecycle docs tests pass.
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks pass.
+
+git diff --check
+# No whitespace errors.
+```
+
 ## Post-Review Repair for Review-Level Comment `issue:4620140358`
 
 Problem statement and scope:

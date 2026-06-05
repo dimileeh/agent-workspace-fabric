@@ -2626,6 +2626,56 @@ git diff --check
 # no output
 ```
 
+## Post-Review Repair for PR Thread `PRRT_kwDOSJAM6s6HbDiq`
+
+Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
+
+Requirement status:
+
+- Complete: Package and virtualenv restore snippets now select the last matching
+  `.env` assignment for persisted `AWF_API_TOKEN`,
+  `AWF_POSTGRES_PASSWORD`, and `AWF_DATABASE_URL`, matching Compose duplicate
+  key precedence.
+- Complete: Source-checkout restore snippets now select the last matching
+  assignment inside the selected env file while preserving root `.env` before
+  legacy `docker/compose/.env` file precedence.
+- Complete: The focused lifecycle regression executes duplicate-key dotenv
+  restore snippets and proves the later assignment is exported.
+- Complete: Full AWF/GitHub validation, full coverage, OpenAPI drift checks,
+  console builds, pushes, and PR lifecycle actions were intentionally not run
+  in the agent phase; AWF owns those broad gates after agent completion.
+
+Files changed:
+
+- `docs/QUICKSTART.md`
+- `docs/UNINSTALL.md`
+- `docs/UPGRADE.md`
+- `tests/unit/docs/public_docs_status_helpers.py`
+- `tests/unit/docs/test_public_docs_lifecycle_status.py`
+- `plans/T15_FIRST_RUN_DOCS_PLAN.md`
+- `plans/T15_FIRST_RUN_DOCS_VALIDATION.md`
+
+Focused evidence:
+
+```bash
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py::test_lifecycle_env_restore_uses_last_dotenv_assignment -q
+# Red phase before docs update: failed because the snippets exported the first
+# duplicate dotenv assignment (`stale-token`).
+# Final result: 1 passed in 0.67s
+
+uv run --python 3.12 --extra dev pytest tests/unit/docs/test_public_docs_lifecycle_status.py -q
+# 41 passed in 5.53s
+
+uv run --python 3.12 --extra dev ruff check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# All checks passed!
+
+uv run --python 3.12 --extra dev ruff format --check tests/unit/docs/test_public_docs_lifecycle_status.py tests/unit/docs/public_docs_status_helpers.py
+# 2 files already formatted
+
+git diff --check
+# no output
+```
+
 ## Post-Review Repair for Review-Level Comment `issue:4620140358`
 
 Plan reference: `plans/T15_FIRST_RUN_DOCS_PLAN.md`.
