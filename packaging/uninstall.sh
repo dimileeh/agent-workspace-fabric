@@ -279,10 +279,13 @@ confirm_destructive() {
 # line bootstrap_uv writes, not merely that some file sits at the path. Without
 # that proof we refuse (UV_REMOVAL_REFUSED_UNOWNED) so a uv the user installed
 # themselves is never removed. The removal is destructive,
-# so it is confirm-gated; --dry-run only plans it. The official uv has no
-# `uv self uninstall` subcommand (uv self exposes only update/version), so removal
-# means deleting the uv/uvx binaries the installer placed; bootstrap_uv recorded
-# their directory in the marker (uv_bin_dir=...). If deleting them fails we raise
+# so it is confirm-gated; --dry-run only plans it. Removal deliberately deletes the
+# uv/uvx binaries the installer placed rather than delegating to a `uv self`
+# subcommand: deleting the recorded binaries has predictable scope (exactly what
+# bootstrap_uv placed, in the marker's uv_bin_dir) and no shell-RC or PATH side
+# effects, and stays correct regardless of which `uv self` subcommands a given uv
+# version happens to expose. bootstrap_uv recorded that directory in the marker
+# (uv_bin_dir=...). If deleting them fails we raise
 # UV_REMOVAL_FAILED and keep the marker so a later --remove-uv can retry, rather
 # than reporting a false success while uv is still installed.
 remove_uv() {
