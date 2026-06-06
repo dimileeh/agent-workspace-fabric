@@ -389,6 +389,15 @@ def _inline_command_mentions(text: str) -> list[str]:
 # detected just like a spaced one.
 _SHELL_OPERATOR_RE = re.compile(r"[;&|]")
 
+# A shell output-redirection operator at the start of a token: an optional file
+# descriptor (`2`) prefix followed by `>` or `>>`. `shlex.split` keeps these as
+# ordinary characters, so a redirect arrives as its own token (`> init.log`,
+# `2>`) or glued to its target (`>init.log`). A redirection and its target are
+# not command arguments, so they must never be read as a path. Input redirection
+# `<` is deliberately excluded: the docs use `<path>`/`<repo>` as placeholder
+# arguments, so a leading `<` denotes a positional path here, not a redirect.
+_SHELL_REDIRECT_RE = re.compile(r"^\d*>>?")
+
 
 def _split_tail(tail: str) -> list[str]:
     try:
@@ -403,9 +412,30 @@ def _split_tail(tail: str) -> list[str]:
     # each token on the operator characters keeps only the head before the first
     # separator, so the chained continuation command (e.g. `awf`) is never read
     # as a positional path/argument.
+    #
+    # Shell *redirections* are likewise not arguments: a documented no-path init
+    # that merely captures output (`awf init --write-profile --yes > init.log`,
+    # `... 2>&1`) would otherwise leave the operator (`>`, `2>`) and its target
+    # file as non-flag tokens that the path scan reads as the required repo path,
+    # so R2 would report the stale example as "ok". Drop each redirection
+    # operator and — when the target is a separate token (a bare `>`/`2>` rather
+    # than a glued `>init.log`) — its operand, so the redirect never stands in
+    # for a path.
     result: list[str] = []
+    skip_operand = False
     for token in tokens:
+        if skip_operand:
+            # The target file of a preceding bare redirection operator.
+            skip_operand = False
+            continue
         head = _SHELL_OPERATOR_RE.split(token, maxsplit=1)[0]
+        redirect = _SHELL_REDIRECT_RE.match(head)
+        if redirect is not None:
+            # A bare operator (`>`, `2>`) consumes the next token as its target;
+            # a glued form (`>init.log`) carries the target inline, so only the
+            # operator token itself is dropped.
+            skip_operand = redirect.group(0) == head
+            continue
         if head:
             result.append(head)
         if head != token:
@@ -839,6 +869,17 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status('awf init "$HOME/a&&b"') == "ok"
     assert _init_arg_status("awf init '$HOME/a&&b'") == "ok"
     assert _init_arg_status('echo "x; awf init" && awf init .') == "ok"
+    # A shell redirection is not a path: a no-path init that merely captures its
+    # output (`> init.log`, glued `>init.log`, `2>&1`) must stay an offender, not
+    # be read as "ok" because the operator/target slipped in as a positional. A
+    # real path before the redirect still counts.
+    assert _init_arg_status("awf init --write-profile --yes > init.log") == "flag-only"
+    assert _init_arg_status("awf init --write-profile --yes >init.log") == "flag-only"
+    assert _init_arg_status("awf init --write-profile --yes 2>&1") == "flag-only"
+    assert _init_arg_status("awf init --yes > init.log 2>&1") == "flag-only"
+    assert _init_arg_status("awf init > init.log") == "bare"
+    assert _init_arg_status("awf init . > init.log") == "ok"
+    assert _init_arg_status("awf init . >init.log") == "ok"
 
 
 def test_helper_read_missing_doc_fails_with_actionable_message() -> None:
