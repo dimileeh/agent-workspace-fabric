@@ -966,8 +966,18 @@ async def _run_post_agent_semantic_precommit_repair(
         )
     # Always evaluate the final repair diff. A semantic repair can remove
     # the real implementation change while leaving only hook-normalized
-    # plan artifacts staged, and that must not become a PR.
-    if await self._fail_if_plan_only_paths(
+    # plan artifacts staged, and that must not become a PR. Guard with the
+    # committed-output helper (#427) so a repair that re-stages only a plan
+    # artifact while real implementation is already committed in earlier
+    # commits (net base..HEAD has real code) does not false-fire (#430). The
+    # helper short-circuits (no git call) when the staged delta has real
+    # content, and still returns True when nothing real is committed -- so a
+    # no-op repair with empty base..HEAD continues to fail.
+    if await self._committed_and_staged_output_is_plan_only(
+        worktree_path=worktree_path,
+        base_commit=base_commit,
+        staged_paths=repair_staged_paths,
+    ) and await self._fail_if_plan_only_paths(
         workspace_id=workspace_id,
         changed_paths=repair_staged_paths,
         expected_status=WorkspaceStatus.running,
