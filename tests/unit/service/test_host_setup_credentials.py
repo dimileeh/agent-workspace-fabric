@@ -702,7 +702,7 @@ def test_plain_file_fsyncs_created_ancestor_directories(
     parent of each created level — not merely the leaf — is among them.
     """
     home = tmp_path / "home"
-    home.mkdir()
+    home.mkdir(mode=0o700)
     # ``.awf`` and ``secrets`` are both missing, so the creation loop runs for
     # each; ``home`` is the pre-existing top of the freshly created chain.
     awf_dir = home / ".awf"

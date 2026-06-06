@@ -239,7 +239,7 @@ def test_write_secret_file_rejects_symlink_racing_into_mkdir(
     attacker_dir.mkdir()
     attacker_dir.chmod(0o755)
     anchor = tmp_path / "home"
-    anchor.mkdir()
+    anchor.mkdir(mode=0o700)
     secrets_dir = anchor / "secrets"  # missing leaf; ``anchor`` is the real anchor
     target = secrets_dir / "github.secret"
 
@@ -277,7 +277,7 @@ def test_write_secret_file_rejects_regular_file_racing_into_mkdir(
     so the hardening chmod never re-permissions an unrelated raced-in file.
     """
     anchor = tmp_path / "home"
-    anchor.mkdir()
+    anchor.mkdir(mode=0o700)
     secrets_dir = anchor / "secrets"
     target = secrets_dir / "github.secret"
 
@@ -313,7 +313,7 @@ def test_write_secret_file_tolerates_real_dir_racing_into_mkdir(
     plain *directory* that races in is accepted and the secret is still written.
     """
     anchor = tmp_path / "home"
-    anchor.mkdir()
+    anchor.mkdir(mode=0o700)
     secrets_dir = anchor / "secrets"
     target = secrets_dir / "github.secret"
 
@@ -353,7 +353,7 @@ def test_write_secret_file_rejects_writable_dir_racing_into_mkdir(
     treated like a pre-existing ancestor and refused when group/world-writable.
     """
     anchor = tmp_path / "home"
-    anchor.mkdir()
+    anchor.mkdir(mode=0o700)
     raced = anchor / "awf"  # intermediate component the attacker wins the race for
     secrets_dir = raced / "secrets"
     target = secrets_dir / "github.secret"
@@ -400,7 +400,7 @@ def test_write_secret_file_rejects_sticky_writable_dir_racing_into_mkdir(
     component without honouring the sticky exemption.
     """
     anchor = tmp_path / "home"
-    anchor.mkdir()
+    anchor.mkdir(mode=0o700)
     raced = anchor / "awf"
     secrets_dir = raced / "secrets"
     target = secrets_dir / "github.secret"
