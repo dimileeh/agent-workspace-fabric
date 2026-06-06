@@ -164,6 +164,7 @@ def _queue_push_and_pr(
     fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
 ) -> None:
     """Queue push-and-PR outputs that follow validation side-effect checks."""
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD

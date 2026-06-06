@@ -33,7 +33,6 @@ class ExecutionValidationResult:
     stop: bool
     successful_validation_run_id: str | None
     successful_validation_workspace_head_sha: str | None
-    has_known_non_plan_output: bool
 
 
 async def fail_validation_worktree_guard(
@@ -44,7 +43,6 @@ async def fail_validation_worktree_guard(
     validation_tier: int,
     reason_code: str,
     message: str,
-    has_known_non_plan_output: bool,
 ) -> ExecutionValidationResult:
     """Record and surface a fatal validation-worktree guard failure."""
     failure_message = f"{reason_code}: {message}"
@@ -73,7 +71,6 @@ async def fail_validation_worktree_guard(
         stop=True,
         successful_validation_run_id=None,
         successful_validation_workspace_head_sha=None,
-        has_known_non_plan_output=has_known_non_plan_output,
     )
 
 
@@ -164,7 +161,6 @@ async def handle_validation_cleanup_guard(
     validation_tier: int,
     successful_validation_run_id: str | None,
     successful_validation_workspace_head_sha: str | None,
-    has_known_non_plan_output: bool,
     callback_ignored: bool,
     cleanup_result: ValidationWorktreeCleanup,
     check_callback_after_cleanup: bool = False,
@@ -176,7 +172,6 @@ async def handle_validation_cleanup_guard(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         if check_callback_after_cleanup and await self._finish_validation_callback_if_terminal(
             workspace_id=workspace_id,
@@ -187,7 +182,6 @@ async def handle_validation_cleanup_guard(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         return None
 
@@ -236,5 +230,4 @@ async def handle_validation_cleanup_guard(
         validation_tier=validation_tier,
         reason_code=reason_code,
         message=cleanup_message,
-        has_known_non_plan_output=has_known_non_plan_output,
     )

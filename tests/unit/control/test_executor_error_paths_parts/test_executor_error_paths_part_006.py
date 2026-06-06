@@ -75,11 +75,10 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
-def _queue_pre_push_checks(
-    fake: FakeCommandRunner, *, head: str = "deadbeef01", include_plan_only_diff: bool = False
-) -> None:
-    if include_plan_only_diff:
-        fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
+def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+    # The final plan-only gate is always evaluated before the protected-output
+    # gate, so its committed ``--name-only`` diff is always queued first.
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-push rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/x\n")  # pre-push abbrev-ref
@@ -896,6 +895,11 @@ class TestExecutorCoverageEdgesPart002:
         fake.queue_result(returncode=0)  # merge-base
         _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation
+        # Final pre-push gates re-derive committed output: plan-only gate diffs
+        # base..HEAD (name-only), then the protected-output gate diffs it again
+        # (name-status). The branch has real committed work, so both pass.
+        fake.queue_result(returncode=0, stdout="a.py\n")  # plan-only committed diff
+        fake.queue_result(returncode=0, stdout="M\0a.py\0")  # protected committed diff
         executor = _make_executor(
             fake,
             factory,

@@ -91,6 +91,17 @@ class TestPullRequestUnexpectedErrorPart002:
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         fake.queue_result(returncode=0, stdout="validated-head\n")  # pre-validation HEAD
+        # Final pre-push gates re-derive committed output: plan-only gate diffs
+        # base..HEAD (name-only), then the protected-output gate diffs it again
+        # (name-status). The branch has real committed work, so both pass.
+        fake.queue_result(  # plan-only committed diff
+            returncode=0,
+            stdout="src/awf/runtime/pr_monitor_runner.py\n",
+        )
+        fake.queue_result(  # protected committed diff (name-status)
+            returncode=0,
+            stdout="M\0src/awf/runtime/pr_monitor_runner.py\0",
+        )
 
         executor = _make_executor(
             fake,

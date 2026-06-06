@@ -333,6 +333,34 @@ async def _fail_if_plan_only_committed_output(
     changed_paths = sorted(
         path.as_posix() for path in await self._committed_paths_since(worktree_path, base_commit)
     )
+    if not changed_paths:
+        # An empty net diff (``base..HEAD`` touches no paths) means the branch
+        # has no implementation output to push -- e.g. a validation/fix pass
+        # reverted the agent's real changes back to the base tree. The
+        # post-agent no-work check counts *commits* (``rev-list --count``), so a
+        # revert commit still passes it; this final gate is the last guard
+        # before push, so treat an empty net diff as terminal output failure
+        # rather than opening an empty PR. ``changed_paths_are_only_internal_plan_artifacts``
+        # returns ``False`` for an empty list, so the delegate below cannot
+        # catch this case on its own.
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=expected_status,
+            failure_reason=FailureReason.agent_failure,
+            message=(
+                "agent produced no net implementation output -- the feature "
+                f"branch's diff against base ({base_commit[:10]}) is empty "
+                "(changes were reverted during validation/repair). AWF will not "
+                "open an empty PR until the branch contains implementation, "
+                "test, or user-facing documentation output for the task."
+            )[:2000],
+            reason_code=PLAN_ONLY_OUTPUT_REASON_CODE,
+            details={
+                "changed_paths": [],
+                "reason_code": PLAN_ONLY_OUTPUT_REASON_CODE,
+            },
+        )
+        return True
     return cast(
         bool,
         await self._fail_if_plan_only_paths(

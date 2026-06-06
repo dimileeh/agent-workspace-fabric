@@ -497,6 +497,7 @@ async def _seed_ready_workspace_no_recovery(
 def _queue_push_and_pr(
     fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
 ) -> None:
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
@@ -506,6 +507,7 @@ def _queue_push_and_pr(
 
 
 def _queue_existing_pr_push(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
@@ -919,6 +921,18 @@ async def test_sync_feature_pr_push_error_audit_records_adopted_pr_head(
     fake.queue_result(returncode=0)  # git commit
     _queue_validation_head(fake, head=fixed_head)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation passes after fix
+    # Final pre-push gates re-derive committed output: plan-only gate diffs
+    # base..HEAD (name-only), then the protected-output gate diffs it again
+    # (name-status). The fix pass committed real work, so both pass and the
+    # adopted-PR push is attempted (and fails via the mocked creator below).
+    fake.queue_result(  # plan-only committed diff
+        returncode=0,
+        stdout="tests/integration/test_alembic_postgres.py\n",
+    )
+    fake.queue_result(  # protected committed diff (name-status)
+        returncode=0,
+        stdout="M\0tests/integration/test_alembic_postgres.py\0",
+    )
 
     await executor.execute(ws_id)
 
@@ -1077,7 +1091,6 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
     fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
     _queue_post_validation_conformance_report_commit(fake, report_path)
     fake.queue_result(returncode=0, stdout=f"{report_head}\n")  # post-report HEAD
-    fake.queue_result(returncode=0, stdout=f"src/awf/onboarding.py\n{report_path}\n")
     _queue_existing_pr_push(fake, head=report_head)
 
     await executor.execute(ws_id)
@@ -1175,7 +1188,6 @@ async def test_rebase_only_recovery_with_conformance_handoff_pushes_report_commi
     fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
     _queue_post_validation_conformance_report_commit(fake, report_path)
     fake.queue_result(returncode=0, stdout=f"{report_head}\n")  # post-report HEAD
-    fake.queue_result(returncode=0, stdout=f"src/awf/onboarding.py\n{report_path}\n")
     _queue_existing_pr_push(fake, head=report_head)
 
     await executor.execute(ws_id)

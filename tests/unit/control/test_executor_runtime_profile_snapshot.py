@@ -637,7 +637,6 @@ async def test_validation_cycle_syncs_profile_before_command_planning(
         planning_validation_handoff=None,
         recovery=None,
         rebase_recovery_result=None,
-        has_known_non_plan_output=False,
         git_in_worktree=unused_git_in_worktree,
     )
 

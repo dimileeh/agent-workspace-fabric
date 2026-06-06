@@ -68,11 +68,10 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
-def _queue_pre_push_checks(
-    fake: FakeCommandRunner, *, head: str = "deadbeef01", include_plan_only_diff: bool = False
-) -> None:
-    if include_plan_only_diff:
-        fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
+def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+    # The final plan-only gate is always evaluated before the protected-output
+    # gate, so its committed ``--name-only`` diff is always queued first.
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-push rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/x\n")  # pre-push abbrev-ref
@@ -752,6 +751,11 @@ class TestPullRequestUnexpectedErrorPart002:
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         fake.queue_result(returncode=0, stdout="pre-pr-validation-head\n")  # rev-parse HEAD
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        # Final pre-push gates re-derive committed output from git: the plan-only
+        # gate diffs base..HEAD (name-only), then the protected-output gate diffs
+        # it again (name-status). The branch has real committed work, so both pass.
+        fake.queue_result(returncode=0, stdout="src/awf/x.py\n")  # plan-only committed diff
+        fake.queue_result(returncode=0, stdout="M\0src/awf/x.py\0")  # protected committed diff
 
         compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
         validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -806,7 +810,7 @@ class TestPullRequestUnexpectedErrorPart002:
         fake.queue_result(returncode=0)
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
-        _queue_pre_push_checks(fake, include_plan_only_diff=True)
+        _queue_pre_push_checks(fake)
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/7\n")
 
