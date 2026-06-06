@@ -52,6 +52,12 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+# Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (issue
+# #345 flipped bitbucket into ``_SUPPORTED_FORGES``), so a ``bitbucket.org`` ref
+# clears the adoption forge gate. But the *default* adoption metadata fetcher
+# shells ``gh pr view``, which is GitHub-only — so this honest code says "the
+# default fetcher cannot serve this supported forge yet", not "unsupported forge".
+PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY = "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"
 _LIVE_ADOPTION_STATUSES = frozenset(
     {
         WorkspaceStatus.requested.value,
@@ -548,6 +554,24 @@ async def _default_metadata_fetcher(
     repo: RepoRef,
     pr_number: int,
 ) -> PullRequestAdoptionMetadata:
+    # ``fetch_pull_request_adoption_metadata`` shells ``gh pr view --repo
+    # owner/repo``, which always targets github.com. Forge detection (issue #345)
+    # makes ``RepoRef.from_url`` accept non-GitHub hosts, and the Part 2 gate flip
+    # lets a ``bitbucket.org`` ref clear the adoption forge gate — so without this
+    # guard the default fetcher would silently query GitHub for the *same* slug
+    # (a different repo). Fail closed: a BitBucket-aware adoption metadata fetcher
+    # is follow-up work and must be injected explicitly, never reached by mis-route.
+    if repo.forge != "github":
+        raise PRMonitorAdoptionError(
+            error_code=PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY,
+            message=(
+                "Default PR adoption metadata fetch is GitHub-only "
+                "(uses `gh pr view`); forge "
+                f"{repo.forge!r} requires an injected forge-aware metadata fetcher."
+            ),
+            status_code=422,
+            detail={"repo_slug": repo.slug(), "forge": repo.forge},
+        )
     return await fetch_pull_request_adoption_metadata(
         runner=AsyncioSubprocessRunner(),
         repo=repo,

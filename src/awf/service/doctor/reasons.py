@@ -88,6 +88,25 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace adopt-pr",
         _reason_catalog_link("OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED"),
     ),
+    "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY": _ReasonText(
+        (
+            "AWF could not adopt the PR because the default adoption metadata "
+            "fetcher only supports GitHub."
+        ),
+        (
+            "No repository change is needed — the forge is supported. Inject a "
+            "BitBucket-aware adoption metadata fetcher, or adopt a GitHub PR until "
+            "the forge-neutral fetcher lands."
+        ),
+        (
+            "The repository is on a supported non-GitHub forge (e.g. BitBucket "
+            "Cloud), but the default adoption metadata fetcher shells `gh pr view`, "
+            "which is GitHub-only — so AWF fails fast instead of querying GitHub for "
+            "the same owner/repo slug."
+        ),
+        "awf workspace adopt-pr",
+        _reason_catalog_link("PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"),
+    ),
     "BITBUCKET_AUTH_NOT_CONFIGURED": _ReasonText(
         "AWF could not build BitBucket Cloud credentials from the environment.",
         (

@@ -15,12 +15,15 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import PullRequestMonitorAdoptionRequest
+from awf.common.github_client import RepoRef
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.pr_monitor_adoption import (
+    PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY,
     PRMonitorAdoptionError,
     PullRequestMonitorAdoptionService,
+    _default_metadata_fetcher,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.service.test_pr_monitor_adoption_parts.test_pr_monitor_adoption_part_002 import (
@@ -115,6 +118,24 @@ class TestPullRequestMonitorAdoptionForgeGate:
             assert await _count(session, Workspace) == 1
         # The forge gate passed (no FORGE_NOT_SUPPORTED) and metadata was fetched.
         assert fetcher.calls
+
+    @pytest.mark.unit
+    async def test_default_metadata_fetcher_rejects_non_github_forge(self) -> None:
+        # The *default* (production) adoption metadata fetcher shells
+        # ``gh pr view --repo owner/repo``, which always targets github.com. After
+        # the Part 2 gate flip a ``bitbucket.org`` repo passes the adoption forge
+        # gate, so the default fetcher must fail closed for a non-GitHub forge
+        # rather than silently querying GitHub for the same owner/repo slug. A
+        # BitBucket-aware adoption metadata fetcher must be injected explicitly.
+        with pytest.raises(PRMonitorAdoptionError) as excinfo:
+            await _default_metadata_fetcher(
+                repo=RepoRef.from_url("https://bitbucket.org/workspace/repo"),
+                pr_number=277,
+            )
+
+        assert excinfo.value.error_code == PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail == {"repo_slug": "workspace/repo", "forge": "bitbucket"}
 
     @pytest.mark.unit
     async def test_bitbucket_pr_url_falls_back_to_input_required(

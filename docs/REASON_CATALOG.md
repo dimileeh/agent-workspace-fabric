@@ -541,6 +541,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_adoption_input_required](#pr_adoption_input_required)
 
+### PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY
+**Problem:** AWF could not adopt the PR because the default adoption metadata fetcher only supports GitHub.
+**Likely Cause:** The repository is on a supported non-GitHub forge (e.g. BitBucket Cloud), but the default adoption metadata fetcher shells `gh pr view`, which is GitHub-only — so AWF fails fast instead of querying GitHub for the same owner/repo slug.
+**Operator Fix:** No repository change is needed — the forge is supported. Inject a BitBucket-aware adoption metadata fetcher, or adopt a GitHub PR until the forge-neutral fetcher lands.
+**Related Command:** `awf workspace adopt-pr`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_adoption_metadata_fetch_github_only](#pr_adoption_metadata_fetch_github_only)
+
 ### PR_ADOPTION_POLICY_CONFLICT
 **Problem:** The requested PR cannot be adopted under the current workspace policy.
 **Likely Cause:** The PR targets an unsupported branch, conflicts with requested metadata, or violates adoption policy.
