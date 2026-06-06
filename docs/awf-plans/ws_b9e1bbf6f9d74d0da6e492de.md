@@ -22,7 +22,7 @@ The flag `has_known_non_plan_output` was grepped across `src/`. Every occurrence
 init / assignment / kwarg-threading / dataclass-field / result-construction. The **only**
 site that reads it in a branch condition is:
 
-```
+```text
 src/awf/control/executor/execution_flow.py:1155
     if not has_known_non_plan_output and await self._fail_if_plan_only_committed_output(...)
 ```
