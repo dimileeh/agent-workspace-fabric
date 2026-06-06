@@ -29,7 +29,7 @@
 #
 #   UNSUPPORTED_PLATFORM MISSING_DEPENDENCY BAD_USAGE UNINSTALL_REFUSED_UNMANAGED
 #   INSTALL_METHOD_FAILED CONFIRMATION_REQUIRED UV_REMOVAL_REFUSED_UNOWNED
-#   STATE_CLEANUP_FAILED
+#   UV_REMOVAL_FAILED STATE_CLEANUP_FAILED
 #
 # Testability seams (keep fixture tests hermetic, no real release/network):
 #   AWF_HOME                       base dir for the state/config allowlist
