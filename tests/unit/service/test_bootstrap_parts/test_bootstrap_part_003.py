@@ -235,6 +235,60 @@ def test_force_rebuild_skipped_when_agent_runtime_build_skipped(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_bootstrap_stages_do_not_start_console_by_default(tmp_path: Path) -> None:
+    """The lower-level bootstrap contract does not start the console unless asked."""
+    root = _write_source_checkout(tmp_path / "pinned-checkout")
+    assets = bootstrap._resolve_bootstrap_assets(  # noqa: SLF001
+        bootstrap.LOCAL_SERVICE_COMPOSE_FILE,
+        require_agent_runtime=False,
+        asset_root=root,
+    )
+
+    stages = bootstrap._bootstrap_stages(  # noqa: SLF001
+        _settings(tmp_path),
+        options=ServiceBootstrapOptions(skip_agent_runtime_build=True),
+        compose_file=bootstrap.LOCAL_SERVICE_COMPOSE_FILE,
+        assets=assets,
+    )
+
+    assert [stage.name for stage in stages] == ["postgres", "migrate", "api_worker"]
+
+
+@pytest.mark.unit
+def test_bootstrap_stages_start_console_when_requested(tmp_path: Path) -> None:
+    """start_console=True appends a console Compose stage after API/worker startup."""
+    root = _write_source_checkout(tmp_path / "pinned-checkout")
+    assets = bootstrap._resolve_bootstrap_assets(  # noqa: SLF001
+        bootstrap.LOCAL_SERVICE_COMPOSE_FILE,
+        require_agent_runtime=False,
+        asset_root=root,
+    )
+
+    stages = bootstrap._bootstrap_stages(  # noqa: SLF001
+        _settings(tmp_path),
+        options=ServiceBootstrapOptions(
+            skip_agent_runtime_build=True,
+            start_console=True,
+        ),
+        compose_file=bootstrap.LOCAL_SERVICE_COMPOSE_FILE,
+        assets=assets,
+    )
+
+    assert [stage.name for stage in stages] == ["postgres", "migrate", "api_worker", "console"]
+    assert stages[-1].command == (
+        "docker",
+        "compose",
+        "-f",
+        str(root / "compose.yaml"),
+        "up",
+        "-d",
+        "--build",
+        "--no-deps",
+        "console",
+    )
+
+
+@pytest.mark.unit
 def test_run_service_bootstrap_pins_root_and_forces_rebuild(tmp_path: Path) -> None:
     """End-to-end: pinned root + force_rebuild issues the expected docker commands."""
     root = _write_source_checkout(tmp_path / "pinned-checkout")

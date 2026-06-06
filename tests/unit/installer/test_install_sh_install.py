@@ -183,6 +183,26 @@ def test_default_install_accepts_uppercase_tag_style_path_awf_version(
 
 
 @pytest.mark.unit
+def test_successful_install_prints_first_run_next_steps(harness: InstallerHarness) -> None:
+    """A successful install tells a first-time user exactly what to run next."""
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv()
+    harness.add_awf()
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run([], manifest=manifest)
+
+    assert result.returncode == 0, result.stderr
+    assert "Installed agent-workspace-fabric" in result.stdout
+    assert "Next steps:" in result.stdout
+    assert "awf setup" in result.stdout
+    assert "awf start" in result.stdout
+    assert "awf init <path>" in result.stdout
+    assert "docs/QUICKSTART.md" in result.stdout
+
+
+@pytest.mark.unit
 def test_default_install_bin_off_path_is_reachable_with_advice(
     harness: InstallerHarness,
 ) -> None:

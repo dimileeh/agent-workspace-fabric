@@ -874,6 +874,60 @@ def test_service_settings_default_api_base_url_uses_api_host_port_override() -> 
 
 
 @pytest.mark.unit
+def test_service_settings_default_console_url_uses_console_host_port_override() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"AWF_CONSOLE_HOST_PORT": "3333"},
+    )
+
+    assert settings.console_url == "http://localhost:3333"
+
+
+@pytest.mark.unit
+def test_service_settings_host_console_url_wins_over_console_host_port_override() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={
+            "AWF_CONSOLE_URL": "https://console.host.example",
+            "AWF_CONSOLE_HOST_PORT": "3333",
+        },
+    )
+
+    assert settings.console_url == "https://console.host.example"
+
+
+@pytest.mark.unit
+def test_resolve_service_console_url_uses_service_environment_url() -> None:
+    console_url = service_config._resolve_service_console_url(  # noqa: SLF001
+        Settings(_env_file=None),
+        environ={},
+        service_environ={"AWF_CONSOLE_URL": "https://console.compose.example"},
+    )
+
+    assert console_url == "https://console.compose.example"
+
+
+@pytest.mark.unit
+def test_service_settings_explicit_console_url_ignores_console_host_port_override() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None, console_url="https://console.example.test"),
+        environ={"AWF_CONSOLE_HOST_PORT": "3333"},
+    )
+
+    assert settings.console_url == "https://console.example.test"
+
+
+@pytest.mark.unit
+def test_settings_console_url_is_explicit_for_environment_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_CONSOLE_URL", "https://console.env.example")
+    settings = Settings(_env_file=None)
+
+    assert service_config._settings_console_url_is_explicit(settings)  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_service_settings_default_api_base_url_ignores_operator_base_url() -> None:
     """Do not let AWF_BASE_URL override service-side API base URL defaults."""
     settings = resolve_service_settings(
@@ -1026,6 +1080,21 @@ def test_service_settings_rejects_invalid_api_host_port(host_port: str) -> None:
 
     message = str(exc_info.value)
     assert "AWF_API_HOST_PORT" in message
+    assert repr(host_port) in message
+    assert "integer between 1 and 65535" in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("host_port", ["not-a-port", "0", "65536"])
+def test_service_settings_rejects_invalid_console_host_port(host_port: str) -> None:
+    with pytest.raises(ValueError) as exc_info:
+        resolve_service_settings(
+            Settings(_env_file=None),
+            environ={"AWF_CONSOLE_HOST_PORT": host_port},
+        )
+
+    message = str(exc_info.value)
+    assert "AWF_CONSOLE_HOST_PORT" in message
     assert repr(host_port) in message
     assert "integer between 1 and 65535" in message
 

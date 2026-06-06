@@ -405,7 +405,7 @@ recreated and Alembic upgrades are idempotent.
 The lower-level Compose workflow remains supported:
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
 That raw Compose path builds the control-plane image, builds
@@ -1005,7 +1005,7 @@ sent to browser JavaScript.
 Start the full local service and console stack with root Compose:
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
 Open <http://127.0.0.1:3000>. Protected API calls use

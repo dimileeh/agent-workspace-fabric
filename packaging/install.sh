@@ -1365,7 +1365,14 @@ run_install() {
     plan "verify awf reachability"
     verify_awf
 
-    say "Installed ${PACKAGE}. Run 'awf --help' to get started."
+    say "Installed ${PACKAGE}."
+    say ""
+    say "Next steps:"
+    say "  awf setup"
+    say "  awf start"
+    say "  awf init <path>"
+    say ""
+    say "Quickstart: https://github.com/dimileeh/aira-agent-workspace-fabric/blob/development/docs/QUICKSTART.md"
 }
 
 main() {
