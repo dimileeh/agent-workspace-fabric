@@ -164,6 +164,15 @@ def test_first_run_install_lanes_present_and_curl_gated() -> None:
     pipe-to-interpreter shape (`curl ... | bash`, see `CURL_PIPE_INSTALLER_RE`)
     rather than the bare `curl -fsSL` download flag, so a legitimate non-installer
     `curl -fsSL` download or release-gating prose note does not false-positive.
+
+    The four lanes are asserted *each by their own distinctive marker* per T18's
+    acceptance criterion that docs tests cover all four install lanes: the two
+    package-manager/source lanes by their install command token, the no-global
+    lane by `--extra dev awf`, and — crucially — the curl-installer lane by its
+    own `curl installer` lane marker, separate from the generic `release-gated`
+    gating text. Without the dedicated `curl installer` marker a doc could drop
+    the curl-installer lane sentence entirely yet still pass as long as any other
+    `release-gated` prose survived, leaving the fourth lane uncovered.
     """
     expected_lane_markers = {
         "README.md": (
@@ -171,6 +180,7 @@ def test_first_run_install_lanes_present_and_curl_gated() -> None:
             "package-manager",
             "uv tool install . --force",
             "--extra dev awf",
+            "curl installer",
             "release-gated",
         ),
         "docs/QUICKSTART.md": (
@@ -178,6 +188,7 @@ def test_first_run_install_lanes_present_and_curl_gated() -> None:
             "package-manager",
             "uv tool install . --force",
             "--extra dev awf",
+            "curl installer",
             "release-gated",
         ),
     }
