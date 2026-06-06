@@ -101,6 +101,9 @@ class ExecutorDelegatesMixin:
         _quality_methods._verify_recovered_post_agent_commit_or_mark_failed
     )
     _fail_if_plan_only_paths = _quality_methods._fail_if_plan_only_paths
+    _committed_and_staged_output_is_plan_only = (
+        _quality_methods._committed_and_staged_output_is_plan_only
+    )
     _fail_if_plan_only_committed_output = _quality_methods._fail_if_plan_only_committed_output
     _fail_if_protected_quality_gate_committed_output = (
         _quality_methods._fail_if_protected_quality_gate_committed_output

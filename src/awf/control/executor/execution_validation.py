@@ -1181,7 +1181,11 @@ async def run_validation_and_fix_cycle(
                 has_known_non_plan_output=has_known_non_plan_output,
             )
         if fix_staged_paths:
-            if await self._fail_if_plan_only_paths(
+            if await self._committed_and_staged_output_is_plan_only(
+                worktree_path=worktree_path,
+                base_commit=base_commit,
+                staged_paths=fix_staged_paths,
+            ) and await self._fail_if_plan_only_paths(
                 workspace_id=workspace_id,
                 changed_paths=fix_staged_paths,
                 expected_status=WorkspaceStatus.validating,

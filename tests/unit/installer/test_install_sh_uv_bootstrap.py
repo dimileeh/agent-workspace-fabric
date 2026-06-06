@@ -19,6 +19,8 @@ filesystem effects, never on incidental wording.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tests.unit.installer.conftest import InstallerHarness
@@ -27,6 +29,11 @@ from tests.unit.installer.conftest import InstallerHarness
 def _bootstrapped_uv(harness: InstallerHarness) -> bool:
     """Whether a uv stub was dropped into the bootstrap target (``~/.local/bin``)."""
     return (harness.home / ".local" / "bin" / "uv").exists()
+
+
+def _uv_marker(harness: InstallerHarness) -> Path:
+    """The AWF uv-ownership marker path ``bootstrap_uv`` writes (``~/.awf/...``)."""
+    return harness.home / ".awf" / "uv-bootstrap.marker"
 
 
 @pytest.mark.unit
@@ -137,6 +144,116 @@ def test_bootstrap_uv_opt_in_installs_uv_then_awf(harness: InstallerHarness) -> 
     assert _bootstrapped_uv(harness)
     # ...and the freshly bootstrapped uv carried the real install through.
     assert "uv tool install" in "\n".join(harness.calls())
+
+
+@pytest.mark.unit
+def test_real_bootstrap_writes_uv_ownership_marker(harness: InstallerHarness) -> None:
+    """A real ``--bootstrap-uv`` writes the AWF uv-ownership marker.
+
+    The marker is the producer half of the T21 uninstaller's marker-gated
+    ``--remove-uv``: only a uv AWF actually bootstrapped is later removable. It is
+    deterministic (no timestamp) and carries the ``installed_by=awf`` line.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_awf(version="0.1.0")
+    installer = harness.write_uv_installer(succeeds=True)
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run(
+        ["--bootstrap-uv"], manifest=manifest, extra_env={"AWF_UV_INSTALLER": str(installer)}
+    )
+
+    assert result.returncode == 0, result.stderr
+    marker = _uv_marker(harness)
+    assert marker.exists()
+    assert "installed_by=awf" in marker.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_real_bootstrap_marker_follows_custom_awf_home(harness: InstallerHarness) -> None:
+    """The ownership marker default tracks a custom ``AWF_HOME`` (symmetric with uninstall.sh).
+
+    ``bootstrap_uv`` writes the marker at ``${AWF_HOME}/uv-bootstrap.marker``. With
+    only ``AWF_HOME`` customised (no ``AWF_UV_MARKER`` seam) the marker must land
+    under the custom home, not the hardcoded ``~/.awf``, so the hosted uninstaller —
+    which derives the same default — finds it for marker-gated ``--remove-uv``.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_awf(version="0.1.0")
+    installer = harness.write_uv_installer(succeeds=True)
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+    custom_home = harness.home / "custom-awf"
+
+    result = harness.run(
+        ["--bootstrap-uv"],
+        manifest=manifest,
+        extra_env={"AWF_UV_INSTALLER": str(installer), "AWF_HOME": str(custom_home)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    marker = custom_home / "uv-bootstrap.marker"
+    assert marker.exists()
+    assert "installed_by=awf" in marker.read_text(encoding="utf-8")
+    # The hardcoded ~/.awf default must NOT have been used.
+    assert not _uv_marker(harness).exists()
+
+
+@pytest.mark.unit
+def test_bootstrap_does_not_claim_preexisting_uv_in_default_dir(harness: InstallerHarness) -> None:
+    """A bootstrap that refreshes a preexisting uv must NOT write the ownership marker.
+
+    uv can already live in the default ``~/.local/bin`` yet be absent from ``PATH``
+    (profile not sourced in this shell), so ``prepare_install_method``'s
+    ``command -v uv`` misses and routes into ``bootstrap_uv``. The binaries are the
+    user's, not AWF's. Writing the marker would let a later
+    ``uninstall.sh --remove-uv`` delete a uv the user installed themselves, breaking
+    the "uv you installed yourself is never removed" contract — so no marker is
+    written and the install still completes.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_awf(version="0.1.0")
+    # Seed a preexisting uv in the default bootstrap dir WITHOUT putting it on PATH,
+    # so command -v uv misses and the bootstrap lane still runs over it.
+    preexisting = harness.home / ".local" / "bin" / "uv"
+    preexisting.parent.mkdir(parents=True, exist_ok=True)
+    preexisting.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    preexisting.chmod(0o755)
+    installer = harness.write_uv_installer(succeeds=True)
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run(
+        ["--bootstrap-uv"], manifest=manifest, extra_env={"AWF_UV_INSTALLER": str(installer)}
+    )
+
+    assert result.returncode == 0, result.stderr
+    # The bootstrap actually ran (the seam installer was invoked)...
+    assert "uv-installer" in "\n".join(harness.calls())
+    # ...the install proceeded via the resolved uv...
+    assert "uv tool install" in "\n".join(harness.calls())
+    # ...but AWF did not claim ownership of the user's preexisting uv.
+    assert not _uv_marker(harness).exists()
+
+
+@pytest.mark.unit
+def test_bootstrap_dry_run_writes_no_marker(harness: InstallerHarness) -> None:
+    """``--bootstrap-uv --dry-run`` plans the bootstrap and writes no marker."""
+    harness.add_uname("Linux", "x86_64")
+    installer = harness.write_uv_installer(succeeds=True)
+    wheel, digest = harness.write_wheel()
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest)
+
+    result = harness.run(
+        ["--bootstrap-uv", "--dry-run"],
+        manifest=manifest,
+        extra_env={"AWF_UV_INSTALLER": str(installer)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    # No real bootstrap ran, so no ownership marker was written.
+    assert not _uv_marker(harness).exists()
 
 
 @pytest.mark.unit
