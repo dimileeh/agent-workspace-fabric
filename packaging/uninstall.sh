@@ -285,8 +285,9 @@ confirm_destructive() {
 # bootstrap_uv placed, in the marker's uv_bin_dir) and no shell-RC or PATH side
 # effects, and stays correct regardless of which `uv self` subcommands a given uv
 # version happens to expose. bootstrap_uv recorded that directory in the marker
-# (uv_bin_dir=...). If deleting them fails we raise
-# UV_REMOVAL_FAILED and keep the marker so a later --remove-uv can retry, rather
+# (uv_bin_dir=...). If the recorded binaries are not actually present (a wrong/legacy
+# uv_bin_dir, binaries the user moved, or a stale marker) or deleting them fails, we
+# raise UV_REMOVAL_FAILED and keep the marker so a later --remove-uv can retry, rather
 # than reporting a false success while uv is still installed.
 remove_uv() {
     [ "$REMOVE_UV" -eq 1 ] || return 0
@@ -309,6 +310,15 @@ remove_uv() {
     if [ "$DRY_RUN" -eq 1 ]; then
         plan "remove uv binaries (uv, uvx) from ${uv_bin_dir} and delete ${AWF_UV_MARKER}"
         return 0
+    fi
+    # rm -f exits zero on already-missing paths, so a wrong/legacy uv_bin_dir,
+    # binaries the user moved, or a stale marker would let us delete the ownership
+    # marker and report success while uv is still on the system. Treat removal as
+    # done only when at least one recorded binary is actually present; otherwise
+    # fail closed (keeping the marker) so the proof survives and a later
+    # --remove-uv can retry once uv sits at the recorded location.
+    if [ ! -e "${uv_bin_dir}/uv" ] && [ ! -e "${uv_bin_dir}/uvx" ]; then
+        fail UV_REMOVAL_FAILED "no AWF-bootstrapped uv binaries found in ${uv_bin_dir}; keeping ${AWF_UV_MARKER} so --remove-uv can retry once uv is at the recorded location"
     fi
     rm -f "${uv_bin_dir}/uv" "${uv_bin_dir}/uvx" \
         || fail UV_REMOVAL_FAILED "could not remove uv binaries from ${uv_bin_dir}; keeping ${AWF_UV_MARKER} so --remove-uv can retry"

@@ -257,6 +257,37 @@ def test_remove_uv_runs_despite_unmanaged_awf_refusal(
 
 
 @pytest.mark.unit
+def test_remove_uv_with_no_binaries_at_recorded_dir_fails_closed(
+    harness: InstallerHarness,
+) -> None:
+    """A recorded uv_bin_dir holding no uv/uvx must not be reported as removed.
+
+    Regression for the false-success bug: ``rm -f`` exits zero on already-missing
+    paths, so a wrong/legacy ``uv_bin_dir``, binaries the user moved, or a stale
+    marker would let the lane delete the ownership marker and print
+    "Removed AWF-bootstrapped uv" while uv is still on the system. The lane must
+    confirm at least one recorded binary is actually present; otherwise it fails
+    closed (UV_REMOVAL_FAILED) and keeps the marker so the proof of ownership is
+    not lost and --remove-uv can retry.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output="")  # uv still resolvable on PATH (harness bin dir)
+    # The marker points at a dir that exists but holds no uv/uvx binaries.
+    empty_bin_dir = harness.home / "moved-elsewhere"
+    empty_bin_dir.mkdir(parents=True, exist_ok=True)
+    marker = harness.write_uv_marker(uv_bin_dir=str(empty_bin_dir))
+
+    result = _run(harness, ["--remove-uv", "--yes"])
+
+    assert result.returncode != 0
+    assert "UV_REMOVAL_FAILED" in result.stderr
+    # The marker survives so the proof of ownership is preserved for a retry.
+    assert marker.exists()
+    # No false success was reported while uv is still installed.
+    assert "Removed AWF-bootstrapped uv" not in result.stdout
+
+
+@pytest.mark.unit
 def test_remove_uv_binary_deletion_failure_preserves_marker(
     harness: InstallerHarness,
 ) -> None:
