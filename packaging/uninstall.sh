@@ -61,6 +61,11 @@ PURGE_CONFIG=0
 PURGE_STATE=0
 REMOVE_UV=0
 
+# Set by uninstall_awf when an unmanaged awf is found on PATH. The refusal is
+# deferred (not raised inline) so the marker-authorized uv-removal lane can still
+# run; main() surfaces it as UNINSTALL_REFUSED_UNMANAGED after remove_uv.
+UNMANAGED_AWF_PATH=""
+
 # --------------------------------------------------------------------------
 # Output helpers
 # --------------------------------------------------------------------------
@@ -473,7 +478,13 @@ uninstall_awf() {
     local awf_path=""
     awf_path="$(resolve_awf_path || true)"
     if [ -n "$awf_path" ]; then
-        fail UNINSTALL_REFUSED_UNMANAGED "refusing to remove unmanaged awf at ${awf_path}; not installed by uv or pipx"
+        # Defer the refusal rather than exiting here. remove_uv is authorized
+        # independently by the AWF ownership marker, so an unmanaged awf must not
+        # strand a bootstrapped uv (the same reason purge_state runs ahead of this
+        # lane). main() raises UNINSTALL_REFUSED_UNMANAGED after remove_uv has had
+        # its chance to run, so the refusal still surfaces non-zero.
+        UNMANAGED_AWF_PATH="$awf_path"
+        return 0
     fi
 
     say "No AWF-managed installation found; nothing to uninstall."
@@ -502,6 +513,12 @@ main() {
     purge_state
     uninstall_awf
     remove_uv
+
+    # uninstall_awf defers its unmanaged-awf refusal so the marker-authorized uv
+    # lane above still runs; surface it now that remove_uv has had its turn.
+    if [ -n "$UNMANAGED_AWF_PATH" ]; then
+        fail UNINSTALL_REFUSED_UNMANAGED "refusing to remove unmanaged awf at ${UNMANAGED_AWF_PATH}; not installed by uv or pipx"
+    fi
 
     say "Credentials were preserved. AWF does not remove provider secrets, keyring entries, env refs, or gh/agent auth."
     say "Docker volumes and Compose stacks were left intact; stop them with 'awf service gc' or 'docker compose down' if you no longer need them."

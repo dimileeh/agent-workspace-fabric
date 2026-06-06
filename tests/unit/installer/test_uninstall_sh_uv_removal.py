@@ -194,6 +194,39 @@ def test_managed_package_removed_before_uv_removal(
 
 
 @pytest.mark.unit
+def test_remove_uv_runs_despite_unmanaged_awf_refusal(
+    harness: InstallerHarness,
+) -> None:
+    """An unmanaged awf must not strand the marker-authorized uv removal.
+
+    Regression: the package lane refuses an unmanaged awf on PATH with
+    UNINSTALL_REFUSED_UNMANAGED. If that refusal exited before remove_uv, the
+    marker-authorized removal of an AWF-bootstrapped uv would never run and the
+    bootstrapped uv could remain. The package lane therefore *defers* its
+    unmanaged refusal so the independently-authorized uv lane still runs; the
+    run still exits non-zero with the refusal token, and the unmanaged awf is
+    never deleted.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output="")  # uv present but awf is NOT uv-managed
+    harness.add_pipx(list_output="")  # ...nor pipx-managed
+    unmanaged = harness.add_awf()  # an unmanaged awf on PATH
+    uv_stub = harness.bin_dir / "uv"
+    marker = harness.write_uv_marker(uv_bin_dir=str(harness.bin_dir))
+
+    result = _run(harness, ["--remove-uv", "--yes"])
+
+    # The unmanaged-awf refusal still surfaces non-zero...
+    assert result.returncode != 0
+    assert "UNINSTALL_REFUSED_UNMANAGED" in result.stderr
+    # ...but the marker-authorized uv removal ran anyway, clearing uv + marker...
+    assert not uv_stub.exists()
+    assert not marker.exists()
+    # ...and the unmanaged awf was refused, never deleted.
+    assert unmanaged.exists()
+
+
+@pytest.mark.unit
 def test_remove_uv_binary_deletion_failure_preserves_marker(
     harness: InstallerHarness,
 ) -> None:
