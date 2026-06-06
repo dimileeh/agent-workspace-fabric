@@ -272,9 +272,12 @@ confirm_destructive() {
 # Remove uv only when --remove-uv is given AND the AWF ownership marker proves AWF
 # bootstrapped it. Without the marker we refuse (UV_REMOVAL_REFUSED_UNOWNED) so a
 # uv the user installed themselves is never removed. The removal is destructive,
-# so it is confirm-gated; --dry-run only plans it. A non-zero `uv self uninstall`
-# warns and continues — the contract is the marker gate, not uv's internals — and
-# the marker is removed either way since it is AWF's own ownership record.
+# so it is confirm-gated; --dry-run only plans it. The official uv has no
+# `uv self uninstall` subcommand (uv self exposes only update/version), so removal
+# means deleting the uv/uvx binaries the installer placed; bootstrap_uv recorded
+# their directory in the marker (uv_bin_dir=...). If deleting them fails we raise
+# UV_REMOVAL_FAILED and keep the marker so a later --remove-uv can retry, rather
+# than reporting a false success while uv is still installed.
 remove_uv() {
     [ "$REMOVE_UV" -eq 1 ] || return 0
     if [ ! -f "$AWF_UV_MARKER" ]; then
@@ -282,13 +285,17 @@ remove_uv() {
     fi
     confirm_destructive "uv (AWF-bootstrapped)" \
         || fail CONFIRMATION_REQUIRED "uv removal requires --yes (non-interactive) or interactive confirmation"
+    # The bin dir AWF linked uv/uvx into, recorded by bootstrap_uv. Fall back to the
+    # installer default if a legacy marker predates the uv_bin_dir field.
+    local uv_bin_dir=""
+    uv_bin_dir="$(awk -F= '$1 == "uv_bin_dir" { print substr($0, index($0, "=") + 1); exit }' "$AWF_UV_MARKER" 2>/dev/null || true)"
+    [ -n "$uv_bin_dir" ] || uv_bin_dir="${HOME}/.local/bin"
     if [ "$DRY_RUN" -eq 1 ]; then
-        plan "remove uv via 'uv self uninstall' and delete ${AWF_UV_MARKER}"
+        plan "remove uv binaries (uv, uvx) from ${uv_bin_dir} and delete ${AWF_UV_MARKER}"
         return 0
     fi
-    if command -v uv >/dev/null 2>&1; then
-        uv self uninstall >/dev/null 2>&1 || warn "uv self uninstall reported a problem; continuing"
-    fi
+    rm -f "${uv_bin_dir}/uv" "${uv_bin_dir}/uvx" \
+        || fail UV_REMOVAL_FAILED "could not remove uv binaries from ${uv_bin_dir}; keeping ${AWF_UV_MARKER} so --remove-uv can retry"
     rm -f "$AWF_UV_MARKER"
     say "Removed AWF-bootstrapped uv."
 }
@@ -487,10 +494,11 @@ main() {
     # State purge runs first: it is an explicit, authorized lane independent of the
     # package, so the package lane's unmanaged refusal must not block it. The
     # package lane then runs before remove_uv because uv is the very tool it uses:
-    # `uv self uninstall` drops uv from PATH, after which `uv tool uninstall` can no
-    # longer run and a still-installed, formerly uv-managed awf would be misread as
-    # unmanaged (UNINSTALL_REFUSED_UNMANAGED) — uv and state already gone. Removing
-    # the package before its manager keeps that lane correct; uv removal comes last.
+    # deleting the uv binaries drops uv from PATH, after which `uv tool uninstall`
+    # can no longer run and a still-installed, formerly uv-managed awf would be
+    # misread as unmanaged (UNINSTALL_REFUSED_UNMANAGED) — uv and state already
+    # gone. Removing the package before its manager keeps that lane correct; uv
+    # removal comes last.
     purge_state
     uninstall_awf
     remove_uv
