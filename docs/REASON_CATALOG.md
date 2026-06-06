@@ -443,6 +443,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#opencode_ollama_auth_missing](#opencode_ollama_auth_missing)
 
+### OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED
+**Problem:** AWF could not recover the open PR for a preserved workspace because the open-PR resolver only supports GitHub.
+**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. BitBucket Cloud), but the GitHub-only open-PR resolver cannot look up its open PR by branch yet, so worker recovery fails fast instead of querying the branch as a same-slug GitHub repo.
+**Operator Fix:** No repository change is needed — the forge is supported. Adopt the PR monitor explicitly with `awf workspace adopt-pr`, or remonitor once a forge-neutral open-PR resolver lands.
+**Related Command:** `awf workspace adopt-pr`
+**Docs Link:** [docs/REASON_CATALOG.md#open_pr_resolver_forge_not_supported](#open_pr_resolver_forge_not_supported)
+
 ### ORPHAN_RESOURCES_PRESENT
 **Problem:** Orphan AWF Docker resources were detected.
 **Likely Cause:** Networks or volumes left behind by deleted workspaces.

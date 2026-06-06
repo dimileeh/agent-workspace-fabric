@@ -69,6 +69,25 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace create",
         _reason_catalog_link("FORGE_NOT_SUPPORTED"),
     ),
+    "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED": _ReasonText(
+        (
+            "AWF could not recover the open PR for a preserved workspace because "
+            "the open-PR resolver only supports GitHub."
+        ),
+        (
+            "No repository change is needed — the forge is supported. Adopt the PR "
+            "monitor explicitly with `awf workspace adopt-pr`, or remonitor once a "
+            "forge-neutral open-PR resolver lands."
+        ),
+        (
+            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "Cloud), but the GitHub-only open-PR resolver cannot look up its open "
+            "PR by branch yet, so worker recovery fails fast instead of querying "
+            "the branch as a same-slug GitHub repo."
+        ),
+        "awf workspace adopt-pr",
+        _reason_catalog_link("OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED"),
+    ),
     "BITBUCKET_AUTH_NOT_CONFIGURED": _ReasonText(
         "AWF could not build BitBucket Cloud credentials from the environment.",
         (

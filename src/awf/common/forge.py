@@ -56,6 +56,14 @@ from awf.runtime.pr_monitor import CheckFailure, PRStatus
 
 FORGE_NOT_SUPPORTED_REASON_CODE = "FORGE_NOT_SUPPORTED"
 
+# Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (GitHub or
+# BitBucket Cloud), but the GitHub-only ``BranchOpenPullRequestResolver`` cannot
+# recover an open PR for a non-GitHub forge yet (a forge-neutral resolver is
+# deferred). Using ``FORGE_NOT_SUPPORTED`` here would tell a bitbucket.org operator
+# to switch to a supported forge they are already on — so this path carries its own
+# honest reason code instead.
+OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE = "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED"
+
 _SUPPORTED_FORGES: frozenset[ForgeKind] = frozenset({"github", "bitbucket"})
 
 

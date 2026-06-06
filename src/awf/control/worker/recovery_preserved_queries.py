@@ -27,7 +27,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.forge import (
-    FORGE_NOT_SUPPORTED_REASON_CODE,
+    OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
     detect_forge_from_url,
 )
 from awf.common.git_identity import (
@@ -520,6 +520,12 @@ async def _resolve_preserved_active_branch_open_pr(
     # a forge-neutral resolver exists. Undetectable URLs (``None``) fall through
     # to the GitHub resolver unchanged — existing GitHub workspaces never trip
     # this.
+    #
+    # The reason code is ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED``, NOT the generic
+    # ``FORGE_NOT_SUPPORTED``: BitBucket Cloud *is* a supported forge now, so the
+    # generic code (and its "use a supported forge" fix text) would contradict the
+    # real failure for a bitbucket.org operator. The honest reason is that the
+    # open-PR resolver itself is GitHub-only.
     detected_forge = detect_forge_from_url(repo_url)
     if detected_forge is not None and detected_forge != "github":
         _log.warning(
@@ -527,7 +533,7 @@ async def _resolve_preserved_active_branch_open_pr(
             branch_name=lookup_branch,
             base_branch=base_branch,
             forge=detected_forge,
-            reason_code=FORGE_NOT_SUPPORTED_REASON_CODE,
+            reason_code=OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
         )
         return _BranchOpenPRLookup(
             branch_name=lookup_branch,
@@ -536,8 +542,8 @@ async def _resolve_preserved_active_branch_open_pr(
             payload={
                 "branch_name": lookup_branch,
                 "forge": detected_forge,
-                "reason_code": FORGE_NOT_SUPPORTED_REASON_CODE,
-                "failure": "forge_not_supported",
+                "reason_code": OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
+                "failure": "open_pr_resolver_forge_not_supported",
                 "source": "open_pr_resolver",
             },
         )

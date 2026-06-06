@@ -1129,7 +1129,11 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         # A preserved-active BitBucket workspace must never reach the GitHub-only
         # ``gh pr list`` path: dropping the forge would query bitbucket.org's
         # owner/repo as a same-slug GitHub repo and could attach the wrong
-        # monitor. The lookup must fail fast with FORGE_NOT_SUPPORTED instead.
+        # monitor. The lookup must fail fast instead. BitBucket Cloud *is* a
+        # supported forge (issue #345 Part 2), so the reason code must be the
+        # honest ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` (the resolver is
+        # GitHub-only), NOT the generic ``FORGE_NOT_SUPPORTED`` whose fix text
+        # would tell a bitbucket.org operator to switch to a forge they already use.
         branch_name = "awf/ws_branch"
         resolver = _RecordingBranchOpenPRResolver({branch_name: []})
         worker = ControlWorker(
@@ -1152,8 +1156,8 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         assert lookup.payload == {
             "branch_name": branch_name,
             "forge": "bitbucket",
-            "reason_code": "FORGE_NOT_SUPPORTED",
-            "failure": "forge_not_supported",
+            "reason_code": "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED",
+            "failure": "open_pr_resolver_forge_not_supported",
             "source": "open_pr_resolver",
         }
         # The GitHub-only resolver must never be queried for a BitBucket repo.
