@@ -125,6 +125,75 @@ async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> 
     assert failures[0].run_id is None  # external fallback path
 
 
+async def test_failing_check_logs_surfaces_external_status_alongside_failing_steps() -> None:
+    """A non-Pipelines FAILED status must still surface when a pipeline step fails.
+
+    Regression for PRRT_kwDOSJAM6s6Hm62I: previously the pipeline-step pass
+    returned early and dropped every other FAILED/STOPPED commit status (e.g. an
+    external linter), so those checks never became CheckFailure rows for triage.
+    """
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[
+            {"state": "FAILED", "name": "Pipeline #5", "key": "PIPELINE"},
+            {"state": "STOPPED", "name": "external-linter", "key": "lint"},
+        ],
+    )
+    fake.page("GET", _PIPELINES, values=[{"uuid": "pipe-1", "state": {"name": "COMPLETED"}}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/",
+        values=[{"uuid": "step-2", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/step-2/log",
+        text="FAILED tests/test_x.py::test_y\n",
+    )
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD, pytest_fallback_commands=["uv run pytest -q"]
+    )
+    by_name = {f.name: f for f in failures}
+    assert set(by_name) == {"Test", "external-linter"}
+    assert by_name["Test"].run_id == "pipe-1"  # pipeline step keeps its log evidence
+    assert by_name["external-linter"].run_id is None  # external status, no pipeline log
+    assert by_name["external-linter"].log_excerpt == ""
+
+
+async def test_failing_check_logs_skips_pipeline_status_identified_by_url() -> None:
+    """The pipeline's own commit status (recognised by its /pipelines/ url) is not
+    double-counted on top of the per-step failures, even without a ``PIPELINE`` key."""
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[
+            {
+                "state": "FAILED",
+                "name": "Pipeline #7",
+                "url": "https://bitbucket.org/workspace/repo/pipelines/results/7",
+            }
+        ],
+    )
+    fake.page("GET", _PIPELINES, values=[{"uuid": "pipe-1", "state": {"name": "COMPLETED"}}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/",
+        values=[{"uuid": "step-2", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/step-2/log",
+        text="FAILED tests/test_x.py::test_y\n",
+    )
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert [f.name for f in failures] == ["Test"]  # no duplicate external row for the pipeline
+
+
 async def test_failing_check_logs_scopes_statuses_by_refname() -> None:
     """Scope the commit-statuses fetch by the PR source branch (refname).
 

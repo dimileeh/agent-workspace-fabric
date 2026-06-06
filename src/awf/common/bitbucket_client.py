@@ -415,6 +415,16 @@ class BitBucketClient:
                     evidence_warnings=evidence.evidence_warnings,
                 )
             )
+        # External (non-Pipelines) FAILED/STOPPED statuses — e.g. third-party
+        # linters — have no pipeline step backing them, so the per-step pass
+        # above never surfaces them. Add them too (via the pytest fallback path)
+        # so they still become triageable CheckFailure rows, skipping the
+        # pipeline's own commit status which the steps already cover.
+        failures.extend(
+            self._external_status_failure(status, pytest_fallback_commands)
+            for status in failed
+            if not _is_pipeline_owned_status(status)
+        )
         return tuple(failures)
 
     async def rerun_failed_workflow_jobs(
@@ -916,6 +926,20 @@ class BitBucketClient:
 def _as_dict(value: Any) -> dict[str, Any]:
     """Return ``value`` if it is a dict, else an empty dict (payload guard)."""
     return value if isinstance(value, dict) else {}
+
+
+def _is_pipeline_owned_status(status: dict[str, Any]) -> bool:
+    """True when a commit build-status belongs to BitBucket Pipelines itself.
+
+    Pipelines posts its own commit status (key ``PIPELINE``, url pointing at the
+    repo's ``/pipelines/`` results); that status is already covered by the
+    per-step failures, so it must not be re-emitted as an external check. Any
+    other FAILED/STOPPED status (third-party linters, deploy gates, …) is
+    external and should still surface for triage.
+    """
+    if str(status.get("key") or "").upper() == "PIPELINE":
+        return True
+    return "/pipelines/" in str(status.get("url") or "")
 
 
 def _freeze_params(params: Mapping[str, str] | None) -> _FrozenParams:
