@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "development"
+
+  - package-ecosystem: "npm"
+    directory: "/apps/console"
+    schedule:
+      interval: "weekly"
+    target-branch: "development"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    target-branch: "development"
