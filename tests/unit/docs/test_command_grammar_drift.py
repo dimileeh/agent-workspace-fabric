@@ -251,14 +251,28 @@ def _fenced_command_lines(text: str) -> list[str]:
     and any trailing ``#`` shell comment is removed (via :func:`_strip_shell_comment`)
     so a comment that merely mentions ``awf init``/``awf smoke run`` never reaches
     the classifiers as a fake command line.
+
+    Shell line-continuations are rejoined: a physical line ending in a trailing
+    backslash is the head of a command split across lines, so it is held and glued
+    to the next collected line before being emitted. Otherwise a multi-line example
+    such as ``awf init`` + backslash then ``--write-profile --yes`` would reach
+    :func:`_init_arg_status` with the dangling backslash as a lone token — read as
+    the required path (any non-flag token is path-like) — waving the no-path init
+    regression through as ``"ok"``.
     """
     lines: list[str] = []
     inside = False
     collecting = False
+    pending = ""  # head of a command split across physical lines with a trailing `\`
     for raw_line in text.splitlines():
         fence = FENCE_RE.match(raw_line)
         if fence is not None:
             if inside:
+                # A fence that closes mid-continuation flushes the accumulated head
+                # so a dangling `awf init \` is still classified, not dropped.
+                if pending:
+                    lines.append(pending)
+                    pending = ""
                 inside = collecting = False
             else:
                 inside = True
@@ -270,8 +284,19 @@ def _fenced_command_lines(text: str) -> list[str]:
         if stripped.startswith(("$ ", "> ", "% ")):
             stripped = stripped[2:].strip()
         stripped = _strip_shell_comment(stripped)
-        if stripped:
-            lines.append(stripped)
+        if not stripped:
+            continue
+        if pending:
+            stripped = f"{pending} {stripped}"
+            pending = ""
+        if stripped.endswith("\\"):
+            # Hold the continuation head (minus the trailing `\`) and join it with
+            # the next physical line so the classifiers see the whole command.
+            pending = stripped[:-1].rstrip()
+            continue
+        lines.append(stripped)
+    if pending:
+        lines.append(pending)
     return lines
 
 
@@ -838,6 +863,29 @@ def test_helper_flags_smoke_invocation_offenses() -> None:
 def test_helper_extracts_fenced_command_lines() -> None:
     text = "intro\n\n```bash\n$ awf setup\nawf start\n```\nprose `awf init` mention\n"
     assert _fenced_command_lines(text) == ["awf setup", "awf start"]
+
+
+def test_helper_joins_backslash_continued_fenced_lines() -> None:
+    # A shell line-continuation (`\`) splits one logical command across physical
+    # lines; `_fenced_command_lines` must rejoin them so the grammar classifiers
+    # see the whole command. Otherwise a stale no-path `awf init \` reaches
+    # `_init_arg_status` with the dangling `\` as a lone token — and because any
+    # non-flag token is read as the required path — it is misclassified "ok",
+    # hiding the backslash-wrapped no-path init regression and even satisfying the
+    # per-doc init example tally.
+    no_path = "```bash\nawf init \\\n  --write-profile --yes\n```\n"
+    assert _fenced_command_lines(no_path) == ["awf init --write-profile --yes"]
+    assert _init_arg_status(_fenced_command_lines(no_path)[0]) == "flag-only"
+    # A continuation whose path sits on the next physical line still resolves to a
+    # valid path example once rejoined, so the join never false-flags a real one.
+    with_path = "```bash\nawf init \\\n  /tmp/repo\n```\n"
+    assert _fenced_command_lines(with_path) == ["awf init /tmp/repo"]
+    assert _init_arg_status(_fenced_command_lines(with_path)[0]) == "ok"
+    # A fence that closes while a continuation is still open flushes the dangling
+    # head rather than dropping it, so the no-path form is still surfaced as bare.
+    dangling = "```bash\nawf init \\\n```\n"
+    assert _fenced_command_lines(dangling) == ["awf init"]
+    assert _init_arg_status(_fenced_command_lines(dangling)[0]) == "bare"
 
 
 def test_helper_drops_shell_comments_from_fenced_lines() -> None:
