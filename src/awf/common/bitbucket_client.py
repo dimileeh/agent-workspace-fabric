@@ -238,6 +238,23 @@ class BitBucketClient:
         client = httpx.AsyncClient(base_url=_DEFAULT_BASE_URL, timeout=_DEFAULT_TIMEOUT)
         return cls(client=client, auth=auth)
 
+    async def aclose(self) -> None:
+        """Close the underlying ``httpx.AsyncClient`` so its connections release.
+
+        Callers that build a client via :meth:`from_env` should ``aclose()`` it
+        (or use ``async with``) when done; an injected client is owned by the
+        caller but closing it here is idempotent and harmless.
+        """
+        await self._client.aclose()
+
+    async def __aenter__(self) -> BitBucketClient:
+        """Enter an ``async with`` block, returning this client unchanged."""
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        """Close the underlying HTTP client on ``async with`` exit."""
+        await self.aclose()
+
     # ── Public ForgeClient surface ─────────────────────────────────────────
 
     async def create_pull_request(

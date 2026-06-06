@@ -483,3 +483,22 @@ def test_from_env_invalid_config_raises() -> None:
     with pytest.raises(BitBucketClientError) as excinfo:
         BitBucketClient.from_env({})
     assert excinfo.value.reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
+
+
+# ── lifecycle ───────────────────────────────────────────────────────────────────
+
+
+async def test_aclose_closes_underlying_httpx_client() -> None:
+    fake = FakeBitBucket()
+    client = make_client(fake)
+    await client.aclose()
+    assert client._client.is_closed
+
+
+async def test_async_context_manager_closes_on_exit() -> None:
+    fake = FakeBitBucket()
+    client = make_client(fake)
+    async with client as entered:
+        assert entered is client
+        assert not client._client.is_closed
+    assert client._client.is_closed
