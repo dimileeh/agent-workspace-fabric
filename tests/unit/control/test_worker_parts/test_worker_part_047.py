@@ -310,7 +310,9 @@ async def test_safely_provision_isolates_epoch_read_failure(
     exception escaping ``_safely_provision_claimed`` would propagate and wedge
     the rest of the cycle. The epoch read (D2) sits outside the inner provision
     try/except, so it must be isolated like a provision failure — logged and
-    swallowed — and the claim released so the next poll re-claims and retries.
+    swallowed — and the claim released so the stale-active execution recovery
+    scan can pick up the released ``provisioning`` row (the normal poll only
+    claims ``requested`` rows).
     """
     worker = ControlWorker(
         session_factory=session_factory,
@@ -333,7 +335,7 @@ async def test_safely_provision_isolates_epoch_read_failure(
     # Must not raise: the failure is isolated, not propagated to the gather().
     await worker._safely_provision_claimed("ws_epoch")  # noqa: SLF001
 
-    # The claim was still released so the next poll re-claims and retries.
+    # The claim was still released so stale-active recovery can reclaim the row.
     assert released == ["ws_epoch"]
     assert "ws_epoch" not in worker._execution_claim_epochs  # noqa: SLF001
 

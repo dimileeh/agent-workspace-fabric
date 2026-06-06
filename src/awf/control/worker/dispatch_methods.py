@@ -300,8 +300,13 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
         # the provision batch instead of being isolated like a provision
         # failure. Swallow it so one bad workspace can't wedge the cycle; an
         # external cancel still propagates (``CancelledError`` is not an
-        # ``Exception``) and the outer ``finally`` releases the claim either way
-        # so the next poll re-claims and retries.
+        # ``Exception``) and the outer ``finally`` releases the claim either
+        # way. The claiming transaction already transitioned the row
+        # ``requested -> provisioning`` before we were dispatched, so the normal
+        # poll (which only claims ``requested`` rows) does not re-claim it;
+        # instead the released ``provisioning`` row is picked up by the
+        # stale-active execution recovery scan, the same recovery contract as
+        # the heartbeat-fence path above.
         _log.exception("worker.provision_claim_setup_failed", workspace_id=workspace_id)
     finally:
         # Release CAS on the stored epoch so a release issued after a newer
