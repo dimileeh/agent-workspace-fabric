@@ -76,6 +76,24 @@ INIT_CONTEXT_DOCS = (
     "docs/PROJECT_ONBOARDING.md",
 )
 
+# First-run contexts that must each demonstrate at least one valid
+# `awf smoke run --mocked-local` example (R4), the smoke analog of
+# `INIT_CONTEXT_DOCS`. Tracked per-doc rather than via a single global counter so
+# a page that silently drops every `--mocked-local` example fails on its own —
+# `docs/UPGRADE.md`'s rerun step is the motivating case (a future editor removing
+# it would otherwise get no CI signal as long as one mocked example survives
+# anywhere across `FIRST_RUN_DOCS`). README/quickstart/getting-started teach the
+# no-token mocked smoke as the first-run proof, and upgrade reruns it post-bump.
+# The remaining first-run docs (mcp-setup/uninstall/troubleshooting/releasing and
+# the onboarding page's project-free `awf smoke run --format pretty` proof) do not
+# document a mocked-local smoke and so stay out.
+MOCKED_SMOKE_CONTEXT_DOCS = (
+    "README.md",
+    "docs/QUICKSTART.md",
+    "docs/GETTING_STARTED.md",
+    "docs/UPGRADE.md",
+)
+
 # Fenced blocks: capture the info string's leading language token so the command
 # scanners only read shell/command examples. Non-shell fences (yaml/json/toml/
 # text) hold config or sample output, not commands — feeding their lines to the

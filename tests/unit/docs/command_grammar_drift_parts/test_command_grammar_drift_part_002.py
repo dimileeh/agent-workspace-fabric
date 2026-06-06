@@ -13,6 +13,7 @@ from tests.unit.docs.command_grammar_drift_parts._helpers import (
     CURL_PIPE_INSTALLER_RE,
     FIRST_RUN_DOCS,
     INIT_CONTEXT_DOCS,
+    MOCKED_SMOKE_CONTEXT_DOCS,
     SETUP_START_DOCS,
     _bootstrap_offenders,
     _fenced_command_lines,
@@ -105,9 +106,15 @@ def test_mocked_smoke_examples_use_project_flag() -> None:
     R2's fenced+inline scan. The `--project`/`--mocked-local` pairing is enforced
     symmetrically (see `_smoke_invocation_offense`) so a doc cannot keep a project
     target while quietly dropping the no-token `--mocked-local` grammar.
+
+    The per-context tally (not a single global counter, mirroring R2's
+    `init_examples_by_context`) keeps the requirement enforced per-doc: a first-run
+    page that drops every `--mocked-local` example fails even if another doc still
+    carries one. `docs/UPGRADE.md`'s post-upgrade rerun step is the motivating case
+    — a global counter would let it silently lose its mocked smoke example.
     """
     offenders: list[str] = []
-    mocked_examples_seen = 0
+    mocked_examples_by_context = dict.fromkeys(MOCKED_SMOKE_CONTEXT_DOCS, 0)
     for rel_path in FIRST_RUN_DOCS:
         text = _read(rel_path)
         # Inline mentions are scanned with smoke-run prohibitions unwrapped so a
@@ -119,15 +126,19 @@ def test_mocked_smoke_examples_use_project_flag() -> None:
             invocation = _parse_smoke_invocation(line)
             if invocation is None:
                 continue
-            if invocation.has_mocked_local:
-                mocked_examples_seen += 1
+            if invocation.has_mocked_local and rel_path in mocked_examples_by_context:
+                mocked_examples_by_context[rel_path] += 1
             offense = _smoke_invocation_offense(invocation)
             if offense is not None:
                 offenders.append(f"{rel_path}: {offense} in `{invocation.raw}`")
 
+    missing_contexts = sorted(
+        rel_path for rel_path, count in mocked_examples_by_context.items() if count == 0
+    )
     assert not offenders, offenders
-    assert mocked_examples_seen, (
-        "Expected at least one `awf smoke run --mocked-local` example across first-run docs."
+    assert not missing_contexts, (
+        "first-run mocked-smoke contexts missing a valid "
+        f"`awf smoke run --mocked-local` example: {missing_contexts}"
     )
 
 
