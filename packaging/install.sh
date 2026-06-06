@@ -25,6 +25,13 @@
 #                                 official https://astral.sh/uv/install.sh).
 #   AWF_INSTALL_FORCE_INTERACTIVE treat stdin as a TTY so the bootstrap confirm
 #                                 prompt can be exercised under a piped stdin.
+#   AWF_UV_MARKER                 path of the uv-ownership marker bootstrap_uv
+#                                 writes after a real uv bootstrap (defaults to
+#                                 ${HOME}/.awf/uv-bootstrap.marker). The hosted
+#                                 uninstaller (packaging/uninstall.sh) consumes
+#                                 it to prove AWF bootstrapped uv before removing
+#                                 it; overridable so install/uninstall tests share
+#                                 a hermetic path.
 #   --shell <name>                override shell detection for PATH advice.
 
 set -euo pipefail
@@ -32,6 +39,12 @@ set -euo pipefail
 PACKAGE="agent-workspace-fabric"
 DEFAULT_REPO_URL="https://github.com/dimileeh/aira-agent-workspace-fabric"
 MANIFEST_BASENAME="awf-install-manifest.json"
+
+# uv-ownership marker. Written only on a real bootstrap_uv (never under --dry-run)
+# so the hosted uninstaller's marker-gated --remove-uv can prove AWF installed uv
+# and refuse to remove a uv the user brought themselves. Overridable via the
+# AWF_UV_MARKER env seam for hermetic install/uninstall tests.
+AWF_UV_MARKER="${AWF_UV_MARKER:-${HOME}/.awf/uv-bootstrap.marker}"
 
 VERSION=""
 CHANNEL="stable"
@@ -841,6 +854,17 @@ bootstrap_uv() {
     esac
     command -v uv >/dev/null 2>&1 \
         || fail UV_BOOTSTRAP_FAILED "uv is still not on PATH after bootstrap (expected it in ${uv_bin_dir})"
+    # Record AWF ownership of this uv so the hosted uninstaller can later prove it
+    # bootstrapped uv before removing it (marker-gated --remove-uv). Deterministic
+    # (no timestamp) and never written under --dry-run, which returns above before
+    # any mutation. Marker failures must not fail an otherwise successful install,
+    # so a write problem only warns.
+    if mkdir -p "$(dirname "$AWF_UV_MARKER")" 2>/dev/null &&
+        printf 'installed_by=awf\nuv_bin_dir=%s\n' "$uv_bin_dir" >"$AWF_UV_MARKER" 2>/dev/null; then
+        :
+    else
+        warn "could not write uv-ownership marker at ${AWF_UV_MARKER}; --remove-uv will refuse to remove this uv later"
+    fi
     say "Bootstrapped uv into ${uv_bin_dir}."
 }
 
