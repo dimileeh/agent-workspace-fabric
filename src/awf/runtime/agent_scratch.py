@@ -22,16 +22,13 @@ are a no-op here.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from awf.common.commands import CommandResult
 from awf.common.logging import get_logger
+from awf.runtime.validation_worktree import GitRunner
 
 _log = get_logger(__name__)
-
-GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 
 AWF_SCRATCH_BLOCK_START = "# >>> awf-managed agent scratch"
 AWF_SCRATCH_BLOCK_END = "# <<< awf-managed agent scratch"
