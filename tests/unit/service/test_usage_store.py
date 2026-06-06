@@ -16,10 +16,12 @@ from awf.service.usage_store import (
     SCHEMA_VERSION,
     NormalizedUsage,
     UsageSnapshot,
+    accumulate_usage,
     normalize_ccusage_json,
     provider_ccusage_source,
     read_latest_usage_snapshot,
     read_latest_usage_snapshots,
+    snapshot_usage_metrics,
     subtract_baseline,
     workspace_usage_dir,
     write_usage_snapshot,
@@ -45,6 +47,8 @@ _ALLOWED_SNAPSHOT_KEYS = {
     "cost_estimate",
     "currency",
     "baseline",
+    "run_delta",
+    "accumulated_usage_at_run_start",
 }
 
 
@@ -161,6 +165,27 @@ def test_normalize_ccusage_json_supports_cache_read_and_creation_tokens() -> Non
         currency="USD",
         model=None,
     )
+
+
+@pytest.mark.unit
+def test_normalize_ccusage_json_ignores_invalid_split_cached_token_fields() -> None:
+    raw = json.dumps(
+        {
+            "totals": {
+                "inputTokens": 100,
+                "cacheReadTokens": "invalid",
+                "cacheCreationTokens": 50,
+                "outputTokens": 40,
+            }
+        }
+    )
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage is not None
+    assert usage.cached_input_tokens == 50
+    assert usage.total_tokens == 190
 
 
 @pytest.mark.unit
@@ -477,6 +502,208 @@ def test_subtract_baseline_preserves_none_current_fields() -> None:
     delta = subtract_baseline(current, baseline)
     assert delta.input_tokens is None
     assert delta.total_tokens == 3
+
+
+@pytest.mark.unit
+def test_accumulate_usage_adds_prior_and_run_delta() -> None:
+    accumulated = NormalizedUsage(
+        input_tokens=100,
+        cached_input_tokens=1000,
+        output_tokens=50,
+        reasoning_output_tokens=20,
+        total_tokens=1150,
+        cost_estimate=0.50,
+        currency="USD",
+        model="gpt-5",
+    )
+    run_delta = NormalizedUsage(
+        input_tokens=10,
+        cached_input_tokens=25,
+        output_tokens=5,
+        reasoning_output_tokens=3,
+        total_tokens=35,
+        cost_estimate=0.07,
+        currency="USD",
+        model="gpt-5.5",
+    )
+
+    result = accumulate_usage(accumulated, run_delta)
+
+    assert result is not None
+    assert result.input_tokens == 110
+    assert result.cached_input_tokens == 1025
+    assert result.output_tokens == 55
+    assert result.reasoning_output_tokens == 23
+    assert result.total_tokens == 1185
+    assert result.cost_estimate == pytest.approx(0.57)
+    assert result.currency == "USD"
+    assert result.model == "gpt-5.5"
+
+
+@pytest.mark.unit
+def test_accumulate_usage_preserves_prior_when_run_delta_field_missing() -> None:
+    accumulated = NormalizedUsage(input_tokens=100, total_tokens=200, cost_estimate=0.50)
+    run_delta = NormalizedUsage(input_tokens=10)
+
+    result = accumulate_usage(accumulated, run_delta)
+
+    assert result is not None
+    assert result.input_tokens == 110
+    assert result.total_tokens == 200
+    assert result.cost_estimate == 0.50
+
+
+@pytest.mark.unit
+def test_accumulate_usage_preserves_latest_fallback_when_run_delta_field_missing() -> None:
+    accumulated = NormalizedUsage(input_tokens=100, total_tokens=200)
+    latest = NormalizedUsage(input_tokens=105, total_tokens=225)
+    run_delta = NormalizedUsage(input_tokens=10)
+
+    result = accumulate_usage(accumulated, run_delta, fallback=latest)
+
+    assert result is not None
+    assert result.input_tokens == 110
+    assert result.total_tokens == 225
+
+
+@pytest.mark.unit
+def test_accumulate_usage_merges_fallback_fields_when_accumulated_missing() -> None:
+    latest = NormalizedUsage(input_tokens=10, total_tokens=15, cost_estimate=0.20, currency="USD")
+    run_delta = NormalizedUsage(output_tokens=3, total_tokens=18)
+
+    result = accumulate_usage(None, run_delta, fallback=latest)
+
+    assert result is not None
+    assert result.input_tokens == 10
+    assert result.output_tokens == 3
+    assert result.total_tokens == 18
+    assert result.cost_estimate == 0.20
+    assert result.currency == "USD"
+
+
+@pytest.mark.unit
+def test_accumulate_usage_preserves_unknown_fields_on_zero_delta_seed() -> None:
+    accumulated = NormalizedUsage(total_tokens=100, cost_estimate=None)
+    latest = NormalizedUsage(total_tokens=100, cost_estimate=None)
+    run_delta = NormalizedUsage(total_tokens=0, cost_estimate=0.0)
+
+    result = accumulate_usage(accumulated, run_delta, fallback=latest)
+
+    assert result is not None
+    assert result.total_tokens == 100
+    assert result.cost_estimate is None
+
+
+@pytest.mark.unit
+def test_accumulate_usage_preserves_currency_when_delta_omits_cost() -> None:
+    accumulated = NormalizedUsage(total_tokens=100, cost_estimate=1.25, currency="USD")
+    run_delta = NormalizedUsage(total_tokens=10)
+
+    result = accumulate_usage(accumulated, run_delta)
+
+    assert result is not None
+    assert result.total_tokens == 110
+    assert result.cost_estimate == 1.25
+    assert result.currency == "USD"
+
+
+@pytest.mark.unit
+def test_accumulate_usage_adds_delta_to_empty_accumulated_fields() -> None:
+    accumulated = NormalizedUsage()
+    run_delta = NormalizedUsage(
+        input_tokens=10, total_tokens=10, cost_estimate=0.25, currency="USD"
+    )
+
+    result = accumulate_usage(accumulated, run_delta)
+
+    assert result is not None
+    assert result.input_tokens == 10
+    assert result.total_tokens == 10
+    assert result.cost_estimate == 0.25
+    assert result.currency == "USD"
+
+
+@pytest.mark.unit
+def test_accumulate_usage_marks_mixed_currency_as_unknown_cost() -> None:
+    accumulated = NormalizedUsage(cost_estimate=1.0, currency="USD")
+    run_delta = NormalizedUsage(cost_estimate=2.0, currency="EUR")
+
+    result = accumulate_usage(accumulated, run_delta)
+
+    assert result is not None
+    assert result.cost_estimate is None
+    assert result.currency == "MIXED"
+
+
+@pytest.mark.unit
+def test_accumulate_usage_returns_fallback_when_run_delta_missing() -> None:
+    accumulated = NormalizedUsage(input_tokens=100, total_tokens=100)
+    latest = NormalizedUsage(input_tokens=120, total_tokens=120)
+
+    result = accumulate_usage(accumulated, None, fallback=latest)
+
+    assert result == latest
+
+
+@pytest.mark.unit
+def test_snapshot_usage_metrics_reads_existing_snapshot_metrics() -> None:
+    snapshot = UsageSnapshot(
+        workspace_id="ws",
+        provider="codex",
+        ccusage_source="codex",
+        status="available",
+        phase="final",
+        captured_at="2026-05-22T00:00:00+00:00",
+        input_tokens=10,
+        cached_input_tokens=20,
+        output_tokens=5,
+        reasoning_output_tokens=2,
+        total_tokens=35,
+        cost_estimate=0.01,
+        currency="USD",
+    )
+
+    assert snapshot_usage_metrics(snapshot) == NormalizedUsage(
+        input_tokens=10,
+        cached_input_tokens=20,
+        output_tokens=5,
+        reasoning_output_tokens=2,
+        total_tokens=35,
+        cost_estimate=0.01,
+        currency="USD",
+    )
+    assert (
+        snapshot_usage_metrics(
+            UsageSnapshot(
+                workspace_id="ws",
+                provider="codex",
+                ccusage_source="codex",
+                status="unavailable",
+                phase="final",
+                captured_at="2026-05-22T00:00:00+00:00",
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_usage_snapshot_from_old_schema_without_lifetime_metadata() -> None:
+    snapshot = UsageSnapshot.from_dict(
+        {
+            "workspace_id": "ws_old",
+            "provider": "codex",
+            "ccusage_source": "codex",
+            "status": "available",
+            "phase": "final",
+            "captured_at": "2026-05-22T00:00:00+00:00",
+            "total_tokens": 10,
+        }
+    )
+
+    assert snapshot.total_tokens == 10
+    assert snapshot.run_delta is None
+    assert snapshot.accumulated_usage_at_run_start is None
 
 
 @pytest.mark.unit

@@ -9,10 +9,10 @@ provider-specific runner code.
 Design invariants:
 - Sampling never masks the agent outcome (all sample failures are reason-coded
   or swallowed-and-logged).
-- Reported totals are baseline-subtracted so copied host history can't inflate
-  them; a fresh baseline is captured at the start of each run (never reused from
-  a prior run, whose transcripts persist in the per-workspace auth copy) so
-  prior-run usage can't inflate this run's per-run total.
+- Snapshot metric fields report workspace-lifetime usage. Each run's delta is
+  still baseline-subtracted so copied host history can't inflate totals; a fresh
+  baseline is captured at the start of each run (never reused from a prior run,
+  whose transcripts persist in the per-workspace auth copy).
 - Only normalized numeric/accounting data is persisted (see ``usage_store``).
 """
 
@@ -46,8 +46,11 @@ from awf.service.usage_store import (
     REASON_UNAVAILABLE,
     NormalizedUsage,
     UsageSnapshot,
+    accumulate_usage,
     normalize_ccusage_json,
     provider_ccusage_source,
+    read_latest_usage_snapshot,
+    snapshot_usage_metrics,
     subtract_baseline,
     write_usage_snapshot,
 )
@@ -133,6 +136,11 @@ class CcusageCollector(UsageSampler):
         provider: AgentRuntime,
     ) -> _CcusageSampleContext:
         source = provider_ccusage_source(provider)
+        prior_snapshot = await asyncio.to_thread(
+            read_latest_usage_snapshot,
+            workspace_id,
+            work_dir=self._work_dir,
+        )
         ctx = _CcusageSampleContext(
             collector=self,
             compose_project=compose_project,
@@ -140,6 +148,8 @@ class CcusageCollector(UsageSampler):
             workspace_id=workspace_id,
             provider=provider,
             source=source,
+            accumulated_usage_at_run_start=snapshot_usage_metrics(prior_snapshot),
+            prior_ccusage_source=None if prior_snapshot is None else prior_snapshot.ccusage_source,
         )
         if source is None:
             # Unsupported provider: record the reason once, no periodic loop.
@@ -162,6 +172,8 @@ class _CcusageSampleContext(UsageSampleContext):
         workspace_id: str,
         provider: AgentRuntime,
         source: str | None,
+        accumulated_usage_at_run_start: NormalizedUsage | None,
+        prior_ccusage_source: str | None,
     ) -> None:
         self._collector = collector
         self._compose_project = compose_project
@@ -169,6 +181,9 @@ class _CcusageSampleContext(UsageSampleContext):
         self._workspace_id = workspace_id
         self._provider = provider
         self._source = source
+        self._accumulated_usage_at_run_start = accumulated_usage_at_run_start
+        self._prior_ccusage_source = prior_ccusage_source
+        self._latest_accumulated_usage = accumulated_usage_at_run_start
         self._baseline: NormalizedUsage | None = None
         # Set when baseline capture failed (vs. a fresh, legitimately empty one).
         # While set, samples report unavailable instead of subtracting against a
@@ -265,10 +280,17 @@ class _CcusageSampleContext(UsageSampleContext):
                 model=None,
                 phase="live",
                 run_status="running",
+                update_latest=False,
             )
             return
         if usage is not None:
             self._baseline = usage
+        elif (
+            reason == REASON_NO_RECORDS
+            and self._accumulated_usage_at_run_start is not None
+            and self._prior_ccusage_source == self._source
+        ):
+            self._baseline_unavailable_reason = REASON_NO_RECORDS
         elif reason != REASON_NO_RECORDS:
             # ccusage failed for a classified reason (timeout / command error /
             # unreadable output): we can't anchor a trustworthy baseline, so flag
@@ -284,7 +306,12 @@ class _CcusageSampleContext(UsageSampleContext):
         # exec: the start reading is, by definition, a zero delta against the
         # baseline it just anchored (or an unavailable reason when it didn't).
         await self._safe_write_reading(
-            usage=usage, reason=reason, model=model, phase="live", run_status="running"
+            usage=usage,
+            reason=reason,
+            model=model,
+            phase="live",
+            run_status="running",
+            update_latest=False,
         )
 
     async def _safe_sample(self, *, phase: str, run_status: str) -> None:
@@ -309,6 +336,7 @@ class _CcusageSampleContext(UsageSampleContext):
         model: str | None,
         phase: str,
         run_status: str,
+        update_latest: bool = True,
     ) -> None:
         # Swallow-and-log wrapper for seeding the start snapshot from the baseline
         # reading. A failed seed write must not mask the agent outcome nor abort
@@ -316,7 +344,12 @@ class _CcusageSampleContext(UsageSampleContext):
         # _safe_sample rather than propagating.
         try:
             await self._write_reading(
-                usage=usage, reason=reason, model=model, phase=phase, run_status=run_status
+                usage=usage,
+                reason=reason,
+                model=model,
+                phase=phase,
+                run_status=run_status,
+                update_latest=update_latest,
             )
         except asyncio.CancelledError:
             raise
@@ -331,13 +364,10 @@ class _CcusageSampleContext(UsageSampleContext):
 
     async def _sample_and_write(self, *, phase: str, run_status: str) -> None:
         if self._source is None:
-            await self._write(
+            await self._write_unavailable_or_preserved(
                 phase=phase,
                 run_status=run_status,
-                status_label="unavailable",
                 reason=REASON_SOURCE_UNSUPPORTED,
-                metrics=NormalizedUsage(),
-                model=None,
             )
             return
         usage, reason, model = await self._run_ccusage()
@@ -353,11 +383,55 @@ class _CcusageSampleContext(UsageSampleContext):
         model: str | None,
         phase: str,
         run_status: str,
+        update_latest: bool = True,
     ) -> None:
         # Persist one ccusage reading as a baseline-subtracted snapshot. Shared by
         # the periodic/final samples (reading fetched via _run_ccusage) and the
         # start-time seed snapshot (reading reused from _capture_baseline).
         if usage is None:
+            await self._write_unavailable_or_preserved(
+                phase=phase,
+                run_status=run_status,
+                reason=reason,
+            )
+            return
+        if self._baseline_unavailable_reason is not None:
+            # We have a current reading but never anchored a baseline, so a delta
+            # would expose copied host history. Report unavailable with the
+            # baseline failure reason instead of an inflated total.
+            await self._write_unavailable_or_preserved(
+                phase=phase,
+                run_status=run_status,
+                reason=self._baseline_unavailable_reason,
+            )
+            return
+        delta = subtract_baseline(usage, self._baseline)
+        metrics = accumulate_usage(
+            self._accumulated_usage_at_run_start,
+            delta,
+            fallback=self._latest_accumulated_usage,
+        )
+        if metrics is not None and (update_latest or self._latest_accumulated_usage is None):
+            self._latest_accumulated_usage = metrics
+        await self._write(
+            phase=phase,
+            run_status=run_status,
+            status_label="available",
+            reason=None,
+            metrics=metrics or NormalizedUsage(),
+            model=model,
+            run_delta=delta,
+        )
+
+    async def _write_unavailable_or_preserved(
+        self,
+        *,
+        phase: str,
+        run_status: str,
+        reason: str | None,
+    ) -> None:
+        metrics = self._latest_accumulated_usage
+        if metrics is None:
             await self._write(
                 phase=phase,
                 run_status=run_status,
@@ -365,29 +439,17 @@ class _CcusageSampleContext(UsageSampleContext):
                 reason=reason,
                 metrics=NormalizedUsage(),
                 model=None,
+                run_delta=None,
             )
             return
-        if self._baseline_unavailable_reason is not None:
-            # We have a current reading but never anchored a baseline, so a delta
-            # would expose copied host history. Report unavailable with the
-            # baseline failure reason instead of an inflated total.
-            await self._write(
-                phase=phase,
-                run_status=run_status,
-                status_label="unavailable",
-                reason=self._baseline_unavailable_reason,
-                metrics=NormalizedUsage(),
-                model=None,
-            )
-            return
-        delta = subtract_baseline(usage, self._baseline)
         await self._write(
             phase=phase,
             run_status=run_status,
             status_label="available",
-            reason=None,
-            metrics=delta,
-            model=model,
+            reason=reason,
+            metrics=metrics,
+            model=metrics.model,
+            run_delta=None,
         )
 
     async def _write(
@@ -399,6 +461,7 @@ class _CcusageSampleContext(UsageSampleContext):
         reason: str | None,
         metrics: NormalizedUsage,
         model: str | None,
+        run_delta: NormalizedUsage | None,
     ) -> None:
         snapshot = UsageSnapshot(
             workspace_id=self._workspace_id,
@@ -418,6 +481,12 @@ class _CcusageSampleContext(UsageSampleContext):
             cost_estimate=metrics.cost_estimate,
             currency=metrics.currency,
             baseline=self._baseline.as_baseline_dict() if self._baseline is not None else None,
+            run_delta=run_delta.as_baseline_dict() if run_delta is not None else None,
+            accumulated_usage_at_run_start=(
+                self._accumulated_usage_at_run_start.as_baseline_dict()
+                if self._accumulated_usage_at_run_start is not None
+                else None
+            ),
         )
         # Offload the blocking mkdir/write/replace off the event loop, tracking the
         # write so finalize() can drain it. shield keeps the worker-thread job

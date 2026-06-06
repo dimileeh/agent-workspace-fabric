@@ -17,6 +17,7 @@ from awf.db.enums import AgentRuntime
 from awf.service import usage_collection
 from awf.service.usage_collection import CcusageCollector, _is_missing_binary, _RealClock
 from awf.service.usage_store import (
+    NormalizedUsage,
     UsageSnapshot,
     read_latest_usage_snapshot,
     write_usage_snapshot,
@@ -221,6 +222,8 @@ async def test_baseline_not_reused_when_provider_changed(tmp_path: Path) -> None
     # A workspace can switch agents in place (provider recovery fallback), so a
     # prior baseline anchored for a different provider/source must not be reused:
     # subtracting it against an unrelated ccusage source would skew the delta.
+    # The prior lifetime total is still valid workspace usage and must accumulate
+    # with the new provider's fresh-baseline delta.
     write_usage_snapshot(
         UsageSnapshot(
             workspace_id="ws_switch",
@@ -229,6 +232,7 @@ async def test_baseline_not_reused_when_provider_changed(tmp_path: Path) -> None
             status="available",
             phase="final",
             captured_at="2026-05-22T00:00:00+00:00",
+            total_tokens=20,
             baseline={"total_tokens": 100},
         ),
         work_dir=tmp_path,
@@ -251,8 +255,96 @@ async def test_baseline_not_reused_when_provider_changed(tmp_path: Path) -> None
     assert snap.provider == "codex"
     assert snap.ccusage_source == "codex"
     # Stale claude baseline (100) ignored; a fresh codex baseline (10) is captured.
-    assert snap.total_tokens == 7  # fresh baseline 10, final 17
+    assert snap.total_tokens == 27  # prior lifetime 20 + fresh-baseline delta 7
     assert len(runner.calls) == 2  # fresh baseline + final, not a single reused call
+
+
+@pytest.mark.unit
+async def test_second_run_accumulates_prior_lifetime_usage(tmp_path: Path) -> None:
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_lifetime",
+            provider="codex",
+            ccusage_source="codex",
+            status="available",
+            phase="final",
+            run_status="success",
+            captured_at="2026-05-22T00:00:00+00:00",
+            input_tokens=300,
+            cached_input_tokens=50,
+            output_tokens=200,
+            reasoning_output_tokens=20,
+            total_tokens=550,
+            cost_estimate=0.50,
+            currency="USD",
+        ),
+        work_dir=tmp_path,
+    )
+    runner = _ccusage_runner(
+        json.dumps(
+            {
+                "totals": {
+                    "inputTokens": 80,
+                    "cachedInputTokens": 40,
+                    "outputTokens": 20,
+                    "reasoningOutputTokens": 10,
+                    "totalTokens": 140,
+                    "totalCost": 1.20,
+                }
+            }
+        ),
+        json.dumps(
+            {
+                "totals": {
+                    "inputTokens": 90,
+                    "cachedInputTokens": 42,
+                    "outputTokens": 25,
+                    "reasoningOutputTokens": 12,
+                    "totalTokens": 157,
+                    "totalCost": 1.37,
+                }
+            }
+        ),
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_lifetime",
+        provider=AgentRuntime.codex,
+    )
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_lifetime", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.input_tokens == 310
+    assert snap.cached_input_tokens == 52
+    assert snap.output_tokens == 205
+    assert snap.reasoning_output_tokens == 22
+    assert snap.total_tokens == 567
+    assert snap.cost_estimate == pytest.approx(0.67)
+    assert snap.run_delta == {
+        "input_tokens": 10,
+        "cached_input_tokens": 2,
+        "output_tokens": 5,
+        "reasoning_output_tokens": 2,
+        "total_tokens": 17,
+        "cost_estimate": pytest.approx(0.17),
+        "currency": "USD",
+        "model": None,
+    }
+    assert (
+        snap.accumulated_usage_at_run_start
+        == NormalizedUsage(
+            input_tokens=300,
+            cached_input_tokens=50,
+            output_tokens=200,
+            reasoning_output_tokens=20,
+            total_tokens=550,
+            cost_estimate=0.50,
+            currency="USD",
+        ).as_baseline_dict()
+    )
 
 
 @pytest.mark.unit
@@ -298,6 +390,8 @@ async def test_safe_write_reading_reraises_cancellation(tmp_path: Path) -> None:
         workspace_id="ws_cancel",
         provider=AgentRuntime.claude_code,
         source="claude",
+        accumulated_usage_at_run_start=None,
+        prior_ccusage_source=None,
     )
 
     async def _cancel_write(**_kwargs: object) -> None:
@@ -366,8 +460,9 @@ async def test_timeout_runs_targeted_compose_exec_cleanup(tmp_path: Path) -> Non
     snap = read_latest_usage_snapshot("ws_timeout_cleanup", work_dir=tmp_path)
     assert snap is not None
     assert snap.phase == "final"
-    assert snap.status == "unavailable"
+    assert snap.status == "available"
     assert snap.reason == "ccusage_timeout"  # cleanup failure must not change reason coding
+    assert snap.total_tokens == 0
     # Exactly one targeted cleanup exec was issued for the timed-out invocation
     # (the cleanup argv carries the awf-cleanup marker).
     cleanup_calls = [call for call in runner.calls if "awf-cleanup" in call.args]
@@ -474,12 +569,11 @@ async def test_live_snapshots_written_during_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-async def test_start_seeds_running_snapshot_over_prior_run(tmp_path: Path) -> None:
+async def test_start_seed_preserves_prior_lifetime_usage(tmp_path: Path) -> None:
     # A prior run left a final snapshot with metrics for this workspace id, which
-    # retries/recovery reuse. At start — before the first live sample — the
-    # collector must overwrite it with a fresh zero-delta "running" snapshot so
-    # workspace_usage_summary can't keep reporting the prior run's 500-token total
-    # as this run's usage during the pre-first-sample window.
+    # retries/recovery reuse. At start — before the first live sample — the fresh
+    # baseline seed must preserve the prior lifetime total instead of resetting
+    # the workspace-level LLM usage display to zero.
     write_usage_snapshot(
         UsageSnapshot(
             workspace_id="ws_seed",
@@ -510,18 +604,57 @@ async def test_start_seeds_running_snapshot_over_prior_run(tmp_path: Path) -> No
     assert seed.phase == "live"
     assert seed.run_status == "running"
     assert seed.status == "available"
-    assert seed.total_tokens == 0  # baseline 120 - baseline 120, not the prior 500
+    assert seed.total_tokens == 500
+    assert seed.run_delta == {
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
+        "total_tokens": 0,
+        "cost_estimate": None,
+        "currency": None,
+        "model": None,
+    }
     assert len(runner.calls) == 1  # only the baseline exec; the seed reuses it
 
     await ctx.finalize(status="cancelled")
 
 
 @pytest.mark.unit
-async def test_start_seed_clears_stale_metrics_when_baseline_unavailable(tmp_path: Path) -> None:
+async def test_first_run_final_failure_preserves_seeded_zero_usage(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 10}}))
+    runner.queue_result(returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON)
+    runner.queue_result(returncode=0, stdout="awf cleanup: killed")
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_seed_zero",
+        provider=AgentRuntime.claude_code,
+    )
+
+    seed = read_latest_usage_snapshot("ws_seed_zero", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.status == "available"
+    assert seed.total_tokens == 0
+
+    await ctx.finalize(status="failed")
+
+    snap = read_latest_usage_snapshot("ws_seed_zero", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.status == "available"
+    assert snap.reason == "ccusage_timeout"
+    assert snap.total_tokens == 0
+
+
+@pytest.mark.unit
+async def test_start_seed_preserves_prior_usage_when_baseline_unavailable(
+    tmp_path: Path,
+) -> None:
     # Same reused-id scenario, but the run-start baseline read times out, so no
-    # trustworthy baseline is anchored. The seed must still overwrite the prior
-    # run's metrics — reporting unavailable with the baseline reason rather than
-    # leaving the stale 500-token total as this run's usage.
+    # trustworthy baseline is anchored. The seed must still preserve the prior
+    # lifetime total while surfacing the baseline failure reason.
     write_usage_snapshot(
         UsageSnapshot(
             workspace_id="ws_seed_fail",
@@ -548,11 +681,148 @@ async def test_start_seed_clears_stale_metrics_when_baseline_unavailable(tmp_pat
     assert seed is not None
     assert seed.phase == "live"
     assert seed.run_status == "running"
-    assert seed.status == "unavailable"
+    assert seed.status == "available"
     assert seed.reason == "ccusage_timeout"  # baseline failure reason, not "available"
-    assert seed.total_tokens is None  # prior run's 500 cleared, not reported
+    assert seed.total_tokens == 500
 
     await ctx.finalize(status="failed")
+
+
+@pytest.mark.unit
+async def test_prior_usage_with_no_records_baseline_preserves_prior_totals(
+    tmp_path: Path,
+) -> None:
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_no_records_prior",
+            provider="claude_code",
+            ccusage_source="claude",
+            status="available",
+            phase="final",
+            captured_at="2026-05-22T00:00:00+00:00",
+            total_tokens=500,
+        ),
+        work_dir=tmp_path,
+    )
+    runner = _ccusage_runner(
+        json.dumps({}),  # baseline returned no records despite prior lifetime state
+        json.dumps({"totals": {"totalTokens": 50}}),
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_no_records_prior",
+        provider=AgentRuntime.claude_code,
+    )
+
+    seed = read_latest_usage_snapshot("ws_no_records_prior", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.status == "available"
+    assert seed.reason == "ccusage_no_records"
+    assert seed.total_tokens == 500
+
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_no_records_prior", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.status == "available"
+    assert snap.reason == "ccusage_no_records"
+    assert snap.total_tokens == 500
+
+
+@pytest.mark.unit
+async def test_provider_switch_with_no_records_baseline_adds_new_source_usage(
+    tmp_path: Path,
+) -> None:
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_no_records_switch",
+            provider="claude_code",
+            ccusage_source="claude",
+            status="available",
+            phase="final",
+            captured_at="2026-05-22T00:00:00+00:00",
+            total_tokens=500,
+        ),
+        work_dir=tmp_path,
+    )
+    runner = _ccusage_runner(
+        json.dumps({}),  # codex has no records yet, so this is a zero baseline
+        json.dumps({"totals": {"totalTokens": 50}}),
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_no_records_switch",
+        provider=AgentRuntime.codex,
+    )
+
+    seed = read_latest_usage_snapshot("ws_no_records_switch", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.status == "available"
+    assert seed.reason == "ccusage_no_records"
+    assert seed.total_tokens == 500
+    assert seed.ccusage_source == "codex"
+
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_no_records_switch", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.provider == "codex"
+    assert snap.ccusage_source == "codex"
+    assert snap.status == "available"
+    assert snap.reason is None
+    assert snap.total_tokens == 550
+    assert snap.baseline is None
+    assert snap.run_delta == {
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
+        "total_tokens": 50,
+        "cost_estimate": None,
+        "currency": None,
+        "model": None,
+    }
+
+
+@pytest.mark.unit
+async def test_final_failure_after_live_sample_preserves_latest_lifetime_usage(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 10}}))
+    runner.queue_result(returncode=0, stdout=json.dumps({"totals": {"totalTokens": 18}}))
+    runner.queue_result(returncode=124, stdout="", stderr="", reason_code=COMMAND_TIMEOUT_REASON)
+    runner.queue_result(returncode=0, stdout="awf cleanup: killed")
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=clock)
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_live_then_fail",
+        provider=AgentRuntime.claude_code,
+    )
+
+    await _wait_for(lambda: len(clock.sleeps) == 1)
+    clock.tick()
+    await _wait_for(
+        lambda: (
+            (snap := read_latest_usage_snapshot("ws_live_then_fail", work_dir=tmp_path)) is not None
+            and snap.total_tokens == 8
+        )
+    )
+
+    await ctx.finalize(status="failed")
+
+    snap = read_latest_usage_snapshot("ws_live_then_fail", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.phase == "final"
+    assert snap.status == "available"
+    assert snap.reason == "ccusage_timeout"
+    assert snap.total_tokens == 8
 
 
 @pytest.mark.unit
@@ -592,8 +862,9 @@ async def test_final_sample_reason_codes(
     snap = read_latest_usage_snapshot("ws_reason", work_dir=tmp_path)
     assert snap is not None
     assert snap.phase == "final"
-    assert snap.status == "unavailable"
+    assert snap.status == "available"
     assert snap.reason == expected_reason
+    assert snap.total_tokens == 0
 
 
 @pytest.mark.unit
@@ -622,6 +893,37 @@ async def test_unsupported_provider_records_reason_without_running_ccusage(
     assert final.phase == "final"
     assert final.reason == "ccusage_source_unsupported"
     assert runner.calls == []
+
+
+@pytest.mark.unit
+async def test_unsupported_provider_preserves_prior_lifetime_usage(tmp_path: Path) -> None:
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_unsupported_prior",
+            provider="codex",
+            ccusage_source="codex",
+            status="available",
+            phase="final",
+            captured_at="2026-05-22T00:00:00+00:00",
+            total_tokens=123,
+        ),
+        work_dir=tmp_path,
+    )
+    collector = CcusageCollector(runner=FakeCommandRunner(), work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_unsupported_prior",
+        provider=AgentRuntime.cursor,
+    )
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_unsupported_prior", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.phase == "final"
+    assert snap.status == "available"
+    assert snap.reason == "ccusage_source_unsupported"
+    assert snap.total_tokens == 123
 
 
 @pytest.mark.unit
@@ -947,6 +1249,43 @@ async def test_timeout_cleanup_logs_non_cancel_errors(
         cleanup_script="cleanup",
     )
     await ctx._cleanup_timed_out_invocation(invocation)
+    await ctx.finalize(status="failed")
+
+
+@pytest.mark.unit
+async def test_timeout_cleanup_reraises_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_cleanup_cancel",
+        provider=AgentRuntime.claude_code,
+    )
+
+    async def _raise_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(usage_collection, "cleanup_compose_exec_invocation", _raise_cleanup)
+    invocation = usage_collection.TrackedComposeExec(
+        args=["docker", "compose", "exec"],
+        invocation_id="inv",
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        service="agent",
+        workdir="/workspace",
+        source="usage",
+        label="awf=usage",
+        wrapper_script="wrapper",
+        cleanup_script="cleanup",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await ctx._cleanup_timed_out_invocation(invocation)
+
     await ctx.finalize(status="failed")
 
 
