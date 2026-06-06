@@ -148,8 +148,14 @@ AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE = re.compile(
 # bridge stops it crossing a sentence break), so a *positive* example such as
 # "Run `awf smoke run --project <p> --mocked-local`" carries no lead-in, keeps its
 # backticks, and is still scanned.
+# Like the init prohibition siblings, the lead-in carries a negative lookahead that
+# rejects double-negative *reminders* such as "Do not forget to run
+# `awf smoke run <path>`": "do not forget to X" prescribes X, so it is prescriptive
+# legacy bare-positional guidance, not a prohibition, and must stay an R4 offender
+# rather than have its backticks unwrapped out of the inline scan.
 SMOKE_RUN_PROHIBITION_RE = re.compile(
-    r"(?P<lead>do not|don't|never|avoid)(?P<between>[^.`\n]*?)"
+    r"(?P<lead>do not|don't|never|avoid)(?!\s+"
+    r"(?:forget|neglect|hesitate|fail|omit|skip|miss|overlook)\b)(?P<between>[^.`\n]*?)"
     r"`(?P<span>awf smoke run[^`\n]*)`",
     re.IGNORECASE,
 )
@@ -1403,6 +1409,37 @@ def test_helper_does_not_exempt_do_not_forget_init_reminder() -> None:
     genuine = "Do not run `awf init` without a path for service setup."
     assert "awf init" not in _inline_command_mentions(_without_init_prohibitions(genuine))
     assert _bootstrap_offenders(genuine) == []
+
+
+def test_helper_does_not_exempt_do_not_forget_smoke_reminder() -> None:
+    # The R4 analog of `test_helper_does_not_exempt_do_not_forget_init_reminder`:
+    # a double-negative *reminder* such as "Do not forget to run
+    # `awf smoke run /tmp/proj`" is prescriptive legacy bare-positional guidance,
+    # not a prohibition ("do not forget to X" means "do X"). It must NOT be
+    # unwrapped, so R4's inline scan still surfaces the backticked span and rejects
+    # it as a bare-positional-path offender. Without the inverting-verb exclusion
+    # the strip swallowed the span and the drift guard waved the legacy example
+    # through.
+    def smoke_offenders(text: str) -> list[str]:
+        return [
+            offense
+            for line in _inline_command_mentions(_without_smoke_prohibitions(text))
+            if (invocation := _parse_smoke_invocation(line)) is not None
+            and (offense := _smoke_invocation_offense(invocation)) is not None
+        ]
+
+    reminder = "Do not forget to run `awf smoke run /tmp/proj` before release."
+    assert "bare positional path" in smoke_offenders(reminder)
+    # The same applies to the other inverting reminder verbs and lead-ins.
+    for variant in (
+        "Don't forget to run `awf smoke run /tmp/proj` first.",
+        "Never neglect to run `awf smoke run /tmp/proj` here.",
+    ):
+        assert "bare positional path" in smoke_offenders(variant)
+    # A genuine prohibition (no inverting verb) stays exempted exactly as before,
+    # so the exclusion never weakens the legitimate "do not run bare smoke" warning.
+    genuine = "Do not run `awf smoke run /tmp/proj` directly; pass `--project`."
+    assert smoke_offenders(genuine) == []
 
 
 # --------------------------------------------------------------------------- #
