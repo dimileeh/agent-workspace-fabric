@@ -104,8 +104,13 @@ INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 # path"); the sibling AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE below handles the
 # qualifier-*after* wording that does. A path-bearing `awf init <path>` span has
 # its backtick after the path, not after `init`, so it is left untouched.
+# The lead-in carries a negative lookahead that rejects double-negative
+# *reminders* such as "Do not forget to use no-path `awf init`": "do not forget
+# to X" prescribes X, so it is legacy no-path guidance, not a prohibition, and
+# must stay an R2 offender rather than be unwrapped.
 NO_PATH_INIT_PROHIBITION_RE = re.compile(
-    r"(?P<lead>do not|don't|never|avoid)(?P<between>[^.`\n]*?)"
+    r"(?P<lead>do not|don't|never|avoid)(?!\s+"
+    r"(?:forget|neglect|hesitate|fail|omit|skip|miss|overlook)\b)(?P<between>[^.`\n]*?)"
     r"(?P<qualifier>no[- ]path|without a path)\s+`awf init`",
     re.IGNORECASE,
 )
@@ -119,9 +124,16 @@ NO_PATH_INIT_PROHIBITION_RE = re.compile(
 # bridge stops it spanning a sentence break before the code span). That gate makes
 # unwrapping it safe even for R3: a *prescriptive* "run `awf init` without a path
 # to bootstrap" carries no lead-in, keeps its backticks, and is still flagged as a
-# reintroduction.
+# reintroduction. The lead-in also carries a negative lookahead rejecting
+# double-negative *reminders* ("Do not forget to run `awf init` without a path to
+# bootstrap"): "do not forget to X" prescribes X, so the strip must not unwrap it —
+# otherwise R2 would stop extracting the backticked bare `awf init` and R3 would
+# stop matching the "without a path" bootstrap text, waving prescriptive legacy
+# no-path guidance through both scans.
 AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE = re.compile(
-    r"(?P<lead>do not|don't|never|avoid)(?P<between>[^.`\n]*?)`awf init`"
+    r"(?P<lead>do not|don't|never|avoid)(?!\s+"
+    r"(?:forget|neglect|hesitate|fail|omit|skip|miss|overlook)\b)"
+    r"(?P<between>[^.`\n]*?)`awf init`"
     r"(?P<qualifier>\s+(?:without a path|no[- ]path))",
     re.IGNORECASE,
 )
@@ -1339,6 +1351,37 @@ def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     # root cause that `_init_arg_status` already reports as "bare".
     assert _bootstrap_offenders("awf init") == []
     assert _init_arg_status("awf init") == "bare"
+
+
+def test_helper_does_not_exempt_do_not_forget_init_reminder() -> None:
+    # A double-negative *reminder* such as "Do not forget to run `awf init`
+    # without a path to bootstrap Core" is prescriptive legacy no-path guidance,
+    # not a prohibition: the `do not` lead-in is inverted by `forget` ("do not
+    # forget to X" means "do X"). It must NOT be unwrapped, so both R2's inline
+    # scan and R3's bootstrap scan still reject it. Without the inverting-verb
+    # exclusion the strip swallowed the backticked span and the drift guard waved
+    # the legacy no-path init through.
+    reminder = "Do not forget to run `awf init` without a path to bootstrap Core."
+    # R2: the backticked bare `awf init` is still surfaced as an inline mention.
+    assert "awf init" in _inline_command_mentions(_without_init_prohibitions(reminder))
+    # R3: the no-path-init-as-bootstrap framing is still flagged.
+    assert _bootstrap_offenders(reminder)
+    # The same applies to the other inverting reminder verbs and lead-ins.
+    for variant in (
+        "Don't forget to run `awf init` without a path to bootstrap.",
+        "Never neglect to run `awf init` without a path to bootstrap.",
+    ):
+        assert "awf init" in _inline_command_mentions(_without_init_prohibitions(variant))
+        assert _bootstrap_offenders(variant)
+    # The before-span "no-path `awf init`" reminder is likewise not exempted by
+    # R2's inline scan.
+    before = "Do not forget to use no-path `awf init` for service setup."
+    assert "awf init" in _inline_command_mentions(_without_init_prohibitions(before))
+    # A genuine prohibition (no inverting verb) stays exempted exactly as before,
+    # so the exclusion never weakens the legitimate "do not run no-path" guidance.
+    genuine = "Do not run `awf init` without a path for service setup."
+    assert "awf init" not in _inline_command_mentions(_without_init_prohibitions(genuine))
+    assert _bootstrap_offenders(genuine) == []
 
 
 # --------------------------------------------------------------------------- #
