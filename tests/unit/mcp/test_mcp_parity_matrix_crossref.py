@@ -398,7 +398,7 @@ def test_parity_matrix_cli_commands_or_absent() -> None:
             tokens = part.split()
             base_end = len(tokens)
             for i, t in enumerate(tokens):
-                if t.startswith("--"):
+                if t.startswith("--") or t.startswith("<"):
                     base_end = i
                     break
             base_cmd = " ".join(tokens[:base_end])

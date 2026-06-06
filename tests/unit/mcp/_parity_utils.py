@@ -127,7 +127,7 @@ def _extract_cli_invocations_from_cell(cell: str) -> list[CliInvocation]:
         tokens = part.split()
         base_end = len(tokens)
         for index, token in enumerate(tokens):
-            if token.startswith("--"):
+            if token.startswith("--") or token.startswith("<"):
                 base_end = index
                 break
         command = " ".join(tokens[:base_end])
