@@ -707,6 +707,52 @@ def _env_assignment_line_with_key(line: str, key: str) -> str:
     return f"{key}{line[match.end('key') :]}"
 
 
+def _replace_env_assignment_value(line: str, value: str) -> str:
+    """Return ``line`` (no trailing newline) with its assignment value set to ``value``.
+
+    Everything up to and including ``=`` is kept verbatim, so the key spelling and
+    any ``export`` prefix are preserved while the old value (and any same-line
+    trailing comment) is replaced.
+    """
+    match = _ENV_ASSIGNMENT_RE.match(line)
+    if match is None:  # pragma: no cover - callers only pass matched assignment lines
+        return line
+    return f"{line[: match.end()]}{value}"
+
+
+def _persist_console_host_port(env_file: Path, console_port: int) -> None:
+    """Persist ``AWF_CONSOLE_HOST_PORT=<console_port>`` into the active service env file.
+
+    Updates an existing assignment in place (preserving key spelling, an ``export``
+    prefix, and all unrelated lines/comments), appends a fresh assignment when the
+    key is absent, and creates the file (and parent dirs) when it does not yet exist.
+    ``AWF_CONSOLE_URL`` and every other key are left untouched.
+    """
+    value = str(console_port)
+    assignment = f"AWF_CONSOLE_HOST_PORT={value}"
+    if not env_file.exists():
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(f"{assignment}\n", encoding="utf-8")
+        return
+
+    text = env_file.read_text(encoding="utf-8")
+    target_identity = _env_assignment_key_identity("AWF_CONSOLE_HOST_PORT")
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        key = _env_assignment_key(line)
+        if key is None or _env_assignment_key_identity(key) != target_identity:
+            continue
+        body = line.rstrip("\r\n")
+        newline = line[len(body) :]
+        lines[index] = f"{_replace_env_assignment_value(body, value)}{newline}"
+        env_file.write_text("".join(lines), encoding="utf-8")
+        return
+
+    if text and not text.endswith(("\n", "\r")):
+        text += "\n"
+    env_file.write_text(f"{text}{assignment}\n", encoding="utf-8")
+
+
 def _env_seed_has_meaningful_leading_context(lines: list[str]) -> bool:
     """Return whether the seed owns the merged file header."""
     for line in lines:
