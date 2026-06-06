@@ -21,6 +21,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALLER = REPO_ROOT / "packaging" / "install.sh"
+UNINSTALLER = REPO_ROOT / "packaging" / "uninstall.sh"
 REPOSITORY_URL = "https://github.com/dimileeh/aira-agent-workspace-fabric"
 
 
@@ -28,6 +29,12 @@ REPOSITORY_URL = "https://github.com/dimileeh/aira-agent-workspace-fabric"
 def installer_path() -> Path:
     """Absolute path to the checked-in installer under test."""
     return INSTALLER
+
+
+@pytest.fixture
+def uninstaller_path() -> Path:
+    """Absolute path to the checked-in uninstaller under test."""
+    return UNINSTALLER
 
 
 class InstallerHarness:
@@ -71,6 +78,7 @@ class InstallerHarness:
         *,
         install_rc: int = 0,
         uninstall_rc: int = 0,
+        self_uninstall_rc: int = 0,
         list_output: str = "",
         tool_bin_dir: str | None = None,
     ) -> str:
@@ -80,6 +88,14 @@ class InstallerHarness:
         ``write_uv_installer`` (embeds the stub so a bootstrap drops a runnable
         ``uv`` into ``$UV_INSTALL_DIR``), so a bootstrapped uv behaves exactly
         like one the harness placed directly.
+
+        ``self_uninstall_rc`` is reserved for the ``uv self uninstall`` stub
+        case below. The hosted uninstaller (``packaging/uninstall.sh``) does
+        **not** call ``uv self uninstall`` — it deletes the uv/uvx binaries
+        directly via ``rm -f`` (``test_uninstall_sh_uv_removal`` asserts the
+        subcommand is never invoked). The stub case exists so the harness does
+        not fall through to the catch-all ``exit 0`` if a future code path ever
+        invokes it, but no current code path triggers it.
         """
         bin_dir_expr = (
             json.dumps(tool_bin_dir) if tool_bin_dir is not None else '"$HOME/.local/bin"'
@@ -96,6 +112,8 @@ class InstallerHarness:
             "    printf '%s\\n' \"uv-tool-uninstall-env UV_TOOL_BIN_DIR=${UV_TOOL_BIN_DIR:-<unset>}\""
             ' >> "$AWF_STUB_LOG"\n'
             f"    exit {uninstall_rc} ;;\n"
+            '  "self uninstall")\n'
+            f"    exit {self_uninstall_rc} ;;\n"
             '  "tool list")\n'
             f"    printf '%b' {json.dumps(list_output)}\n"
             "    exit 0 ;;\n"
@@ -125,6 +143,7 @@ class InstallerHarness:
         *,
         install_rc: int = 0,
         uninstall_rc: int = 0,
+        self_uninstall_rc: int = 0,
         list_output: str = "",
         tool_bin_dir: str | None = None,
     ) -> None:
@@ -136,12 +155,17 @@ class InstallerHarness:
         configured to install elsewhere. ``tool uninstall`` additionally records
         a ``uv-tool-uninstall-env UV_TOOL_BIN_DIR=<value|<unset>>`` line so tests
         can assert the installer re-exports the install-time bin dir on uninstall.
+        ``self_uninstall_rc`` feeds the ``uv self uninstall`` stub case below.
+        The hosted uninstaller does **not** call ``uv self uninstall`` — it
+        deletes the uv/uvx binaries directly; the stub case is a defensive
+        fallback that no current code path triggers.
         """
         self._write_stub(
             "uv",
             self._uv_behavior(
                 install_rc=install_rc,
                 uninstall_rc=uninstall_rc,
+                self_uninstall_rc=self_uninstall_rc,
                 list_output=list_output,
                 tool_bin_dir=tool_bin_dir,
             ),
@@ -388,6 +412,64 @@ class InstallerHarness:
         path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path
 
+    # -- uninstaller seed fixtures ------------------------------------
+
+    def awf_home(self) -> Path:
+        """The hermetic ``AWF_HOME`` the uninstaller's state lanes target.
+
+        Mirrors the production default (``~/.awf``) but rooted under the temp
+        ``HOME`` so a test can seed config/state/secret paths and assert which
+        the uninstaller removes — and, crucially, which it preserves. Passed to
+        the uninstaller via the ``AWF_HOME`` env seam.
+        """
+        return self.home / ".awf"
+
+    def uv_marker_path(self) -> Path:
+        """The hermetic ``AWF_UV_MARKER`` path the uv-removal lane gates on."""
+        return self.awf_home() / "uv-bootstrap.marker"
+
+    def write_uv_marker(self, *, uv_bin_dir: str | None = None) -> Path:
+        """Seed the AWF uv-ownership marker that authorizes ``--remove-uv``.
+
+        ``install.sh``'s ``bootstrap_uv`` writes this deterministic marker
+        (``installed_by=awf`` plus ``uv_bin_dir=<dir>``) only after AWF actually
+        bootstraps uv, so its presence is the uninstaller's proof that the uv on
+        the box is AWF-owned and safe to remove.
+        """
+        marker = self.uv_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        resolved_bin = uv_bin_dir if uv_bin_dir is not None else str(self.home / ".local" / "bin")
+        marker.write_text(f"installed_by=awf\nuv_bin_dir={resolved_bin}\n", encoding="utf-8")
+        return marker
+
+    def write_awf_config(self, *, content: str = "install_channel: stable\n") -> Path:
+        """Seed the non-secret host setup config ``${AWF_HOME}/config.yml``."""
+        config = self.awf_home() / "config.yml"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(content, encoding="utf-8")
+        return config
+
+    def write_awf_state(self) -> Path:
+        """Seed the host runtime/state dir ``${AWF_HOME}/service`` with a file."""
+        state = self.awf_home() / "service"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "runtime.json").write_text("{}\n", encoding="utf-8")
+        return state
+
+    def write_awf_secret(self) -> Path:
+        """Seed a plain-file secret store under ``${AWF_HOME}`` to prove it survives.
+
+        The uninstaller preserves credentials by default and its state lanes
+        target an explicit allowlist (only ``config.yml`` and ``service/``), so a
+        secrets path beside them must outlive every purge lane. Tests assert this
+        file still exists after ``--purge-config``/``--purge-state``/``--all``.
+        """
+        secret = self.awf_home() / "secrets.yml"
+        secret.parent.mkdir(parents=True, exist_ok=True)
+        secret.write_text("openai: sk-REDACTED-not-a-real-token\n", encoding="utf-8")
+        secret.chmod(0o600)
+        return secret
+
     # -- runner --------------------------------------------------------
 
     def shadowed_system_path(self) -> str:
@@ -447,15 +529,24 @@ class InstallerHarness:
         manifest: Path | None = None,
         extra_env: dict[str, str] | None = None,
         stdin: str | None = None,
+        script: Path = INSTALLER,
     ) -> subprocess.CompletedProcess[str]:
-        """Run the installer with a hermetic env and captured output.
+        """Run a packaging script with a hermetic env and captured output.
+
+        ``script`` selects which checked-in script runs (the installer by
+        default, or ``UNINSTALLER`` for the hosted uninstaller). The same
+        hermetic ``HOME``/``PATH``/stub-log environment drives both, so the
+        uninstaller's managed-removal, state-cleanup, and uv-removal lanes are
+        exercised against the same stub ``uv``/``pipx``/``awf`` the installer
+        tests use.
 
         ``stdin`` feeds the process standard input (used to confirm/decline the
         interactive uv-bootstrap prompt under the
-        ``AWF_INSTALL_FORCE_INTERACTIVE`` seam). When it is ``None`` the child's
-        stdin is ``/dev/null`` so ``[ -t 0 ]`` is deterministically non-TTY and
-        the non-interactive decision path is exercised regardless of how pytest
-        was launched.
+        ``AWF_INSTALL_FORCE_INTERACTIVE`` seam, or the uninstaller's destructive
+        confirmation under ``AWF_UNINSTALL_FORCE_INTERACTIVE``). When it is
+        ``None`` the child's stdin is ``/dev/null`` so ``[ -t 0 ]`` is
+        deterministically non-TTY and the non-interactive decision path is
+        exercised regardless of how pytest was launched.
         """
         system_path = self.shadowed_system_path()
         env: dict[str, str] = {
@@ -478,7 +569,7 @@ class InstallerHarness:
             run_kwargs["stdin"] = subprocess.DEVNULL
         else:
             run_kwargs["input"] = stdin
-        return subprocess.run(["bash", str(INSTALLER), *args], **run_kwargs)  # type: ignore[call-overload]
+        return subprocess.run(["bash", str(script), *args], **run_kwargs)  # type: ignore[call-overload]
 
     def calls(self) -> list[str]:
         """Return the recorded stub invocations (one ``name args`` per line)."""

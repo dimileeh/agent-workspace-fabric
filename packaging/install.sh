@@ -25,6 +25,16 @@
 #                                 official https://astral.sh/uv/install.sh).
 #   AWF_INSTALL_FORCE_INTERACTIVE treat stdin as a TTY so the bootstrap confirm
 #                                 prompt can be exercised under a piped stdin.
+#   AWF_HOME                      base dir for AWF host state; the uv-ownership
+#                                 marker default is derived from it (defaults to
+#                                 ${HOME}/.awf).
+#   AWF_UV_MARKER                 path of the uv-ownership marker bootstrap_uv
+#                                 writes after a real uv bootstrap (defaults to
+#                                 ${AWF_HOME}/uv-bootstrap.marker). The hosted
+#                                 uninstaller (packaging/uninstall.sh) consumes
+#                                 it to prove AWF bootstrapped uv before removing
+#                                 it; overridable so install/uninstall tests share
+#                                 a hermetic path.
 #   --shell <name>                override shell detection for PATH advice.
 
 set -euo pipefail
@@ -32,6 +42,19 @@ set -euo pipefail
 PACKAGE="agent-workspace-fabric"
 DEFAULT_REPO_URL="https://github.com/dimileeh/aira-agent-workspace-fabric"
 MANIFEST_BASENAME="awf-install-manifest.json"
+
+# Base dir for AWF host state. Matches the host setup default (~/.awf; see
+# src/awf/host_setup/config.py) and the hosted uninstaller's AWF_HOME, so the
+# uv-ownership marker below tracks a custom AWF_HOME on both scripts without a
+# separate seam.
+AWF_HOME="${AWF_HOME:-${HOME}/.awf}"
+# uv-ownership marker. Written only on a real bootstrap_uv (never under --dry-run)
+# so the hosted uninstaller's marker-gated --remove-uv can prove AWF installed uv
+# and refuse to remove a uv the user brought themselves. Derived from ${AWF_HOME}
+# so a custom AWF_HOME moves it automatically (the uninstaller derives the same
+# default); overridable via the AWF_UV_MARKER env seam for hermetic install/
+# uninstall tests.
+AWF_UV_MARKER="${AWF_UV_MARKER:-${AWF_HOME}/uv-bootstrap.marker}"
 
 VERSION=""
 CHANNEL="stable"
@@ -830,6 +853,15 @@ bootstrap_uv() {
     [ -s "$installer_file" ] \
         || fail UV_BOOTSTRAP_FAILED "downloaded uv installer is empty: ${src}"
     local uv_bin_dir="${HOME}/.local/bin"
+    # Capture whether uv already lived in uv_bin_dir *before* we run the installer.
+    # uv can be installed in the default ${HOME}/.local/bin yet be absent from PATH
+    # (a fresh shell, profile not yet sourced), which is exactly what makes
+    # prepare_install_method's `command -v uv` miss and route here. In that case the
+    # binaries are the user's, not ours, so we must not later claim ownership of them.
+    local uv_preexisted=0
+    if [ -e "${uv_bin_dir}/uv" ] || [ -e "${uv_bin_dir}/uvx" ]; then
+        uv_preexisted=1
+    fi
     UV_INSTALL_DIR="$uv_bin_dir" UV_NO_MODIFY_PATH=1 sh "$installer_file" \
         || fail UV_BOOTSTRAP_FAILED "the uv installer exited non-zero"
     case ":${PATH}:" in
@@ -841,6 +873,26 @@ bootstrap_uv() {
     esac
     command -v uv >/dev/null 2>&1 \
         || fail UV_BOOTSTRAP_FAILED "uv is still not on PATH after bootstrap (expected it in ${uv_bin_dir})"
+    # Record AWF ownership of this uv so the hosted uninstaller can later prove it
+    # bootstrapped uv before removing it (marker-gated --remove-uv). Deterministic
+    # (no timestamp) and never written under --dry-run, which returns above before
+    # any mutation. Marker failures must not fail an otherwise successful install,
+    # so a write problem only warns.
+    #
+    # Only claim ownership when AWF actually created the binaries. If uv (or uvx)
+    # already sat in uv_bin_dir before the installer ran, it was placed by the user,
+    # so writing the marker would let a later `uninstall.sh --remove-uv` delete a uv
+    # the user installed themselves — breaking the documented "uv you installed
+    # yourself is never removed" contract. Skip the marker in that case; the
+    # uninstaller then refuses --remove-uv with UV_REMOVAL_REFUSED_UNOWNED.
+    if [ "$uv_preexisted" -eq 1 ]; then
+        say "uv was already installed in ${uv_bin_dir}; not marking it AWF-owned, so --remove-uv will not remove it."
+    elif mkdir -p "$(dirname "$AWF_UV_MARKER")" 2>/dev/null &&
+        printf 'installed_by=awf\nuv_bin_dir=%s\n' "$uv_bin_dir" >"$AWF_UV_MARKER" 2>/dev/null; then
+        :
+    else
+        warn "could not write uv-ownership marker at ${AWF_UV_MARKER}; --remove-uv will refuse to remove this uv later"
+    fi
     say "Bootstrapped uv into ${uv_bin_dir}."
 }
 
