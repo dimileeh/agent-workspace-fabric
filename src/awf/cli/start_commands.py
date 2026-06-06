@@ -222,20 +222,27 @@ def _resolve_start_bootstrap_inputs(
     from awf.service.config import local_service_environ, resolve_service_settings
 
     if verified is not None:
-        from awf.cli.init_ops import _migrate_legacy_service_env_file
+        from awf.cli.init_ops import (
+            _migrate_legacy_service_env_file,
+            _persist_console_host_port,
+        )
 
         compose_file = verified.compose_file
         asset_root: Path | None = verified.root
+        root_env = verified.root / ".env"
         env_migration = _migrate_legacy_service_env_file(
-            verified.root / ".env",
+            root_env,
             verified.root / ".env.example",
         )
-        root_env = verified.root / ".env"
+        # Persist after migration so a migrated file is updated, not clobbered.
+        if console_port is not None:
+            _persist_console_host_port(root_env, console_port)
         read_env_file = root_env if root_env.exists() else None
         compose_env_file = read_env_file
     else:
         from awf.cli.init_ops import (
             _migrate_legacy_service_env_file,
+            _persist_console_host_port,
             _resolve_service_compose_paths,
             _resolve_service_runtime_env_files,
         )
@@ -247,6 +254,8 @@ def _resolve_start_bootstrap_inputs(
             raw_env_file,
             paths_verified=True,
         )
+        if console_port is not None:
+            _persist_console_host_port(read_env_file, console_port)
         asset_root = None
 
     service_env = local_service_environ(env_file=read_env_file)
