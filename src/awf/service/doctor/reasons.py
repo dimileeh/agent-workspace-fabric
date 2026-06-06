@@ -52,23 +52,88 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "FORGE_NOT_SUPPORTED": _ReasonText(
         (
-            "AWF detected a code forge it does not yet support. Only GitHub is "
-            "implemented; BitBucket is detected but not yet available."
+            "AWF detected a code forge it does not support. GitHub and BitBucket "
+            "Cloud are implemented; any other forge fails fast."
         ),
         (
-            "Use a GitHub-hosted repository for now, or track BitBucket support in "
-            "issue #345 (Phase 1 adds detection only). Recreate the workspace "
-            "against a github.com remote."
+            "Use a GitHub or BitBucket Cloud repository, or track support for the "
+            "detected forge upstream. Recreate the workspace against a supported "
+            "remote (github.com or bitbucket.org)."
         ),
         (
-            "The workspace repository URL resolved to a non-GitHub forge (for "
-            "example bitbucket.org), or the workspace profile set `forge: "
-            "bitbucket`. Phase 1 of issue #345 adds forge detection without a "
-            "BitBucket client, so the workspace fails fast instead of mis-routing "
+            "The workspace repository URL resolved to an unsupported forge (a host "
+            "other than github.com or bitbucket.org), or the workspace profile set "
+            "an unsupported `forge:` value. AWF fails fast instead of mis-routing "
             "to GitHub."
         ),
         "awf workspace create",
         _reason_catalog_link("FORGE_NOT_SUPPORTED"),
+    ),
+    "BITBUCKET_AUTH_NOT_CONFIGURED": _ReasonText(
+        "AWF could not build BitBucket Cloud credentials from the environment.",
+        (
+            "Set BITBUCKET_AUTH_MODE (basic|bearer) and BITBUCKET_API_TOKEN (plus "
+            "BITBUCKET_EMAIL for basic mode) in the AWF service environment, then "
+            "remonitor the workspace."
+        ),
+        (
+            "The BitBucket auth mode, API token, or email is missing or malformed. "
+            "App passwords are not supported; use an Atlassian API token."
+        ),
+        "awf service doctor",
+        _reason_catalog_link("BITBUCKET_AUTH_NOT_CONFIGURED"),
+    ),
+    "BITBUCKET_PIPELINE_FULL_RERUN": _ReasonText(
+        (
+            "AWF re-ran the entire BitBucket pipeline because BitBucket Cloud has "
+            "no failed-only rerun API (that action is UI-only)."
+        ),
+        (
+            "No action required. The full pipeline was retriggered for the PR; "
+            "inspect the monitor log if reruns keep recurring."
+        ),
+        (
+            "BitBucket Cloud exposes only a whole-pipeline trigger over REST, so a "
+            "transient-failure rerun necessarily reruns every step, not just the "
+            "failed ones."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("BITBUCKET_PIPELINE_FULL_RERUN"),
+    ),
+    "BITBUCKET_PIPELINE_NOT_RERUNNABLE": _ReasonText(
+        (
+            "AWF refused to rerun a BitBucket pipeline because the pull-request "
+            "pipeline target could not be safely reconstructed."
+        ),
+        (
+            "Re-run the pipeline from the BitBucket UI, or verify the PR pipeline "
+            "configuration (custom/manual pipelines and required variables are not "
+            "auto-rerunnable), then remonitor the workspace."
+        ),
+        (
+            "The failing pipeline was custom/manual, required variables, or lacked "
+            "the source/destination commit metadata AWF needs to retrigger the "
+            "correct PR pipeline — so AWF declined rather than trigger a wrong run."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("BITBUCKET_PIPELINE_NOT_RERUNNABLE"),
+    ),
+    "BITBUCKET_ISSUE_TRACKER_DISABLED": _ReasonText(
+        (
+            "The BitBucket repository issue tracker is disabled, so AWF posted the "
+            "tracking note as a pull-request comment instead of opening an issue."
+        ),
+        (
+            "Enable the BitBucket repository issue tracker if durable issues are "
+            "wanted; otherwise no action is required — the note was captured on the "
+            "PR."
+        ),
+        (
+            "BitBucket returned 404 for the issues endpoint because the repository "
+            "issue tracker is turned off."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("BITBUCKET_ISSUE_TRACKER_DISABLED"),
     ),
     "AWF_SETUP_PLACEHOLDER": _ReasonText(
         "`awf setup` is registered but the first-run setup implementation is not active yet.",

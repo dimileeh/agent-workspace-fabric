@@ -87,47 +87,46 @@ class TestPullRequestMonitorAdoptionForgeGate:
         assert replay.workspace_id == first.workspace_id
 
     @pytest.mark.unit
-    async def test_bitbucket_repo_url_rejected_before_metadata_fetch(
+    async def test_bitbucket_repo_url_passes_forge_gate_after_part2_flip(
         self,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        # Regression: forge detection (issue #345) makes ``RepoRef.from_url``
-        # accept a ``bitbucket.org`` URL as ``RepoRef(forge="bitbucket")``.
-        # Adoption must fail fast on the unsupported forge BEFORE fetching
-        # metadata — otherwise the GitHub-only ``gh pr view --repo owner/repo``
-        # path silently queries GitHub for the same slug and can adopt the wrong
-        # PR (the executor forge gate runs too late, after this metadata fetch).
+        # Part 2 flip (issue #345): bitbucket is now a supported forge, so the
+        # adoption forge gate no longer rejects a ``bitbucket.org`` repo_url — the
+        # request proceeds to the metadata fetch and creates a workspace.
+        #
+        # FLAGGED GAP (validation doc / PR): the *default* adoption metadata fetcher
+        # (``fetch_pull_request_adoption_metadata``) is GitHub-only (``gh pr view``).
+        # A real bitbucket adoption via the default fetcher would mis-route to
+        # GitHub; a BitBucket-aware adoption metadata fetcher is follow-up work
+        # outside the 10-method ForgeClient surface. The injected fetcher here
+        # stands in for that future BitBucket path.
         fetcher = _MetadataFetcher(_metadata())
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
-            with pytest.raises(PRMonitorAdoptionError) as excinfo:
-                await service.adopt(
-                    PullRequestMonitorAdoptionRequest(
-                        repo_url="https://bitbucket.org/workspace/repo",
-                        pr_number=277,
-                    )
+            result = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_url="https://bitbucket.org/workspace/repo",
+                    pr_number=277,
                 )
-
-            assert await _count(session, Workspace) == 0
-
-        assert excinfo.value.error_code == "FORGE_NOT_SUPPORTED"
-        assert excinfo.value.status_code == 422
-        assert excinfo.value.detail == {"repo_slug": "workspace/repo", "forge": "bitbucket"}
-        assert "BitBucket forge support is not yet implemented" in excinfo.value.message
-        assert fetcher.calls == []
+            )
+            await session.commit()
+            assert result.workspace_id
+            assert await _count(session, Workspace) == 1
+        # The forge gate passed (no FORGE_NOT_SUPPORTED) and metadata was fetched.
+        assert fetcher.calls
 
     @pytest.mark.unit
-    async def test_bitbucket_pr_url_rejected_with_forge_not_supported(
+    async def test_bitbucket_pr_url_falls_back_to_input_required(
         self,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        # Regression: ``parse_github_pull_request_url`` rejects any non-github.com
-        # host with a bare ``ValueError`` (read as PR_ADOPTION_INPUT_REQUIRED), so a
-        # BitBucket ``pr_url`` would otherwise never reach the forge gate. The
-        # ``_PR_ADOPTION_ERROR_CODE_CONTRACT`` documents FORGE_NOT_SUPPORTED as
-        # reachable here, so a well-formed BitBucket PR URL must surface it (the
-        # same code as the ``repo_url``/``repo_slug`` path), not the generic input
-        # error — and never fetch metadata against the wrong forge.
+        # Part 2 flip: a bitbucket ``pr_url`` is no longer rejected with
+        # FORGE_NOT_SUPPORTED. AWF has no BitBucket PR-URL parser
+        # (``parse_github_pull_request_url`` is github.com-only), so a well-formed
+        # bitbucket PR URL now surfaces PR_ADOPTION_INPUT_REQUIRED — provide
+        # ``repo_url``/``repo_slug`` + ``pr_number`` for BitBucket adoption instead.
+        # (A BitBucket PR-URL parser is follow-up work, flagged in the PR.)
         fetcher = _MetadataFetcher(_metadata())
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
@@ -140,10 +139,8 @@ class TestPullRequestMonitorAdoptionForgeGate:
 
             assert await _count(session, Workspace) == 0
 
-        assert excinfo.value.error_code == "FORGE_NOT_SUPPORTED"
+        assert excinfo.value.error_code == "PR_ADOPTION_INPUT_REQUIRED"
         assert excinfo.value.status_code == 422
-        assert excinfo.value.detail == {"repo_slug": "workspace/repo", "forge": "bitbucket"}
-        assert "BitBucket forge support is not yet implemented" in excinfo.value.message
         assert fetcher.calls == []
 
     @pytest.mark.unit

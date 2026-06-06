@@ -18,7 +18,7 @@ Resolution + dispatch flow::
                                   resolved_profile.forge   (persisted once)
                                                    ▼
             make_forge_client(forge, runner) ──► github: GitHubClient
-                                              └─► bitbucket: raise FORGE_NOT_SUPPORTED (Phase 1)
+                                              └─► bitbucket: BitBucketClient (Phase 2, issue #345)
                                                    ▼
             consumers depend on ForgeClient (Protocol), not GitHubClient
 
@@ -56,11 +56,11 @@ from awf.runtime.pr_monitor import CheckFailure, PRStatus
 
 FORGE_NOT_SUPPORTED_REASON_CODE = "FORGE_NOT_SUPPORTED"
 
-_SUPPORTED_FORGES: frozenset[ForgeKind] = frozenset({"github"})
+_SUPPORTED_FORGES: frozenset[ForgeKind] = frozenset({"github", "bitbucket"})
 
 
 class ForgeNotSupportedError(Exception):
-    """A detected forge has no implementation yet (Phase 1: BitBucket).
+    """A detected forge has no implementation yet (e.g. a future GitLab forge).
 
     Carries a stable ``reason_code`` so the failure flows end-to-end
     (exception → log field → ``WorkspaceEvent`` → policy) like every other
@@ -165,14 +165,15 @@ class ForgeClient(Protocol):
 
 
 def _forge_not_supported_error(forge: object) -> ForgeNotSupportedError:
-    """Build the honest fail-fast error for an unsupported/unknown forge."""
-    if forge == "bitbucket":
-        message = (
-            "BitBucket forge support is not yet implemented "
-            "(issue #345 Phase 1 adds detection only)."
-        )
-    else:
-        message = f"Unsupported forge {forge!r}: only 'github' is implemented (issue #345 Phase 1)."
+    """Build the honest fail-fast error for an unsupported/unknown forge.
+
+    GitHub and BitBucket are both implemented (issue #345). This fires only for a
+    genuinely-unknown forge value (for example ``gitlab``) that slips past typing
+    at runtime, so the factory fails closed rather than mis-routing to GitHub.
+    """
+    message = (
+        f"Unsupported forge {forge!r}: only 'github' and 'bitbucket' are implemented (issue #345)."
+    )
     return ForgeNotSupportedError(message=message)
 
 
@@ -235,11 +236,20 @@ def concrete_forge_for_repo(forge: object, repo_url: str | None) -> ForgeKind:
 def make_forge_client(forge: ForgeKind, runner: AsyncCommandRunner) -> ForgeClient:
     """Return the concrete forge client for ``forge``.
 
-    ``github`` → :class:`GitHubClient`. ``bitbucket`` (or any unknown value that
-    slips past typing at runtime) → :class:`ForgeNotSupportedError`, so the
-    factory fails closed rather than mis-routing to GitHub.
+    ``github`` → :class:`GitHubClient` (over ``runner``). ``bitbucket`` →
+    :class:`~awf.common.bitbucket_client.BitBucketClient`, built from the
+    BitBucket env contract (``runner`` is unused on this path because the
+    BitBucket client talks HTTP via its own injected ``httpx.AsyncClient``). Any
+    unknown value that slips past typing at runtime → :class:`ForgeNotSupportedError`,
+    so the factory fails closed rather than mis-routing to GitHub.
     """
     ensure_forge_supported(forge)
+    if forge == "bitbucket":
+        # Imported lazily so the GitHub-only hot path never pays for httpx import
+        # and ``forge`` keeps no import-time dependency on the BitBucket client.
+        from awf.common.bitbucket_client import BitBucketClient
+
+        return BitBucketClient.from_env()
     return GitHubClient(runner)
 
 

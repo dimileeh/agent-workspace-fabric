@@ -1,0 +1,922 @@
+"""BitBucket Cloud client — REST API v2.0 over an injected ``httpx.AsyncClient``.
+
+The provider-neutral ``ForgeClient`` peer of ``GitHubClient`` (issue #345 Part 2).
+Where GitHub shells out to ``gh`` through an ``AsyncCommandRunner``, BitBucket Cloud
+has no first-party CLI for these operations, so this client talks HTTPS directly via
+an injected ``httpx.AsyncClient``. Tests inject ``httpx.MockTransport`` and queue
+canned responses — the BitBucket parity of the GitHub ``FakeCommandRunner`` seam.
+
+Architecture decisions (issue #345, locked):
+
+* **D1 transport = httpx.** ``__init__`` takes the client + auth; :meth:`from_env`
+  builds the production client (``https://api.bitbucket.org``) and auth.
+* **D2 shared ``_request``** with exponential backoff honoring ``Retry-After`` on
+  HTTP 429, full cursor pagination following BitBucket's ``next`` links, ETag /
+  ``If-None-Match`` conditional requests (304 → cached body) on cacheable GETs, and a
+  proactive slow-down when ``X-RateLimit-NearLimit`` is set. The ETag cache is bounded
+  and keyed per ``(method, path, params)`` (i.e. per repo/PR/resource). BitBucket rate
+  limits are per user/token, not per repo.
+* **D6 auth = explicit credential mode.** ``basic`` (``email:api_token``) or ``bearer``
+  (``Authorization: Bearer <token>``); app passwords are NOT supported. The token is
+  registered as an extra redaction secret and the ``Authorization`` header is never
+  logged.
+
+Several ``ForgeClient`` methods (``resolve_thread``, ``create_issue``,
+``fetch_repo_merge_methods``, ``fetch_branch_*``) carry no PR context in their
+signatures. BitBucket needs it, so ``fetch_pr_status`` remembers per-repo PR context
+(branches, commits, merge strategies) on the instance, and ``resolve_thread`` recovers
+repo/PR/comment from the neutral ``thread_id`` string those statuses encode.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import quote
+
+import httpx
+
+from awf.common.audit import redact_audit_text
+from awf.common.bitbucket_client_parsing import (
+    _clean_optional_str,
+    _tail,
+    bb_merge_strategy_for_method,
+    build_general_review_comments,
+    build_review_threads,
+    decode_thread_id,
+    extract_diffstat_paths,
+    html_href,
+    map_bb_merge_methods,
+    merge_state_status_for,
+    mergeable_state_for,
+    parse_check_state,
+    parse_check_timings,
+    parse_pr_terminal_state,
+)
+from awf.common.github_client import RepoRef
+from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
+from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
+from awf.runtime.pr_monitor import CheckFailure, PRStatus
+
+_log = get_logger(__name__)
+
+_DEFAULT_BASE_URL = "https://api.bitbucket.org"
+_DEFAULT_TIMEOUT = 30.0
+_DEFAULT_MAX_RETRIES = 3
+_DEFAULT_BACKOFF_BASE_SECONDS = 1.0
+_DEFAULT_NEAR_LIMIT_DELAY_SECONDS = 1.0
+_DEFAULT_ETAG_CACHE_SIZE = 128
+_ERROR_BODY_LIMIT = 2000
+
+# Reason codes (flow end-to-end: exception → log field → event → policy).
+BITBUCKET_AUTH_NOT_CONFIGURED = "BITBUCKET_AUTH_NOT_CONFIGURED"
+BITBUCKET_AUTH_FAILED = "BITBUCKET_AUTH_FAILED"
+BITBUCKET_API_ERROR = "BITBUCKET_API_ERROR"
+BITBUCKET_PIPELINE_FULL_RERUN = "BITBUCKET_PIPELINE_FULL_RERUN"
+BITBUCKET_PIPELINE_NOT_RERUNNABLE = "BITBUCKET_PIPELINE_NOT_RERUNNABLE"
+BITBUCKET_ISSUE_TRACKER_DISABLED = "BITBUCKET_ISSUE_TRACKER_DISABLED"
+BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
+
+_FrozenParams = tuple[tuple[str, str], ...]
+
+
+class BitBucketClientError(Exception):
+    """Raised when BitBucket Cloud returns an error or an unusable payload.
+
+    Mirrors ``GitHubClientError``: it carries a redacted body, the failing
+    operation, the HTTP status (``None`` for transport errors), and a stable
+    ``reason_code`` so the failure flows end-to-end. Catch this specifically,
+    never bare ``Exception``.
+    """
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        status: int | None,
+        body: str,
+        reason_code: str = BITBUCKET_API_ERROR,
+    ) -> None:
+        """Store redacted failure context for monitor diagnostics."""
+        self.operation = operation
+        self.status = status
+        self.reason_code = reason_code
+        self.body = redact_audit_text(body)
+        status_label = "n/a" if status is None else str(status)
+        super().__init__(
+            f"{operation} failed (status={status_label}): {self.body.strip() or '<no output>'}"
+        )
+
+
+@dataclass(frozen=True)
+class BitBucketAuth:
+    """Explicit BitBucket Cloud credential mode (issue #345 decision D6)."""
+
+    mode: str
+    api_token: str
+    email: str | None = None
+
+    def header_value(self) -> str:
+        """Return the ``Authorization`` header value for this credential mode."""
+        if self.mode == "basic":
+            raw = f"{self.email}:{self.api_token}".encode()
+            return "Basic " + base64.b64encode(raw).decode("ascii")
+        return f"Bearer {self.api_token}"
+
+    def secret_values(self) -> tuple[str, ...]:
+        """Return secret strings that must be redacted from any logged text."""
+        secrets = [self.api_token]
+        if self.mode == "basic" and self.email:
+            encoded = base64.b64encode(f"{self.email}:{self.api_token}".encode()).decode("ascii")
+            secrets.append(encoded)
+        return tuple(secret for secret in secrets if secret)
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> BitBucketAuth:
+        """Build auth from the env contract, failing with a reason code if invalid."""
+        mode = (env.get("BITBUCKET_AUTH_MODE") or "basic").strip().lower()
+        token = (env.get("BITBUCKET_API_TOKEN") or "").strip()
+        email = (env.get("BITBUCKET_EMAIL") or "").strip() or None
+        if mode not in {"basic", "bearer"}:
+            raise BitBucketClientError(
+                operation="bitbucket auth",
+                status=None,
+                body=(
+                    f"BITBUCKET_AUTH_MODE must be 'basic' or 'bearer', got {mode!r}. "
+                    "App passwords are not supported."
+                ),
+                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
+            )
+        if not token:
+            raise BitBucketClientError(
+                operation="bitbucket auth",
+                status=None,
+                body="BITBUCKET_API_TOKEN is required.",
+                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
+            )
+        if mode == "basic" and email is None:
+            raise BitBucketClientError(
+                operation="bitbucket auth",
+                status=None,
+                body="BITBUCKET_EMAIL is required for basic auth mode.",
+                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
+            )
+        return cls(mode=mode, api_token=token, email=email)
+
+
+@dataclass(frozen=True)
+class _PRContext:
+    """Per-repo PR context remembered so repo-less Protocol methods can act."""
+
+    pr_number: int
+    source_branch: str | None
+    source_sha: str | None
+    dest_branch: str | None
+    dest_sha: str | None
+    merge_strategies: list[str] | None
+    default_merge_strategy: str | None
+
+    def is_rerunnable(self) -> bool:
+        """True only when a PR pipeline target can be safely reconstructed."""
+        return all(
+            value is not None
+            for value in (
+                self.source_branch,
+                self.dest_branch,
+                self.source_sha,
+                self.dest_sha,
+            )
+        )
+
+
+class BitBucketClient:
+    """Stateful façade over BitBucket Cloud REST v2.0. Re-entrant per repo."""
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        auth: BitBucketAuth,
+        *,
+        sleep: Any = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+        backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS,
+        near_limit_delay_seconds: float = _DEFAULT_NEAR_LIMIT_DELAY_SECONDS,
+        etag_cache_size: int = _DEFAULT_ETAG_CACHE_SIZE,
+    ) -> None:
+        """Store the injected HTTP client, auth, and retry/cache policy."""
+        self._client = client
+        self._auth = auth
+        self._secret_values = auth.secret_values()
+        self._max_retries = max_retries
+        self._backoff_base_seconds = backoff_base_seconds
+        self._near_limit_delay_seconds = near_limit_delay_seconds
+        self._etag_cache_size = etag_cache_size
+        self._etag_cache: OrderedDict[tuple[str, str, _FrozenParams], tuple[str, Any]] = (
+            OrderedDict()
+        )
+        self._pr_context: dict[str, _PRContext] = {}
+        self._account_id: str | None = None
+        self._account_id_fetched = False
+        if sleep is None:
+            import asyncio
+
+            self._sleep = asyncio.sleep
+        else:
+            self._sleep = sleep
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> BitBucketClient:
+        """Build the production client + auth from the BitBucket env contract."""
+        resolved_env = os.environ if env is None else env
+        auth = BitBucketAuth.from_env(resolved_env)
+        client = httpx.AsyncClient(base_url=_DEFAULT_BASE_URL, timeout=_DEFAULT_TIMEOUT)
+        return cls(client=client, auth=auth)
+
+    # ── Public ForgeClient surface ─────────────────────────────────────────
+
+    async def create_pull_request(
+        self,
+        *,
+        repo: RepoRef,
+        base: str,
+        head: str,
+        title: str,
+        body: str,
+    ) -> str:
+        """Open a PR for ``head`` against ``base`` and return its web URL."""
+        payload = {
+            "title": title,
+            "source": {"branch": {"name": head}},
+            "destination": {"branch": {"name": base}},
+            "description": body,
+        }
+        data = await self._request_json(
+            "POST",
+            self._pr_collection_path(repo),
+            operation="bitbucket create_pull_request",
+            json_body=payload,
+        )
+        url = html_href(data)
+        if url is None:
+            raise BitBucketClientError(
+                operation="bitbucket create_pull_request",
+                status=None,
+                body="BitBucket create-PR response omitted links.html.href",
+            )
+        return url
+
+    async def fetch_pr_status(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        base_behind_count: int,
+    ) -> PRStatus:
+        """Assemble a ``PRStatus`` from the PR, commit statuses, and comments.
+
+        ``base_behind_count`` is computed by the caller (local git), matching the
+        GitHub contract — BitBucket Cloud has no GitHub-style merge-state signal.
+        """
+        pr = await self._request_json(
+            "GET",
+            self._pr_path(repo, pr_number),
+            operation="bitbucket fetch_pr_status",
+            cache=True,
+        )
+        if not isinstance(pr, dict):
+            raise BitBucketClientError(
+                operation="bitbucket fetch_pr_status",
+                status=None,
+                body=f"PR {repo.slug()}#{pr_number} not found",
+            )
+        self._remember_pr(repo, pr_number, pr)
+        head_sha = self._pr_head_sha(pr)
+        if head_sha is None:
+            raise BitBucketClientError(
+                operation="bitbucket fetch_pr_status",
+                status=None,
+                body=f"PR {repo.slug()}#{pr_number} has no source commit hash",
+            )
+        source_branch = _clean_optional_str(
+            _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
+        )
+        statuses = await self._paginate(
+            f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
+            operation="bitbucket fetch_pr_status statuses",
+            params={"refname": source_branch} if source_branch else None,
+        )
+        comments = await self._paginate(
+            f"{self._pr_path(repo, pr_number)}/comments",
+            operation="bitbucket fetch_pr_status comments",
+            cache=True,
+        )
+        diffstat = await self._paginate(
+            f"{self._pr_path(repo, pr_number)}/diffstat",
+            operation="bitbucket fetch_pr_status diffstat",
+        )
+        account_id = await self._current_account_id()
+        merged, closed, merge_commit_sha = parse_pr_terminal_state(pr)
+        return PRStatus(
+            number=int(pr.get("id") or pr_number),
+            head_sha=head_sha,
+            mergeable=mergeable_state_for(merged=merged, closed=closed),
+            check_state=parse_check_state(statuses),
+            unresolved_inline_threads=build_review_threads(
+                comments, repo=repo, pr_number=pr_number, account_id=account_id
+            ),
+            unresolved_review_comments=build_general_review_comments(
+                comments, account_id=account_id
+            ),
+            base_behind_count=base_behind_count,
+            merge_state_status=merge_state_status_for(merged=merged, closed=closed),
+            ci_failures=(),  # populated by fetch_failing_check_logs when needed
+            checks=parse_check_timings(statuses),
+            changed_paths=extract_diffstat_paths(diffstat),
+            closed=closed,
+            merged=merged,
+            merge_commit_sha=merge_commit_sha,
+        )
+
+    async def fetch_failing_check_logs(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,  # noqa: ARG002 - kept for API consistency with GitHub
+        head_sha: str,
+        log_tail_chars: int = 3000,
+        pytest_fallback_commands: Sequence[str] = (),
+    ) -> tuple[CheckFailure, ...]:
+        """Fetch logs for failing checks via the BitBucket pipeline-lookup chain.
+
+        Commit statuses do not carry pipeline/step UUIDs, so for FAILED statuses we
+        locate the pipeline by commit, find its failing steps, and tail each step
+        log. External (non-Pipelines) failing statuses have no BitBucket logs and
+        fall back to ``pytest_fallback_commands`` (same evidence path as GitHub).
+        """
+        statuses = await self._paginate(
+            f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
+            operation="bitbucket fetch_failing_check_logs statuses",
+        )
+        failed = [s for s in statuses if str(s.get("state") or "").upper() in {"FAILED", "STOPPED"}]
+        if not failed:
+            return ()
+
+        pipeline = await self._find_pipeline_for_commit(repo, head_sha)
+        if pipeline is None:
+            return tuple(
+                self._external_status_failure(status, pytest_fallback_commands) for status in failed
+            )
+
+        pipeline_uuid = _clean_optional_str(pipeline.get("uuid"))
+        failing_steps = (
+            await self._failing_pipeline_steps(repo, pipeline_uuid)
+            if pipeline_uuid is not None
+            else []
+        )
+        if not failing_steps:
+            return tuple(
+                self._external_status_failure(status, pytest_fallback_commands) for status in failed
+            )
+
+        failures: list[CheckFailure] = []
+        for step in failing_steps:
+            step_uuid = _clean_optional_str(step.get("uuid"))
+            raw_log = (
+                await self._fetch_step_log(repo, pipeline_uuid, step_uuid, log_tail_chars)
+                if step_uuid is not None
+                else ""
+            )
+            step_name = _clean_optional_str(step.get("name")) or f"step/{step_uuid or 'unknown'}"
+            evidence = extract_ci_failure_evidence(
+                raw_log,
+                check_name=step_name,
+                pytest_fallback_commands=pytest_fallback_commands,
+            )
+            failures.append(
+                CheckFailure(
+                    name=step_name,
+                    conclusion="FAILURE",
+                    log_excerpt=_tail(redact_ci_log(raw_log), log_tail_chars),
+                    run_id=pipeline_uuid,
+                    failing_commands=evidence.failing_commands,
+                    test_node_ids=evidence.test_node_ids,
+                    assertion_snippets=evidence.assertion_snippets,
+                    error_summaries=evidence.error_summaries,
+                    suggested_repro_commands=evidence.suggested_repro_commands,
+                    evidence_warnings=evidence.evidence_warnings,
+                )
+            )
+        return tuple(failures)
+
+    async def rerun_failed_workflow_jobs(
+        self,
+        *,
+        repo: RepoRef,
+        run_id: str,  # noqa: ARG002 - BitBucket reconstructs the PR target, not a run id
+    ) -> None:
+        """Rerun the PR pipeline.
+
+        BitBucket Cloud has no failed-only rerun API (UI-only), so this reruns the
+        WHOLE pipeline by reconstructing the ``pipeline_pullrequest_target`` from the
+        remembered PR context, emitting ``BITBUCKET_PIPELINE_FULL_RERUN``. If the
+        target cannot be safely reconstructed, it emits
+        ``BITBUCKET_PIPELINE_NOT_RERUNNABLE`` and triggers nothing.
+        """
+        ctx = self._pr_context.get(repo.slug())
+        if ctx is None or not ctx.is_rerunnable():
+            _log.warning(
+                "bitbucket.pipeline_not_rerunnable",
+                repo=repo.slug(),
+                reason_code=BITBUCKET_PIPELINE_NOT_RERUNNABLE,
+                has_context=ctx is not None,
+            )
+            raise BitBucketClientError(
+                operation="bitbucket rerun_failed_workflow_jobs",
+                status=None,
+                body=(
+                    "BitBucket PR pipeline target could not be reconstructed "
+                    "(custom/manual pipeline or missing commit metadata)."
+                ),
+                reason_code=BITBUCKET_PIPELINE_NOT_RERUNNABLE,
+            )
+        payload = {
+            "target": {
+                "type": "pipeline_pullrequest_target",
+                "source": ctx.source_branch,
+                "destination": ctx.dest_branch,
+                "destination_commit": {"hash": ctx.dest_sha},
+                "commit": {"type": "commit", "hash": ctx.source_sha},
+                "pullrequest": {"id": ctx.pr_number},
+                "selector": {"type": "pull_requests", "pattern": "**"},
+            }
+        }
+        await self._request_json(
+            "POST",
+            f"{self._repo_path(repo)}/pipelines/",
+            operation="bitbucket rerun_failed_workflow_jobs",
+            json_body=payload,
+        )
+        _log.info(
+            "bitbucket.pipeline_full_rerun",
+            repo=repo.slug(),
+            pr_number=ctx.pr_number,
+            reason_code=BITBUCKET_PIPELINE_FULL_RERUN,
+        )
+
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        """Resolve a review thread (POST resolves; DELETE would REOPEN — never used)."""
+        try:
+            owner, name, pr_number, comment_id = decode_thread_id(thread_id)
+        except ValueError as exc:
+            raise BitBucketClientError(
+                operation="bitbucket resolve_thread",
+                status=None,
+                body=f"unrecognized BitBucket thread id: {thread_id!r}",
+            ) from exc
+        path = (
+            f"/2.0/repositories/{quote(owner, safe='')}/{quote(name, safe='')}"
+            f"/pullrequests/{pr_number}/comments/{comment_id}/resolve"
+        )
+        await self._request_json("POST", path, operation="bitbucket resolve_thread")
+
+    async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
+        """Post a top-level PR comment."""
+        await self._request_json(
+            "POST",
+            f"{self._pr_path(repo, pr_number)}/comments",
+            operation="bitbucket post_comment",
+            json_body={"content": {"raw": body}},
+        )
+
+    async def create_issue(self, *, repo: RepoRef, title: str, body: str) -> str:
+        """Open a tracking issue and return its URL.
+
+        If the repository issue tracker is disabled (404), fall back to posting the
+        content as a PR comment (using remembered PR context), returning that comment
+        URL and emitting ``BITBUCKET_ISSUE_TRACKER_DISABLED``. Never crashes the
+        NotifyHuman path; always returns a usable URL.
+        """
+        try:
+            data = await self._request_json(
+                "POST",
+                f"{self._repo_path(repo)}/issues",
+                operation="bitbucket create_issue",
+                json_body={"title": title, "content": {"raw": body}},
+            )
+        except BitBucketClientError as exc:
+            if exc.status == 404:
+                return await self._issue_fallback_to_comment(repo, title, body)
+            raise
+        return html_href(data) or self._issues_page_url(repo)
+
+    async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
+        """Return enabled merge methods from the remembered PR destination branch.
+
+        The BitBucket repo object does not expose merge settings, so these come from
+        the PR's ``destination.branch.merge_strategies`` captured by
+        ``fetch_pr_status``. Without that context (no prior status fetch), returns an
+        empty tuple so the merge gate fails conservatively rather than mis-merging.
+        """
+        ctx = self._pr_context.get(repo.slug())
+        if ctx is None:
+            _log.warning(
+                "bitbucket.merge_methods_without_pr_context",
+                repo=repo.slug(),
+            )
+            return ()
+        return map_bb_merge_methods(ctx.merge_strategies)
+
+    async def fetch_branch_pull_request_allowed_merge_methods(
+        self,
+        *,
+        repo: RepoRef,
+        branch: str,  # noqa: ARG002 - BitBucket strategies come from the PR dest branch
+    ) -> tuple[str, ...] | None:
+        """Return base-branch merge-method constraints, or ``None`` when unconstrained.
+
+        BitBucket models this as the destination branch's ``merge_strategies`` (NOT
+        branch-restrictions, which are permissions/merge-checks). Absent → ``None``.
+        """
+        ctx = self._pr_context.get(repo.slug())
+        if ctx is None or ctx.merge_strategies is None:
+            return None
+        return map_bb_merge_methods(ctx.merge_strategies)
+
+    async def merge_pr(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        method: str = "squash",
+        delete_branch: bool = True,
+    ) -> str:
+        """Merge a PR with the given method and return the merge commit hash."""
+        strategy = bb_merge_strategy_for_method(method)
+        if strategy is None:
+            raise BitBucketClientError(
+                operation="bitbucket merge_pr",
+                status=None,
+                body=f"unsupported merge method for BitBucket: {method!r}",
+                reason_code=BITBUCKET_MERGE_METHOD_UNSUPPORTED,
+            )
+        data = await self._request_json(
+            "POST",
+            f"{self._pr_path(repo, pr_number)}/merge",
+            operation="bitbucket merge_pr",
+            json_body={"merge_strategy": strategy, "close_source_branch": delete_branch},
+        )
+        merge_commit = data.get("merge_commit") if isinstance(data, dict) else None
+        if isinstance(merge_commit, dict):
+            return _clean_optional_str(merge_commit.get("hash")) or ""
+        return ""
+
+    # ── Pipeline-chain internals ───────────────────────────────────────────
+
+    async def _find_pipeline_for_commit(
+        self, repo: RepoRef, commit_sha: str
+    ) -> dict[str, Any] | None:
+        """Return the most recent pipeline for a commit, or ``None`` if none exist."""
+        pipelines = await self._paginate(
+            f"{self._repo_path(repo)}/pipelines/",
+            operation="bitbucket fetch_failing_check_logs pipelines",
+            params={"target.commit.hash": commit_sha, "sort": "-created_on"},
+        )
+        return pipelines[0] if pipelines else None
+
+    async def _failing_pipeline_steps(
+        self, repo: RepoRef, pipeline_uuid: str
+    ) -> list[dict[str, Any]]:
+        """Return the steps of a pipeline whose result is FAILED."""
+        steps = await self._paginate(
+            f"{self._repo_path(repo)}/pipelines/{quote(pipeline_uuid, safe='')}/steps/",
+            operation="bitbucket fetch_failing_check_logs steps",
+        )
+        failing: list[dict[str, Any]] = []
+        for step in steps:
+            state = step.get("state")
+            result = state.get("result") if isinstance(state, dict) else None
+            result_name = result.get("name") if isinstance(result, dict) else None
+            if str(result_name or "").upper() == "FAILED":
+                failing.append(step)
+        return failing
+
+    async def _fetch_step_log(
+        self,
+        repo: RepoRef,
+        pipeline_uuid: str | None,
+        step_uuid: str,
+        log_tail_chars: int,
+    ) -> str:
+        """Tail a pipeline step log via a Range request (best-effort, never raises)."""
+        if pipeline_uuid is None:  # pragma: no cover - guarded by caller
+            return ""
+        path = (
+            f"{self._repo_path(repo)}/pipelines/{quote(pipeline_uuid, safe='')}"
+            f"/steps/{quote(step_uuid, safe='')}/log"
+        )
+        return await self._request_text(
+            "GET",
+            path,
+            operation="bitbucket fetch_step_log",
+            extra_headers={"Range": f"bytes=-{max(log_tail_chars, 1)}"},
+        )
+
+    def _external_status_failure(
+        self,
+        status: dict[str, Any],
+        pytest_fallback_commands: Sequence[str],
+    ) -> CheckFailure:
+        """Build a ``CheckFailure`` for an external status with no BitBucket logs."""
+        name = _clean_optional_str(status.get("name") or status.get("key")) or "external-check"
+        evidence = extract_ci_failure_evidence(
+            "",
+            check_name=name,
+            pytest_fallback_commands=pytest_fallback_commands,
+        )
+        return CheckFailure(
+            name=name,
+            conclusion="FAILURE",
+            log_excerpt="",
+            run_id=None,
+            failing_commands=evidence.failing_commands,
+            test_node_ids=evidence.test_node_ids,
+            assertion_snippets=evidence.assertion_snippets,
+            error_summaries=evidence.error_summaries,
+            suggested_repro_commands=evidence.suggested_repro_commands,
+            evidence_warnings=evidence.evidence_warnings,
+        )
+
+    # ── Issue-fallback + context internals ─────────────────────────────────
+
+    async def _issue_fallback_to_comment(self, repo: RepoRef, title: str, body: str) -> str:
+        """Post the issue content as a PR comment when the tracker is disabled."""
+        ctx = self._pr_context.get(repo.slug())
+        _log.warning(
+            "bitbucket.issue_tracker_disabled",
+            repo=repo.slug(),
+            reason_code=BITBUCKET_ISSUE_TRACKER_DISABLED,
+            has_pr_context=ctx is not None,
+        )
+        if ctx is None:
+            # No PR context to comment on; return a usable URL without crashing.
+            return self._issues_page_url(repo)
+        comment_body = f"{title}\n\n{body}"
+        data = await self._request_json(
+            "POST",
+            f"{self._pr_path(repo, ctx.pr_number)}/comments",
+            operation="bitbucket create_issue comment-fallback",
+            json_body={"content": {"raw": comment_body}},
+        )
+        return html_href(data) or self._pr_page_url(repo, ctx.pr_number)
+
+    async def _current_account_id(self) -> str | None:
+        """Return the authenticated account id (cached) to filter own comments."""
+        if self._account_id_fetched:
+            return self._account_id
+        self._account_id_fetched = True
+        try:
+            data = await self._request_json(
+                "GET", "/2.0/user", operation="bitbucket current_user", cache=True
+            )
+        except BitBucketClientError as exc:
+            _log.warning("bitbucket.current_user_unavailable", reason_code=exc.reason_code)
+            self._account_id = None
+            return None
+        if isinstance(data, dict):
+            self._account_id = _clean_optional_str(data.get("account_id") or data.get("uuid"))
+        return self._account_id
+
+    def _remember_pr(self, repo: RepoRef, pr_number: int, pr: dict[str, Any]) -> None:
+        """Capture per-repo PR context for the repo-less Protocol methods."""
+        source = _as_dict(pr.get("source"))
+        destination = _as_dict(pr.get("destination"))
+        dest_branch = _as_dict(destination.get("branch"))
+        merge_strategies = dest_branch.get("merge_strategies")
+        self._pr_context[repo.slug()] = _PRContext(
+            pr_number=pr_number,
+            source_branch=_clean_optional_str(_as_dict(source.get("branch")).get("name")),
+            source_sha=_clean_optional_str(_as_dict(source.get("commit")).get("hash")),
+            dest_branch=_clean_optional_str(dest_branch.get("name")),
+            dest_sha=_clean_optional_str(_as_dict(destination.get("commit")).get("hash")),
+            merge_strategies=merge_strategies if isinstance(merge_strategies, list) else None,
+            default_merge_strategy=_clean_optional_str(dest_branch.get("default_merge_strategy")),
+        )
+
+    @staticmethod
+    def _pr_head_sha(pr: dict[str, Any]) -> str | None:
+        return _clean_optional_str(_as_dict(_as_dict(pr.get("source")).get("commit")).get("hash"))
+
+    # ── Path builders ──────────────────────────────────────────────────────
+
+    def _repo_path(self, repo: RepoRef) -> str:
+        return f"/2.0/repositories/{quote(repo.owner, safe='')}/{quote(repo.name, safe='')}"
+
+    def _pr_collection_path(self, repo: RepoRef) -> str:
+        return f"{self._repo_path(repo)}/pullrequests"
+
+    def _pr_path(self, repo: RepoRef, pr_number: int) -> str:
+        return f"{self._pr_collection_path(repo)}/{pr_number}"
+
+    def _issues_page_url(self, repo: RepoRef) -> str:
+        return f"https://bitbucket.org/{repo.owner}/{repo.name}/issues"
+
+    def _pr_page_url(self, repo: RepoRef, pr_number: int) -> str:
+        return f"https://bitbucket.org/{repo.owner}/{repo.name}/pull-requests/{pr_number}"
+
+    # ── HTTP core (D2) ─────────────────────────────────────────────────────
+
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        operation: str,
+        json_body: Any = None,
+        params: Mapping[str, str] | None = None,
+        cache: bool = False,
+    ) -> Any:
+        """Send a request and decode JSON, honoring ETag conditional requests."""
+        extra_headers: dict[str, str] = {}
+        cache_key = (method.upper(), path, _freeze_params(params)) if cache else None
+        if cache_key is not None:
+            cached = self._etag_cache.get(cache_key)
+            if cached is not None:
+                extra_headers["If-None-Match"] = cached[0]
+        response = await self._request(
+            method,
+            path,
+            operation=operation,
+            json_body=json_body,
+            params=params,
+            extra_headers=extra_headers or None,
+        )
+        if response.status_code == 304:
+            if cache_key is not None and (hit := self._etag_cache.get(cache_key)) is not None:
+                self._etag_cache.move_to_end(cache_key)
+                return hit[1]
+            raise BitBucketClientError(
+                operation=operation,
+                status=304,
+                body="BitBucket returned 304 without a cached body",
+            )
+        parsed = self._parse_json(response, operation)
+        if cache_key is not None:
+            etag = response.headers.get("ETag")
+            if etag:
+                self._etag_cache_set(cache_key, etag, parsed)
+        return parsed
+
+    async def _paginate(
+        self,
+        path: str,
+        *,
+        operation: str,
+        params: Mapping[str, str] | None = None,
+        cache: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Follow BitBucket ``next`` cursor links, collecting all ``values``."""
+        values: list[dict[str, Any]] = []
+        page = await self._request_json(
+            "GET", path, operation=operation, params=params, cache=cache
+        )
+        while isinstance(page, dict):
+            for value in page.get("values") or []:
+                if isinstance(value, dict):
+                    values.append(value)
+            next_url = page.get("next")
+            if not isinstance(next_url, str) or not next_url:
+                break
+            page = await self._request_json("GET", next_url, operation=operation)
+        return values
+
+    async def _request_text(
+        self,
+        method: str,
+        path: str,
+        *,
+        operation: str,
+        extra_headers: Mapping[str, str] | None = None,
+    ) -> str:
+        """Fetch a raw text body (logs); returns ``""`` on any error response."""
+        response = await self._request(
+            method,
+            path,
+            operation=operation,
+            extra_headers=extra_headers,
+            strict=False,
+        )
+        if response.status_code >= 400:
+            return ""
+        return response.text
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        operation: str,
+        json_body: Any = None,
+        params: Mapping[str, str] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        strict: bool = True,
+    ) -> httpx.Response:
+        """Single request with 429/Retry-After backoff and near-limit slow-down."""
+        headers = {"Accept": "application/json", "Authorization": self._auth.header_value()}
+        if extra_headers:
+            headers.update(extra_headers)
+        attempt = 0
+        while True:
+            try:
+                response = await self._client.request(
+                    method, path, json=json_body, params=params, headers=headers
+                )
+            except httpx.RequestError as exc:
+                raise BitBucketClientError(
+                    operation=operation,
+                    status=None,
+                    body=self._redact(str(exc)),
+                    reason_code=BITBUCKET_API_ERROR,
+                ) from exc
+            if response.status_code == 429 and attempt < self._max_retries:
+                await self._sleep(self._retry_after_seconds(response, attempt))
+                attempt += 1
+                continue
+            break
+        await self._maybe_slow_for_near_limit(response)
+        if strict and response.status_code >= 400:
+            raise self._error_for(response, operation)
+        return response
+
+    def _retry_after_seconds(self, response: httpx.Response, attempt: int) -> float:
+        """Return the 429 backoff delay, honoring the ``Retry-After`` header."""
+        header = response.headers.get("Retry-After")
+        if header:
+            try:
+                delay: float = float(header)
+            except ValueError:
+                delay = -1.0
+            if delay >= 0:
+                return delay
+        return float(self._backoff_base_seconds * (2**attempt))
+
+    async def _maybe_slow_for_near_limit(self, response: httpx.Response) -> None:
+        """Proactively slow down when BitBucket signals it is near the rate limit."""
+        near_limit = response.headers.get("X-RateLimit-NearLimit")
+        if near_limit and near_limit.strip().lower() in {"true", "1", "yes"}:
+            _log.info("bitbucket.rate_limit_near", delay_seconds=self._near_limit_delay_seconds)
+            await self._sleep(self._near_limit_delay_seconds)
+
+    def _parse_json(self, response: httpx.Response, operation: str) -> Any:
+        """Decode a JSON body, or ``None`` for an empty body."""
+        text = response.text
+        if not text.strip():
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise BitBucketClientError(
+                operation=f"{operation} (json parse)",
+                status=response.status_code,
+                body=self._redact(f"{exc}; body was: {text[:400]}"),
+            ) from exc
+
+    def _error_for(self, response: httpx.Response, operation: str) -> BitBucketClientError:
+        """Build a redacted ``BitBucketClientError`` for a non-2xx response."""
+        reason = (
+            BITBUCKET_AUTH_FAILED if response.status_code in {401, 403} else BITBUCKET_API_ERROR
+        )
+        return BitBucketClientError(
+            operation=operation,
+            status=response.status_code,
+            body=self._redact(response.text[:_ERROR_BODY_LIMIT]),
+            reason_code=reason,
+        )
+
+    def _redact(self, text: str) -> str:
+        """Redact credentials/secrets from text before it lands in logs/errors."""
+        return redact_secrets(text, extra_secrets=self._secret_values)
+
+    def _etag_cache_set(self, key: tuple[str, str, _FrozenParams], etag: str, body: Any) -> None:
+        """Store an ETag + parsed body in the bounded LRU cache."""
+        self._etag_cache[key] = (etag, body)
+        self._etag_cache.move_to_end(key)
+        while len(self._etag_cache) > self._etag_cache_size:
+            self._etag_cache.popitem(last=False)
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Return ``value`` if it is a dict, else an empty dict (payload guard)."""
+    return value if isinstance(value, dict) else {}
+
+
+def _freeze_params(params: Mapping[str, str] | None) -> _FrozenParams:
+    """Freeze query params into a hashable, order-stable cache-key component."""
+    if not params:
+        return ()
+    return tuple(sorted((str(key), str(value)) for key, value in params.items()))
