@@ -12,8 +12,8 @@ manifest, checksums, and release artifacts are published and verified.
 ## Hosted uninstaller (`uninstall.sh`)
 
 AWF keeps the hosted uninstaller source in `packaging/uninstall.sh`: a
-standalone, inspected cleanup script for the public
-`curl -fsSL .../uninstall.sh | bash` lane and for source-checkout inspection.
+standalone, inspected cleanup script for the future public hosted-uninstaller
+lane and for source-checkout inspection.
 Package-manager installs should still uninstall AWF through their package
 manager (`uv`, `pipx`, or `pip`) rather than relying on this script to be present
 inside Python package artifacts. Like the installer lane, the hosted uninstaller
