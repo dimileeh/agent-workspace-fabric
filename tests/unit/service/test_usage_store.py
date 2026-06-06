@@ -168,6 +168,27 @@ def test_normalize_ccusage_json_supports_cache_read_and_creation_tokens() -> Non
 
 
 @pytest.mark.unit
+def test_normalize_ccusage_json_ignores_invalid_split_cached_token_fields() -> None:
+    raw = json.dumps(
+        {
+            "totals": {
+                "inputTokens": 100,
+                "cacheReadTokens": "invalid",
+                "cacheCreationTokens": 50,
+                "outputTokens": 40,
+            }
+        }
+    )
+
+    usage, reason = normalize_ccusage_json(raw)
+
+    assert reason is None
+    assert usage is not None
+    assert usage.cached_input_tokens == 50
+    assert usage.total_tokens == 190
+
+
+@pytest.mark.unit
 def test_normalize_ccusage_json_prefers_unified_cached_tokens_over_split_tokens() -> None:
     raw = json.dumps(
         {
@@ -543,6 +564,44 @@ def test_accumulate_usage_preserves_latest_fallback_when_run_delta_field_missing
     assert result is not None
     assert result.input_tokens == 110
     assert result.total_tokens == 225
+
+
+@pytest.mark.unit
+def test_accumulate_usage_adds_delta_to_empty_accumulated_fields() -> None:
+    accumulated = NormalizedUsage()
+    run_delta = NormalizedUsage(
+        input_tokens=10, total_tokens=10, cost_estimate=0.25, currency="USD"
+    )
+
+    result = accumulate_usage(accumulated, run_delta)
+
+    assert result is not None
+    assert result.input_tokens == 10
+    assert result.total_tokens == 10
+    assert result.cost_estimate == 0.25
+    assert result.currency == "USD"
+
+
+@pytest.mark.unit
+def test_accumulate_usage_marks_mixed_currency_as_unknown_cost() -> None:
+    accumulated = NormalizedUsage(cost_estimate=1.0, currency="USD")
+    run_delta = NormalizedUsage(cost_estimate=2.0, currency="EUR")
+
+    result = accumulate_usage(accumulated, run_delta)
+
+    assert result is not None
+    assert result.cost_estimate is None
+    assert result.currency == "MIXED"
+
+
+@pytest.mark.unit
+def test_accumulate_usage_returns_fallback_when_run_delta_missing() -> None:
+    accumulated = NormalizedUsage(input_tokens=100, total_tokens=100)
+    latest = NormalizedUsage(input_tokens=120, total_tokens=120)
+
+    result = accumulate_usage(accumulated, None, fallback=latest)
+
+    assert result == latest
 
 
 @pytest.mark.unit

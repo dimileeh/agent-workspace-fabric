@@ -1068,6 +1068,10 @@ def test_safe_agent_file_equal_content_closes_fds_on_partial_descent_failure(
     host.write_bytes(b"x\n")
 
     fd_dir = Path("/proc/self/fd")
+    if not fd_dir.exists():
+        fd_dir = Path("/dev/fd")
+    if not fd_dir.exists():
+        pytest.skip("fd table directory unavailable on this platform")
     before = len(list(fd_dir.iterdir()))
     for _ in range(100):
         assert overlay_copy_mod._safe_agent_file_equal_content(root, rel, host) is False

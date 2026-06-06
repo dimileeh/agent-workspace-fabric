@@ -24,6 +24,13 @@ from awf.cli.main import app
 _runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cli_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in ("AWF_BASE_URL", "AWF_CLI_BASE_URL", "AWF_API_HOST_PORT"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(cli_main, "local_service_environ", lambda _environ: {})
+
+
 def _mock_response(*, status_code: int = 202, payload: object = None, text: str = "") -> MagicMock:
     response = MagicMock(spec=httpx.Response)
     response.status_code = status_code
