@@ -622,9 +622,9 @@ class TestEarlyReturnGuards:
         fail_plan_only = AsyncMock(return_value=True)
         monkeypatch.setattr(executor, "_fail_if_plan_only_committed_output", fail_plan_only)
 
-        # The agent self-commits: AWF stages nothing (empty cached diff), so
-        # ``has_known_non_plan_output`` stays False and the post-validation
-        # committed-output plan-only guard at line 1135 actually runs.
+        # The agent self-commits: AWF stages nothing (empty cached diff). The
+        # final committed-output plan-only gate is now always evaluated (it is
+        # no longer gated behind a sticky flag), so it runs here.
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add -A
@@ -640,6 +640,93 @@ class TestEarlyReturnGuards:
         # The push / gh pr create never ran.
         assert all("push" not in c.args for c in fake.calls)
         assert not any(c.args[:3] == ["gh", "pr", "create"] for c in fake.calls)
+
+    @pytest.mark.unit
+    async def test_final_gate_runs_after_real_output_committed_then_reverted(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Revert false-negative regression (#432).
+
+        An early post-agent step stages real output (so the old sticky
+        ``has_known_non_plan_output`` flag would latch True), but the net
+        ``base..HEAD`` diff later becomes empty/plan-only. The final pre-push
+        plan-only gate must still run and fail ``PLAN_ONLY_OUTPUT`` — it is no
+        longer gated behind the sticky flag, so a genuinely-empty/plan-only
+        branch cannot open an empty PR.
+
+        Under the old flag-guarded gate this committed real output would skip
+        the gate entirely; ``_fail_if_plan_only_committed_output`` would never
+        be awaited and the push would proceed — so this test fails pre-change.
+        """
+        ws_id = await _seed_ready_workspace(factory)
+
+        # Net committed output is plan-only/empty at the final gate.
+        fail_plan_only = AsyncMock(return_value=True)
+        monkeypatch.setattr(executor, "_fail_if_plan_only_committed_output", fail_plan_only)
+
+        # A real file is staged on the post-agent commit. Under the old code
+        # this latched the sticky flag True and skipped the final gate.
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="f\n")  # diff --cached: real staged output
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base is-ancestor ok
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+
+        await executor.execute(ws_id)
+
+        # The authoritative gate ran despite real output having been staged
+        # earlier, and stopped the pipeline before any push / PR creation.
+        fail_plan_only.assert_awaited_once()
+        assert all("push" not in c.args for c in fake.calls)
+        assert not any(c.args[:3] == ["gh", "pr", "create"] for c in fake.calls)
+
+    @pytest.mark.unit
+    async def test_final_gate_passes_real_committed_output_and_opens_pr(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Normal path (#432): a branch with real committed output clears the
+        now-always-evaluated final plan-only gate (it returns False for real
+        ``base..HEAD`` output) and proceeds to push + open the PR."""
+        ws_id = await _seed_ready_workspace(factory)
+
+        fake.queue_result(returncode=0, stdout="codex finished")  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff (real)
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-agent/pull/321\n",
+        )  # gh pr create
+
+        await executor.execute(ws_id)
+
+        # The final gate did not false-fail real committed output: push and PR
+        # creation both ran.
+        assert any("push" in c.args for c in fake.calls)
+        assert any(c.args[:3] == ["gh", "pr", "create"] for c in fake.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/321"
 
     @pytest.mark.unit
     async def test_start_push_transition_race_returns(

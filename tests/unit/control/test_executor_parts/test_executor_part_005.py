@@ -104,6 +104,9 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbee
     realistic enough that the log line reads sanely if a test prints
     captured output.
     """
+    fake.queue_result(
+        returncode=0, stdout="src/fix.py\n"
+    )  # final plan-only gate: committed base..HEAD --name-only
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref

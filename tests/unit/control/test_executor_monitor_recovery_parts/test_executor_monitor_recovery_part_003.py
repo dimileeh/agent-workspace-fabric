@@ -492,6 +492,7 @@ async def _seed_ready_workspace_no_recovery(
 def _queue_push_and_pr(
     fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
 ) -> None:
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
@@ -501,6 +502,7 @@ def _queue_push_and_pr(
 
 
 def _queue_existing_pr_push(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
@@ -683,7 +685,6 @@ async def test_rebase_only_recovery_pushes_already_rebased_head_when_remote_lags
     _queue_synced_base_lagging_remote_recovery(fake)
     _queue_validation_head(fake, head="c" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")
-    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed paths check
     _queue_existing_pr_push(fake, head="c" * 40)
 
     await executor.execute(ws_id)

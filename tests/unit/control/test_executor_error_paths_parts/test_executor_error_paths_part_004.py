@@ -68,11 +68,10 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
-def _queue_pre_push_checks(
-    fake: FakeCommandRunner, *, head: str = "deadbeef01", include_plan_only_diff: bool = False
-) -> None:
-    if include_plan_only_diff:
-        fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
+def _queue_pre_push_checks(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+    # The final plan-only gate is always evaluated before the protected-output
+    # gate, so its committed ``--name-only`` diff is always queued first.
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # plan-only committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-push rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/x\n")  # pre-push abbrev-ref
@@ -806,7 +805,7 @@ class TestPullRequestUnexpectedErrorPart002:
         fake.queue_result(returncode=0)
         _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
-        _queue_pre_push_checks(fake, include_plan_only_diff=True)
+        _queue_pre_push_checks(fake)
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/7\n")
 

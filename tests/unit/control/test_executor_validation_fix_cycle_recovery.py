@@ -216,6 +216,10 @@ dependencies = [
         fake.queue_result(returncode=0)  # validation passes
         fake.queue_result(
             returncode=0,
+            stdout=".awf/workspace.yml\nsrc/fix.py\n",
+        )  # final plan-only gate committed --name-only diff
+        fake.queue_result(
+            returncode=0,
             stdout="M\0.awf/workspace.yml\0M\0src/fix.py\0",
         )  # cumulative base..HEAD diff
         fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # legacy abbrev-ref HEAD

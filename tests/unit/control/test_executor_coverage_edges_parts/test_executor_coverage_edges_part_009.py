@@ -185,7 +185,6 @@ async def _run_cycle(
         planning_validation_handoff=planning_validation_handoff,
         recovery=recovery,
         rebase_recovery_result=None,
-        has_known_non_plan_output=False,
         git_in_worktree=git_in_worktree
         or AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )
@@ -858,7 +857,6 @@ async def test_fix_pass_plan_only_staged_with_real_committed_output_proceeds(
     executor._fail_if_plan_only_paths.assert_not_awaited()
     executor._committed_paths_since.assert_awaited_once()
     # No PLAN_ONLY_OUTPUT failure was finished; downstream knows real work exists.
-    assert result.has_known_non_plan_output is True
     for call in executor._finish_pending_validate_operations.await_args_list:
         assert call.kwargs.get("reason_code") != PLAN_ONLY_OUTPUT_REASON_CODE
 

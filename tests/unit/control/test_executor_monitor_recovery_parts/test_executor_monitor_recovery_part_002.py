@@ -497,6 +497,7 @@ async def _seed_ready_workspace_no_recovery(
 def _queue_push_and_pr(
     fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
 ) -> None:
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
@@ -506,6 +507,7 @@ def _queue_push_and_pr(
 
 
 def _queue_existing_pr_push(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+    fake.queue_result(returncode=0, stdout="src/fix.py\n")  # final plan-only gate committed diff
     fake.queue_result(returncode=0, stdout="M\0src/fix.py\0")  # committed base..HEAD diff
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
@@ -1077,7 +1079,6 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
     fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
     _queue_post_validation_conformance_report_commit(fake, report_path)
     fake.queue_result(returncode=0, stdout=f"{report_head}\n")  # post-report HEAD
-    fake.queue_result(returncode=0, stdout=f"src/awf/onboarding.py\n{report_path}\n")
     _queue_existing_pr_push(fake, head=report_head)
 
     await executor.execute(ws_id)
@@ -1175,7 +1176,6 @@ async def test_rebase_only_recovery_with_conformance_handoff_pushes_report_commi
     fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
     _queue_post_validation_conformance_report_commit(fake, report_path)
     fake.queue_result(returncode=0, stdout=f"{report_head}\n")  # post-report HEAD
-    fake.queue_result(returncode=0, stdout=f"src/awf/onboarding.py\n{report_path}\n")
     _queue_existing_pr_push(fake, head=report_head)
 
     await executor.execute(ws_id)

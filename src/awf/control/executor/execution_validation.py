@@ -161,7 +161,6 @@ async def run_validation_and_fix_cycle(
     planning_validation_handoff: _PlanningValidationHandoff | None,
     recovery: Mapping[str, Any] | None,
     rebase_recovery_result: _RebaseRecoveryResult | None,
-    has_known_non_plan_output: bool,
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state."""
@@ -183,7 +182,6 @@ async def run_validation_and_fix_cycle(
             stop=True,
             successful_validation_run_id=successful_validation_run_id,
             successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-            has_known_non_plan_output=has_known_non_plan_output,
         )
 
     max_fix_passes = self._config.max_validation_fix_passes
@@ -237,7 +235,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         validation_workspace_head_sha = await self._capture_workspace_head_sha(
             workspace_id=workspace_id,
@@ -271,7 +268,6 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         if validation_workspace_head_sha is None:
             return await _fail_validation_worktree_guard(
@@ -281,7 +277,6 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
                 message="could not capture workspace HEAD before AWF validation",
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
@@ -336,7 +331,6 @@ async def run_validation_and_fix_cycle(
                     validation_tier=validation_tier,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    has_known_non_plan_output=has_known_non_plan_output,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
                     check_callback_after_cleanup=True,
@@ -367,7 +361,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         except Exception as exc:
             message = f"unexpected error during validation run: {exc!r}"[:2000]
@@ -394,7 +387,6 @@ async def run_validation_and_fix_cycle(
                     validation_tier=validation_tier,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    has_known_non_plan_output=has_known_non_plan_output,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
                     check_callback_after_cleanup=True,
@@ -425,7 +417,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         cleanup_result = await cleanup_validation_worktree_side_effects(
             run_git=git_in_worktree,
@@ -450,7 +441,6 @@ async def run_validation_and_fix_cycle(
                     validation_tier=validation_tier,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    has_known_non_plan_output=has_known_non_plan_output,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
                     check_callback_after_cleanup=True,
@@ -466,7 +456,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         val_result = _apply_baseline_coverage_ratchet(
             val_result,
@@ -565,7 +554,6 @@ async def run_validation_and_fix_cycle(
                         stop=True,
                         successful_validation_run_id=successful_validation_run_id,
                         successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                        has_known_non_plan_output=has_known_non_plan_output,
                     )
                 except AgentRunError as exc:
                     reason_code = exc.reason_code or "AGENT_CLI_FAILED"
@@ -601,7 +589,6 @@ async def run_validation_and_fix_cycle(
                         stop=True,
                         successful_validation_run_id=successful_validation_run_id,
                         successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                        has_known_non_plan_output=has_known_non_plan_output,
                     )
                 except _PostValidationConformanceReportGitError as exc:
                     reason_code = POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
@@ -652,7 +639,6 @@ async def run_validation_and_fix_cycle(
                         stop=True,
                         successful_validation_run_id=successful_validation_run_id,
                         successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                        has_known_non_plan_output=has_known_non_plan_output,
                     )
                 except _PostValidationConformanceReportWriteError as exc:
                     reason_code = POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
@@ -695,7 +681,6 @@ async def run_validation_and_fix_cycle(
                         stop=True,
                         successful_validation_run_id=successful_validation_run_id,
                         successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                        has_known_non_plan_output=has_known_non_plan_output,
                     )
                 except Exception as exc:
                     reason_code = POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE
@@ -726,7 +711,6 @@ async def run_validation_and_fix_cycle(
                         stop=True,
                         successful_validation_run_id=successful_validation_run_id,
                         successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                        has_known_non_plan_output=has_known_non_plan_output,
                     )
                 if conformance_failure is not None:
                     remaining_conformance_iterations = max(
@@ -758,7 +742,6 @@ async def run_validation_and_fix_cycle(
                             stop=True,
                             successful_validation_run_id=successful_validation_run_id,
                             successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                            has_known_non_plan_output=has_known_non_plan_output,
                         )
                     _log.info(
                         "executor.post_validation_conformance_needs_fix_pass",
@@ -868,7 +851,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
 
         # Fire a fix pass: re-invoke the coding CLI with the failure
@@ -926,7 +908,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         if not await self._ensure_worktree_available(
             workspace_id=workspace_id,
@@ -940,7 +921,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         fix_command_evidence: list[str] = []
         try:
@@ -991,7 +971,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         except AgentRunError as exc:
             append_command_evidence(
@@ -1028,7 +1007,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         if not await self._ensure_worktree_available(
             workspace_id=workspace_id,
@@ -1042,7 +1020,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
 
         async def _fail_fix_pass_git_command(
@@ -1111,7 +1088,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         if not await self._ensure_worktree_available(
             workspace_id=workspace_id,
@@ -1125,7 +1101,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         fix_cached = await git_in_worktree(["diff", "--cached", "--name-only"])
         if not fix_cached.ok:
@@ -1145,7 +1120,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         fix_staged_paths = _git_name_lines(fix_cached.stdout) if fix_cached.stdout.strip() else []
         supply_chain_result = await self._refresh_supply_chain_policy_for_workspace(
@@ -1178,7 +1152,6 @@ async def run_validation_and_fix_cycle(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
                 successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
         if fix_staged_paths:
             if await self._committed_and_staged_output_is_plan_only(
@@ -1206,9 +1179,7 @@ async def run_validation_and_fix_cycle(
                     stop=True,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    has_known_non_plan_output=has_known_non_plan_output,
                 )
-            has_known_non_plan_output = True
             protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
                 worktree_path=worktree_path,
                 base_ref=base_commit,
@@ -1245,7 +1216,6 @@ async def run_validation_and_fix_cycle(
                     stop=True,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    has_known_non_plan_output=has_known_non_plan_output,
                 )
             if not await self._ensure_worktree_available(
                 workspace_id=workspace_id,
@@ -1259,7 +1229,6 @@ async def run_validation_and_fix_cycle(
                     stop=True,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    has_known_non_plan_output=has_known_non_plan_output,
                 )
             commit_msg = f"awf: fix pass {fix_pass_number} for {ws.task_title}"[:72]
             commit_body = (
@@ -1304,7 +1273,6 @@ async def run_validation_and_fix_cycle(
                     stop=True,
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    has_known_non_plan_output=has_known_non_plan_output,
                 )
 
         fix_pass_ignored_check = await check_validation_worktree_clean(
@@ -1328,7 +1296,6 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
-                has_known_non_plan_output=has_known_non_plan_output,
             )
 
         # Loop back to re-validate.
@@ -1337,5 +1304,4 @@ async def run_validation_and_fix_cycle(
         stop=False,
         successful_validation_run_id=successful_validation_run_id,
         successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-        has_known_non_plan_output=has_known_non_plan_output,
     )
