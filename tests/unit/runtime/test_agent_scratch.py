@@ -308,3 +308,24 @@ async def test_exclude_write_oserror_is_handled_gracefully(
     )
 
     assert applied is False
+
+
+@pytest.mark.unit
+async def test_non_utf8_exclude_is_handled_gracefully(tmp_path: Path) -> None:
+    """A non-UTF-8 exclude file degrades to False instead of raising.
+
+    ``read_text(encoding="utf-8")`` raises ``UnicodeDecodeError`` (a
+    ``ValueError`` subclass, not ``OSError``) on binary content; the function's
+    graceful-degradation contract must still hold.
+    """
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is False

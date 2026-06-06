@@ -150,7 +150,10 @@ async def apply_agent_scratch_excludes(
         merged = _extract_managed_patterns(existing) + scratch_paths
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
         exclude_path.write_text(prefix + _render_managed_block(merged), encoding="utf-8")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ``ValueError`` covers ``UnicodeDecodeError`` (a ``ValueError`` subclass)
+        # raised by ``read_text(encoding="utf-8")`` when ``info/exclude`` holds
+        # non-UTF-8 bytes — degrade gracefully like any other exclude I/O failure.
         logger.warning(
             "agent_scratch.exclude_write_failed",
             worktree_path=str(worktree_path),
