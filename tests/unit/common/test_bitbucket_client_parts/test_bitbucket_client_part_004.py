@@ -142,6 +142,10 @@ async def test_rerun_reconstructs_pr_pipeline_target() -> None:
     assert target["destination"] == "development"
     assert target["commit"]["hash"] == "s" * 40
     assert target["pullrequest"]["id"] == 42
+    # BitBucket's PR pipeline selector type is the hyphenated "pull-requests"
+    # (verified against the live POST /pipelines docs); an underscore would not
+    # match the pull-requests pipeline definition.
+    assert target["selector"] == {"type": "pull-requests", "pattern": "**"}
 
 
 async def test_rerun_without_pr_context_is_not_rerunnable() -> None:

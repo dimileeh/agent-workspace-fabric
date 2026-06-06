@@ -453,7 +453,7 @@ class BitBucketClient:
                 "destination_commit": {"hash": ctx.dest_sha},
                 "commit": {"type": "commit", "hash": ctx.source_sha},
                 "pullrequest": {"id": ctx.pr_number},
-                "selector": {"type": "pull_requests", "pattern": "**"},
+                "selector": {"type": "pull-requests", "pattern": "**"},
             }
         }
         await self._request_json(
