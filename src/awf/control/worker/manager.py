@@ -113,6 +113,12 @@ class ControlWorker(WorkerDelegatesMixin):
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
         self._execution_task_kinds: dict[str, _ExecutionTaskKind] = {}
+        # Per-workspace execution-claim fencing epoch, captured at provision
+        # start (D2). Present only while this worker drives a provisioning
+        # claim; the heartbeat/release CAS reads it back here so a stale worker
+        # whose epoch was superseded is fenced. The executor path never
+        # populates this map, so its refresh/release stay epoch-unguarded.
+        self._execution_claim_epochs: dict[str, int] = {}
         self._consecutive_saturated_cycles: int = 0
         self._monitor_recovery_operation_ids: dict[str, str] = {}
         # Session-local advisory state; reset on restart and bounded below.

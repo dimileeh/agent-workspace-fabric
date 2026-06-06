@@ -559,7 +559,9 @@ class _TransitioningProvisioner:
     async def provision(self, workspace_id: str) -> None:
         await self.provision_claimed(workspace_id)
 
-    async def provision_claimed(self, workspace_id: str) -> None:
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
         self.calls.append(workspace_id)
         async with self._session_factory() as s:
             repo = WorkspaceRepository(s)
@@ -970,6 +972,66 @@ class TestRunOnceStaleActiveExecutionRecoveryPart019:
                 assert events == []
 
     @pytest.mark.unit
+    async def test_recoverable_runtime_stranding_clears_execution_claim_and_bumps_epoch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stranding-recoverable-execution",
+            WorkspaceStatus.running,
+            compose_project_name="awf_stranding_recoverable_execution",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "zombie-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            ws.execution_claim_epoch = 9
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        finding = WorkspaceRuntimeFinding(
+            workspace_id=workspace_id,
+            workspace_status=WorkspaceStatus.running.value,
+            status="stranded",
+            reason_code="STRANDED_WORKSPACE",
+            decision="recover_workspace",
+            message="runtime is stranded",
+        )
+        snapshot = RuntimeSnapshot(stack_state="stopped", reason="no containers")
+
+        await worker._record_recoverable_runtime_stranding(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_stranding_recoverable_execution",
+            ),
+            snapshot,
+            finding,
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            # D3: clearing the stale execution claim bumps the fencing token.
+            assert ws.execution_claim_epoch == 10
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+
+    @pytest.mark.unit
     async def test_runtime_failure_helpers_ignore_rows_that_changed_status(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1036,6 +1098,13 @@ class TestRunOnceStaleActiveExecutionRecoveryPart019:
             failure_message="provider auth failed before runtime stranding",
             reason_code="AGENT_AUTH_FAILED",
         )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "zombie-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            ws.execution_claim_epoch = 6
+            await s.commit()
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
@@ -1066,6 +1135,10 @@ class TestRunOnceStaleActiveExecutionRecoveryPart019:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == FailureReason.agent_failure.value
             assert ws.failure_message == "provider auth failed before runtime stranding"
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            # D3: the recovery clear bumps the fencing token.
+            assert ws.execution_claim_epoch == 7
             state_events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
                 event_type="workspace.state_changed",
