@@ -301,6 +301,27 @@ async def _fail_if_plan_only_paths(
     return True
 
 
+async def _committed_and_staged_output_is_plan_only(
+    self: Any,
+    *,
+    worktree_path: Path,
+    base_commit: str,
+    staged_paths: list[str] | tuple[str, ...],
+) -> bool:
+    """True only when the staged delta is entirely internal plan artifacts AND
+    the already-committed net output (base..HEAD) is also plan-only (or empty)
+    -- i.e. the workspace has produced no real implementation/test/doc output
+    anywhere. Gates PLAN_ONLY_OUTPUT so a fix-pass that stages only the
+    conformance artifact cannot false-fail a workspace whose real work is in
+    earlier commits. Mirrors the post-agent guard in execution_flow."""
+    if not changed_paths_are_only_internal_plan_artifacts(staged_paths):
+        return False
+    committed_paths = sorted(
+        p.as_posix() for p in await self._committed_paths_since(worktree_path, base_commit)
+    )
+    return not committed_paths or changed_paths_are_only_internal_plan_artifacts(committed_paths)
+
+
 async def _fail_if_plan_only_committed_output(
     self: Any,
     *,
