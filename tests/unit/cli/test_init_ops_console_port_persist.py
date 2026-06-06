@@ -77,14 +77,30 @@ def test_persist_preserves_export_prefix_and_replaces_value(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
-def test_persist_matches_key_case_insensitively_without_duplicating(tmp_path: Path) -> None:
-    """A lowercase key spelling is matched case-insensitively; no duplicate appended."""
+def test_persist_normalizes_lowercase_key_to_canonical_casing(tmp_path: Path) -> None:
+    """A lowercase key is matched case-insensitively and rewritten to canonical casing.
+
+    Compose interpolates the case-sensitive ``${AWF_CONSOLE_HOST_PORT}`` placeholder, so
+    a preserved lowercase key would be ignored and the console would fall back to 3000.
+    No duplicate assignment is appended.
+    """
     env_file = tmp_path / ".env"
     env_file.write_text("awf_console_host_port=3000\n", encoding="utf-8")
 
     _persist_console_host_port(env_file, 4321)
 
-    assert env_file.read_text(encoding="utf-8") == "awf_console_host_port=4321\n"
+    assert env_file.read_text(encoding="utf-8") == "AWF_CONSOLE_HOST_PORT=4321\n"
+
+
+@pytest.mark.unit
+def test_persist_normalizes_lowercase_key_while_keeping_export_prefix(tmp_path: Path) -> None:
+    """An ``export``-prefixed lowercase key keeps its prefix and is normalized to uppercase."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("export awf_console_host_port=3000\n", encoding="utf-8")
+
+    _persist_console_host_port(env_file, 4321)
+
+    assert env_file.read_text(encoding="utf-8") == "export AWF_CONSOLE_HOST_PORT=4321\n"
 
 
 @pytest.mark.unit

@@ -707,6 +707,18 @@ def _env_assignment_line_with_key(line: str, key: str) -> str:
     return f"{key}{line[match.end('key') :]}"
 
 
+def _env_assignment_line_with_canonical_key(line: str, canonical_key: str) -> str:
+    """Return ``line`` with its assignment key rewritten to ``canonical_key`` in place.
+
+    Unlike :func:`_env_assignment_line_with_key`, the leading ``export`` prefix and
+    any indentation before the key are preserved — only the key span is rewritten.
+    """
+    match = _ENV_ASSIGNMENT_RE.match(line)
+    if match is None:  # pragma: no cover - callers only pass matched assignment lines
+        return line
+    return f"{line[: match.start('key')]}{canonical_key}{line[match.end('key') :]}"
+
+
 def _replace_env_assignment_value(line: str, value: str) -> str:
     """Return ``line`` (no trailing newline) with its assignment value set to ``value``.
 
@@ -745,7 +757,11 @@ def _persist_console_host_port(env_file: Path, console_port: int) -> None:
             continue
         body = line.rstrip("\r\n")
         newline = line[len(body) :]
-        lines[index] = f"{_replace_env_assignment_value(body, value)}{newline}"
+        # Rewrite the key to the canonical uppercase spelling: Compose interpolates
+        # the case-sensitive ${AWF_CONSOLE_HOST_PORT} placeholder, so a preserved
+        # lowercase key would be ignored and the console would fall back to 3000.
+        canonical_body = _env_assignment_line_with_canonical_key(body, "AWF_CONSOLE_HOST_PORT")
+        lines[index] = f"{_replace_env_assignment_value(canonical_body, value)}{newline}"
         updated = True
     if updated:
         # Update every matching assignment: later commands parse env files
