@@ -19,6 +19,7 @@ from typing import Any, cast
 
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.forge import ForgeNotSupportedError, concrete_forge_for_repo, make_forge_client
 from awf.common.github_client import (
     GitHubClientError,
@@ -1105,6 +1106,21 @@ async def _handoff_sync_release_pr_monitor(
             from_status=WorkspaceStatus.running,
             failure_reason=FailureReason.infrastructure_failure,
             message=f"sync_release_pr failed: {exc.message}",
+            reason_code=exc.reason_code,
+        )
+        return
+    except BitBucketClientError as exc:
+        # ``make_forge_client("bitbucket")`` builds the client via
+        # ``BitBucketClient.from_env()``, which raises ``BitBucketClientError``
+        # (e.g. BITBUCKET_AUTH_NOT_CONFIGURED) when credentials are missing. Map
+        # it to a reason-coded failure here — like ForgeNotSupportedError above —
+        # so the auth error doesn't escape uncaught and strand the workspace in
+        # ``running``.
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"sync_release_pr failed: {exc}",
             reason_code=exc.reason_code,
         )
         return
