@@ -44,7 +44,7 @@ class FakeBitBucket:
     """Queue canned BitBucket responses and capture requests for assertions."""
 
     def __init__(self) -> None:
-        self._routes: dict[tuple[str, str], list[_Queued]] = {}
+        self._routes: dict[tuple[Any, ...], list[_Queued]] = {}
         self.requests: list[httpx.Request] = []
 
     def enqueue(
@@ -56,9 +56,21 @@ class FakeBitBucket:
         json: Any = None,
         text: str | None = None,
         headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
     ) -> FakeBitBucket:
-        """Queue one response for the next ``(method, path)`` request."""
-        self._routes.setdefault((method.upper(), path), []).append(
+        """Queue one response for the next request.
+
+        Keyed by ``(method, path)`` by default. When ``params`` is given, the
+        response is keyed by ``(method, path, sorted-params)`` so two calls to the
+        same path with different query strings can be served independent responses;
+        ``_handler`` falls back to the path-only key for callers that don't care.
+        """
+        key: tuple[Any, ...]
+        if params is not None:
+            key = (method.upper(), path, tuple(sorted(params.items())))
+        else:
+            key = (method.upper(), path)
+        self._routes.setdefault(key, []).append(
             _Queued(status=status, json_body=json, text=text, headers=headers or {})
         )
         return self
@@ -71,17 +83,23 @@ class FakeBitBucket:
         values: list[dict[str, Any]],
         next_url: str | None = None,
         headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
     ) -> FakeBitBucket:
         """Queue one BitBucket paginated page (``{values, next}``)."""
         body: dict[str, Any] = {"values": values}
         if next_url is not None:
             body["next"] = next_url
-        return self.enqueue(method, path, json=body, headers=headers)
+        return self.enqueue(method, path, json=body, headers=headers, params=params)
 
     def _handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        key = (request.method.upper(), request.url.path)
-        queue = self._routes.get(key)
+        # Prefer an exact (method, path, sorted-params) match so tests can serve
+        # distinct responses per query string; fall back to (method, path) so
+        # callers that don't key on params still resolve.
+        params_key = tuple(sorted(request.url.params.items()))
+        key_with_params = (request.method.upper(), request.url.path, params_key)
+        key_path_only = (request.method.upper(), request.url.path)
+        queue = self._routes.get(key_with_params) or self._routes.get(key_path_only)
         if not queue:
             raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
         item = queue.pop(0) if len(queue) > 1 else queue[0]

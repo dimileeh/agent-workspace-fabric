@@ -284,6 +284,31 @@ async def test_failing_check_logs_omits_refname_without_pr_context() -> None:
     assert "refname" not in statuses_call.url.params
 
 
+async def test_fake_serves_distinct_responses_by_query_params() -> None:
+    """The fake transport keys canned responses by query string when asked.
+
+    Regression for the helper limitation flagged on PR #443: two calls to the same
+    path with different query strings (e.g. an unscoped vs a ``refname``-scoped
+    statuses fetch) must be able to return independent responses, so a test can
+    prove that different params yield different observable behavior — not merely
+    that a param was sent. The path-only enqueue still resolves the unscoped call.
+    """
+    fake = FakeBitBucket()
+    path = f"{_REPO}/commit/{_HEAD}/statuses"
+    fake.page("GET", path, values=[{"state": "SUCCESSFUL", "name": "unscoped"}])
+    fake.page(
+        "GET",
+        path,
+        values=[{"state": "FAILED", "name": "scoped"}],
+        params={"refname": "feature/head"},
+    )
+    async with fake.client() as http:
+        unscoped = await http.get(path)
+        scoped = await http.get(path, params={"refname": "feature/head"})
+    assert unscoped.json()["values"][0]["name"] == "unscoped"
+    assert scoped.json()["values"][0]["name"] == "scoped"
+
+
 async def test_failing_check_logs_pipeline_scoped_to_pr_ref() -> None:
     """Pick the pipeline whose ref matches the PR source branch, not just newest.
 
