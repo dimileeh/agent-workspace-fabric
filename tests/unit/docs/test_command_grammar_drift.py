@@ -441,20 +441,52 @@ def _looks_pathlike(token: str) -> bool:
     return not token.startswith("-")
 
 
-def _init_arg_status(line: str) -> str | None:
-    """Classify an ``awf init`` command line.
+def _command_segment_starts(line: str) -> list[str]:
+    """Return ``line`` plus the suffix beginning after each top-level separator.
+
+    A documented one-liner often chains setup before the init, e.g.
+    ``cd "$repo" && awf init .``. The start-anchored classifier
+    (:func:`_classify_init_command`) only inspects a command at the *start* of
+    the string it is handed, so feeding it the raw line would miss the ``awf
+    init`` after ``&&`` entirely — :func:`re.match` returns ``None`` before the
+    separator is reached. Yielding the whole line *and* the (left-stripped)
+    remainder after every ``;``/``&``/``|`` lets that classifier see each chained
+    command in turn, so a no-path init after a separator is still caught.
+
+    The scan is quote-aware (single/double, mirroring
+    :func:`_strip_shell_comment`) so an operator character *inside* a quoted
+    path argument — ``awf init "$HOME/a&&b"`` — is treated as part of the path,
+    not a command separator, and never manufactures a spurious extra segment.
+    Each emitted suffix is left-stripped so the anchored classifier sees the
+    command at offset zero; a suffix that does not begin with ``awf init`` (or a
+    ``uv run`` prefix) simply classifies to ``None`` and is dropped.
+    """
+    starts = [line.lstrip()]
+    in_single = in_double = False
+    for index, char in enumerate(line):
+        if char == "'" and not in_double:
+            in_single = not in_single
+        elif char == '"' and not in_single:
+            in_double = not in_double
+        elif char in ";&|" and not in_single and not in_double:
+            starts.append(line[index + 1 :].lstrip())
+    return starts
+
+
+def _classify_init_command(segment: str) -> str | None:
+    """Classify a single ``awf init`` command at the start of ``segment``.
 
     Returns ``"ok"`` when a path/repo argument follows, ``"help"`` when only a
     help flag follows (a legitimate non-offender that nonetheless demonstrates no
     path), ``"bare"`` when nothing follows, ``"flag-only"`` when only non-help
-    flags follow (no path), or ``None`` when the line does not invoke ``awf init``
-    (e.g. ``awf service bootstrap`` or ``awf profile init``).
+    flags follow (no path), or ``None`` when ``segment`` does not invoke ``awf
+    init`` (e.g. ``awf service bootstrap`` or ``awf profile init``).
 
     ``"help"`` is kept distinct from ``"ok"`` so a help-only invocation is not
     flagged as a missing-path offender, yet also cannot stand in for the
     path-bearing example each first-run init context must demonstrate.
 
-    The match is anchored at the start of ``line`` (``re.match``, not
+    The match is anchored at the start of ``segment`` (``re.match``, not
     ``re.search``), with a leading ``uv run ...`` runner prefix allowed before
     ``awf init`` so the documented ``uv run --python 3.12 --extra dev awf init
     .`` lane is still classified — mirroring :func:`_parse_smoke_invocation`.
@@ -464,9 +496,11 @@ def _init_arg_status(line: str) -> str | None:
     valid ``awf init <path>`` example: such a span neither begins with ``awf
     init`` nor with a ``uv run`` prefix, so it returns ``None``. An unbounded
     ``re.search`` here would let that prose hit silently satisfy R2's
-    per-context "at least one valid example" gate.
+    per-context "at least one valid example" gate. :func:`_init_arg_status` first
+    splits the line into command segments (:func:`_command_segment_starts`) so an
+    init *chained after* a separator is still reached despite this anchoring.
     """
-    match = re.match(r"(?:uv\s+run\b.*?\s+)?awf init\b(?P<tail>.*)", line)
+    match = re.match(r"(?:uv\s+run\b.*?\s+)?awf init\b(?P<tail>.*)", segment)
     if match is None:
         return None
     tokens = _split_tail(match.group("tail"))
@@ -494,6 +528,32 @@ def _init_arg_status(line: str) -> str | None:
         break
 
     return "ok" if has_path else "flag-only"
+
+
+def _init_arg_status(line: str) -> str | None:
+    """Classify the ``awf init`` invocation(s) on a documented command line.
+
+    The line is first split into shell command segments
+    (:func:`_command_segment_starts`) so a chained one-liner such as
+    ``cd "$repo" && awf init`` is scanned even though it does not begin with
+    ``awf init`` — R2 enforces *every* documented init, not only the ones that
+    open their line. Each segment is classified by :func:`_classify_init_command`
+    and the worst status wins: an offender (``"bare"``/``"flag-only"``) anywhere
+    on the line is reported over a valid ``"ok"`` example, and ``"help"`` ranks
+    last so a line carrying a real path still counts as the example. ``None`` is
+    returned only when no segment invokes ``awf init`` at all.
+    """
+    statuses = [
+        status
+        for segment in _command_segment_starts(line)
+        if (status := _classify_init_command(segment)) is not None
+    ]
+    if not statuses:
+        return None
+    for offender in ("bare", "flag-only"):
+        if offender in statuses:
+            return offender
+    return "ok" if "ok" in statuses else "help"
 
 
 def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
@@ -717,6 +777,30 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("uv run --python 3.12 --extra dev awf init .") == "ok"
     assert _init_arg_status("uv run --extra dev awf init") == "bare"
     assert _init_arg_status("uv run --extra dev awf init --write-profile --yes") == "flag-only"
+    # An `awf init` chained *after* another command via a shell operator is still
+    # scanned: the start-anchored classifier is applied to every command segment,
+    # so a no-path init in a one-liner such as `cd "$repo" && awf init` is not
+    # skipped just because the line does not *begin* with `awf init`. Without this
+    # the anchored `re.match` returns None before the separator is ever inspected,
+    # silently waving a no-path chained init past R2.
+    assert _init_arg_status('cd "$repo" && awf init') == "bare"
+    assert _init_arg_status('cd "$repo" && awf init --write-profile --yes') == "flag-only"
+    assert _init_arg_status('cd "$repo" && awf init .') == "ok"
+    assert _init_arg_status("cd repo ; awf init") == "bare"
+    assert _init_arg_status("export AWF=1 | awf init .") == "ok"
+    # The `uv run ... awf init` lane after a separator is unwrapped just the same.
+    assert _init_arg_status("cd repo && uv run --extra dev awf init") == "bare"
+    # A help-only init after a separator stays the distinct non-offender status.
+    assert _init_arg_status("cd repo && awf init --help") == "help"
+    # When a line documents *both* a valid and a no-path init, the offender wins so
+    # the line is flagged rather than silently counting as a valid path example.
+    assert _init_arg_status("awf init . && awf init") == "bare"
+    # A shell operator *inside a quoted argument* is part of the path, not a command
+    # separator, so it neither splits the command nor manufactures a bogus segment
+    # whose trailing quote is misread as another invocation.
+    assert _init_arg_status('awf init "$HOME/a&&b"') == "ok"
+    assert _init_arg_status("awf init '$HOME/a&&b'") == "ok"
+    assert _init_arg_status('echo "x; awf init" && awf init .') == "ok"
 
 
 def test_helper_read_missing_doc_fails_with_actionable_message() -> None:
