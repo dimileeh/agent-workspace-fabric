@@ -563,7 +563,8 @@ def _command_segment_starts(line: str) -> list[str]:
     not a command separator, and never manufactures a spurious extra segment.
     Each emitted suffix is left-stripped so the anchored classifier sees the
     command at offset zero; a suffix that does not begin with ``awf init`` (or a
-    ``uv run`` prefix) simply classifies to ``None`` and is dropped.
+    ``uv run`` / path-qualified ``*/awf`` prefix) simply classifies to ``None``
+    and is dropped.
     """
     starts = [line.lstrip()]
     in_single = in_double = False
@@ -594,6 +595,14 @@ def _classify_init_command(segment: str) -> str | None:
     ``re.search``), with a leading ``uv run ...`` runner prefix allowed before
     ``awf init`` so the documented ``uv run --python 3.12 --extra dev awf init
     .`` lane is still classified — mirroring :func:`_parse_smoke_invocation`.
+    A path-qualified binary start (``(?:\\S*/)?awf``) is also accepted so the
+    installed-binary form used in the release runbook —
+    ``/tmp/awf-release-install/bin/awf init --help`` (RELEASING.md) — is swept
+    too: without it a future stale no-path drift such as
+    ``/tmp/.../bin/awf init --write-profile --yes`` would classify to ``None``
+    and slip past R2 even though the release docs are inside the init grammar
+    contract. The path token cannot contain whitespace, so a start-anchored
+    prose mention (``run awf init later``) still classifies to ``None``.
     Anchoring keeps a prose backtick span that merely references the command
     mid-sentence (e.g. ``run awf init later`` or ``see awf init below``) from
     being parsed with the trailing prose token as a path and miscounted as a
@@ -604,7 +613,7 @@ def _classify_init_command(segment: str) -> str | None:
     splits the line into command segments (:func:`_command_segment_starts`) so an
     init *chained after* a separator is still reached despite this anchoring.
     """
-    match = re.match(r"(?:uv\s+run\b.*?\s+)?awf init\b(?P<tail>.*)", segment)
+    match = re.match(r"(?:uv\s+run\b.*?\s+)?(?:\S*/)?awf init\b(?P<tail>.*)", segment)
     if match is None:
         return None
     tokens = _split_tail(match.group("tail"))

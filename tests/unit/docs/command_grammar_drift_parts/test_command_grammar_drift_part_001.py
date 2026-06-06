@@ -76,6 +76,22 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("uv run --python 3.12 --extra dev awf init .") == "ok"
     assert _init_arg_status("uv run --extra dev awf init") == "bare"
     assert _init_arg_status("uv run --extra dev awf init --write-profile --yes") == "flag-only"
+    # The release runbook invokes the *installed binary* by path
+    # (`/tmp/awf-release-install/bin/awf init --help`), so a path-qualified
+    # `*/awf init` start is classified just like the bare `awf init` form —
+    # otherwise a future stale no-path drift in that release-doc form would slip
+    # past R2 even though RELEASING.md is inside the init grammar contract.
+    assert _init_arg_status("/tmp/awf-release-install/bin/awf init --help") == "help"
+    assert _init_arg_status("/tmp/awf-release-install/bin/awf init .") == "ok"
+    assert _init_arg_status("/tmp/awf-release-install/bin/awf init") == "bare"
+    assert (
+        _init_arg_status("/tmp/awf-release-install/bin/awf init --write-profile --yes")
+        == "flag-only"
+    )
+    assert _init_arg_status("./bin/awf init .") == "ok"
+    # A path-qualified `*/awf service bootstrap` is not an init invocation, and a
+    # prose mention is still anchored out because a path token carries no spaces.
+    assert _init_arg_status("/tmp/awf-release-install/bin/awf service bootstrap") is None
     # An `awf init` chained *after* another command via a shell operator is still
     # scanned: the start-anchored classifier is applied to every command segment,
     # so a no-path init in a one-liner such as `cd "$repo" && awf init` is not
