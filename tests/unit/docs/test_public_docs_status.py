@@ -152,7 +152,7 @@ def test_raw_docker_compose_source_path_is_single_command() -> None:
                 "For source checkouts or raw Docker installs",
                 maxsplit=1,
             )[1].split("If ", maxsplit=1)[0]
-        assert "docker compose up --build" in section, doc_name
+        assert "docker compose up -d --build" in section, doc_name
         assert "cp .env.example .env" not in section, doc_name
         assert "docker build -t awf-agent-runtime:latest" not in section, doc_name
         assert "127.0.0.1:3000" in section, doc_name

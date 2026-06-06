@@ -17,7 +17,7 @@ then, use one of the three lanes below.
 
 Mocked smoke does not require live GitHub or provider access. Local first-run
 service URLs use IPv4 loopback: <http://127.0.0.1:8000> for the API and
-<http://127.0.0.1:3000> for the console when it is running.
+<http://127.0.0.1:3000> for the console started by `awf start`.
 
 AWF uses root `.env` for local runtime values. `awf start` seeds it from
 `.env.example` when needed; source-checkout operators can also pre-create it
@@ -57,6 +57,11 @@ awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 `awf init "$HOME/awf-eval-project"` is the `awf init <path>` project onboarding
 step. If the project already has `.awf/workspace.yml`, AWF validates it; if not,
 interactive terminals guide profile creation.
+
+`awf start` starts the local API, worker, database, and web console. Use
+`awf start --headless` to skip the console on server or CI hosts, or
+`awf start --console-port 3333` to publish the console on another localhost
+port.
 
 Upgrade with the same package manager you used to install:
 
@@ -153,7 +158,7 @@ For source checkouts or raw Docker installs, root Compose can bring up the full
 local stack with safe loopback-only defaults:
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
 Open <http://127.0.0.1:3000> for the console, or call the API at

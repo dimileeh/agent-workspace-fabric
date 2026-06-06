@@ -5,7 +5,7 @@ commands in a subprocess whose import path puts the extracted wheel first and
 drops the editable repo ``src`` — proving the packaged ``awf`` runs from outside
 the checkout without repo-relative files. It works offline (runtime deps resolve
 from the current interpreter). A second, best-effort test performs a real
-``python -m venv`` + ``pip install`` of the wheel: it skips only when its
+``uv venv`` + ``uv pip install`` of the wheel: it skips only when its
 dependencies cannot be fetched offline, but fails on a real wheel-artifact
 regression (invalid metadata, incompatible Requires-Python, malformed archive);
 CI (with network) runs it fully. The exhaustive install-lane matrix is owned by
@@ -15,6 +15,7 @@ T14.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -74,6 +75,15 @@ print({_SUCCESS_MARKER!r})
 """
 
 
+def _combined_output(result: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join(part for part in (result.stderr, result.stdout) if part)
+
+
+def _output_tail(result: subprocess.CompletedProcess[str], *, length: int = 600) -> str:
+    combined = _combined_output(result).strip()
+    return combined[-length:] if combined else "<no subprocess output>"
+
+
 @pytest.fixture(scope="module")
 def built() -> BuiltDistributions:
     """Build the wheel once for this module, skipping if unavailable."""
@@ -115,27 +125,32 @@ def test_extracted_wheel_help_runs_outside_checkout(
     assert _SUCCESS_MARKER in result.stdout
 
 
-def test_clean_venv_install_help(built: BuiltDistributions, tmp_path: Path) -> None:
-    """A real venv install of the wheel exposes a working ``awf --help`` (CI lane).
+def test_uv_venv_install_help(built: BuiltDistributions, tmp_path: Path) -> None:
+    """A real uv-managed venv install exposes a working ``awf --help`` (CI lane).
 
-    Skips when ``python -m venv`` is unavailable or when the wheel's dependencies
-    cannot be fetched offline, keeping the unit suite robust; but a non-environmental
-    install failure (a regression in the wheel artifact itself) fails the test so
-    the package guard is preserved. CI with network runs the full install.
+    Skips when ``uv``/Python setup is unavailable or when the wheel's
+    dependencies cannot be fetched offline, keeping the unit suite robust; but a
+    non-environmental install failure (a regression in the wheel artifact
+    itself) fails the test so the package guard is preserved. CI with network
+    runs the full install.
     """
+    uv = shutil.which("uv")
+    if uv is None:  # pragma: no cover - env dependent
+        pytest.skip("uv is not available for the clean wheel install smoke")
+
     venv_dir = tmp_path / "venv"
     try:
         create = subprocess.run(
-            [sys.executable, "-m", "venv", str(venv_dir)],
+            [uv, "venv", "--python", "3.12", str(venv_dir)],
             check=False,
             capture_output=True,
             text=True,
             timeout=120,
         )
     except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - env dependent
-        pytest.skip(f"python -m venv could not run: {exc}")
+        pytest.skip(f"uv venv could not run: {exc}")
     if create.returncode != 0:  # pragma: no cover - env dependent
-        pytest.skip(f"python -m venv unavailable: {create.stderr.strip()}")
+        pytest.skip(f"uv venv unavailable: {_output_tail(create)}")
 
     venv_python = venv_dir / "bin" / "python"
     venv_awf = venv_dir / "bin" / "awf"
@@ -144,36 +159,35 @@ def test_clean_venv_install_help(built: BuiltDistributions, tmp_path: Path) -> N
 
     try:
         install = subprocess.run(
-            [str(venv_python), "-m", "pip", "install", str(built.wheel)],
+            [uv, "pip", "install", "--python", str(venv_python), str(built.wheel)],
             check=False,
             capture_output=True,
             text=True,
             timeout=600,
         )
-    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - network dependent
-        pytest.skip(f"wheel install could not run (no network/pip): {exc}")
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover - env dependent
+        pytest.skip(f"uv wheel install could not run: {exc}")
     if install.returncode != 0:  # pragma: no cover - depends on offline vs regression outcome
-        combined = "\n".join(part for part in (install.stderr, install.stdout) if part)
+        combined = _combined_output(install)
         if install_failure_is_environmental(combined):
             pytest.skip(
-                "wheel install with dependencies unavailable offline: "
-                + (install.stderr[-300:] or install.stdout[-300:])
+                "uv wheel install with dependencies unavailable offline: " + _output_tail(install)
             )
-        # pip processed the local wheel but the install failed for a
+        # uv processed the local wheel but the install failed for a
         # non-environmental reason — invalid wheel metadata, an incompatible
         # Requires-Python, or a malformed archive. Fail loudly so the
         # package-artifact guard catches the regression instead of reporting
         # skipped (PRRT_kwDOSJAM6s6F-8ys).
-        pytest.fail(f"wheel install failed for a non-environmental reason:\n{combined[-1000:]}")
+        pytest.fail(f"uv wheel install failed for a non-environmental reason:\n{combined[-1000:]}")
 
     if not venv_awf.exists():  # pragma: no cover - wheel entry-point regression
-        # pip install succeeded but the ``awf`` console script is absent (e.g. a
+        # uv install succeeded but the ``awf`` console script is absent (e.g. a
         # malformed ``entry_points.txt`` in the wheel). Fail with a diagnostic
         # message rather than letting the subprocess call below raise a bare
         # FileNotFoundError — a missing entry point on this POSIX layout is a
         # real wheel-artifact regression the package guard must surface.
         pytest.fail(
-            f"pip install succeeded but the 'awf' console script is missing at {venv_awf}; "
+            f"uv install succeeded but the 'awf' console script is missing at {venv_awf}; "
             "the wheel's entry-point metadata is malformed."
         )
 

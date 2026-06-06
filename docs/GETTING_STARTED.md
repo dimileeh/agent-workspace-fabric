@@ -98,11 +98,15 @@ awf smoke run --project "$HOME/awf-eval-project" --mocked-local --format pretty
 
 `awf setup` checks host readiness, imports any legacy `docker/compose/.env`
 values into root `.env`, and configures supported clients such as MCP when
-requested. `awf start` starts the local AWF Core stack, and
+requested. `awf start` starts the local AWF Core stack, including the web
+console at <http://127.0.0.1:3000>, and
 `awf service status --format pretty` confirms API, database, Docker, image,
 disk, provider, and cleanup health. The lower-level
 `awf service bootstrap` command remains available for service-only development
 and is what `awf start` delegates to.
+
+Use `awf start --headless` when a host should not run the console, or
+`awf start --console-port 3333` when port `3000` is already in use.
 
 For the source checkout with global tool install lane, run from the checkout:
 
@@ -128,7 +132,7 @@ For source checkouts or raw Docker installs, root Compose can bring up the full
 local stack with safe loopback-only defaults:
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
 Open <http://127.0.0.1:3000> for the console, or call the API at

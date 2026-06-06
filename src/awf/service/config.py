@@ -212,6 +212,12 @@ def resolve_service_settings(
         require_init_field=environ is not None,
         project_dotenv_lookup=project_dotenv_lookup,
     )
+    console_url = _resolve_service_console_url(
+        settings,
+        env,
+        service_env,
+        require_init_field=environ is not None,
+    )
     work_dir = _resolve_service_work_dir(settings, service_env, host_environ=env)
     validate_production_settings(settings, database_url=database_url)
 
@@ -219,7 +225,7 @@ def resolve_service_settings(
         service_name=settings.service_name,
         env=settings.env,
         api_base_url=api_base_url,
-        console_url=settings.console_url,
+        console_url=console_url,
         database_url=database_url,
         docker_host=settings.docker_host,
         agent_runtime_image=settings.agent_runtime_image,
@@ -554,6 +560,39 @@ def _default_local_service_api_base_url(environ: Mapping[str, str]) -> str:
     return f"http://localhost:{parsed_port}"
 
 
+def _resolve_service_console_url(
+    settings: Settings,
+    environ: Mapping[str, str],
+    service_environ: Mapping[str, str],
+    *,
+    require_init_field: bool = False,
+) -> str | None:
+    """Return the operator-facing console URL for local service displays."""
+
+    host_console_url = _empty_to_none(_env_value(environ, "AWF_CONSOLE_URL"))
+    if host_console_url is not None:
+        return host_console_url
+    if _settings_console_url_is_explicit(
+        settings,
+        require_init_field=require_init_field,
+    ):
+        return settings.console_url
+    service_console_url = _empty_to_none(_env_value(service_environ, "AWF_CONSOLE_URL"))
+    if service_console_url is not None:
+        return service_console_url
+    return _default_local_service_console_url(service_environ)
+
+
+def _default_local_service_console_url(environ: Mapping[str, str]) -> str | None:
+    """Return the local console URL matching existing Compose port overrides."""
+
+    host_port = _env_value(environ, "AWF_CONSOLE_HOST_PORT")
+    if not host_port:
+        return None
+    parsed_port = _parse_host_port("AWF_CONSOLE_HOST_PORT", host_port)
+    return f"http://localhost:{parsed_port}"
+
+
 def _parse_host_port(env_key: str, value: str) -> int:
     """Parse a Compose host port override into a TCP port number."""
 
@@ -580,6 +619,20 @@ def _settings_api_base_url_is_explicit(
     if require_init_field or "api_base_url" not in settings.model_fields_set:
         return False
     return _api_base_url_is_explicit(settings.api_base_url, environ)
+
+
+def _settings_console_url_is_explicit(
+    settings: Settings,
+    *,
+    require_init_field: bool = False,
+) -> bool:
+    """Return true when settings carries an explicitly configured console URL."""
+
+    if "console_url" in _settings_init_fields(settings):
+        return True
+    if require_init_field or "console_url" not in settings.model_fields_set:
+        return False
+    return settings.console_url is not None
 
 
 def _api_base_url_is_explicit(api_base_url: str, environ: Mapping[str, str]) -> bool:

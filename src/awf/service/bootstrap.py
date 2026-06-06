@@ -136,6 +136,7 @@ class ServiceBootstrapOptions:
     poll_interval_seconds: float = DEFAULT_BOOTSTRAP_POLL_INTERVAL_SECONDS
     skip_agent_runtime_build: bool = False
     force_rebuild: bool = False
+    start_console: bool = False
     strict_providers: frozenset[str] = field(default_factory=frozenset)
 
 
@@ -932,6 +933,13 @@ def _bootstrap_stages(
             ),
         ]
     )
+    if options.start_console:
+        stages.append(
+            _BootstrapStage(
+                "console",
+                (*compose, "up", "-d", "--build", "--no-deps", "console"),
+            )
+        )
     return tuple(stages)
 
 
