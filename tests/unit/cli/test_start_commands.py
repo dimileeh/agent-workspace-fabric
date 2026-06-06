@@ -225,10 +225,16 @@ def test_start_headless_skips_console_bootstrap_and_output(
 @pytest.mark.unit
 def test_start_console_port_override_updates_bootstrap_env_and_output(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """`--console-port` publishes the console on that host port and reports it."""
+    """`--console-port` publishes the console on that host port and persists it."""
     records: list[dict[str, object]] = []
     _patch_start_wiring(monkeypatch, records=records, result=_success_result())
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(
+        "awf.cli.init_ops._resolve_service_runtime_env_files",
+        lambda *_a, **_k: (env_file, env_file),
+    )
 
     def _resolve_settings(_base: object, *, environ: dict[str, str]) -> object:
         return SimpleNamespace(
@@ -245,6 +251,8 @@ def test_start_console_port_override_updates_bootstrap_env_and_output(
     assert records[0]["options"].start_console is True
     payload = json.loads(result.stdout)
     assert payload["details"]["console_url"] == "http://127.0.0.1:3333"
+    # The override is persisted into the active service env file for later commands.
+    assert env_file.read_text(encoding="utf-8") == "AWF_CONSOLE_HOST_PORT=3333\n"
 
 
 @pytest.mark.unit
@@ -373,6 +381,114 @@ def test_resolve_start_inputs_source_checkout_falls_back_to_root_env(
     assert captured["environ_env_file"] == root_env
     assert captured["settings_env_file"] == root_env
     assert inputs.compose_env_file == root_env
+
+
+def _capture_settings_environ(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, object],
+) -> None:
+    """Wire ``local_service_environ``/``resolve_service_settings`` to capture the environ."""
+    monkeypatch.setattr("awf.service.config.local_service_environ", lambda **_k: {})
+    monkeypatch.setattr("awf.common.config.Settings", lambda **_k: object())
+
+    def _capture_settings(_base: object, *, environ: dict[str, str]) -> object:
+        captured["environ"] = dict(environ)
+        return SimpleNamespace(api_base_url="http://localhost:8000", console_url=None)
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", _capture_settings)
+
+
+@pytest.mark.unit
+def test_resolve_start_inputs_default_persists_console_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Default discovery persists --console-port into the active env file and settings."""
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(
+        "awf.cli.init_ops._resolve_service_compose_paths",
+        lambda: (tmp_path / "compose.yaml", env_file, tmp_path / ".env.example"),
+    )
+    monkeypatch.setattr(
+        "awf.cli.init_ops._resolve_service_runtime_env_files",
+        lambda *_a, **_k: (env_file, env_file),
+    )
+    monkeypatch.setattr("awf.cli.init_ops._migrate_legacy_service_env_file", lambda *_a, **_k: None)
+    captured: dict[str, object] = {}
+    _capture_settings_environ(monkeypatch, captured)
+
+    start_commands._resolve_start_bootstrap_inputs(None, console_port=4321)
+
+    assert env_file.read_text(encoding="utf-8") == "AWF_CONSOLE_HOST_PORT=4321\n"
+    assert captured["environ"]["AWF_CONSOLE_HOST_PORT"] == "4321"
+
+
+@pytest.mark.unit
+def test_resolve_start_inputs_default_no_console_port_leaves_env_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Plain awf start (no --console-port) never creates or edits the env file."""
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(
+        "awf.cli.init_ops._resolve_service_compose_paths",
+        lambda: (tmp_path / "compose.yaml", env_file, tmp_path / ".env.example"),
+    )
+    monkeypatch.setattr(
+        "awf.cli.init_ops._resolve_service_runtime_env_files",
+        lambda *_a, **_k: (env_file, env_file),
+    )
+    monkeypatch.setattr("awf.cli.init_ops._migrate_legacy_service_env_file", lambda *_a, **_k: None)
+    captured: dict[str, object] = {}
+    _capture_settings_environ(monkeypatch, captured)
+
+    start_commands._resolve_start_bootstrap_inputs(None)
+
+    assert not env_file.exists()
+    assert "AWF_CONSOLE_HOST_PORT" not in captured["environ"]
+
+
+@pytest.mark.unit
+def test_resolve_start_inputs_source_checkout_creates_root_env_with_console_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verified source checkout creates a missing root .env carrying --console-port."""
+    root = (tmp_path / "checkout").resolve()
+    root.mkdir(parents=True)
+    root_env = root / ".env"
+    verified = SimpleNamespace(root=root, compose_file=root / "compose.yaml")
+    monkeypatch.setattr("awf.cli.init_ops._migrate_legacy_service_env_file", lambda *_a, **_k: None)
+    captured: dict[str, object] = {}
+    _capture_settings_environ(monkeypatch, captured)
+
+    inputs = start_commands._resolve_start_bootstrap_inputs(verified, console_port=4321)
+
+    assert root_env.read_text(encoding="utf-8") == "AWF_CONSOLE_HOST_PORT=4321\n"
+    assert inputs.compose_env_file == root_env
+    assert captured["environ"]["AWF_CONSOLE_HOST_PORT"] == "4321"
+
+
+@pytest.mark.unit
+def test_resolve_start_inputs_source_checkout_preserves_existing_root_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pre-existing root .env keeps its keys and gains --console-port exactly once."""
+    root = (tmp_path / "checkout").resolve()
+    root.mkdir(parents=True)
+    root_env = root / ".env"
+    root_env.write_text("AWF_API_TOKEN=from-root\n", encoding="utf-8")
+    verified = SimpleNamespace(root=root, compose_file=root / "compose.yaml")
+    monkeypatch.setattr("awf.cli.init_ops._migrate_legacy_service_env_file", lambda *_a, **_k: None)
+    captured: dict[str, object] = {}
+    _capture_settings_environ(monkeypatch, captured)
+
+    start_commands._resolve_start_bootstrap_inputs(verified, console_port=4321)
+
+    assert root_env.read_text(encoding="utf-8") == (
+        "AWF_API_TOKEN=from-root\nAWF_CONSOLE_HOST_PORT=4321\n"
+    )
 
 
 @pytest.mark.unit
