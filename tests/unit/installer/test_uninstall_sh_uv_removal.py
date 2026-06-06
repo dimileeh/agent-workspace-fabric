@@ -49,6 +49,36 @@ def test_remove_uv_without_marker_refuses(harness: InstallerHarness) -> None:
 
 
 @pytest.mark.unit
+def test_remove_uv_with_invalid_marker_contents_refuses(
+    harness: InstallerHarness,
+) -> None:
+    """A marker file lacking ``installed_by=awf`` is not proof and is refused.
+
+    Regression: an empty/corrupt or unrelated file at the marker path is a
+    regular file but does not prove AWF bootstrapped uv. The lane must verify the
+    marker contents, not merely its existence, before deleting any binaries.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output="")
+    uv_bin_dir = harness.home / ".local" / "bin"
+    uv_bin_dir.mkdir(parents=True, exist_ok=True)
+    uv_bin = uv_bin_dir / "uv"
+    uv_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    # A present-but-unrelated marker file (no installed_by=awf line).
+    marker = harness.uv_marker_path()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("garbage\nuv_bin_dir=/somewhere\n", encoding="utf-8")
+
+    result = _run(harness, ["--remove-uv", "--yes"])
+
+    assert result.returncode != 0
+    assert "UV_REMOVAL_REFUSED_UNOWNED" in result.stderr
+    # uv must survive when ownership is unproven, and the marker is left intact.
+    assert uv_bin.exists()
+    assert marker.exists()
+
+
+@pytest.mark.unit
 def test_remove_uv_with_marker_and_yes_deletes_binaries(
     harness: InstallerHarness,
 ) -> None:

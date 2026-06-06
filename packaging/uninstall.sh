@@ -275,8 +275,10 @@ confirm_destructive() {
 # --------------------------------------------------------------------------
 
 # Remove uv only when --remove-uv is given AND the AWF ownership marker proves AWF
-# bootstrapped it. Without the marker we refuse (UV_REMOVAL_REFUSED_UNOWNED) so a
-# uv the user installed themselves is never removed. The removal is destructive,
+# bootstrapped it — proof means the marker exists AND carries the installed_by=awf
+# line bootstrap_uv writes, not merely that some file sits at the path. Without
+# that proof we refuse (UV_REMOVAL_REFUSED_UNOWNED) so a uv the user installed
+# themselves is never removed. The removal is destructive,
 # so it is confirm-gated; --dry-run only plans it. The official uv has no
 # `uv self uninstall` subcommand (uv self exposes only update/version), so removal
 # means deleting the uv/uvx binaries the installer placed; bootstrap_uv recorded
@@ -287,6 +289,12 @@ remove_uv() {
     [ "$REMOVE_UV" -eq 1 ] || return 0
     if [ ! -f "$AWF_UV_MARKER" ]; then
         fail UV_REMOVAL_REFUSED_UNOWNED "refusing to remove uv: no AWF ownership marker at ${AWF_UV_MARKER}; AWF only removes a uv it bootstrapped"
+    fi
+    # A regular file at the marker path is not by itself proof: an empty, corrupt,
+    # or unrelated file there must not authorize deleting uv. bootstrap_uv writes a
+    # deterministic installed_by=awf line, so require it before trusting the marker.
+    if ! grep -q '^installed_by=awf$' "$AWF_UV_MARKER" 2>/dev/null; then
+        fail UV_REMOVAL_REFUSED_UNOWNED "refusing to remove uv: ownership marker at ${AWF_UV_MARKER} lacks installed_by=awf; AWF only removes a uv it bootstrapped"
     fi
     confirm_destructive "uv (AWF-bootstrapped)" \
         || fail CONFIRMATION_REQUIRED "uv removal requires --yes (non-interactive) or interactive confirmation"
