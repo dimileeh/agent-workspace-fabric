@@ -1239,7 +1239,9 @@ def test_mocked_smoke_examples_use_project_flag() -> None:
                 offenders.append(f"{rel_path}: {offense} in `{invocation.raw}`")
 
     assert not offenders, offenders
-    assert mocked_examples_seen, "Expected at least one mocked `awf smoke run --project` example."
+    assert mocked_examples_seen, (
+        "Expected at least one `awf smoke run --mocked-local` example across first-run docs."
+    )
 
 
 def test_first_run_install_lanes_present_and_curl_gated() -> None:
