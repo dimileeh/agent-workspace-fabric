@@ -17,7 +17,6 @@ re-raised so the caller can log/alert.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,11 +31,7 @@ from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.db.enums import EgressDecision, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
-from awf.db.repositories import (
-    EgressAuditRepository,
-    TaskAttemptRepository,
-    WorkspaceRepository,
-)
+from awf.db.repositories import WorkspaceRepository
 from awf.db.repositories.base import (
     PRE_LAUNCH_FAILURE_EVENT_TYPE,
     PROVISIONING_LAUNCHING_EVENT_TYPE,
@@ -44,8 +39,6 @@ from awf.db.repositories.base import (
     TERMINAL_RUNTIME_RELEASE_REVOKED_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REVOKED_REASON_CODE,
     has_terminal_runtime_released_event,
-    host_ports_from_resolved_profile,
-    host_ports_from_task_policy_companions,
 )
 from awf.node import provisioner_helpers as _provisioner_helpers
 from awf.node.companion_services import (
@@ -62,11 +55,12 @@ from awf.node.compose_manager import (
 )
 from awf.node.egress_policy import LocalEgressPlan, LocalEgressPolicyError, local_egress_plan
 from awf.node.git_manager import GitManager, GitOperationError
+from awf.node.provisioner_host_ports_check import ProvisionerHostPortCheckMixin
+from awf.node.provisioner_short_txn_helpers import ProvisionerShortTxnHelpersMixin
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.compose import profile_services
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import (
-    ProfileResolution,
     ProfileResolutionError,
     resolve_workspace_profile,
 )
@@ -119,6 +113,13 @@ host ports.
 _ORPHAN_STOP_TIMEOUT_SECONDS: Final = 30.0
 """Maximum time to spend stopping orphan containers after launch races cleanup."""
 
+_EXECUTION_CLAIM_FENCED_REASON_CODE: Final = "EXECUTION_CLAIM_FENCED"
+"""Reason code logged when a stale provisioner is fenced by the execution-claim epoch (D5).
+
+Kept as a node-local literal so ``awf.node`` does not import ``awf.control``; the
+string is the end-to-end contract shared with the worker's
+``EXECUTION_CLAIM_FENCED`` constant."""
+
 _log = get_logger(__name__)
 
 
@@ -168,7 +169,7 @@ class ProvisionerConfig:
             )
 
 
-class Provisioner:
+class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin):
     """Orchestrates git + state transitions for one workspace at a time.
 
     Stateless apart from injected dependencies — safe to share across concurrent
@@ -205,8 +206,16 @@ class Provisioner:
 
         await self._provision_claimed_workspace(workspace_id, ws)
 
-    async def provision_claimed(self, workspace_id: str) -> None:
-        """Drive a workspace already claimed into ``provisioning`` by the worker."""
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        """Drive a workspace already claimed into ``provisioning`` by the worker.
+
+        ``execution_claim_epoch`` (when supplied) fences this provision against
+        a later claimant: it is verified just before the stack launch and gates
+        the terminal ``provisioning -> ready`` / ``-> failed`` transitions so a
+        stale worker can never force or steal the row (D4/D7).
+        """
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
@@ -224,13 +233,21 @@ class Provisioner:
                 await session.commit()
                 return
 
-        await self._provision_claimed_workspace(workspace_id, ws)
+        await self._provision_claimed_workspace(
+            workspace_id, ws, execution_claim_epoch=execution_claim_epoch
+        )
 
     def get_worktree_path(self, workspace_id: str) -> Path:
         """Return the node-local worktree path AWF manages for ``workspace_id``."""
         return self._git.get_worktree_path(workspace_id)
 
-    async def _provision_claimed_workspace(self, workspace_id: str, ws: Workspace) -> None:
+    async def _provision_claimed_workspace(
+        self,
+        workspace_id: str,
+        ws: Workspace,
+        *,
+        execution_claim_epoch: int | None = None,
+    ) -> None:
         """Execute the full provisioning pipeline for an already-claimed workspace."""
         if not await self._recheck_status(
             workspace_id,
@@ -321,6 +338,7 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message=str(exc)[:2000],
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
                     )
                     return
@@ -335,6 +353,7 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message="companion host-port check failed; compose not started",
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="COMPANION_HOST_PORT_CHECK_FATAL",
                     )
                     return
@@ -366,6 +385,7 @@ class Provisioner:
                         excluding_workspace_id=workspace_id,
                         task_policy=ws.task_policy,
                         resolved_profile_dict=resolved_profile_dict,
+                        execution_claim_epoch=execution_claim_epoch,
                     )
                 except (
                     WorkspaceCreateHostPortConflictError,
@@ -383,6 +403,7 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message=str(exc)[:2000],
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
                     )
                     return
@@ -397,14 +418,39 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message="auto-resolved profile host-port check failed; compose not started",
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="AUTO_PROFILE_HOST_PORT_CHECK_FATAL",
                     )
                     return
+                pre_launch_fenced = False
                 try:
                     async with self._session_factory() as pre_launch_session:
                         pre_launch_repo = WorkspaceRepository(pre_launch_session)
                         pre_launch_ws = await pre_launch_repo.get_for_update(workspace_id)
                         if (
+                            pre_launch_ws is not None
+                            and execution_claim_epoch is not None
+                            and pre_launch_ws.execution_claim_epoch != execution_claim_epoch
+                        ):
+                            # D4 (early, row-locked): a later claimant superseded us
+                            # after profile resolution — it advanced
+                            # execution_claim_epoch while the row stayed
+                            # ``provisioning``. The status guard alone cannot see
+                            # that, so we detect the fence here and abort once the
+                            # lock releases. Aborting now (not only at the downstream
+                            # D4 _verify_execution_claim_epoch) keeps the fenced-exit
+                            # path free of side effects: we must not write
+                            # compose_project_name / resolved_profile into the new
+                            # claimant's row, and we must not fall through to
+                            # _recheck_before_launch, which would commit a
+                            # ``provisioning_launching`` event into the new claimant's
+                            # timeline (that recheck is epoch-blind, gated only on
+                            # status). The early return also stops any future code
+                            # inserted before D4 from running under a stale claim. The
+                            # SELECT FOR UPDATE makes this epoch read atomic against
+                            # the reclaim.
+                            pre_launch_fenced = True
+                        elif (
                             pre_launch_ws is not None
                             and pre_launch_ws.compose_project_name is None
                             and pre_launch_ws.status == WorkspaceStatus.provisioning.value
@@ -442,7 +488,16 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message="pre-launch commit failed; compose_project_name not persisted",
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="PRE_LAUNCH_COMMIT_FATAL",
+                    )
+                    return
+                if pre_launch_fenced:
+                    _log.warning(
+                        "provisioner.execution_claim_fenced",
+                        workspace_id=workspace_id,
+                        phase="pre_launch_session",
+                        reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
                     )
                     return
                 try:
@@ -459,8 +514,30 @@ class Provisioner:
                         failure_reason=FailureReason.infrastructure_failure,
                         message="recheck-before-launch failed; compose not started",
                         from_status=WorkspaceStatus.provisioning,
+                        execution_claim_epoch=execution_claim_epoch,
                         reason_code="RECHECK_BEFORE_LAUNCH_FATAL",
                         clear_unlaunched_compose_project=True,
+                    )
+                    return
+
+                # D4: final epoch check on the event loop, immediately before
+                # the stack launch. A later claimant advances the epoch, so a
+                # fenced worker aborts here WITHOUT transitioning the row —
+                # never touching the new claimant's git worktree / compose /
+                # auth state. The residual ms-scale gap to the rmtree inside
+                # the launcher's to_thread is backstopped by the heartbeat
+                # cancel and the terminal-transition CAS (D7).
+                if (
+                    execution_claim_epoch is not None
+                    and not await self._verify_execution_claim_epoch(
+                        workspace_id, execution_claim_epoch
+                    )
+                ):
+                    _log.warning(
+                        "provisioner.execution_claim_fenced",
+                        workspace_id=workspace_id,
+                        phase="pre_launch",
+                        reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
                     )
                     return
 
@@ -492,6 +569,7 @@ class Provisioner:
                 failure_reason=FailureReason.infrastructure_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
             )
             raise
         except ProfileResolutionError as exc:
@@ -505,6 +583,7 @@ class Provisioner:
                 failure_reason=FailureReason.profile_resolution_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
             )
             raise
@@ -521,6 +600,7 @@ class Provisioner:
                 failure_reason=FailureReason.policy_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
                 reason_code=exc.reason_code,
                 clear_unlaunched_compose_project=not stack_launch_started,
             )
@@ -538,6 +618,7 @@ class Provisioner:
                     failure_reason=FailureReason.infrastructure_failure,
                     message=str(exc)[:2000],
                     from_status=WorkspaceStatus.provisioning,
+                    execution_claim_epoch=execution_claim_epoch,
                     reason_code=exc.reason_code,
                     clear_unlaunched_compose_project=True,
                 )
@@ -555,6 +636,10 @@ class Provisioner:
                         compose_fail_ws is not None
                         and compose_fail_ws.status == WorkspaceStatus.provisioning.value
                         and compose_fail_ws.compose_project_name is None
+                        and (
+                            execution_claim_epoch is None
+                            or compose_fail_ws.execution_claim_epoch == execution_claim_epoch
+                        )
                     ):
                         # Defensive backstop: pre_launch_session normally sets
                         # compose_project_name before launch, so this branch
@@ -564,6 +649,17 @@ class Provisioner:
                         # compose_project_name null at compose-fail time,
                         # ensuring the cleanup worker can still discover and
                         # tear down the project.
+                        #
+                        # D4 (row-locked): the epoch read under this
+                        # ``get_for_update`` fences the write the same way
+                        # ``pre_launch_session`` does — a later claimant can
+                        # advance ``execution_claim_epoch`` during the launch
+                        # ``to_thread`` window (the residual gap the D4 verify
+                        # above acknowledges), and a fenced worker must not
+                        # write compose_project_name / resolved_profile into
+                        # the new claimant's row.  When the epoch has moved on
+                        # we skip the write; the epoch-gated ``_mark_failed``
+                        # (D7) below then CAS-skips the terminal transition.
                         compose_fail_ws.compose_project_name = f"awf_{workspace_id}"
                         if (
                             resolved_profile_dict is not None
@@ -583,6 +679,7 @@ class Provisioner:
                     failure_reason=FailureReason.infrastructure_failure,
                     message="compose-fail backstop commit failed; compose_project_name not persisted",
                     from_status=WorkspaceStatus.provisioning,
+                    execution_claim_epoch=execution_claim_epoch,
                     reason_code="COMPOSE_FAIL_COMMIT_FATAL",
                     compose_launched=True,
                 )
@@ -634,6 +731,7 @@ class Provisioner:
                             egress_plan=egress_plan,
                             egress_decision=egress_decision,
                             destination_category=destination_category,
+                            execution_claim_epoch=execution_claim_epoch,
                         )
                     except Exception:
                         _log.exception(
@@ -647,6 +745,7 @@ class Provisioner:
                     failure_reason=FailureReason.service_startup_failure,
                     message=str(exc)[:2000],
                     from_status=WorkspaceStatus.provisioning,
+                    execution_claim_epoch=execution_claim_epoch,
                     event_payload=diagnostics,
                     compose_launched=True,
                 )
@@ -667,6 +766,7 @@ class Provisioner:
                 failure_reason=FailureReason.infrastructure_failure,
                 message=f"unexpected provisioning failure: {exc}"[:2000],
                 from_status=WorkspaceStatus.provisioning,
+                execution_claim_epoch=execution_claim_epoch,
                 compose_launched=stack_launch_started,
                 clear_unlaunched_compose_project=not stack_launch_started,
             )
@@ -739,11 +839,34 @@ class Provisioner:
                 profile=profile,
             )
 
-            await repo.transition(
-                persisted,
-                to=WorkspaceStatus.ready,
-                reason_code="PROVISIONING_COMPLETE",
-            )
+            if execution_claim_epoch is not None:
+                # D7: epoch-CAS the terminal transition. A fenced worker updates
+                # 0 rows -> it knows it lost the claim and must not force the new
+                # claimant's row to ready. The metadata set on ``persisted``
+                # above is autoflushed before this re-SELECT and repopulated
+                # onto the same identity object, so the happy path keeps it; a
+                # fenced CAS leaves the session uncommitted and rolls it back.
+                transitioned = await repo.transition_if_current(
+                    workspace_id,
+                    from_status=WorkspaceStatus.provisioning,
+                    to=WorkspaceStatus.ready,
+                    reason_code="PROVISIONING_COMPLETE",
+                    extra_conditions=(Workspace.execution_claim_epoch == execution_claim_epoch,),
+                )
+                if transitioned is None:
+                    _log.warning(
+                        "provisioner.execution_claim_fenced",
+                        workspace_id=workspace_id,
+                        phase="ready_transition",
+                        reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
+                    )
+                    return
+            else:
+                await repo.transition(
+                    persisted,
+                    to=WorkspaceStatus.ready,
+                    reason_code="PROVISIONING_COMPLETE",
+                )
             await session.commit()
 
         _log.info(
@@ -908,6 +1031,7 @@ class Provisioner:
         event_payload: dict[str, Any] | None = None,
         compose_launched: bool = False,
         clear_unlaunched_compose_project: bool = False,
+        execution_claim_epoch: int | None = None,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -991,294 +1115,41 @@ class Provisioner:
                         reason_code=final_reason_code,
                         payload={"workspace_id": workspace_id},
                     )
-                await repo.transition(
-                    ws,
-                    to=WorkspaceStatus.failed,
-                    reason_code=final_reason_code,
-                    payload=event_payload,
-                )
+                if execution_claim_epoch is not None:
+                    # D7: epoch-CAS the terminal failure transition so a fenced
+                    # worker cannot force the new claimant's row to ``failed``.
+                    # The failure metadata set on ``ws`` above is autoflushed
+                    # before the re-SELECT and repopulated; a fenced CAS leaves
+                    # the session uncommitted and rolls it back.
+                    transitioned = await repo.transition_if_current(
+                        workspace_id,
+                        from_status=from_status,
+                        to=WorkspaceStatus.failed,
+                        reason_code=final_reason_code,
+                        payload=event_payload,
+                        extra_conditions=(
+                            Workspace.execution_claim_epoch == execution_claim_epoch,
+                        ),
+                    )
+                    if transitioned is None:
+                        _log.warning(
+                            "provisioner.execution_claim_fenced",
+                            workspace_id=workspace_id,
+                            phase="failed_transition",
+                            reason_code=_EXECUTION_CLAIM_FENCED_REASON_CODE,
+                        )
+                        return
+                else:
+                    await repo.transition(
+                        ws,
+                        to=WorkspaceStatus.failed,
+                        reason_code=final_reason_code,
+                        payload=event_payload,
+                    )
 
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
-
-    async def _record_egress_audit_if_current(
-        self,
-        *,
-        workspace_id: str,
-        egress_plan: LocalEgressPlan,
-        egress_decision: EgressDecision,
-        destination_category: str,
-    ) -> bool:
-        """Record an egress audit only if the workspace is still in provisioning."""
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
-            if ws is None:  # pragma: no cover - race with hard deletion
-                _log.warning(
-                    "provisioner.skip_unknown",
-                    workspace_id=workspace_id,
-                    action="record_egress_audit",
-                )
-                return False
-            if ws.status != WorkspaceStatus.provisioning.value:
-                await self._record_stale_action_skip(
-                    repo,
-                    ws,
-                    action="record_egress_audit",
-                    expected=WorkspaceStatus.provisioning,
-                    reason_code="PROVISIONER_STALE_STATUS",
-                )
-                await session.commit()
-                return False
-            await self._create_egress_audit_record(
-                session,
-                workspace_id=workspace_id,
-                egress_plan=egress_plan,
-                egress_decision=egress_decision,
-                destination_category=destination_category,
-            )
-            await session.commit()
-            return True
-
-    async def _create_egress_audit_record(
-        self,
-        session: AsyncSession,
-        *,
-        workspace_id: str,
-        egress_plan: LocalEgressPlan,
-        egress_decision: EgressDecision,
-        destination_category: str,
-    ) -> None:
-        """Persist an egress audit record for the workspace's network policy decision."""
-        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
-        await EgressAuditRepository(session).create(
-            workspace_id=workspace_id,
-            attempt_id=attempt.id if attempt is not None else None,
-            policy_posture=egress_plan.mode.value,
-            decision=egress_decision.value,
-            destination_category=destination_category,
-            reason_code=egress_plan.reason_code,
-            details=dict(egress_plan.details),
-        )
-
-    async def _issue_secret_leases(
-        self,
-        workspace_id: str,
-        profile: WorkspaceProfile,
-    ) -> None:
-        """Issue secret leases declared in the workspace profile."""
-        if not profile.secrets:
-            return
-        try:
-            async with self._session_factory() as session:
-                repo = WorkspaceRepository(session)
-                ws = await repo.get(workspace_id)
-                if ws is None:
-                    return
-                if ws.status != WorkspaceStatus.provisioning.value:
-                    await self._record_stale_action_skip(
-                        repo,
-                        ws,
-                        action="issue_secret_leases",
-                        expected=WorkspaceStatus.provisioning,
-                        reason_code="PROVISIONER_STALE_STATUS",
-                    )
-                    await session.commit()
-                    return
-                await SecretLeaseService(session).issue_profile_secret_leases(ws, profile)
-                await session.commit()
-        except Exception:
-            _log.exception(
-                "provisioner.secret_lease_issue_failed",
-                workspace_id=workspace_id,
-            )
-            raise
-
-    async def _recheck_status(
-        self,
-        workspace_id: str,
-        *,
-        expected: WorkspaceStatus,
-        action: str,
-        reason_code: str,
-    ) -> bool:
-        """Return True if the workspace is still in the expected status, False otherwise."""
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
-            if ws is None:  # pragma: no cover - race with hard deletion
-                _log.warning(
-                    "provisioner.skip_unknown",
-                    workspace_id=workspace_id,
-                    action=action,
-                )
-                return False
-            if ws.status == expected.value:
-                return True
-            await self._record_stale_action_skip(
-                repo,
-                ws,
-                action=action,
-                expected=expected,
-                reason_code=reason_code,
-            )
-            await session.commit()
-            return False
-
-    async def _check_auto_resolved_profile_host_ports(
-        self,
-        *,
-        workspace_id: str,
-        profile: WorkspaceProfile,
-        profile_resolution: ProfileResolution | None = None,
-        excluding_workspace_id: str | None = None,
-        task_policy: Mapping[str, Any] | None = None,
-        resolved_profile_dict: dict[str, Any] | None = None,
-    ) -> None:
-        """Check auto-resolved profile service ports for admission after provision-time resolution.
-
-        When ``profile_ref`` is ``"auto"`` (the default), the create-path admission
-        gate cannot check profile service ports because the worktree (and therefore
-        the repo-local profile) is not available until provisioning.  This method
-        closes that gap by re-checking host ports after the profile has been
-        resolved inside the provisioner.
-
-        Scope boundary: companion port checks and auto-profile service port
-        checks run in separate short transactions because profile service ports
-        are unknown until the provisioner materializes and resolves the repo
-        profile.  No advisory lock spans that earlier companion-check
-        transaction.  If a concurrent workspace commits a matching profile port
-        before this method publishes our ``resolved_profile``, this method fails
-        this workspace before launch.  That is intentional first-committer-wins
-        behavior, not a dispatch-time guarantee for auto profiles.
-
-        Before the cross-workspace DB conflict check, this method also detects
-        intra-workspace duplicates — the same host port claimed by both a
-        companion and an auto-resolved profile service within the same workspace.
-        This case is invisible to ``find_host_port_conflicts`` when
-        ``excluding_workspace_id`` is set to the current workspace, so it is
-        caught here with an in-memory check instead.
-
-        To close the TOCTOU window between the conflict check and the later
-        pre-launch commit, this method publishes the workspace's
-        ``resolved_profile`` inside the same transaction (and therefore
-        under the same advisory lock) so that concurrent provisioners can
-        see the port claim before the lock is released.  When
-        ``profile_resolution`` is ``None`` (profile was already resolved in
-        a previous provisioner run and stored in ``ws.resolved_profile``),
-        the previously-published profile is already visible to
-        ``find_host_port_conflicts`` via the ``HOST_PORT_CONFLICT_STATUSES``
-        query (the workspace is still ``provisioning``), so the TOCTOU
-        invariant holds without a re-publish.
-
-        ``compose_project_name`` is intentionally **not** set here.  Setting
-        it before ``_recheck_before_launch`` records its
-        ``provisioning_launching`` guard creates a race: a
-        ``stop_stack=False`` cancel that wins between this method and the
-        recheck would leave the workspace in a terminal state with a
-        non-null ``compose_project_name`` but no
-        ``workspace.terminal_runtime_released`` event, causing
-        ``find_host_port_conflicts`` to treat the profile ports as
-        permanently occupied (a false ``HOST_PORT_CONFLICT``).
-
-        Raises :class:`WorkspaceCreateDuplicateHostPortError` for intra-workspace
-        duplicates or :class:`WorkspaceCreateHostPortConflictError` for
-        cross-workspace conflicts so the caller can mark the workspace as
-        failed.
-        """
-        if resolved_profile_dict is None:
-            resolved_profile_dict = profile.model_dump(mode="json", by_alias=True)
-        auto_profile_host_ports = host_ports_from_resolved_profile(resolved_profile_dict)
-        if not auto_profile_host_ports:
-            return
-        seen_profile: set[int] = set()
-        for hp in auto_profile_host_ports:
-            if hp in seen_profile:
-                raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
-            seen_profile.add(hp)
-        companion_host_ports = set(host_ports_from_task_policy_companions(task_policy))
-        for hp in auto_profile_host_ports:
-            if hp in companion_host_ports:
-                raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            # Port-admission invariant: the advisory lock acquired here is
-            # released when this session commits (it is a
-            # pg_advisory_xact_lock). After this commit, the workspace's
-            # resolved_profile is visible to concurrent provisioners via
-            # find_host_port_conflicts because its status is still
-            # ``provisioning`` ∈ HOST_PORT_CONFLICT_STATUSES, so the port
-            # claim is detectable even without the lock held. The subsequent
-            # pre_launch_session runs in a separate transaction without the
-            # advisory lock; this is safe because the conflict is caught by
-            # the HOST_PORT_CONFLICT_STATUSES filter, not by the lock. If a
-            # future refactor changes the query scope to exclude
-            # ``provisioning`` from the host-port visibility filter, this
-            # two-commit gap would silently reopen a TOCTOU window.
-            await repo.acquire_host_port_admission_lock(host_ports=auto_profile_host_ports)
-            conflicts = await repo.find_host_port_conflicts(
-                host_ports=auto_profile_host_ports,
-                excluding_workspace_id=excluding_workspace_id,
-                node_id=self._config.node_id,
-            )
-            if conflicts:
-                raise WorkspaceCreateHostPortConflictError(
-                    host_port=conflicts[0].host_port,
-                    conflicting_workspace_id=conflicts[0].workspace_id,
-                )
-            ws = await repo.get_for_update(workspace_id)
-            if (
-                ws is not None
-                and profile_resolution is not None
-                and ws.status == WorkspaceStatus.provisioning.value
-            ):
-                ws.resolved_profile = resolved_profile_dict
-            await session.commit()
-
-    async def _check_companion_host_ports(
-        self,
-        *,
-        task_policy: Mapping[str, Any] | None = None,
-        excluding_workspace_id: str | None = None,
-    ) -> None:
-        """Check companion host ports for conflicts before provisioning starts Compose.
-
-        Create and retry admission check companion ports before a workspace row
-        is written, but planning-scope auto-retry intentionally excludes the
-        source workspace from the retry-time conflict scan.  This provisioner
-        check closes that remaining gap: if the source stack still owns a
-        companion host port, provisioning fails before companion worktree
-        materialization and before Docker Compose can attempt to bind the port.
-
-        The advisory lock acquired here is transaction-scoped
-        (``pg_advisory_xact_lock``) and is released when this method commits,
-        before Docker Compose launches containers.  This is a defense-in-depth
-        database recheck for claims that are visible at pre-launch time; it is
-        not a lock held through the Docker bind operation.
-        """
-        companion_host_ports = host_ports_from_task_policy_companions(task_policy)
-        if not companion_host_ports:
-            return
-        seen: set[int] = set()
-        for hp in companion_host_ports:
-            if hp in seen:
-                raise WorkspaceCreateDuplicateHostPortError(host_port=hp)
-            seen.add(hp)
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            await repo.acquire_host_port_admission_lock(host_ports=companion_host_ports)
-            conflicts = await repo.find_host_port_conflicts(
-                host_ports=companion_host_ports,
-                excluding_workspace_id=excluding_workspace_id,
-                node_id=self._config.node_id,
-            )
-            if conflicts:
-                raise WorkspaceCreateHostPortConflictError(
-                    host_port=conflicts[0].host_port,
-                    conflicting_workspace_id=conflicts[0].workspace_id,
-                )
-            await session.commit()
 
     async def _recheck_before_launch(self, workspace_id: str) -> bool:
         """Recheck workspace status with a row lock and record a launch guard.

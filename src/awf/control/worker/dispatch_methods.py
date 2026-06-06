@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from functools import partial
 from typing import Any, cast
 
-from awf.control.worker.constants import _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL
+from awf.control.worker.constants import (
+    _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL,
+    EXECUTION_CLAIM_FENCED,
+)
 from awf.control.worker.logging import _log
 from awf.control.worker.types import _ExecutionTaskKind
 from awf.db.enums import (
@@ -216,21 +220,101 @@ def _update_execution_slot_saturation(self: Any, *, dispatched: int) -> None:
 
 
 async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
-    heartbeat = asyncio.create_task(
-        self._refresh_execution_claim_loop(workspace_id),
-        name=f"awf-provisioning-claim-{workspace_id}",
-    )
+    # The execution claim was already stamped on the row by the earlier
+    # scheduling transaction, so *every* exit from here must release it —
+    # including a cancel landing on the initial epoch read below, before the
+    # provision try/finally is even entered. Without the outer finally, an
+    # external cancel (e.g. worker shutdown cancelling ``run_once``'s ``gather``)
+    # during that read would exit straight out, stranding the row claimed until
+    # the lease expires and delaying recovery despite no provision having
+    # started. The release is owner+epoch-gated (D6), so it is a no-op when a
+    # newer claimant already fenced us; the shielded helper still runs it to
+    # completion across a second cancellation (worker shutdown) landing
+    # mid-write so neither the DB lease nor the epoch entry leaks.
     try:
-        await self._provisioner.provision_claimed(workspace_id)
+        # D2: read our fencing epoch back at provision start. ``None`` means a newer
+        # claimant already superseded us (or the row is gone), so abort before any
+        # work — never touch the new claimant's row.
+        epoch = await self._read_execution_claim_epoch(workspace_id)
+        if epoch is None:
+            _log.warning(
+                "worker.execution_claim_fenced",
+                workspace_id=workspace_id,
+                worker_id=self._worker_id,
+                phase="provision_start",
+                reason_code=EXECUTION_CLAIM_FENCED,
+            )
+            return
+        self._execution_claim_epochs[workspace_id] = epoch
+        provision_task = asyncio.create_task(
+            self._provisioner.provision_claimed(workspace_id, execution_claim_epoch=epoch),
+            name=f"awf-provision-{workspace_id}",
+        )
+        # D4: the heartbeat CAS is epoch-gated; if a later claimant fences us it
+        # returns False and cancels the in-flight provision before any rmtree.
+        heartbeat = asyncio.create_task(
+            self._refresh_execution_claim_loop(workspace_id, on_claim_lost=provision_task.cancel),
+            name=f"awf-provisioning-claim-{workspace_id}",
+        )
+        try:
+            await provision_task
+        except asyncio.CancelledError:
+            # Two cancellations land here: the heartbeat fence (``on_claim_lost``
+            # cancels ``provision_task``) and an external cancel of *this* task —
+            # e.g. worker shutdown cancelling ``run_once``'s ``gather``. Only the
+            # fence is ours to abort quietly; an external cancel must propagate so
+            # cooperative cancellation is never suppressed (D7's CAS leaves the row
+            # untouched either way). ``current_task().cancelling()`` is the
+            # discriminator: cancelling this task increments its own request count
+            # even though the cancel is delegated to the awaited ``provision_task``,
+            # whereas a pure heartbeat fence never touches this task's count.
+            outer = cast("asyncio.Task[None]", asyncio.current_task())
+            if outer.cancelling() > 0:
+                raise
+            # Heartbeat-cancel fired: we were fenced mid-provision. The provisioner
+            # leaves the row untouched (D7 CAS), so just abort this attempt.
+            _log.warning(
+                "worker.execution_claim_fenced",
+                workspace_id=workspace_id,
+                worker_id=self._worker_id,
+                phase="provision_cancelled",
+                reason_code=EXECUTION_CLAIM_FENCED,
+            )
+        except Exception:
+            # Provisioner.provision_claimed() logs the failure and attempts to
+            # transition to ``failed``; on the fenced path the epoch-CAS in
+            # _mark_failed updates 0 rows, so the workspace stays in
+            # ``provisioning`` for the new claimant rather than landing in
+            # ``failed``. Swallow either way so one bad workspace doesn't abort
+            # the batch.
+            _log.exception("worker.provision_failed", workspace_id=workspace_id)
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
     except Exception:
-        # Provisioner.provision_claimed() already logged + transitioned to failed;
-        # we swallow here so one bad workspace doesn't abort the batch.
-        _log.exception("worker.provision_failed", workspace_id=workspace_id)
+        # The fencing epoch read and claim-task setup above sit *outside* the
+        # inner provision try/except, yet ``run_once`` gathers us with
+        # ``return_exceptions=False``: a transient failure here (e.g. a DB
+        # disconnect on the D2 read) would propagate out and abort the rest of
+        # the provision batch instead of being isolated like a provision
+        # failure. Swallow it so one bad workspace can't wedge the cycle; an
+        # external cancel still propagates (``CancelledError`` is not an
+        # ``Exception``) and the outer ``finally`` releases the claim either
+        # way. The claiming transaction already transitioned the row
+        # ``requested -> provisioning`` before we were dispatched, so the normal
+        # poll (which only claims ``requested`` rows) does not re-claim it;
+        # instead the released ``provisioning`` row is picked up by the
+        # stale-active execution recovery scan, the same recovery contract as
+        # the heartbeat-fence path above.
+        _log.exception("worker.provision_claim_setup_failed", workspace_id=workspace_id)
     finally:
-        heartbeat.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await heartbeat
-        await self._release_execution_claim(workspace_id)
+        # Release CAS on the stored epoch so a release issued after a newer
+        # claimant reclaimed the row cannot clobber it (D6). This finally runs
+        # while an external cancel may already be propagating; shield the release
+        # and the epoch pop so a second cancellation (worker shutdown) landing
+        # mid-write cannot skip them and leak the DB lease or the epoch entry.
+        await self._release_execution_claim_after_cancellation(workspace_id)
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:
@@ -341,7 +425,12 @@ async def _refresh_monitoring_pr_claim_loop(self: Any, workspace_id: str) -> Non
             return
 
 
-async def _refresh_execution_claim_loop(self: Any, workspace_id: str) -> None:
+async def _refresh_execution_claim_loop(
+    self: Any,
+    workspace_id: str,
+    *,
+    on_claim_lost: Callable[[], object] | None = None,
+) -> None:
     interval = max(1.0, min(60.0, self._config.execution_claim_lease_seconds / 3))
     while True:
         await asyncio.sleep(interval)
@@ -353,6 +442,25 @@ async def _refresh_execution_claim_loop(self: Any, workspace_id: str) -> None:
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
+            # D4: a refresh failure (e.g. a transient DB disconnect) leaves us
+            # unable to confirm we still hold the lease, yet the heartbeat loop
+            # is about to die so ``execution_claim_expires_at`` stops being
+            # renewed. On the provisioning path, fence conservatively: cancel the
+            # in-flight provision task so a worker that may have silently lost the
+            # lease stops before any destructive git/compose op, rather than
+            # racing a new claimant that reclaims and bumps the epoch. The row is
+            # left ``provisioning`` with its claim released by
+            # ``_safely_provision_claimed``'s outer ``finally``. The normal poll
+            # only claims ``requested`` rows, so it never re-claims this row;
+            # instead the released row is owned by the stale-active execution
+            # recovery scan, which covers ``provisioning`` rows whose execution
+            # claim is released/expired (see
+            # ``_list_stale_active_execution_candidates``) and cleans up and
+            # fails the interrupted attempt for retry-policy/operator retry —
+            # the same recovery contract as any other interrupted active work.
+            # The executor path passes no callback.
+            if on_claim_lost is not None:
+                on_claim_lost()
             return
         if not refreshed:
             _log.warning(
@@ -360,4 +468,9 @@ async def _refresh_execution_claim_loop(self: Any, workspace_id: str) -> None:
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
+            # D4: on the provisioning path this cancels the in-flight provision
+            # task so a fenced worker stops before any destructive filesystem op.
+            # The executor path passes no callback, preserving its behavior.
+            if on_claim_lost is not None:
+                on_claim_lost()
             return

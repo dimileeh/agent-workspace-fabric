@@ -1244,7 +1244,7 @@ class TestSecretLeaseIssueEdges:
                 raise RuntimeError("lease repository unavailable")
 
         monkeypatch.setattr(
-            "awf.node.provisioner.SecretLeaseService",
+            "awf.node.provisioner_short_txn_helpers.SecretLeaseService",
             _FailingSecretLeaseService,
         )
         async with session_factory() as s:

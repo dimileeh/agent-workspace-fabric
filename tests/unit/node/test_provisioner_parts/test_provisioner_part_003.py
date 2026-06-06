@@ -525,6 +525,69 @@ class TestFailureHandling:
             assert audit is None
 
     @pytest.mark.unit
+    async def test_record_egress_audit_skips_when_claim_epoch_advanced(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        from awf.db.enums import EgressDecision
+        from awf.node.egress_policy import LocalEgressPlan
+        from awf.profiles.models import EgressMode
+
+        plan = LocalEgressPlan(
+            mode=EgressMode.restricted,
+            network_internal=True,
+            host_gateway_enabled=False,
+            reason_code="LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY",
+            details={"destination_filtering": "deferred"},
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            # A later claimant has re-entered provisioning with a higher epoch
+            # while this provisioner was dispatched at epoch 0.
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+            ws.execution_claim_epoch = 5
+            await s.commit()
+            ws_id = ws.id
+
+        recorded = await provisioner._record_egress_audit_if_current(
+            workspace_id=ws_id,
+            egress_plan=plan,
+            egress_decision=EgressDecision.deferred,
+            destination_category="policy_decision",
+            execution_claim_epoch=0,
+        )
+
+        assert recorded is False
+        async with session_factory() as s:
+            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
+            assert audit is None
+
+        # The matching epoch (the live claimant) still records the audit.
+        recorded_current = await provisioner._record_egress_audit_if_current(
+            workspace_id=ws_id,
+            egress_plan=plan,
+            egress_decision=EgressDecision.deferred,
+            destination_category="policy_decision",
+            execution_claim_epoch=5,
+        )
+
+        assert recorded_current is True
+        async with session_factory() as s:
+            audit = await EgressAuditRepository(s).get_latest_for_workspace(ws_id)
+            assert audit is not None
+            assert audit.policy_posture == "restricted"
+
+    @pytest.mark.unit
     async def test_stack_launch_failure_revokes_issued_secret_leases_without_hiding_error(
         self,
         session_factory: async_sessionmaker[AsyncSession],

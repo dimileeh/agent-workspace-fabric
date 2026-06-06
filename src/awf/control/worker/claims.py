@@ -85,6 +85,26 @@ from awf.db.resilience import run_db_operation_with_retry
 from awf.service.scheduler import SchedulerOrderCursor
 
 
+def _apply_execution_claim(self: Any, ws: Workspace, *, owner_id: str) -> None:
+    """Stamp ``ws`` with this worker's execution claim and bump the fencing epoch.
+
+    Shared by both requested-claim blocks (D8). ``execution_claim_epoch`` is
+    incremented with a SQL-side expression so monotonicity holds regardless of
+    any in-memory staleness: the row is freshly row-locked / atomically
+    transitioned by the caller, so a later claimant always lands a strictly
+    higher epoch and a stale worker is fenced on its next CAS write. The
+    concrete value is read back later via ``_read_execution_claim_epoch`` (D2),
+    so the SQL-expression placeholder is never read inside the claim txn.
+    """
+    ws.execution_claimed_by = owner_id
+    ws.execution_claim_expires_at = self._execution_claim_expires_at()
+    ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
+    if self._config.node_id is not None:
+        # Recovery for named workers is node-scoped, so ownership must be
+        # persisted with the claim before a provisioner crash can strand it.
+        ws.node_id = self._config.node_id
+
+
 def _empty_requested_capacity_claim_result() -> _RequestedCapacityClaimResult:
     return _RequestedCapacityClaimResult(
         workspace_ids=[],
@@ -382,12 +402,7 @@ async def _claim_requested_capacity_candidates(
         if ws is None:
             await self._log_stale_requested_claims(session, [workspace.id])
             continue
-        ws.execution_claimed_by = self._worker_id
-        ws.execution_claim_expires_at = self._execution_claim_expires_at()
-        if self._config.node_id is not None:
-            # Recovery for named workers is node-scoped, so ownership must be
-            # persisted with the claim before a provisioner crash can strand it.
-            ws.node_id = self._config.node_id
+        self._apply_execution_claim(ws, owner_id=self._worker_id)
         if demand.defaulted:
             await _record_capacity_queue_decision(
                 session,
@@ -451,12 +466,7 @@ async def _claim_requested_for_provisioning(self: Any, workspace_id: str) -> boo
             ),
         )
         if ws is not None:
-            ws.execution_claimed_by = self._worker_id
-            ws.execution_claim_expires_at = self._execution_claim_expires_at()
-            if self._config.node_id is not None:
-                # Keep the provisioning row recoverable if the worker crashes
-                # before the provisioner writes placement metadata.
-                ws.node_id = self._config.node_id
+            self._apply_execution_claim(ws, owner_id=self._worker_id)
             await session.commit()
             return True
 
@@ -709,6 +719,20 @@ async def _refresh_monitoring_pr_claim(self: Any, workspace_id: str) -> bool:
     )
 
 
+async def _read_execution_claim_epoch(self: Any, workspace_id: str) -> int | None:
+    """Read this worker's current execution-claim epoch (D2).
+
+    Returns ``None`` when the claim is no longer held by this worker (a newer
+    claimant reclaimed it, or the row is gone), in which case the caller aborts
+    the provision before doing any work.
+    """
+    async with self._session_factory() as session:
+        return await WorkspaceRepository(session).read_execution_claim_epoch(
+            workspace_id,
+            owner_id=self._worker_id,
+        )
+
+
 async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
     async def _operation(session: AsyncSession) -> bool:
         lease_expires_at = self._execution_claim_expires_at()
@@ -716,6 +740,7 @@ async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
             workspace_id,
             owner_id=self._worker_id,
             lease_expires_at=lease_expires_at,
+            execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),
         )
 
     return await run_db_operation_with_retry(
@@ -733,6 +758,7 @@ async def _release_execution_claim(self: Any, workspace_id: str) -> None:
             released = await WorkspaceRepository(session).release_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
+                execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),
             )
             if released:
                 await session.commit()
@@ -742,6 +768,28 @@ async def _release_execution_claim(self: Any, workspace_id: str) -> None:
             workspace_id=workspace_id,
             worker_id=self._worker_id,
         )
+
+
+async def _release_execution_claim_after_cancellation(self: Any, workspace_id: str) -> None:
+    """Release the execution claim and drop its epoch even if cancelled again.
+
+    ``_safely_provision_claimed``'s ``finally`` runs while an external cancel
+    (e.g. worker shutdown) is already propagating. The release is itself a
+    cancellable DB write and the in-memory epoch pop follows it; a second
+    cancellation landing mid-write would propagate out of the un-shielded
+    release (which only catches ``Exception``), skipping both and leaking the DB
+    lease plus the epoch entry. Shield the release and re-await across repeated
+    cancellations so it always runs to completion, then drop the epoch, mirroring
+    ``_finish_monitor_recovery_operation_after_cancellation``.
+    """
+    release_task = asyncio.create_task(
+        self._release_execution_claim(workspace_id),
+        name=f"awf-execution-claim-release-{workspace_id}",
+    )
+    while not release_task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(release_task)
+    self._execution_claim_epochs.pop(workspace_id, None)
 
 
 async def _release_monitoring_pr_claim(self: Any, workspace_id: str) -> None:

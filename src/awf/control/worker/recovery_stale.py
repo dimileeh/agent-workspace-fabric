@@ -792,6 +792,9 @@ async def _fail_stale_active_execution(
         ws = transitioned
         ws.execution_claimed_by = None
         ws.execution_claim_expires_at = None
+        # D3: bump the fencing token so a zombie worker whose owner string still
+        # matches is fenced on its next heartbeat/release CAS write.
+        ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
         if primary_failure is None:
             ws.failure_reason = FailureReason.infrastructure_failure.value
             ws.failure_message = message[:2048]
@@ -867,6 +870,9 @@ async def _fail_stranded_workspace(
         ws = transitioned
         ws.execution_claimed_by = None
         ws.execution_claim_expires_at = None
+        # D3: bump the fencing token so a zombie worker whose owner string still
+        # matches is fenced on its next heartbeat/release CAS write.
+        ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
         ws.monitor_claimed_by = None
         ws.monitor_claim_expires_at = None
         if primary_failure is None:
@@ -937,6 +943,18 @@ async def _record_recoverable_runtime_stranding(
             ws.execution_claim_expires_at = None
             ws.monitor_claimed_by = None
             ws.monitor_claim_expires_at = None
+            if claims_will_clear:
+                # D3: bump the fencing token alongside the version advance so a
+                # zombie worker whose owner string still matches is fenced on
+                # its next heartbeat/release CAS write. The epoch advances only
+                # in this non-monitoring branch (the monitoring_pr branch above
+                # never touches it, since execution stays untouched there).
+                # ``claims_will_clear`` is True as soon as *any* of the four
+                # claim fields is set, so this also bumps in the edge case where
+                # only the monitor claim was set and there is no execution zombie
+                # to fence — harmless, as a higher epoch still fences any future
+                # execution worker correctly.
+                ws.execution_claim_epoch = Workspace.execution_claim_epoch + 1
         if claims_will_clear:
             await repo.advance_workspace_version(ws)
         await repo.add_event(

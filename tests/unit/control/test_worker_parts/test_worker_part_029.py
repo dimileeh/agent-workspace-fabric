@@ -555,7 +555,9 @@ class _TransitioningProvisioner:
     async def provision(self, workspace_id: str) -> None:
         await self.provision_claimed(workspace_id)
 
-    async def provision_claimed(self, workspace_id: str) -> None:
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
         self.calls.append(workspace_id)
         async with self._session_factory() as s:
             repo = WorkspaceRepository(s)
@@ -1033,7 +1035,9 @@ class TestRunOnceStaleActiveExecutionRecoveryPart014:
             async def provision(self, workspace_id: str) -> None:
                 del workspace_id
 
-            async def provision_claimed(self, workspace_id: str) -> None:
+            async def provision_claimed(
+                self, workspace_id: str, execution_claim_epoch: int | None = None
+            ) -> None:
                 del workspace_id
 
         worker = ControlWorker(
@@ -1062,7 +1066,9 @@ class TestRunOnceStaleActiveExecutionRecoveryPart014:
             async def provision(self, workspace_id: str) -> None:
                 del workspace_id
 
-            async def provision_claimed(self, workspace_id: str) -> None:
+            async def provision_claimed(
+                self, workspace_id: str, execution_claim_epoch: int | None = None
+            ) -> None:
                 del workspace_id
 
             def get_worktree_path(self, workspace_id: str) -> Path | None:

@@ -1,0 +1,1 @@
+- [Shield re-await cancellation idiom](pattern_shield_reawait_cancellation.md) — `shield`+loop helpers in worker/claims.py are intentional; teardown residual relies on lease-expiry, not a bug

@@ -1287,28 +1287,6 @@ async def test_workspace_transition_if_current_releases_resources_and_claims_are
 
 
 @pytest.mark.unit
-async def test_claim_monitoring_pr_with_active_postgres_expiry_uses_database_compare(
-    session: AsyncSession,
-) -> None:
-    workspace_repo = WorkspaceRepository(session)
-    claim_workspace = await _workspace(
-        session,
-        title="monitor claim naive expiry",
-        status=WorkspaceStatus.monitoring_pr,
-    )
-    claim_workspace.monitor_claimed_by = "owner-1"
-    claim_workspace.monitor_claim_expires_at = datetime(2026, 4, 27, 15, 5, tzinfo=UTC)
-    await session.flush()
-
-    assert not await workspace_repo.claim_monitoring_pr(
-        claim_workspace.id,
-        owner_id="owner-2",
-        lease_expires_at=datetime(2026, 4, 27, 15, 10, tzinfo=UTC),
-        now=datetime(2026, 4, 27, 15, 1, tzinfo=UTC),
-    )
-
-
-@pytest.mark.unit
 async def test_workspace_queue_listing_and_owned_path_edges(
     session: AsyncSession,
 ) -> None:

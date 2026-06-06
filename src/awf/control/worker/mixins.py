@@ -13,6 +13,7 @@ from awf.control.worker import scheduler_methods as _scheduler_methods
 class WorkerDelegatesMixin:
     """Methods mechanically delegated to focused implementation modules."""
 
+    _apply_execution_claim = _claims._apply_execution_claim
     _claim_requested_ids = _claims._claim_requested_ids
     _claim_requested_ids_with_capacity = _claims._claim_requested_ids_with_capacity
     _claim_requested_capacity_candidates = _claims._claim_requested_capacity_candidates
@@ -26,8 +27,12 @@ class WorkerDelegatesMixin:
         _claims._finish_monitor_recovery_operation_after_cancellation
     )
     _refresh_monitoring_pr_claim = _claims._refresh_monitoring_pr_claim
+    _read_execution_claim_epoch = _claims._read_execution_claim_epoch
     _refresh_execution_claim = _claims._refresh_execution_claim
     _release_execution_claim = _claims._release_execution_claim
+    _release_execution_claim_after_cancellation = (
+        _claims._release_execution_claim_after_cancellation
+    )
     _release_monitoring_pr_claim = _claims._release_monitoring_pr_claim
 
     _maybe_expire_due_secret_leases = _cleanup._maybe_expire_due_secret_leases

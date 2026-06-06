@@ -262,4 +262,12 @@ _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
 
 _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL = 10
 
+EXECUTION_CLAIM_FENCED = "EXECUTION_CLAIM_FENCED"
+"""Reason code logged when a stale worker is fenced by the execution-claim epoch (D5).
+
+Emitted when this worker discovers a newer claimant has superseded its
+execution-claim epoch — at provision start (the read returns ``None``), when the
+heartbeat CAS fails and cancels the provision task, or when a guarded terminal
+transition updates 0 rows. Internal fence log only; not a doctor/catalog entry."""
+
 _ALLOCATED_RESERVATION_SIGNATURE_SCALE = 1_000_000_000

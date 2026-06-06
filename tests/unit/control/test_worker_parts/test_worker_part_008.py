@@ -559,7 +559,9 @@ class _TransitioningProvisioner:
     async def provision(self, workspace_id: str) -> None:
         await self.provision_claimed(workspace_id)
 
-    async def provision_claimed(self, workspace_id: str) -> None:
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
         self.calls.append(workspace_id)
         async with self._session_factory() as s:
             repo = WorkspaceRepository(s)
@@ -1074,6 +1076,7 @@ class TestRunOnceExecutionPart001:
             *,
             owner_id: str,
             lease_expires_at: datetime,
+            execution_claim_epoch: int | None = None,
         ) -> bool:
             nonlocal failures_remaining
             refresh_sessions.append(self._session)
@@ -1086,6 +1089,7 @@ class TestRunOnceExecutionPart001:
                 workspace_id,
                 owner_id=owner_id,
                 lease_expires_at=lease_expires_at,
+                execution_claim_epoch=execution_claim_epoch,
             )
 
         monkeypatch.setattr(
