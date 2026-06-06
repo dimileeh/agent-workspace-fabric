@@ -89,11 +89,13 @@ class InstallerHarness:
         ``uv`` into ``$UV_INSTALL_DIR``), so a bootstrapped uv behaves exactly
         like one the harness placed directly.
 
-        ``self_uninstall_rc`` drives ``uv self uninstall``, which the hosted
-        uninstaller (``packaging/uninstall.sh``) invokes once an AWF
-        uv-ownership marker proves AWF bootstrapped uv. The stub's argv log line
-        (``uv self uninstall``) is recorded by the shared logging preamble, so
-        tests assert on ``calls()`` rather than a bespoke sentinel.
+        ``self_uninstall_rc`` is reserved for the ``uv self uninstall`` stub
+        case below. The hosted uninstaller (``packaging/uninstall.sh``) does
+        **not** call ``uv self uninstall`` — it deletes the uv/uvx binaries
+        directly via ``rm -f`` (``test_uninstall_sh_uv_removal`` asserts the
+        subcommand is never invoked). The stub case exists so the harness does
+        not fall through to the catch-all ``exit 0`` if a future code path ever
+        invokes it, but no current code path triggers it.
         """
         bin_dir_expr = (
             json.dumps(tool_bin_dir) if tool_bin_dir is not None else '"$HOME/.local/bin"'
@@ -153,8 +155,10 @@ class InstallerHarness:
         configured to install elsewhere. ``tool uninstall`` additionally records
         a ``uv-tool-uninstall-env UV_TOOL_BIN_DIR=<value|<unset>>`` line so tests
         can assert the installer re-exports the install-time bin dir on uninstall.
-        ``self_uninstall_rc`` drives ``uv self uninstall``, which the hosted
-        uninstaller runs to remove an AWF-bootstrapped uv.
+        ``self_uninstall_rc`` feeds the ``uv self uninstall`` stub case below.
+        The hosted uninstaller does **not** call ``uv self uninstall`` — it
+        deletes the uv/uvx binaries directly; the stub case is a defensive
+        fallback that no current code path triggers.
         """
         self._write_stub(
             "uv",
