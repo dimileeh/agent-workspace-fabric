@@ -1370,6 +1370,75 @@ async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fail
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_worktree_check_installs_agent_scratch_excludes(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The monitor guard must install adapter scratch excludes before checking cleanliness.
+
+    A monitor-adopted or resumed workspace may never have passed through the
+    executor's scratch-exclude setup, yet the monitor's own fix-pass agent run
+    can create ``.claude/worktrees/``. The pre-push worktree guard therefore has
+    to (re)install the adapter's scratch excludes before judging cleanliness, or
+    it would refuse the otherwise clean tree (regression for thread
+    ``PRRT_kwDOSJAM6s6HjHiR``).
+    """
+    worktree = tmp_path / "worktrees" / "ws-scratch"
+
+    class _ScratchAdapter(FakeAdapter):
+        @property
+        def runtime_scratch_paths(self) -> tuple[str, ...]:
+            return (".claude/worktrees/",)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=_ScratchAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    call_order: list[str] = []
+    applied_scratch_paths: list[tuple[str, ...]] = []
+
+    async def _spy_apply(
+        *,
+        run_git: Any,
+        worktree_path: Path,
+        scratch_paths: tuple[str, ...],
+    ) -> bool:
+        call_order.append("apply")
+        applied_scratch_paths.append(scratch_paths)
+        return True
+
+    clean_check = ValidationWorktreeCheck(clean=True, reason_code=None, message=None)
+
+    async def _spy_clean(**_kwargs: Any) -> ValidationWorktreeCheck:
+        call_order.append("check")
+        return clean_check
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "apply_agent_scratch_excludes",
+        _spy_apply,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.check_validation_worktree_clean",
+        _spy_clean,
+    )
+
+    result = await pre_push_validation_module._pre_push_validation_worktree_check(
+        runner,
+        worktree_path=worktree,
+    )
+
+    assert result is clean_check
+    assert applied_scratch_paths == [(".claude/worktrees/",)]
+    assert call_order == ["apply", "check"]
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_coverage_provider_failure_without_command_skips_fix_pass(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

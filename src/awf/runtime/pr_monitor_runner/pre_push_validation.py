@@ -33,6 +33,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.runtime.agent_scratch import apply_agent_scratch_excludes
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
@@ -512,6 +513,19 @@ async def _pre_push_validation_worktree_check(
     async def _run_git(args: list[str]) -> Any:
         """Run git command arguments inside the workspace worktree."""
         return await self._deps.runner.run(git_worktree_command(worktree_path, *args))
+
+    # Re-install the agent runtime's checkout-local scratch excludes (e.g.
+    # claude_code's ``.claude/worktrees/``) before the cleanliness guard runs.
+    # The executor applies these once before the initial agent run, but a
+    # monitor-adopted or resumed workspace may never have passed through that
+    # setup, and the monitor's own fix-pass agent runs can create the same
+    # scratch state. Without this, the guard below would refuse the otherwise
+    # clean tree. Idempotent and a no-op for agents that declare no scratch.
+    await apply_agent_scratch_excludes(
+        run_git=_run_git,
+        worktree_path=worktree_path,
+        scratch_paths=self._deps.adapter.runtime_scratch_paths,
+    )
 
     from awf.runtime.validation_worktree import check_validation_worktree_clean
 
