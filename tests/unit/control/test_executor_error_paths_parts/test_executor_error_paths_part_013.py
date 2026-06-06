@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.bitbucket_client import BITBUCKET_AUTH_NOT_CONFIGURED, BitBucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.control.executor import monitor_handoff as monitor_handoff_module
@@ -519,6 +520,62 @@ class TestExecutorMonitorHandoffSetup:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_handoff_bitbucket_auth_error_preserves_reason_code(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # The monitor factory builds its forge client via ``make_forge_client``,
+        # so a BitBucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL
+        # raises ``BitBucketClientError`` (reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
+        # from ``BitBucketClient.from_env()`` before the monitor loop exists. The
+        # handoff must preserve that actionable reason code rather than flatten it
+        # into the generic PR_ADOPTION_MONITOR_UNAVAILABLE failure.
+        validation = _RecordingValidation()
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        def _raise_bitbucket_auth_error(*_args: Any, **_kwargs: Any) -> object:
+            raise BitBucketClientError(
+                operation="bitbucket auth",
+                status=None,
+                body="BITBUCKET_API_TOKEN is required.",
+                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
+            )
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=_raise_bitbucket_auth_error,
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            assert ws.events[-1].reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
+            assert "adopted PR monitor handoff failed" in (ws.failure_message or "")
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_profile_preflight_failure_blocks_monitor(

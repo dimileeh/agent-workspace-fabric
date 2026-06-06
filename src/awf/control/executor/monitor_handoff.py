@@ -911,6 +911,30 @@ async def _build_handoff_pr_monitor(
             setup_failure=exc,
         )
         return None
+    except BitBucketClientError as exc:
+        # The factory builds its forge client via ``make_forge_client``, so a
+        # BitBucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL raises
+        # ``BitBucketClientError`` (e.g. reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
+        # from ``BitBucketClient.from_env()`` before the monitor loop exists.
+        # Preserve that actionable reason code instead of flattening it into the
+        # generic MONITOR_UNAVAILABLE failure below — mirrors the release-sync
+        # handoff's BitBucketClientError catch so operators get the auth-setup
+        # message on every handoff path.
+        _log.error(
+            build_failed_log_event,
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+            redacted_traceback=_redacted_exception_traceback(exc),
+        )
+        safe_exception = redact_audit_text(repr(exc), limit=1900)
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"{build_failed_message_prefix}{safe_exception}"[:2000],
+            reason_code=exc.reason_code,
+        )
+        return None
     except Exception as exc:
         _log.error(
             build_failed_log_event,
