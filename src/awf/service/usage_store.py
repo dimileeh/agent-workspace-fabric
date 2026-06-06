@@ -316,21 +316,33 @@ def subtract_baseline(
 
 
 def _add_int(
-    accumulated: int | None, run_delta: int | None, fallback: int | None = None
+    accumulated: int | None,
+    run_delta: int | None,
+    fallback: int | None = None,
+    *,
+    preserve_zero_unknown: bool = False,
 ) -> int | None:
     if run_delta is None:
         return fallback if fallback is not None else accumulated
     if accumulated is None:
+        if preserve_zero_unknown and run_delta == 0:
+            return fallback
         return run_delta
     return accumulated + run_delta
 
 
 def _add_float(
-    accumulated: float | None, run_delta: float | None, fallback: float | None = None
+    accumulated: float | None,
+    run_delta: float | None,
+    fallback: float | None = None,
+    *,
+    preserve_zero_unknown: bool = False,
 ) -> float | None:
     if run_delta is None:
         return fallback if fallback is not None else accumulated
     if accumulated is None:
+        if preserve_zero_unknown and run_delta == 0:
+            return fallback
         return run_delta
     return accumulated + run_delta
 
@@ -360,9 +372,12 @@ def accumulate_usage(
     """
 
     if accumulated is None:
-        return run_delta or fallback
+        if run_delta is None and fallback is None:
+            return None
+        accumulated = NormalizedUsage()
     if run_delta is None:
         return fallback or accumulated
+    has_fallback = fallback is not None
     currency = _merged_currency(
         accumulated.currency,
         run_delta.currency,
@@ -373,26 +388,31 @@ def accumulate_usage(
             accumulated.input_tokens,
             run_delta.input_tokens,
             None if fallback is None else fallback.input_tokens,
+            preserve_zero_unknown=has_fallback,
         ),
         cached_input_tokens=_add_int(
             accumulated.cached_input_tokens,
             run_delta.cached_input_tokens,
             None if fallback is None else fallback.cached_input_tokens,
+            preserve_zero_unknown=has_fallback,
         ),
         output_tokens=_add_int(
             accumulated.output_tokens,
             run_delta.output_tokens,
             None if fallback is None else fallback.output_tokens,
+            preserve_zero_unknown=has_fallback,
         ),
         reasoning_output_tokens=_add_int(
             accumulated.reasoning_output_tokens,
             run_delta.reasoning_output_tokens,
             None if fallback is None else fallback.reasoning_output_tokens,
+            preserve_zero_unknown=has_fallback,
         ),
         total_tokens=_add_int(
             accumulated.total_tokens,
             run_delta.total_tokens,
             None if fallback is None else fallback.total_tokens,
+            preserve_zero_unknown=has_fallback,
         ),
         cost_estimate=(
             None
@@ -401,6 +421,7 @@ def accumulate_usage(
                 accumulated.cost_estimate,
                 run_delta.cost_estimate,
                 None if fallback is None else fallback.cost_estimate,
+                preserve_zero_unknown=has_fallback,
             )
         ),
         currency=currency,

@@ -567,6 +567,47 @@ def test_accumulate_usage_preserves_latest_fallback_when_run_delta_field_missing
 
 
 @pytest.mark.unit
+def test_accumulate_usage_merges_fallback_fields_when_accumulated_missing() -> None:
+    latest = NormalizedUsage(input_tokens=10, total_tokens=15, cost_estimate=0.20, currency="USD")
+    run_delta = NormalizedUsage(output_tokens=3, total_tokens=18)
+
+    result = accumulate_usage(None, run_delta, fallback=latest)
+
+    assert result is not None
+    assert result.input_tokens == 10
+    assert result.output_tokens == 3
+    assert result.total_tokens == 18
+    assert result.cost_estimate == 0.20
+    assert result.currency == "USD"
+
+
+@pytest.mark.unit
+def test_accumulate_usage_preserves_unknown_fields_on_zero_delta_seed() -> None:
+    accumulated = NormalizedUsage(total_tokens=100, cost_estimate=None)
+    latest = NormalizedUsage(total_tokens=100, cost_estimate=None)
+    run_delta = NormalizedUsage(total_tokens=0, cost_estimate=0.0)
+
+    result = accumulate_usage(accumulated, run_delta, fallback=latest)
+
+    assert result is not None
+    assert result.total_tokens == 100
+    assert result.cost_estimate is None
+
+
+@pytest.mark.unit
+def test_accumulate_usage_preserves_currency_when_delta_omits_cost() -> None:
+    accumulated = NormalizedUsage(total_tokens=100, cost_estimate=1.25, currency="USD")
+    run_delta = NormalizedUsage(total_tokens=10)
+
+    result = accumulate_usage(accumulated, run_delta)
+
+    assert result is not None
+    assert result.total_tokens == 110
+    assert result.cost_estimate == 1.25
+    assert result.currency == "USD"
+
+
+@pytest.mark.unit
 def test_accumulate_usage_adds_delta_to_empty_accumulated_fields() -> None:
     accumulated = NormalizedUsage()
     run_delta = NormalizedUsage(

@@ -282,6 +282,8 @@ class _CcusageSampleContext(UsageSampleContext):
             return
         if usage is not None:
             self._baseline = usage
+        elif reason == REASON_NO_RECORDS and self._accumulated_usage_at_run_start is not None:
+            self._baseline_unavailable_reason = REASON_NO_RECORDS
         elif reason != REASON_NO_RECORDS:
             # ccusage failed for a classified reason (timeout / command error /
             # unreadable output): we can't anchor a trustworthy baseline, so flag
@@ -402,7 +404,7 @@ class _CcusageSampleContext(UsageSampleContext):
             delta,
             fallback=self._latest_accumulated_usage,
         )
-        if update_latest and metrics is not None:
+        if metrics is not None and (update_latest or self._latest_accumulated_usage is None):
             self._latest_accumulated_usage = metrics
         await self._write(
             phase=phase,
