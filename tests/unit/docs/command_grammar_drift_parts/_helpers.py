@@ -36,11 +36,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
 # mention in the runbook is caught alongside README/quickstart/upgrade/uninstall/
 # troubleshooting. Its deliberate *negative* "no-path `awf init`" prohibition is
 # allowed (see `_without_init_prohibitions`) instead of being read as a command.
+# `docs/MCP_CLIENT_PARITY.md` is the REST/CLI/MCP parity matrix; its first-run
+# row documents the public `awf init <path>` command *surface*, so — like the
+# release runbook — it is swept for the `awf init`/bootstrap grammar so a future
+# edit cannot reintroduce the bare no-path spelling in that public surface table.
+# `docs/MCP_REFERENCE.md` is intentionally *not* listed: its `awf init` mentions
+# are prose cross-references ("the same onboarding writer as `awf init`"), not a
+# command surface, and the inline R2 scan would mis-read each as a no-path command
+# offender — so widening the sweep to it would manufacture false positives.
 FIRST_RUN_DOCS = (
     "README.md",
     "docs/QUICKSTART.md",
     "docs/GETTING_STARTED.md",
     "docs/MCP_SETUP.md",
+    "docs/MCP_CLIENT_PARITY.md",
     "docs/UPGRADE.md",
     "docs/UNINSTALL.md",
     "docs/TROUBLESHOOTING.md",
