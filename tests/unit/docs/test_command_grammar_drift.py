@@ -122,8 +122,9 @@ AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE = re.compile(
 # The R4 analog of the init prohibition above: a prose prohibition that backticks
 # an `awf smoke run` span as the *disallowed* shape (e.g. a TROUBLESHOOTING note
 # "Do not run `awf smoke run <path>` — pass `--project <path>` instead"). Because
-# `_parse_smoke_invocation` anchors on a span that *begins with* `awf smoke run`,
-# such a cautionary span would otherwise be read as a real bare-positional-path
+# `_parse_smoke_invocation` parses each command segment anchored on a span that
+# *begins with* `awf smoke run`, such a cautionary span would otherwise be read as
+# a real bare-positional-path
 # invocation and flagged as a spurious R4 offender. It is gated on the same
 # `do not`/`don't`/`never`/`avoid` lead-in kept within the clause (the `[^.`\n]`
 # bridge stops it crossing a sentence break), so a *positive* example such as
@@ -556,26 +557,28 @@ def _init_arg_status(line: str) -> str | None:
     return "ok" if "ok" in statuses else "help"
 
 
-def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
-    """Parse an ``awf smoke run`` command line, or ``None`` if it is not one.
+def _parse_smoke_segment(segment: str) -> SmokeInvocation | None:
+    """Parse an ``awf smoke run`` command at the *start* of ``segment``.
 
-    The match is anchored at the start of ``line`` (``re.match``, not
+    The match is anchored at the start of ``segment`` (``re.match``, not
     ``re.search``), but a leading ``uv run ...`` runner prefix is allowed before
     ``awf smoke run`` so the documented ``uv run --python 3.12 --extra dev awf
     smoke run ...`` lane (README/UPGRADE/QUICKSTART/GETTING_STARTED) is still
     classified — without it R4 silently skipped those lines while R2's
-    ``re.search``-based ``_init_arg_status`` checked the sibling ``uv run ... awf
+    segment-scanning ``_init_arg_status`` checked the sibling ``uv run ... awf
     init`` lane, leaving the mocked-smoke grammar on the ``uv run`` lanes able to
     regress undetected.
 
-    Anchoring (rather than an unbounded ``re.search``) still keeps a prose mention
-    that merely references the command mid-sentence (e.g. ``the awf smoke run
-    command`` or ``see awf smoke run --mocked-local below``) from being parsed with
-    the trailing prose as a positional path and flagged as a spurious ``bare
-    positional path`` offender: such a line neither begins with ``awf smoke run``
-    nor with a ``uv run`` runner prefix, so it returns ``None``.
+    Anchoring (rather than an unbounded ``re.search``) keeps a prose mention that
+    merely references the command mid-sentence (e.g. ``the awf smoke run command``
+    or ``see awf smoke run --mocked-local below``) from being parsed with the
+    trailing prose as a positional path and flagged as a spurious ``bare positional
+    path`` offender: such a segment neither begins with ``awf smoke run`` nor with a
+    ``uv run`` runner prefix, so it returns ``None``. :func:`_parse_smoke_invocation`
+    first splits the line into command segments (:func:`_command_segment_starts`) so
+    a smoke run *chained after* a separator is still reached despite this anchoring.
     """
-    match = re.match(r"(?:uv\s+run\b.*?\s+)?awf smoke run\b(?P<tail>.*)", line)
+    match = re.match(r"(?:uv\s+run\b.*?\s+)?awf smoke run\b(?P<tail>.*)", segment)
     if match is None:
         return None
     tail = match.group("tail")
@@ -643,6 +646,39 @@ def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
         references_project_path=positional_path or has_demo_path,
         project_value_dropped=project_value_dropped,
     )
+
+
+def _parse_smoke_invocation(line: str) -> SmokeInvocation | None:
+    """Parse the ``awf smoke run`` invocation on a documented command line.
+
+    The line is first split into shell command segments
+    (:func:`_command_segment_starts`) so a chained one-liner such as
+    ``cd "$repo" && awf smoke run "$HOME/p" --mocked-local`` is scanned even
+    though it does not *begin* with ``awf smoke run`` — R4 enforces the smoke
+    grammar on every documented invocation, not only the ones that open their
+    line. Without this the anchored :func:`_parse_smoke_segment` returns ``None``
+    before the separator is ever inspected, silently waving exactly the bare
+    positional path R4 exists to reject past the gate, mirroring the same
+    segment-scan R2's :func:`_init_arg_status` applies to ``awf init``.
+
+    Each segment is parsed by :func:`_parse_smoke_segment` and, when a line chains
+    more than one smoke run, an offending invocation (per
+    :func:`_smoke_invocation_offense`) wins over a conforming one so the line is
+    flagged rather than silently counting on the valid example — matching how
+    ``_init_arg_status`` reports an offender anywhere on the line. ``None`` is
+    returned only when no segment invokes ``awf smoke run`` at all.
+    """
+    invocations = [
+        invocation
+        for segment in _command_segment_starts(line)
+        if (invocation := _parse_smoke_segment(segment)) is not None
+    ]
+    if not invocations:
+        return None
+    for invocation in invocations:
+        if _smoke_invocation_offense(invocation) is not None:
+            return invocation
+    return invocations[0]
 
 
 def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
@@ -940,6 +976,40 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
     assert chained is not None
     assert chained.has_mocked_local is True
     assert chained.positional_path is False
+
+    # An `awf smoke run` chained *after* a setup step via a shell operator is still
+    # parsed: the start-anchored `_parse_smoke_segment` is applied to every command
+    # segment, so a bare-positional smoke run in a one-liner such as
+    # `cd "$repo" && awf smoke run "$HOME/p" --mocked-local` is not skipped just
+    # because the line does not *begin* with `awf smoke run`. Without the segment
+    # scan the anchored `re.match` returns None before the separator is inspected,
+    # silently waving exactly the bare positional path R4 exists to reject past the
+    # gate — mirroring `_init_arg_status`'s chained-init handling.
+    after_sep = _parse_smoke_invocation('cd "$repo" && awf smoke run "$HOME/p" --mocked-local')
+    assert after_sep is not None
+    assert after_sep.positional_path is True
+    assert after_sep.has_mocked_local is True
+    # The `uv run ... awf smoke run` lane after a separator is unwrapped just the
+    # same, and a conforming `--project` + `--mocked-local` example stays clean.
+    after_sep_uv = _parse_smoke_invocation(
+        "cd repo ; uv run --extra dev awf smoke run --project /p --mocked-local"
+    )
+    assert after_sep_uv is not None
+    assert after_sep_uv.has_project is True
+    assert after_sep_uv.has_mocked_local is True
+    assert after_sep_uv.positional_path is False
+    # A separator glued to a neighbouring token (no surrounding spaces) is split
+    # too, so a one-line chained form does not hide the offending smoke run.
+    glued_sep = _parse_smoke_invocation('cd "$repo"&&awf smoke run /tmp/proj --mocked-local')
+    assert glued_sep is not None
+    assert glued_sep.positional_path is True
+    # When a line documents *both* a conforming and a bare-positional smoke run, the
+    # offender wins so the line is flagged rather than counting on the valid example.
+    both = _parse_smoke_invocation(
+        "awf smoke run --project /p --mocked-local && awf smoke run /q --mocked-local"
+    )
+    assert both is not None
+    assert _smoke_invocation_offense(both) == "bare positional path"
 
     assert _parse_smoke_invocation("awf service status --format pretty") is None
 
