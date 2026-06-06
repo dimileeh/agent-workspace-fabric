@@ -485,6 +485,40 @@ async def test_worker_heartbeat_check_query_failure_is_redacted(
 
 
 @pytest.mark.unit
+async def test_worker_heartbeat_check_stale_result_includes_age_and_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Session:
+        async def close(self) -> None:
+            return None
+
+    class _StaleWorkerHeartbeatRepository:
+        def __init__(self, _session: _Session) -> None:
+            pass
+
+        async def latest_for_node(self, *, node_id: str) -> SimpleNamespace:
+            assert node_id == "local"
+            return SimpleNamespace(
+                last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=60),
+                poll_interval_seconds=1.0,
+            )
+
+    monkeypatch.setattr(
+        health_route,
+        "WorkerHeartbeatRepository",
+        _StaleWorkerHeartbeatRepository,
+    )
+
+    result = await health_route._check_worker_heartbeat(lambda: _Session(), node_id="local")
+
+    assert result.ok is False
+    assert result.status == "fail"
+    assert result.reason == "WORKER_HEARTBEAT_STALE"
+    assert "Latest worker heartbeat is" in (result.detail or "")
+    assert "stale after" in (result.detail or "")
+
+
+@pytest.mark.unit
 async def test_readyz_egress_audit_returns_posture_counts(
     ready_app_and_client: tuple[Any, AsyncClient],
     engine: AsyncEngine,

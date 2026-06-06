@@ -141,6 +141,8 @@ def test_start_help_advertises_options_and_local_core() -> None:
     for flag in (
         "--rebuild",
         "--skip-agent-runtime-build",
+        "--headless",
+        "--console-port",
         "--timeout-seconds",
         "--source-checkout",
         "--format",
@@ -196,9 +198,67 @@ def test_start_maps_flags_to_bootstrap_options(
     options = records[0]["options"]
     assert options.skip_agent_runtime_build is expected["skip_agent_runtime_build"]
     assert options.force_rebuild is expected["force_rebuild"]
+    assert options.start_console is True
     assert options.timeout_seconds == 12
     # Default discovery: no explicit asset root.
     assert records[0]["asset_root"] is None
+
+
+@pytest.mark.unit
+def test_start_headless_skips_console_bootstrap_and_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--headless` does not start the console or print console-open guidance."""
+    records: list[dict[str, object]] = []
+    _patch_start_wiring(monkeypatch, records=records, result=_success_result())
+
+    result = _runner.invoke(app, ["start", "--headless", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    options = records[0]["options"]
+    assert options.start_console is False
+    payload = json.loads(result.stdout)
+    assert "console_url" not in payload["details"]
+    assert all("Open the console" not in step for step in payload["next_steps"])
+
+
+@pytest.mark.unit
+def test_start_console_port_override_updates_bootstrap_env_and_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--console-port` publishes the console on that host port and reports it."""
+    records: list[dict[str, object]] = []
+    _patch_start_wiring(monkeypatch, records=records, result=_success_result())
+
+    def _resolve_settings(_base: object, *, environ: dict[str, str]) -> object:
+        return SimpleNamespace(
+            api_base_url="http://localhost:8000",
+            console_url=f"http://localhost:{environ['AWF_CONSOLE_HOST_PORT']}",
+        )
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", _resolve_settings)
+
+    result = _runner.invoke(app, ["start", "--console-port", "3333", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert records[0]["service_environ"]["AWF_CONSOLE_HOST_PORT"] == "3333"
+    assert records[0]["options"].start_console is True
+    payload = json.loads(result.stdout)
+    assert payload["details"]["console_url"] == "http://127.0.0.1:3333"
+
+
+@pytest.mark.unit
+def test_start_headless_conflicts_with_console_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--headless` plus `--console-port` exits 2 without bootstrapping."""
+    records: list[dict[str, object]] = []
+    _patch_start_wiring(monkeypatch, records=records, result=_success_result())
+
+    result = _runner.invoke(app, ["start", "--headless", "--console-port", "3333"])
+
+    assert result.exit_code == 2
+    assert "--headless" in result.stderr
+    assert "--console-port" in result.stderr
+    assert records == []
 
 
 @pytest.mark.unit
@@ -648,6 +708,14 @@ def test_start_success_payload_leads_with_provider_free_proof() -> None:
     # The existing onboarding/console guidance is preserved after the proof.
     joined = "\n".join(next_steps)
     assert "awf init" in joined
+
+
+@pytest.mark.unit
+def test_env_migration_details_ignores_non_callable_to_dict() -> None:
+    """Env migration metadata is included only for callable to_dict providers."""
+    migration = SimpleNamespace(to_dict={"path": ".env"})
+
+    assert start_commands._env_migration_details(migration) is None  # noqa: SLF001
 
 
 @pytest.mark.unit

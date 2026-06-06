@@ -39,6 +39,19 @@ uv run --python 3.12 --extra dev awf service status
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
 
+Start local AWF Core and the web console:
+
+```bash
+uv run --python 3.12 --extra dev awf start
+uv run --python 3.12 --extra dev awf start --console-port 3333
+uv run --python 3.12 --extra dev awf start --headless
+```
+
+`awf start` starts the API, worker, database, and console through the same
+bootstrap path as service mode. The console is published on
+<http://127.0.0.1:3000> by default. Use `--headless` to skip the console, or
+`--console-port` to change the localhost port.
+
 `awf service status` reports `orphan_workspaces` and `workspace_cleanup` checks
 alongside the existing API / DB / Docker / image / disk checks. It reads
 Docker Compose labels for containers, networks, and volumes, and scans

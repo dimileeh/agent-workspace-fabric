@@ -37,9 +37,8 @@ respects an eight-workspace local capacity cap.
   reasoning effort for AWF implementation workspaces unless an operator gives
   an explicit per-wave override. Operator override on 2026-06-03: launch T07,
   T08, T10, and T16 with `claude_code`, `claude-opus-4-8`, `high`. Operator
-  override on 2026-06-06: launch T18 and T20 with `claude_code`,
-  `claude-opus-4-8`, `high`, and launch T21 with the same settings after T20
-  merges.
+  override on 2026-06-06: launch T18, T20, and T21 with `claude_code`,
+  `claude-opus-4-8`, `high`.
 - H04 launch preflight: before launching implementation workspaces, clean
   expired AWF resources, rebuild local service images, and rerun AWF bootstrap.
 
@@ -50,12 +49,13 @@ holds unless a human operator explicitly reopens one of the decisions above.
 ## Verified Progress
 
 Last verified: 2026-06-06 from `git log origin/development`, `gh pr view`,
-and `awf workspace show/list`. T09, T18, and T20 are merged into
+and local full-coverage results. T09, T18, T20, and T21 are merged into
 `development`. T21 implementation work from failed workspace
 `ws_8846dc92df1c4f02929f707b` was salvaged into
 [PR #428](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/428)
-and adopted by AWF PR monitor `ws_9a7281385e294d6faa9ac756`. T19 remains
-blocked on T21.
+and merged as commit `a071c164` on 2026-06-06T09:15:52Z. T19 was completed as
+a local coordination pass with validation recorded in
+`plans/T19_FINAL_INTEGRATION_VALIDATION.md`.
 
 | Task | Status | Evidence |
 | --- | --- | --- |
@@ -78,27 +78,21 @@ blocked on T21.
 | T17 | done - merged | [PR #391](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/391), merge commit `ed9ed32d`, merged 2026-06-05T14:01:49Z |
 | T18 | done - merged | [PR #425](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/425), merge commit `ff96f37b`, merged 2026-06-06T03:14:45Z |
 | T20 | done - merged | [PR #426](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/426), merge commit `35c7b1bf`, merged 2026-06-05T23:45:33Z |
-| T21 | salvaged - PR monitor active | [PR #428](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/428), source workspace `ws_8846dc92df1c4f02929f707b`, PR monitor `ws_9a7281385e294d6faa9ac756` |
+| T21 | done - merged | [PR #428](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/428), merge commit `a071c164`, merged 2026-06-06T09:15:52Z; source workspace `ws_8846dc92df1c4f02929f707b` |
+| T19 | done - validated locally | `plans/T19_FINAL_INTEGRATION_VALIDATION.md`; local final coverage `11656 passed, 1 skipped`, coverage `99.00%` |
 
 Current runnable workspace set:
 
-- T21 source workspace `ws_8846dc92df1c4f02929f707b` failed after producing
-  real implementation commits; the branch is salvaged as PR #428.
-- T21 PR #428 is monitored by `ws_9a7281385e294d6faa9ac756` with
-  `claude_code`, `claude-opus-4-8`, `high`.
-- T19 remains blocked on T21.
-- AWF currently has one active workspace: T21 PR monitor
-  `ws_9a7281385e294d6faa9ac756`.
+- None. All backlog tasks are complete.
+- No backlog implementation workspace remains active.
 
 Scheduled workspace set:
 
-| Task | Current workspace | Agent | Status at verification |
-| --- | --- | --- | --- |
-| T21 | `ws_9a7281385e294d6faa9ac756` | `claude_code` / `claude-opus-4-8` / `high` | PR #428 monitor requested |
+- None.
 
-Next tasks after current work is ready:
+Next task:
 
-- Launch T19 only after T21 merges.
+- None for this backlog.
 
 ## What Already Exists
 
@@ -161,8 +155,8 @@ These are reuse targets, not work to rebuild:
 | T17 | Add support-bundle and log redaction coverage for setup secrets | workspace | done - merged (#391) | P0 | T06, T07 | security |
 | T18 | Add docs drift tests for setup/start/init command grammar | workspace | done - merged (#425) | P1 | T01, T15 | docs |
 | T20 | Add explicit uv bootstrap contract to `install.sh` | workspace | done - merged (#426) | P0 | T12, T15 | installer |
-| T21 | Add hosted one-line `uninstall.sh` with AWF-managed cleanup contract | workspace | salvaged - PR #428 under monitor `ws_9a7281385e294d6faa9ac756` | P0 | T12, T15, T20 | installer |
-| T19 | Final integration, full coverage, and first-run lane validation | coordination | planned | P0 | T07, T09, T14, T15, T16, T17, T18, T20, T21 | final |
+| T21 | Add hosted one-line `uninstall.sh` with AWF-managed cleanup contract | workspace | done - merged (#428) | P0 | T12, T15, T20 | installer |
+| T19 | Final integration, full coverage, and first-run lane validation | coordination | done - validated locally | P0 | T07, T09, T14, T15, T16, T17, T18, T20, T21 | final |
 
 ## Task Cards
 
@@ -1011,8 +1005,7 @@ Required tests:
 
 Owner type: workspace
 
-Status: running in `ws_8846dc92df1c4f02929f707b` with `claude_code`,
-`claude-opus-4-8`, `high`
+Status: done - merged (#428)
 
 Modules touched:
 
@@ -1069,6 +1062,8 @@ Required tests:
 
 Owner type: coordination
 
+Status: done - validated locally
+
 Modules touched:
 
 - Cross-cutting validation only unless small fixes are needed.
@@ -1121,7 +1116,7 @@ H01 ! installer hosting/trust (done)
                          +--> T14* E2E first-run lanes (done)
                          +--> T15* docs lanes (done)
                                 +--> T20* uv bootstrap installer contract (done)
-                                      +--> T21* hosted uninstaller contract (running)
+                                      +--> T21* hosted uninstaller contract (done)
                         +--> T16* release workflow checks (done)
 
 H02 ! credential consent wording (done)
@@ -1174,7 +1169,8 @@ T16* release workflow checks   +--> T19 final integration and coverage
 T17* setup secret redaction    +--> T19 final integration and coverage (done)
 T18* docs drift tests          +--> T19 final integration and coverage (done)
 T20* uv bootstrap installer    +--> T19 final integration and coverage (done)
-T21* hosted uninstaller        +--> T19 final integration and coverage (running)
+T21* hosted uninstaller        +--> T19 final integration and coverage (done)
+T19 final integration          (done)
 ```
 
 ## Eight-Workspace Execution Schedule
@@ -1185,15 +1181,14 @@ likely to collide or wait idle.
 ### Current PM Snapshot - 2026-06-06
 
 Verified merged: T01, T02, T03, T04, T05, T06, T07, T08, T09, T10, T11,
-T12, T13, T14, T15, T16, T17, T18, and T20.
+T12, T13, T14, T15, T16, T17, T18, T20, and T21.
 
-Scheduled workspaces, using 1 of 8 available slots:
+Scheduled workspaces, using 0 of 8 available slots:
 
-- T21 hosted one-line uninstaller: salvaged PR #428 under AWF PR monitor
-  `ws_9a7281385e294d6faa9ac756` with `claude_code`, `claude-opus-4-8`,
-  `high`.
+- None.
 
-T19 remains the final integration task after T21 is merged.
+T19 is complete as a local coordination pass; this backlog has no remaining
+runnable tasks.
 
 ### Human Gate Before Wave 1
 
@@ -1206,7 +1201,7 @@ preflight becomes stale before Wave 1 launch:
 | --- | --- | --- | --- |
 | H01 | done - locked | T11, T12, T13, T16 | Installer hosting and trust-chain decision. |
 | H02 | done - locked | T06 | Plain-secret consent and provider prompt wording. |
-| H03 | done - locked | T01, T02, downstream implementation workspaces | Default execution model: `codex`, `gpt-5.5`, `xhigh`; T07/T08/T10/T16 use the 2026-06-03 operator override `claude_code`, `claude-opus-4-8`, `high`; T18/T20 use the 2026-06-06 operator override `claude_code`, `claude-opus-4-8`, `high`; T21 is planned with the same settings after T20 merges. |
+| H03 | done - locked | T01, T02, downstream implementation workspaces | Default execution model: `codex`, `gpt-5.5`, `xhigh`; T07/T08/T10/T16 use the 2026-06-03 operator override `claude_code`, `claude-opus-4-8`, `high`; T18/T20/T21 use the 2026-06-06 operator override `claude_code`, `claude-opus-4-8`, `high`. |
 | H04 | done - locked | T01, T02, downstream implementation workspaces | Launch preflight: clean expired AWF resources, rebuild local service images, rerun AWF bootstrap. |
 
 Do not hold T06/T11/T12/T13/T16 for additional H01/H02 approval. If a future
@@ -1354,8 +1349,7 @@ Capacity used: 1 workspace at a time.
 
 Recommended launch:
 
-- T21 is salvaged into PR #428 and monitored by
-  `ws_9a7281385e294d6faa9ac756`.
+- T21 is merged as PR #428.
 - Keep T20 focused on `packaging/install.sh`, installer fixture tests, shell
   help text, and only minimal install-lane docs if needed.
 - Keep T21 focused on `packaging/uninstall.sh`, shared uninstall helpers,
@@ -1363,6 +1357,8 @@ Recommended launch:
   needed.
 
 ### Wave 6 - Final Integration
+
+Status: complete. T19 was executed locally without AWF.
 
 Capacity used: 1 coordination workspace or local operator run.
 
@@ -1372,9 +1368,8 @@ Capacity used: 1 coordination workspace or local operator run.
 
 Recommended launch:
 
-- Use one workspace or local operator run for T19.
-- Do not run broad final integration in parallel with open implementation PRs
-  unless the goal is only early signal. The final answer needs merged code.
+- No remaining launch work in this wave.
+- The final integration run used merged code from `development`.
 
 ## Parallel Lane Summary
 
@@ -1409,9 +1404,8 @@ Lane E - Human credential consent
   H02(done) -> T06
 ```
 
-At no point does the recommended schedule require more than six simultaneous
-workspace tasks. The remaining two slots are intentionally left free for PR
-monitor repair, rebases, review-comment fixes, or emergency follow-up work.
+At no point did the recommended schedule require more than six simultaneous
+workspace tasks. This backlog is now complete.
 
 ## Critical Failure Modes To Preserve In Prompts
 

@@ -91,12 +91,13 @@ def _build_failure_is_environmental(output: str) -> bool:
     return any(signature in lowered for signature in _BUILD_ENV_UNAVAILABLE_SIGNATURES)
 
 
-# Substrings in a nonzero ``pip install <wheel>`` output that mark the failure as
-# an offline dependency-fetch problem (pip cannot reach an index to resolve the
+# Substrings in a nonzero wheel-install output that mark the failure as an
+# offline dependency-fetch problem (uv/pip cannot reach an index to resolve the
 # wheel's runtime dependencies) rather than a real regression in the local wheel
-# artifact itself. ``pip`` installs the explicitly-passed local archive directly,
-# so a bad wheel (invalid metadata, incompatible Requires-Python, malformed
-# archive) fails with artifact-specific text that contains none of these.
+# artifact itself. The installer handles the explicitly-passed local archive
+# directly, so a bad wheel (invalid metadata, incompatible Requires-Python,
+# malformed archive) fails with artifact-specific text that contains none of
+# these.
 #
 # Kept strictly transport/DNS/connection-focused on purpose. pip's terminal
 # resolver-miss messages ("could not find a version that satisfies the
@@ -133,10 +134,11 @@ _INSTALL_ENV_UNAVAILABLE_SIGNATURES = (
 
 
 def install_failure_is_environmental(output: str) -> bool:
-    """Return ``True`` when a nonzero ``pip install <wheel>`` looks like an offline
-    dependency-fetch problem rather than a regression in the wheel artifact itself.
+    """Return ``True`` when a nonzero wheel install looks like an offline
+    dependency-fetch problem rather than a regression in the wheel artifact
+    itself.
 
-    The clean-install smoke test (``test_clean_venv_install_help``) skips on
+    The clean-install smoke test (``test_uv_venv_install_help``) skips on
     environmental failures so the unit suite stays robust without network, but
     fails loudly on anything else — invalid wheel metadata, an incompatible
     Requires-Python, or a malformed archive — to preserve the package-artifact

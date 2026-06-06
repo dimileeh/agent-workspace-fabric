@@ -166,6 +166,10 @@ awf init <path>
 awf smoke run --project <path> --mocked-local --format pretty
 ```
 
+`awf start` starts the local API, worker, database, and web console at
+<http://127.0.0.1:3000>. Use `awf start --headless` to skip the console or
+`awf start --console-port 3333` to choose another localhost port.
+
 For the source checkout with global tool install lane, run from the checkout:
 
 ```bash

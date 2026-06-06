@@ -83,6 +83,18 @@ def start_command(
         "--skip-agent-runtime-build",
         help="Skip building the AWF agent-runtime image for a faster restart.",
     ),
+    headless: bool = typer.Option(
+        False,
+        "--headless",
+        help="Skip starting the local web console.",
+    ),
+    console_port: int | None = typer.Option(
+        None,
+        "--console-port",
+        min=1,
+        max=65535,
+        help="Publish the local web console on this host port.",
+    ),
     timeout_seconds: float = typer.Option(
         _DEFAULT_START_TIMEOUT_SECONDS,
         "--timeout-seconds",
@@ -111,6 +123,13 @@ def start_command(
             err=True,
         )
         raise typer.Exit(code=2)
+    if headless and console_port is not None:
+        typer.echo(
+            "error: --headless cannot be combined with --console-port; "
+            "choose headless startup or a console port override.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
     from awf.host_setup.source_assets import SourceCheckoutError
     from awf.service.bootstrap import (
@@ -125,11 +144,12 @@ def start_command(
         _render_start_payload(_source_checkout_failure_payload(exc), fmt, success=False)
         raise typer.Exit(code=1) from None
 
-    inputs = _resolve_start_bootstrap_inputs(verified)
+    inputs = _resolve_start_bootstrap_inputs(verified, console_port=console_port)
     options = ServiceBootstrapOptions(
         timeout_seconds=timeout_seconds,
         skip_agent_runtime_build=skip_agent_runtime_build,
         force_rebuild=rebuild,
+        start_console=not headless,
     )
     try:
         result = asyncio.run(
@@ -157,6 +177,7 @@ def start_command(
             inputs.settings,
             result,
             env_migration=inputs.env_migration,
+            console_enabled=not headless,
         ),
         fmt,
         success=True,
@@ -193,6 +214,8 @@ def _resolve_start_source_checkout(source_checkout: Path | None) -> VerifiedSour
 
 def _resolve_start_bootstrap_inputs(
     verified: VerifiedSourceCheckout | None,
+    *,
+    console_port: int | None = None,
 ) -> _StartBootstrapInputs:
     """Resolve compose paths, env files, and settings for one bootstrap run."""
     from awf.common.config import Settings
@@ -227,6 +250,8 @@ def _resolve_start_bootstrap_inputs(
         asset_root = None
 
     service_env = local_service_environ(env_file=read_env_file)
+    if console_port is not None:
+        service_env["AWF_CONSOLE_HOST_PORT"] = str(console_port)
     settings = resolve_service_settings(
         Settings(_env_file=read_env_file),
         environ=service_env,
@@ -254,6 +279,7 @@ def _start_success_payload(
     result: ServiceBootstrapResult,
     *,
     env_migration: object | None = None,
+    console_enabled: bool = True,
 ) -> FirstRunPayload:
     """Build the operator success panel from resolved settings and bootstrap result."""
     from awf.service.smoke import DEFAULT_LOCAL_CONSOLE_URL
@@ -262,30 +288,32 @@ def _start_success_payload(
     checks = service_status.get("checks")
     docker_check = checks.get("docker") if isinstance(checks, Mapping) else None
     api_url = _normalize_local_url(str(settings.api_base_url))
-    console_url = _normalize_local_url(str(settings.console_url or DEFAULT_LOCAL_CONSOLE_URL))
     details: dict[str, Any] = {
         "api_url": api_url,
-        "console_url": console_url,
         "docker": _docker_summary(docker_check),
         "providers": _providers_summary(service_status.get("agent_readiness")),
         "health": service_status.get("status", "unknown"),
     }
+    console_url = _normalize_local_url(str(settings.console_url or DEFAULT_LOCAL_CONSOLE_URL))
+    if console_enabled:
+        details["console_url"] = console_url
     if (migration_details := _env_migration_details(env_migration)) is not None:
         details["env_migration"] = migration_details
-    next_steps = (
+    next_steps = [
         # Lead with the provider-free local health proof: a skeptic can verify
         # local Core health without handing AWF GitHub/PR authority or a token.
         "Run awf smoke run --mocked-local to prove local AWF Core health "
         "without provider credentials or GitHub access.",
         "Run awf init <path> to onboard a project repository.",
         "Run awf service status --format pretty to inspect local Core health.",
-        f"Open the console at {console_url} to use the local UI.",
-    )
+    ]
+    if console_enabled:
+        next_steps.append(f"Open the console at {console_url} to use the local UI.")
     return first_run_success_payload(
         command="awf start",
         summary="Local AWF Core is running.",
         details=details,
-        next_steps=next_steps,
+        next_steps=tuple(next_steps),
     )
 
 
