@@ -77,12 +77,23 @@ SETUP_START_DOCS = (
 # on this page"), so it is the strongest init context of all and is tracked here
 # — without it R2 would let that page drop every `awf init <path>` example with
 # no offender and no missing-context entry to flag the regression.
+# `docs/MCP_CLIENT_PARITY.md` is tracked here too: its first-run parity row
+# documents the public `awf init <path>` command *surface*. Because it is in
+# `FIRST_RUN_DOCS` the offender sweep already rejects a *malformed* (no-path)
+# init there, but without a per-context tally R2 would not fail if that row
+# dropped the `awf init <path>` cell entirely — even though that surface is in
+# the T18 grammar scope (it is the exact cell that moved from bare `awf init` to
+# `awf init <path>`). Listing it makes the missing-context guard symmetric with
+# the offender sweep. (`RELEASING.md` stays out by contrast: its only init
+# mention is `awf init --help`, which classifies as "help" not "ok", so it has no
+# `awf init <path>` example to require.)
 INIT_CONTEXT_DOCS = (
     "README.md",
     "docs/QUICKSTART.md",
     "docs/GETTING_STARTED.md",
     "docs/MCP_SETUP.md",
     "docs/PROJECT_ONBOARDING.md",
+    "docs/MCP_CLIENT_PARITY.md",
 )
 
 # First-run contexts that must each demonstrate at least one valid
