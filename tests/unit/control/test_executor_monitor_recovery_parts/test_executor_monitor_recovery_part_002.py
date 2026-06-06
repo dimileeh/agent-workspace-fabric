@@ -921,6 +921,18 @@ async def test_sync_feature_pr_push_error_audit_records_adopted_pr_head(
     fake.queue_result(returncode=0)  # git commit
     _queue_validation_head(fake, head=fixed_head)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation passes after fix
+    # Final pre-push gates re-derive committed output: plan-only gate diffs
+    # base..HEAD (name-only), then the protected-output gate diffs it again
+    # (name-status). The fix pass committed real work, so both pass and the
+    # adopted-PR push is attempted (and fails via the mocked creator below).
+    fake.queue_result(  # plan-only committed diff
+        returncode=0,
+        stdout="tests/integration/test_alembic_postgres.py\n",
+    )
+    fake.queue_result(  # protected committed diff (name-status)
+        returncode=0,
+        stdout="M\0tests/integration/test_alembic_postgres.py\0",
+    )
 
     await executor.execute(ws_id)
 

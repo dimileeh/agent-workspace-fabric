@@ -1384,6 +1384,18 @@ class TestPullRequestUnexpectedErrorPart001:
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         fake.queue_result(returncode=0, stdout="validated-head\n")  # pre-validation HEAD
+        # Final pre-push gates re-derive committed output: the plan-only gate
+        # diffs base..HEAD (name-only) and sees the real committed implementation,
+        # then the protected-output gate diffs it again (name-status). Both pass,
+        # so the branch is accepted and the PR is opened.
+        fake.queue_result(  # plan-only committed diff: real implementation output
+            returncode=0,
+            stdout="src/awf/mcp/server.py\ntests/unit/mcp/test_mcp_operator_surfaces.py\n",
+        )
+        fake.queue_result(  # protected committed diff (name-status)
+            returncode=0,
+            stdout="M\0src/awf/mcp/server.py\0A\0tests/unit/mcp/test_mcp_operator_surfaces.py\0",
+        )
 
         executor = _make_executor(
             fake,

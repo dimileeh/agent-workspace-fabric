@@ -895,6 +895,11 @@ class TestExecutorCoverageEdgesPart002:
         fake.queue_result(returncode=0)  # merge-base
         _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation
+        # Final pre-push gates re-derive committed output: plan-only gate diffs
+        # base..HEAD (name-only), then the protected-output gate diffs it again
+        # (name-status). The branch has real committed work, so both pass.
+        fake.queue_result(returncode=0, stdout="a.py\n")  # plan-only committed diff
+        fake.queue_result(returncode=0, stdout="M\0a.py\0")  # protected committed diff
         executor = _make_executor(
             fake,
             factory,

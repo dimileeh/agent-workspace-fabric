@@ -751,6 +751,11 @@ class TestPullRequestUnexpectedErrorPart002:
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
         fake.queue_result(returncode=0, stdout="pre-pr-validation-head\n")  # rev-parse HEAD
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        # Final pre-push gates re-derive committed output from git: the plan-only
+        # gate diffs base..HEAD (name-only), then the protected-output gate diffs
+        # it again (name-status). The branch has real committed work, so both pass.
+        fake.queue_result(returncode=0, stdout="src/awf/x.py\n")  # plan-only committed diff
+        fake.queue_result(returncode=0, stdout="M\0src/awf/x.py\0")  # protected committed diff
 
         compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
         validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
