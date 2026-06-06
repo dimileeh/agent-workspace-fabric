@@ -11,11 +11,14 @@ manifest, checksums, and release artifacts are published and verified.
 
 ## Hosted uninstaller (`uninstall.sh`)
 
-AWF ships `packaging/uninstall.sh`, a standalone, inspected uninstaller that is
-the symmetric counterpart to the hosted installer. Like the installer lane it is
-release-gated until the hosted URL and release artifacts are published and
-verified; until then, run the checked-in script directly. It is conservative by
-design:
+AWF keeps the hosted uninstaller source in `packaging/uninstall.sh`: a
+standalone, inspected cleanup script for the public
+`curl -fsSL .../uninstall.sh | bash` lane and for source-checkout inspection.
+Package-manager installs should still uninstall AWF through their package
+manager (`uv`, `pipx`, or `pip`) rather than relying on this script to be present
+inside Python package artifacts. Like the installer lane, the hosted uninstaller
+is release-gated until the public URL is published and verified; until then, run
+the checked-in script directly. It is conservative by design:
 
 - **Credentials are preserved by default.** It never removes provider secrets,
   keyring entries, env refs, or `gh`/agent auth, and there is no flag that does.
