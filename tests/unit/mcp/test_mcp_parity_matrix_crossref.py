@@ -387,29 +387,16 @@ def test_parity_matrix_cli_commands_or_absent() -> None:
         cli_cell = row.get("CLI surface", "").strip()
         if not cli_cell or cli_cell == "CLI absent":
             continue
-        cleaned = _strip_backticks(cli_cell)
-        for part in re.split(r",\s*", cleaned):
-            part = part.strip()
-            if not part:
-                continue
-            if not part.startswith("awf "):
+        for invocation in _extract_cli_invocations_from_cell(cli_cell):
+            part = invocation.source
+            if not invocation.command.startswith("awf "):
                 missing.append(f"{row.get('Capability', '?')}: {part} (malformed CLI entry)")
                 continue
-            tokens = part.split()
-            base_end = len(tokens)
-            for i, t in enumerate(tokens):
-                if t.startswith("--") or t.startswith("<"):
-                    base_end = i
-                    break
-            base_cmd = " ".join(tokens[:base_end])
-            if base_cmd not in cli_commands:
+            if invocation.command not in cli_commands:
                 missing.append(f"{row.get('Capability', '?')}: {part}")
                 continue
-            allowed = cli_flags.get(base_cmd, set())
-            for token in tokens:
-                if not token.startswith("--"):
-                    continue
-                flag_name = token.split("=")[0]
+            allowed = cli_flags.get(invocation.command, set())
+            for flag_name in invocation.flags:
                 if flag_name not in allowed:
                     missing.append(
                         f"{row.get('Capability', '?')}: {part} (unsupported flag {flag_name})"
