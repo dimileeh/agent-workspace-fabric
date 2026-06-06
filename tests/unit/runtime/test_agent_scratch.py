@@ -233,6 +233,29 @@ async def test_absolute_rev_parse_path_is_written_in_place(tmp_path: Path) -> No
 
 
 @pytest.mark.unit
+async def test_missing_info_dir_is_created_before_write(tmp_path: Path) -> None:
+    """A missing info/ parent dir is created so the exclude is still applied."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    # Parent ``info/`` deliberately does not exist (minimal/custom git env).
+    exclude = tmp_path / "common" / "info" / "exclude"
+    assert not exclude.parent.exists()
+
+    async def run_git(args: list[str]) -> CommandResult:
+        assert args == ["rev-parse", "--git-path", "info/exclude"]
+        return CommandResult(returncode=0, stdout=f"{exclude}\n", stderr="")
+
+    applied = await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+
+    assert applied is True
+    content = exclude.read_text(encoding="utf-8")
+    assert AWF_SCRATCH_BLOCK_START in content
+    assert ".claude/worktrees/" in content
+
+
+@pytest.mark.unit
 async def test_exclude_write_oserror_is_handled_gracefully(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

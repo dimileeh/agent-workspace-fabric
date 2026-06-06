@@ -111,6 +111,7 @@ async def apply_agent_scratch_excludes(
         prefix = _strip_managed_block(existing)
         if prefix and not prefix.endswith("\n"):
             prefix += "\n"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
         exclude_path.write_text(prefix + _render_managed_block(scratch_paths), encoding="utf-8")
     except OSError as exc:
         logger.warning(
