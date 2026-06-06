@@ -86,13 +86,22 @@ INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 # disallowed no-path form (qualifier-*before*, e.g. RELEASING.md's "Do not use
 # no-path `awf init` for service setup"). Such a mention is teaching the reader
 # *not* to run no-path init, so R2 must not read it as a no-path command example.
-# The qualifier sits before the span, so this form never collides with R3's
+# Like the after-span sibling below, it is gated on an explicit prohibition
+# lead-in (`do not`/`don't`/`never`/`avoid`) kept within the same clause (the
+# `[^.`\n]` bridge stops `between` spanning a sentence break). That gate is
+# essential: a *positive* reintroduction such as "Use no-path `awf init` for
+# service setup" carries no lead-in, so it keeps its backticks and is still
+# surfaced as a bare no-path R2 offender — ungated, the strip would unwrap that
+# legacy guidance and let the very wording this drift test rejects pass. The
+# qualifier sits before the span, so this form never collides with R3's
 # bootstrap-framing patterns (which key on `awf init` *followed by* "without a
 # path"); the sibling AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE below handles the
 # qualifier-*after* wording that does. A path-bearing `awf init <path>` span has
 # its backtick after the path, not after `init`, so it is left untouched.
 NO_PATH_INIT_PROHIBITION_RE = re.compile(
-    r"(?P<qualifier>no[- ]path|without a path)\s+`awf init`", re.IGNORECASE
+    r"(?P<lead>do not|don't|never|avoid)(?P<between>[^.`\n]*?)"
+    r"(?P<qualifier>no[- ]path|without a path)\s+`awf init`",
+    re.IGNORECASE,
 )
 # The same prohibition written with the qualifier *after* the span — the natural
 # release/troubleshooting wording "Do not run `awf init` without a path for
@@ -325,11 +334,15 @@ def _without_init_prohibitions(text: str) -> str:
     intact) keeps that guidance readable while stopping R2's inline scan from
     extracting the span and miscounting a documented prohibition as a no-path
     command example. Both the qualifier-*before* form and the qualifier-*after*
-    form (e.g. "Do not run ``awf init`` without a path") are unwrapped. An
-    *unqualified* bare ``awf init`` still keeps its backticks and is surfaced as
-    an R2 offender.
+    form (e.g. "Do not run ``awf init`` without a path") are unwrapped, and both
+    are gated on a prohibition lead-in (``do not``/``don't``/``never``/``avoid``).
+    The gate matters in *both* directions: a *positive* reintroduction such as
+    "Use no-path ``awf init`` for service setup" carries no lead-in, so it keeps
+    its backticks and stays an R2 offender — the exact legacy guidance this drift
+    test must reject. An *unqualified* bare ``awf init`` likewise keeps its
+    backticks and is surfaced as an R2 offender.
     """
-    text = NO_PATH_INIT_PROHIBITION_RE.sub(r"\g<qualifier> awf init", text)
+    text = NO_PATH_INIT_PROHIBITION_RE.sub(r"\g<lead>\g<between>\g<qualifier> awf init", text)
     return _strip_after_span_init_prohibition(text)
 
 
@@ -986,9 +999,18 @@ def test_helper_excludes_no_path_init_prohibition_from_inline_scan() -> None:
     mentions = _inline_command_mentions(_without_init_prohibitions(text))
     assert "awf init" not in mentions
     assert "awf init <path>" in mentions
-    # The "without a path" qualifier variant is handled the same way.
-    variant = _without_init_prohibitions("Never run `awf init` without a path `awf init` here.")
+    # The "without a path" before-span qualifier variant is unwrapped the same
+    # way, still gated on the prohibition lead-in.
+    variant = _without_init_prohibitions("Never use without a path `awf init` here.")
     assert "without a path awf init" in variant
+    # A *positive* no-path init reintroduction with no prohibition lead-in — the
+    # exact legacy "Use no-path `awf init` for service setup" wording this drift
+    # test must reject — keeps its backticks so R2's inline scan still surfaces it
+    # as a bare no-path offender. Ungated, the before-span strip would unwrap this
+    # and let the legacy guidance pass whenever the no-path qualifier precedes the
+    # span without actually forbidding it.
+    positive = "Use no-path `awf init` for service setup.\n"
+    assert "awf init" in _inline_command_mentions(_without_init_prohibitions(positive))
     # The same prohibition with the qualifier *after* the span — the natural
     # release/troubleshooting wording "Do not run `awf init` without a path" — is
     # unwrapped too, so R2's inline scan does not read it as a bare command, while
