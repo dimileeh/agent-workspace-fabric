@@ -444,6 +444,7 @@ async def test_post_agent_commit_semantic_agent_repair_plan_only_change_is_block
         returncode=0,
         stdout="docs/awf-plans/ws_semantic_repair.md\n",
     )  # repair changed only plan output
+    fake.queue_result(returncode=0, stdout="")  # git diff base..HEAD (no committed output)
 
     executor = _make_executor(fake, factory, tmp_path)
     await executor.execute(ws_id)
@@ -492,6 +493,7 @@ async def test_post_agent_commit_semantic_agent_repair_normalizer_only_plan_outp
         returncode=0,
         stdout="docs/awf-plans/ws_89.conformance.json\n",
     )  # only the normalizer-rewritten plan artifact remains staged
+    fake.queue_result(returncode=0, stdout="")  # git diff base..HEAD (no committed output)
 
     executor = _make_executor(fake, factory, tmp_path)
     await executor.execute(ws_id)
@@ -513,6 +515,129 @@ async def test_post_agent_commit_semantic_agent_repair_normalizer_only_plan_outp
     assert repair_events[-1].reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
     assert repair_events[-1].payload["restaged_paths"] == [  # type: ignore[index]
         "docs/awf-plans/ws_89.conformance.json"
+    ]
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_plan_only_staged_but_real_committed_output_proceeds(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Regression for #430 (sibling of #427).
+
+    When the agent self-committed real implementation in earlier commits and the
+    post-agent semantic repair re-stages ONLY an AWF plan artifact, the net
+    ``base..HEAD`` output still contains real code, so the committed-output guard
+    short-circuits the plan-only gate and the repair flow proceeds (no spurious
+    ``PLAN_ONLY_OUTPUT`` failure)."""
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("src/awf/foo.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(
+        returncode=0,
+        stdout="docs/awf-plans/ws_real.md\n",
+    )  # repair re-staged only a plan artifact
+    fake.queue_result(
+        returncode=0,
+        stdout="src/awf/foo.py\n",
+    )  # git diff base..HEAD has real committed output
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+        state_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type="workspace.state_changed",
+        )
+
+    # The plan-only ``_PostAgentCommitStepError`` was NOT raised: the repair
+    # proceeded past the gate and recorded a successful (non-plan-only) outcome.
+    assert repair_events
+    assert repair_events[-1].reason_code != PLAN_ONLY_OUTPUT_REASON_CODE
+    assert repair_events[-1].payload["retry_outcome"] == "succeeded"  # type: ignore[index]
+
+    # The workspace is never failed via the plan-only path — any downstream
+    # gate (e.g. the no-commits check) is a distinct concern.
+    assert not [
+        event
+        for event in state_events
+        if event.new_state == "failed" and event.reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
+    ]
+
+    # The committed-output guard issued the ``base..HEAD`` diff (not short-circuited).
+    base_head_diff_calls = [
+        call
+        for call in fake.calls
+        if "diff" in call.args and any(arg.endswith("..HEAD") for arg in call.args)
+    ]
+    assert base_head_diff_calls
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_agent_repair_plan_only_with_empty_committed_output_blocks(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """When nothing real is committed (empty ``base..HEAD``) and the repair stages
+    only a plan artifact, the genuine plan-only gate STILL fires (unchanged terminal
+    behavior — the guard must not mask a no-op repair)."""
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="fix_test.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("fix_test.py"),
+    )  # semantic pre-commit failure
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted repair succeeds
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(
+        returncode=0,
+        stdout="docs/awf-plans/ws_only.md\n",
+    )  # repair changed only plan output
+    fake.queue_result(returncode=0, stdout="")  # git diff base..HEAD (no committed output)
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]["post_agent_commit"]
+    assert details["stage"] == "post-agent pre-commit repair policy"
+    assert details["repair_strategy"] == "agent"
+    assert "only AWF plan/conformance artifact changes" in details["summary"]
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+    assert repair_events
+    assert repair_events[-1].reason_code == PLAN_ONLY_OUTPUT_REASON_CODE
+    assert repair_events[-1].payload["restaged_paths"] == [  # type: ignore[index]
+        "docs/awf-plans/ws_only.md"
     ]
 
     commit_calls = [call for call in fake.calls if "commit" in call.args]
