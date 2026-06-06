@@ -102,6 +102,15 @@ async def apply_agent_scratch_excludes(
     no scratch paths is a deliberate no-op, and a failed ``rev-parse`` or an
     unwritable exclude file is logged and degraded gracefully so provisioning
     and validation proceed (the guard then simply behaves as it did before).
+
+    Concurrency: the read-modify-write below is not atomic, and ``info/exclude``
+    is shared across every linked worktree of a bare mirror. For *same-agent*
+    concurrent runs this is harmless (both writers render identical content). For
+    *different-adapter* runs on the same mirror there is a narrow window where
+    two writers both read the pre-existing block and the last writer drops the
+    other's patterns; the loser re-applies on its next cycle (executor pre-agent
+    or monitor pre-push), so the worst case is a transient guard miss, not lost
+    state. This is a deliberate tradeoff — AWF does not serialize exclude writes.
     """
     if not scratch_paths:
         return False
@@ -134,8 +143,10 @@ async def apply_agent_scratch_excludes(
         if prefix and not prefix.endswith("\n"):
             prefix += "\n"
         # Union with any patterns a different adapter already wrote to this
-        # shared (linked-worktree) exclude file so concurrent agents on the same
-        # mirror never clobber each other's scratch exclusions. ``_render`` dedups.
+        # shared (linked-worktree) exclude file so a *sequential* second adapter
+        # does not clobber the first's scratch exclusions (``_render`` dedups).
+        # Under truly concurrent different-adapter writes this read-modify-write
+        # is racy; see the docstring for the bounded, self-healing tradeoff.
         merged = _extract_managed_patterns(existing) + scratch_paths
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
         exclude_path.write_text(prefix + _render_managed_block(merged), encoding="utf-8")
