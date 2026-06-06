@@ -484,12 +484,16 @@ main() {
     # aborts with UNSUPPORTED_PLATFORM before touching uv/pipx or the filesystem.
     detect_platform
 
-    # uv removal and state purge run before package removal so an explicit,
-    # authorized cleanup is not blocked by the package lane's unmanaged refusal.
-    # Each lane is independent; a refusal/failure surfaces its own token + exit.
-    remove_uv
+    # State purge runs first: it is an explicit, authorized lane independent of the
+    # package, so the package lane's unmanaged refusal must not block it. The
+    # package lane then runs before remove_uv because uv is the very tool it uses:
+    # `uv self uninstall` drops uv from PATH, after which `uv tool uninstall` can no
+    # longer run and a still-installed, formerly uv-managed awf would be misread as
+    # unmanaged (UNINSTALL_REFUSED_UNMANAGED) — uv and state already gone. Removing
+    # the package before its manager keeps that lane correct; uv removal comes last.
     purge_state
     uninstall_awf
+    remove_uv
 
     say "Credentials were preserved. AWF does not remove provider secrets, keyring entries, env refs, or gh/agent auth."
     say "Docker volumes and Compose stacks were left intact; stop them with 'awf service gc' or 'docker compose down' if you no longer need them."

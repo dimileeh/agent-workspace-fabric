@@ -139,6 +139,34 @@ def test_uv_preserved_when_remove_uv_absent(harness: InstallerHarness) -> None:
 
 
 @pytest.mark.unit
+def test_managed_package_removed_before_uv_self_uninstall(
+    harness: InstallerHarness,
+) -> None:
+    """``--remove-uv`` removes the uv-managed package *before* removing uv itself.
+
+    Regression for the ordering bug: when the package is uv-managed and uv is
+    AWF-bootstrapped, running ``uv self uninstall`` first drops uv from PATH, so
+    the later ``uv tool uninstall`` cannot run and the still-installed package is
+    misread as unmanaged (UNINSTALL_REFUSED_UNMANAGED) after uv is already gone.
+    The package lane must therefore run while uv still exists; uv removal is last.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output=f"{PACKAGE} v0.1.0\n- awf\n")
+    harness.add_pipx(list_output="")
+    marker = harness.write_uv_marker()
+
+    result = _run(harness, ["--remove-uv", "--yes"])
+
+    assert result.returncode == 0, result.stderr
+    calls = harness.calls()
+    tool_uninstall = next(i for i, c in enumerate(calls) if f"uv tool uninstall {PACKAGE}" in c)
+    self_uninstall = next(i for i, c in enumerate(calls) if "uv self uninstall" in c)
+    # The managed package is removed before uv self-uninstalls (which would strand it).
+    assert tool_uninstall < self_uninstall
+    assert not marker.exists()
+
+
+@pytest.mark.unit
 def test_remove_uv_self_uninstall_failure_still_clears_marker(
     harness: InstallerHarness,
 ) -> None:
