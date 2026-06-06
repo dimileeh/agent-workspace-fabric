@@ -383,6 +383,16 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
             )
             if monitor_log is not None:
                 await monitor_log.close()
+            # Release the forge client built for this monitor. The factory
+            # (``worker._pr_monitor_factory`` / the release handoff) constructs a
+            # fresh ``ForgeClient`` per monitor and hands its lifecycle to this
+            # single-use runner; every ``run()`` return (terminal, provider
+            # retry/fallback, early status loss) ends that life. For a BitBucket
+            # client this closes the underlying ``httpx.AsyncClient`` so its
+            # connection pool releases instead of leaking until GC; for a
+            # ``GitHubClient`` it is a no-op. A resumed monitor builds a new
+            # client, so closing here never strands a later cycle.
+            await self._deps.gh.aclose()
 
     # ── Action dispatch ────────────────────────────────────────────────────
 

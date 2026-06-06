@@ -179,6 +179,7 @@ class _CapturingGH:
         self.failing_log_requests: list[tuple[RepoRef, int, str, tuple[str, ...]]] = []
         self.posted_comments: list[tuple[RepoRef, int, str]] = []
         self.post_errors: list[GitHubClientError] = []
+        self.closed = False
 
     async def fetch_pr_status(
         self,
@@ -208,6 +209,11 @@ class _CapturingGH:
         if self.post_errors:
             raise self.post_errors.pop(0)
         self.posted_comments.append((repo, pr_number, body))
+
+    async def aclose(self) -> None:
+        # The runner closes its forge client in run()'s finally; record it so the
+        # leak-fix regression test can assert the client was released.
+        self.closed = True
 
 
 def _provider_recovery_policy(
@@ -1137,6 +1143,37 @@ async def test_run_fails_workspace_when_base_fetch_cannot_be_refreshed(
         assert workspace.failure_reason == "infrastructure_failure"
         assert workspace.failure_message is not None
         assert "could not refresh base branch" in workspace.failure_message
+
+
+@pytest.mark.unit
+async def test_run_closes_forge_client_on_exit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Regression (issue:4640573294): the per-monitor forge client (a BitBucket
+    # client owns an httpx connection pool) must be released when run() finishes,
+    # not leaked until GC. run() owns the lifecycle of the client the factory
+    # built for it, so it calls gh.aclose() in its finally on every exit path.
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="fatal: could not fetch base")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    gh = _CapturingGH()
+    runner._deps.gh = gh  # type: ignore[assignment]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert gh.closed is True
 
 
 @pytest.mark.unit

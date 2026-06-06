@@ -1092,24 +1092,32 @@ async def _handoff_sync_release_pr_monitor(
         return
 
     try:
-        metadata, created = await find_or_create_release_pr(
-            runner=self._runner,
-            # Reconstructed forge (not re-resolved); unsupported forges fail fast.
-            # Use concrete_forge_for_repo (not plain concrete_forge) to mirror the
-            # worker PR-monitor factory and the execution_flow forge gate: a
-            # legacy/missing snapshot normalizes profile.forge to "auto", so fall
-            # back to the workspace repo_url's host. Without this, a BitBucket
-            # workspace whose snapshot predates the forge field would silently
-            # construct a GitHubClient here instead of failing fast.
-            gh=make_forge_client(
-                concrete_forge_for_repo(profile.forge, workspace.repo_url), self._runner
-            ),
-            repo=repo,
-            source_branch=source_branch,
-            target_branch=target_branch,
-            title=release_pr_title(source_branch=source_branch, target_branch=target_branch),
-            body=release_pr_body(source_branch=source_branch, target_branch=target_branch),
-        )
+        # ``async with`` so the forge client is closed on every exit path. Unlike
+        # the worker PR-monitor factory (whose client lives for the monitor's
+        # lifetime and is closed by the runner), this client is used only for the
+        # one-shot PR find/create below, so a BitBucket client would otherwise
+        # leak its httpx connection pool on every release-sync handoff. The
+        # construct-and-enter is inside the try so an unsupported forge / missing
+        # BitBucket auth still maps to the reason-coded failures below.
+        # Reconstructed forge (not re-resolved); unsupported forges fail fast.
+        # Use concrete_forge_for_repo (not plain concrete_forge) to mirror the
+        # worker PR-monitor factory and the execution_flow forge gate: a
+        # legacy/missing snapshot normalizes profile.forge to "auto", so fall
+        # back to the workspace repo_url's host. Without this, a BitBucket
+        # workspace whose snapshot predates the forge field would silently
+        # construct a GitHubClient here instead of failing fast.
+        async with make_forge_client(
+            concrete_forge_for_repo(profile.forge, workspace.repo_url), self._runner
+        ) as gh:
+            metadata, created = await find_or_create_release_pr(
+                runner=self._runner,
+                gh=gh,
+                repo=repo,
+                source_branch=source_branch,
+                target_branch=target_branch,
+                title=release_pr_title(source_branch=source_branch, target_branch=target_branch),
+                body=release_pr_body(source_branch=source_branch, target_branch=target_branch),
+            )
     except (ReleasePrSyncError, PullRequestMetadataError) as exc:
         await self._mark_failed(
             workspace_id=workspace_id,

@@ -182,15 +182,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             else build_release_pr_monitor
         )
         # Build the forge client from the persisted resolved forge (reconstructed,
-        # never re-resolved). github → GitHubClient (unchanged behavior); an
-        # unsupported forge (e.g. bitbucket) raises ForgeNotSupportedError so the
-        # monitor build fails fast rather than mis-routing to GitHub. Use
+        # never re-resolved). github → GitHubClient; bitbucket → BitBucketClient
+        # (issue #345). A genuinely-unknown forge raises ForgeNotSupportedError so
+        # the monitor build fails fast rather than mis-routing to GitHub. Use
         # concrete_forge_for_repo (not plain concrete_forge) to mirror the
         # executor forge gate: a legacy/missing snapshot normalizes profile.forge
         # to "auto", so fall back to the workspace repo_url's host. Without this,
         # a monitor rebuild that runs before the executor gate on a pre-Phase-1
         # BitBucket snapshot would silently construct a GitHubClient instead of
-        # failing fast.
+        # routing to BitBucket. This client owns resources (a BitBucketClient holds
+        # an httpx connection pool); the monitor runner closes it via gh.aclose()
+        # when its run() finishes, so the per-monitor client is not leaked.
         gh = make_forge_client(concrete_forge_for_repo(profile.forge, workspace.repo_url), runner)
         grace_seconds = (
             workspace.initial_review_grace_period_seconds

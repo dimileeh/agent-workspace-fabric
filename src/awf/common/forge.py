@@ -171,6 +171,27 @@ class ForgeClient(Protocol):
         """Merge a PR and return the merge commit SHA."""
         ...
 
+    async def aclose(self) -> None:
+        """Release any resources the client owns (HTTP pools, sockets).
+
+        :class:`GitHubClient` wraps a stateless subprocess runner and so this is
+        a no-op, but :class:`~awf.common.bitbucket_client.BitBucketClient` owns a
+        live ``httpx.AsyncClient`` (connection pool + TLS session) that must be
+        closed deterministically rather than left to GC. Declaring ``aclose`` on
+        the Protocol lets every caller of :func:`make_forge_client` release the
+        client uniformly — ``async with make_forge_client(...) as gh:`` — without
+        branching on the concrete forge.
+        """
+        ...
+
+    async def __aenter__(self) -> ForgeClient:
+        """Enter an ``async with`` block, returning this client unchanged."""
+        ...
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        """Release resources on ``async with`` exit (delegates to :meth:`aclose`)."""
+        ...
+
 
 def _forge_not_supported_error(forge: object) -> ForgeNotSupportedError:
     """Build the honest fail-fast error for an unsupported/unknown forge.
