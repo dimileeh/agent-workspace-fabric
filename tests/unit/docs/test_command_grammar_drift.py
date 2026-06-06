@@ -65,11 +65,17 @@ SETUP_START_DOCS = (
 # right contexts, so these are tracked per-doc — a first-run page dropping its
 # init snippet fails even if another doc still carries one. Upgrade/uninstall
 # flows reference init without re-teaching onboarding, so they stay out.
+# `docs/PROJECT_ONBOARDING.md` is the dedicated `awf init <path>` onboarding
+# guide (its First-run section calls init "the project-onboarding pass described
+# on this page"), so it is the strongest init context of all and is tracked here
+# — without it R2 would let that page drop every `awf init <path>` example with
+# no offender and no missing-context entry to flag the regression.
 INIT_CONTEXT_DOCS = (
     "README.md",
     "docs/QUICKSTART.md",
     "docs/GETTING_STARTED.md",
     "docs/MCP_SETUP.md",
+    "docs/PROJECT_ONBOARDING.md",
 )
 
 # Fenced blocks: capture the info string's leading language token so the command
