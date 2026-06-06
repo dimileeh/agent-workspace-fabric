@@ -111,6 +111,12 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("awf init > init.log") == "bare"
     assert _init_arg_status("awf init . > init.log") == "ok"
     assert _init_arg_status("awf init . >init.log") == "ok"
+    # A redirect glued to a chained-command separator (`>init.log&&awf start`) is a
+    # command boundary: the continuation command must never be scanned as the init's
+    # positional path. Without the boundary break the no-path init below would be
+    # misread as "ok" because `start` slipped in as a positional after the redirect.
+    assert _init_arg_status("awf init --yes >init.log&&awf start") == "flag-only"
+    assert _init_arg_status("awf init --yes 2>out.log;awf start") == "flag-only"
     # When `shlex.split` raises (an unclosed quote glued to a flag value), the
     # fallback split must still strip a trailing `# comment`: otherwise the bare
     # `#`/`bootstrap` tokens slip in as the required path and a no-path init is

@@ -490,6 +490,13 @@ def _split_tail(tail: str) -> list[str]:
             # a glued form (`>init.log`) carries the target inline, so only the
             # operator token itself is dropped.
             skip_operand = redirect.group(0) == head
+            # A redirect token that also carries a chained-command separator
+            # (`>init.log&&awf`, where `head` is the redirect-bearing prefix and
+            # the `&&awf` tail was split off) is a command boundary: stop here so
+            # the continuation command is never scanned as a positional path,
+            # mirroring the `head != token` break taken on the non-redirect path.
+            if head != token:
+                break
             continue
         if head:
             result.append(head)
