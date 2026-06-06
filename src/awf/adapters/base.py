@@ -181,6 +181,18 @@ class AgentAdapter(ABC):
         return self._default_model
 
     @property
+    def runtime_scratch_paths(self) -> tuple[str, ...]:
+        """Return checkout-local scratch paths this agent creates while running.
+
+        These are agent-runtime artifacts (e.g. an agent's nested worktrees),
+        not AWF artifacts or project work. AWF excludes them from a worktree's
+        git ignore view before validation so its cleanliness guard does not
+        mistake them for a dirty tree. Defaults to no paths; agents that create
+        scratch state override this.
+        """
+        return ()
+
+    @property
     def provider_recovery_default_model(self) -> str | None:
         """Return the implicit model identity provider recovery should attribute."""
         return self._selected_model_for_run(model=None)

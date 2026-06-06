@@ -1378,6 +1378,28 @@ async def test_all_adapters_keep_oversized_prompts_out_of_argv(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("adapter_cls", "expected_scratch"),
+    [
+        (ClaudeCodeAdapter, (".claude/worktrees/",)),
+        (CodexAdapter, ()),
+        (CursorAdapter, ()),
+        (GeminiAdapter, ()),
+        (OpenCodeAdapter, ()),
+        (GrokAdapter, ()),
+    ],
+)
+def test_runtime_scratch_paths_are_sourced_per_agent(
+    adapter_cls: type[AgentAdapter],
+    expected_scratch: tuple[str, ...],
+) -> None:
+    """Only claude_code declares checkout-local scratch paths; others default to none."""
+    runner = FakeCommandRunner()
+    adapter = adapter_cls(runner=runner)
+    assert adapter.runtime_scratch_paths == expected_scratch
+
+
+@pytest.mark.unit
 def test_adapter_cli_args_contract_excludes_prompt_payload() -> None:
     """Adapter CLI arg builders keep prompt payloads out of signatures."""
     for adapter_cls in (
