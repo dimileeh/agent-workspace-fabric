@@ -840,6 +840,23 @@ def test_workspace_usage_summary_prefers_ccusage_snapshot_with_metrics(
 
 
 @pytest.mark.unit
+def test_workspace_usage_summary_keeps_metrics_when_ccusage_snapshot_has_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _usage_snapshot(total_tokens=30, reason="ccusage_timeout")
+    monkeypatch.setattr(
+        workspace_observability_module, "read_latest_usage_snapshot", lambda _id: snapshot
+    )
+
+    usage = workspace_usage_summary(SimpleNamespace(id="ws_snap", operations=[]))
+
+    assert usage.source == "ccusage"
+    assert usage.status == "available"
+    assert usage.total_tokens == 30
+    assert usage.reason == "ccusage_timeout"
+
+
+@pytest.mark.unit
 def test_workspace_usage_summary_surfaces_ccusage_unavailable_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2,8 +2,10 @@
 
 This module is intentionally dependency-light: it maps AWF agent runtimes to
 ``ccusage`` sources, normalizes ``ccusage --json`` output into safe numeric
-accounting data, and reads/writes a single latest-wins snapshot per workspace
-under ``<work_dir>/usage/<workspace_id>/snapshot.json``.
+accounting data, and reads/writes a single latest snapshot per workspace under
+``<work_dir>/usage/<workspace_id>/snapshot.json``. Snapshot metric fields report
+workspace-lifetime usage; optional metadata records the latest run delta for
+diagnostics.
 
 It never persists raw prompt JSONL, file paths, or credential-bearing content —
 only normalized token/cost numbers plus safe metadata (provider, source, model,
@@ -313,6 +315,118 @@ def subtract_baseline(
     )
 
 
+def _add_int(
+    accumulated: int | None, run_delta: int | None, fallback: int | None = None
+) -> int | None:
+    if run_delta is None:
+        return fallback if fallback is not None else accumulated
+    if accumulated is None:
+        return run_delta
+    return accumulated + run_delta
+
+
+def _add_float(
+    accumulated: float | None, run_delta: float | None, fallback: float | None = None
+) -> float | None:
+    if run_delta is None:
+        return fallback if fallback is not None else accumulated
+    if accumulated is None:
+        return run_delta
+    return accumulated + run_delta
+
+
+def _merged_currency(
+    accumulated: str | None, run_delta: str | None, fallback: str | None = None
+) -> str | None:
+    if run_delta is None:
+        return fallback if fallback is not None else accumulated
+    if accumulated is None or accumulated == run_delta:
+        return run_delta
+    return "MIXED"
+
+
+def accumulate_usage(
+    accumulated: NormalizedUsage | None,
+    run_delta: NormalizedUsage | None,
+    *,
+    fallback: NormalizedUsage | None = None,
+) -> NormalizedUsage | None:
+    """Return workspace-lifetime usage after applying ``run_delta``.
+
+    ``None`` fields in ``run_delta`` mean "not reported in this sample", so the
+    latest known accumulated value is preserved when one is supplied. ``None``
+    accumulated usage means this is the first trustworthy metric for the
+    workspace.
+    """
+
+    if accumulated is None:
+        return run_delta or fallback
+    if run_delta is None:
+        return fallback or accumulated
+    currency = _merged_currency(
+        accumulated.currency,
+        run_delta.currency,
+        None if fallback is None else fallback.currency,
+    )
+    return NormalizedUsage(
+        input_tokens=_add_int(
+            accumulated.input_tokens,
+            run_delta.input_tokens,
+            None if fallback is None else fallback.input_tokens,
+        ),
+        cached_input_tokens=_add_int(
+            accumulated.cached_input_tokens,
+            run_delta.cached_input_tokens,
+            None if fallback is None else fallback.cached_input_tokens,
+        ),
+        output_tokens=_add_int(
+            accumulated.output_tokens,
+            run_delta.output_tokens,
+            None if fallback is None else fallback.output_tokens,
+        ),
+        reasoning_output_tokens=_add_int(
+            accumulated.reasoning_output_tokens,
+            run_delta.reasoning_output_tokens,
+            None if fallback is None else fallback.reasoning_output_tokens,
+        ),
+        total_tokens=_add_int(
+            accumulated.total_tokens,
+            run_delta.total_tokens,
+            None if fallback is None else fallback.total_tokens,
+        ),
+        cost_estimate=(
+            None
+            if currency == "MIXED"
+            else _add_float(
+                accumulated.cost_estimate,
+                run_delta.cost_estimate,
+                None if fallback is None else fallback.cost_estimate,
+            )
+        ),
+        currency=currency,
+        model=run_delta.model
+        or (None if fallback is None else fallback.model)
+        or accumulated.model,
+    )
+
+
+def snapshot_usage_metrics(snapshot: UsageSnapshot | None) -> NormalizedUsage | None:
+    """Extract normalized metric fields from a persisted snapshot."""
+
+    if snapshot is None or not snapshot.has_metrics:
+        return None
+    return NormalizedUsage(
+        input_tokens=snapshot.input_tokens,
+        cached_input_tokens=snapshot.cached_input_tokens,
+        output_tokens=snapshot.output_tokens,
+        reasoning_output_tokens=snapshot.reasoning_output_tokens,
+        total_tokens=snapshot.total_tokens,
+        cost_estimate=snapshot.cost_estimate,
+        currency=snapshot.currency,
+        model=snapshot.model,
+    )
+
+
 # Strict typed accessors for deserializing a *persisted* snapshot. Unlike the
 # lenient ``_coerce_*`` helpers (which silently drop bad fields from untrusted
 # ccusage output), these raise ``TypeError`` on a wrong-typed field so a
@@ -342,9 +456,17 @@ def _require_float(value: Any) -> float | None:
     return float(value)
 
 
+def _require_dict(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    raise TypeError("expected object or null")
+
+
 @dataclass(frozen=True)
 class UsageSnapshot:
-    """A normalized, latest-wins usage snapshot for one workspace run."""
+    """A normalized, latest usage snapshot for one workspace lifetime."""
 
     workspace_id: str
     provider: str
@@ -368,6 +490,8 @@ class UsageSnapshot:
     cost_estimate: float | None = None
     currency: str | None = None
     baseline: dict[str, Any] | None = None
+    run_delta: dict[str, Any] | None = None
+    accumulated_usage_at_run_start: dict[str, Any] | None = None
     schema_version: int = SCHEMA_VERSION
     source: str = USAGE_SOURCE
 
@@ -406,13 +530,12 @@ class UsageSnapshot:
             "cost_estimate": self.cost_estimate,
             "currency": self.currency,
             "baseline": self.baseline,
+            "run_delta": self.run_delta,
+            "accumulated_usage_at_run_start": self.accumulated_usage_at_run_start,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> UsageSnapshot:
-        baseline = data.get("baseline")
-        if baseline is not None and not isinstance(baseline, dict):
-            raise TypeError("baseline must be an object or null")
         return cls(
             workspace_id=data["workspace_id"],
             provider=data["provider"],
@@ -430,7 +553,11 @@ class UsageSnapshot:
             total_tokens=_require_int(data.get("total_tokens")),
             cost_estimate=_require_float(data.get("cost_estimate")),
             currency=_require_str(data.get("currency")),
-            baseline=baseline,
+            baseline=_require_dict(data.get("baseline")),
+            run_delta=_require_dict(data.get("run_delta")),
+            accumulated_usage_at_run_start=_require_dict(
+                data.get("accumulated_usage_at_run_start")
+            ),
             schema_version=data.get("schema_version", SCHEMA_VERSION),
             source=data.get("source", USAGE_SOURCE),
         )
