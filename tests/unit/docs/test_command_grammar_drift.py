@@ -421,7 +421,20 @@ def _split_tail(tail: str) -> list[str]:
     try:
         tokens = shlex.split(tail, comments=True)
     except ValueError:
-        tokens = tail.split()
+        # `shlex.split` choked on the line (e.g. an unclosed quote in a fence
+        # such as `awf init "$HOME/proj`). Fall back to a plain whitespace
+        # split, but still honour shell comment semantics: a `#` that begins a
+        # word starts a comment that runs to end of line. Mirror `comments=True`
+        # by truncating at the first such token. Without this, a trailing
+        # `# bootstrap` annotation would survive as `['#', 'bootstrap']`, and
+        # the bare `#` — which is not flag-like — would be miscounted by the
+        # path scan as the required repo argument, silently relabelling a
+        # no-path init as "ok" and hiding it from R2/R3.
+        tokens = []
+        for word in tail.split():
+            if word.startswith("#"):
+                break
+            tokens.append(word)
     # Stop at the first shell operator so chained commands (e.g. `awf init &&
     # awf start`) don't contribute their continuation tokens to the argument
     # scan. `shlex.split` keeps `&&`/`|`/`;` as ordinary characters, so an
@@ -898,6 +911,14 @@ def test_helper_flags_bare_awf_init_command() -> None:
     assert _init_arg_status("awf init > init.log") == "bare"
     assert _init_arg_status("awf init . > init.log") == "ok"
     assert _init_arg_status("awf init . >init.log") == "ok"
+    # When `shlex.split` raises (an unclosed quote glued to a flag value), the
+    # fallback split must still strip a trailing `# comment`: otherwise the bare
+    # `#`/`bootstrap` tokens slip in as the required path and a no-path init is
+    # silently relabelled "ok", evading R2/R3.
+    assert _init_arg_status('awf init --provider=" # bootstrap') == "flag-only"
+    assert (
+        _init_arg_status('awf init --yes " # bootstrap') == "ok"
+    )  # the `"` token is a path-like positional
 
 
 def test_helper_read_missing_doc_fails_with_actionable_message() -> None:
