@@ -757,6 +757,7 @@ class BitBucketClient:
         """Send a request and decode JSON, honoring ETag conditional requests."""
         extra_headers: dict[str, str] = {}
         cache_key = (method.upper(), path, _freeze_params(params)) if cache else None
+        cached: tuple[str, Any] | None = None
         if cache_key is not None:
             cached = self._etag_cache.get(cache_key)
             if cached is not None:
@@ -770,9 +771,12 @@ class BitBucketClient:
             extra_headers=extra_headers or None,
         )
         if response.status_code == 304:
-            if cache_key is not None and (hit := self._etag_cache.get(cache_key)) is not None:
-                self._etag_cache.move_to_end(cache_key)
-                return hit[1]
+            # Use the entry captured before the await: a concurrent task may have
+            # evicted it from the bounded cache while the request was in flight.
+            if cached is not None:
+                if cache_key is not None:
+                    self._etag_cache_set(cache_key, cached[0], cached[1])
+                return cached[1]
             raise BitBucketClientError(
                 operation=operation,
                 status=304,

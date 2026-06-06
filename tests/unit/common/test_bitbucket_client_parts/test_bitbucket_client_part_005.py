@@ -7,6 +7,7 @@ cacheable params, and the pure-parsing guard branches.
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from awf.common.bitbucket_client import BitBucketClientError
@@ -161,6 +162,31 @@ async def test_cacheable_request_with_params_round_trips() -> None:
     first = await client._request_json("GET", "/x", operation="op", params={"a": "b"}, cache=True)
     second = await client._request_json("GET", "/x", operation="op", params={"a": "b"}, cache=True)
     assert first == second == {"v": 1}
+
+
+async def test_304_uses_prefetched_body_when_entry_evicted_mid_flight() -> None:
+    """A concurrent task evicting the bounded ETag cache during the ``await`` must
+    not turn a 304 into a ``BitBucketClientError`` — the body captured before the
+    request is sent is what gets returned."""
+    fake = FakeBitBucket()
+    fake.enqueue("GET", "/x", json={"v": 1}, headers={"ETag": "e1"})
+    client = make_client(fake)
+    first = await client._request_json("GET", "/x", operation="op", cache=True)
+    assert first == {"v": 1}
+
+    # Swap in a transport whose handler returns 304 *and* clears the cache,
+    # modelling a concurrent task evicting our LRU entry while the request is
+    # in flight (after If-None-Match is sent, before the 304 is processed).
+    def evicting_handler(request: httpx.Request) -> httpx.Response:
+        client._etag_cache.clear()
+        return httpx.Response(304, headers={"ETag": "e1"})
+
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(evicting_handler),
+        base_url="https://api.bitbucket.org",
+    )
+    second = await client._request_json("GET", "/x", operation="op", cache=True)
+    assert second == {"v": 1}
 
 
 # ── Pure-parsing guard branches ───────────────────────────────────────────────
