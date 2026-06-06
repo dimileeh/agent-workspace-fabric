@@ -731,6 +731,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
                             egress_plan=egress_plan,
                             egress_decision=egress_decision,
                             destination_category=destination_category,
+                            execution_claim_epoch=execution_claim_epoch,
                         )
                     except Exception:
                         _log.exception(

@@ -62,8 +62,18 @@ async def _record_egress_audit_if_current(
     egress_plan: LocalEgressPlan,
     egress_decision: EgressDecision,
     destination_category: str,
+    execution_claim_epoch: int | None = None,
 ) -> bool:
-    """Record an egress audit only if the workspace is still in provisioning."""
+    """Record an egress audit only if the workspace is still in provisioning.
+
+    ``execution_claim_epoch`` (when supplied) fences the write the same way the
+    terminal ``_mark_failed`` transition does (D7): if a later claimant advanced
+    ``execution_claim_epoch`` during the launch ``to_thread`` window, this
+    provisioner has been fenced and must not commit an immutable egress audit —
+    stale policy evidence against the new claimant's row. The row can still read
+    ``provisioning`` because the new claimant re-enters that status, so the
+    status check alone is insufficient.
+    """
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get(workspace_id)
@@ -83,6 +93,15 @@ async def _record_egress_audit_if_current(
                 reason_code="PROVISIONER_STALE_STATUS",
             )
             await session.commit()
+            return False
+        if execution_claim_epoch is not None and ws.execution_claim_epoch != execution_claim_epoch:
+            _log.info(
+                "provisioner.skip_fenced_epoch",
+                workspace_id=workspace_id,
+                action="record_egress_audit",
+                expected_epoch=execution_claim_epoch,
+                actual_epoch=ws.execution_claim_epoch,
+            )
             return False
         await self._create_egress_audit_record(
             session,
