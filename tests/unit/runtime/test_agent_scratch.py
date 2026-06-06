@@ -142,6 +142,41 @@ async def test_exclude_write_is_idempotent(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_apply_unions_with_another_adapters_scratch_paths(tmp_path: Path) -> None:
+    """A second adapter's apply preserves a prior adapter's scratch patterns.
+
+    ``info/exclude`` is shared across linked worktrees of a mirror, so a second
+    agent type with different scratch paths must not clobber the first agent's
+    exclusions (last-writer-wins). The two blocks are unioned instead.
+    """
+    worktree = _init_real_worktree(tmp_path)
+    run_git = _real_run_git(worktree)
+    exclude = _exclude_file(worktree)
+
+    assert await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+    # A different adapter declaring a different scratch path applies next.
+    assert await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=(".other/scratch/",)
+    )
+
+    content = exclude.read_text(encoding="utf-8")
+    # Exactly one managed block, but it now carries both adapters' patterns.
+    assert content.count(AWF_SCRATCH_BLOCK_START) == 1
+    assert content.count(AWF_SCRATCH_BLOCK_END) == 1
+    assert ".claude/worktrees/" in content
+    assert ".other/scratch/" in content
+    # Re-applying the first adapter keeps the union and stays idempotent.
+    assert await apply_agent_scratch_excludes(
+        run_git=run_git, worktree_path=worktree, scratch_paths=_SCRATCH
+    )
+    content = exclude.read_text(encoding="utf-8")
+    assert content.count(".claude/worktrees/") == 1
+    assert content.count(".other/scratch/") == 1
+
+
+@pytest.mark.unit
 def test_claude_code_declares_scratch_codex_does_not() -> None:
     """Scratch paths are sourced per-agent from the adapter."""
     runner = FakeCommandRunner()

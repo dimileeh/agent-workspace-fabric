@@ -56,6 +56,31 @@ def _strip_managed_block(content: str) -> str:
     return "\n".join(kept)
 
 
+def _extract_managed_patterns(content: str) -> tuple[str, ...]:
+    """Return the patterns currently inside the AWF-managed block, in order.
+
+    Because AWF uses bare mirrors with linked worktrees, ``info/exclude`` is
+    shared across every worktree of a repo. Preserving the existing block's
+    patterns lets ``apply_agent_scratch_excludes`` *union* a second adapter's
+    paths with those already present instead of clobbering them — so the last
+    writer never drops another agent's exclusions. Tolerant of a missing block
+    or a block missing its end sentinel (read to EOF).
+    """
+    patterns: list[str] = []
+    in_block = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not in_block:
+            if stripped == AWF_SCRATCH_BLOCK_START:
+                in_block = True
+            continue
+        if stripped == AWF_SCRATCH_BLOCK_END:
+            break
+        if stripped:
+            patterns.append(stripped)
+    return tuple(patterns)
+
+
 def _render_managed_block(patterns: tuple[str, ...]) -> str:
     """Render the sentinel-wrapped block, one pattern per line, order-stable."""
     deduped = list(dict.fromkeys(patterns))
@@ -108,8 +133,12 @@ async def apply_agent_scratch_excludes(
         prefix = _strip_managed_block(existing)
         if prefix and not prefix.endswith("\n"):
             prefix += "\n"
+        # Union with any patterns a different adapter already wrote to this
+        # shared (linked-worktree) exclude file so concurrent agents on the same
+        # mirror never clobber each other's scratch exclusions. ``_render`` dedups.
+        merged = _extract_managed_patterns(existing) + scratch_paths
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
-        exclude_path.write_text(prefix + _render_managed_block(scratch_paths), encoding="utf-8")
+        exclude_path.write_text(prefix + _render_managed_block(merged), encoding="utf-8")
     except OSError as exc:
         logger.warning(
             "agent_scratch.exclude_write_failed",
