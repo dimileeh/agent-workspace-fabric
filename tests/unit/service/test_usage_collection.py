@@ -391,6 +391,7 @@ async def test_safe_write_reading_reraises_cancellation(tmp_path: Path) -> None:
         provider=AgentRuntime.claude_code,
         source="claude",
         accumulated_usage_at_run_start=None,
+        prior_ccusage_source=None,
     )
 
     async def _cancel_write(**_kwargs: object) -> None:
@@ -728,6 +729,60 @@ async def test_prior_usage_with_no_records_baseline_preserves_prior_totals(
     assert snap.status == "available"
     assert snap.reason == "ccusage_no_records"
     assert snap.total_tokens == 500
+
+
+@pytest.mark.unit
+async def test_provider_switch_with_no_records_baseline_adds_new_source_usage(
+    tmp_path: Path,
+) -> None:
+    write_usage_snapshot(
+        UsageSnapshot(
+            workspace_id="ws_no_records_switch",
+            provider="claude_code",
+            ccusage_source="claude",
+            status="available",
+            phase="final",
+            captured_at="2026-05-22T00:00:00+00:00",
+            total_tokens=500,
+        ),
+        work_dir=tmp_path,
+    )
+    runner = _ccusage_runner(
+        json.dumps({}),  # codex has no records yet, so this is a zero baseline
+        json.dumps({"totals": {"totalTokens": 50}}),
+    )
+    collector = CcusageCollector(runner=runner, work_dir=tmp_path, clock=FakeClock())
+    ctx = await collector.start(
+        compose_project="p",
+        compose_file=_COMPOSE_FILE,
+        workspace_id="ws_no_records_switch",
+        provider=AgentRuntime.codex,
+    )
+
+    seed = read_latest_usage_snapshot("ws_no_records_switch", work_dir=tmp_path)
+    assert seed is not None
+    assert seed.status == "available"
+    assert seed.reason == "ccusage_no_records"
+    assert seed.total_tokens == 500
+    assert seed.ccusage_source == "codex"
+
+    await ctx.finalize(status="success")
+
+    snap = read_latest_usage_snapshot("ws_no_records_switch", work_dir=tmp_path)
+    assert snap is not None
+    assert snap.status == "available"
+    assert snap.reason is None
+    assert snap.total_tokens == 550
+    assert snap.run_delta == {
+        "input_tokens": None,
+        "cached_input_tokens": None,
+        "output_tokens": None,
+        "reasoning_output_tokens": None,
+        "total_tokens": 50,
+        "cost_estimate": None,
+        "currency": None,
+        "model": None,
+    }
 
 
 @pytest.mark.unit

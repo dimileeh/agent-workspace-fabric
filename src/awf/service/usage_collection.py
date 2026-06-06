@@ -149,6 +149,7 @@ class CcusageCollector(UsageSampler):
             provider=provider,
             source=source,
             accumulated_usage_at_run_start=snapshot_usage_metrics(prior_snapshot),
+            prior_ccusage_source=None if prior_snapshot is None else prior_snapshot.ccusage_source,
         )
         if source is None:
             # Unsupported provider: record the reason once, no periodic loop.
@@ -172,6 +173,7 @@ class _CcusageSampleContext(UsageSampleContext):
         provider: AgentRuntime,
         source: str | None,
         accumulated_usage_at_run_start: NormalizedUsage | None,
+        prior_ccusage_source: str | None,
     ) -> None:
         self._collector = collector
         self._compose_project = compose_project
@@ -180,6 +182,7 @@ class _CcusageSampleContext(UsageSampleContext):
         self._provider = provider
         self._source = source
         self._accumulated_usage_at_run_start = accumulated_usage_at_run_start
+        self._prior_ccusage_source = prior_ccusage_source
         self._latest_accumulated_usage = accumulated_usage_at_run_start
         self._baseline: NormalizedUsage | None = None
         # Set when baseline capture failed (vs. a fresh, legitimately empty one).
@@ -282,7 +285,11 @@ class _CcusageSampleContext(UsageSampleContext):
             return
         if usage is not None:
             self._baseline = usage
-        elif reason == REASON_NO_RECORDS and self._accumulated_usage_at_run_start is not None:
+        elif (
+            reason == REASON_NO_RECORDS
+            and self._accumulated_usage_at_run_start is not None
+            and self._prior_ccusage_source == self._source
+        ):
             self._baseline_unavailable_reason = REASON_NO_RECORDS
         elif reason != REASON_NO_RECORDS:
             # ccusage failed for a classified reason (timeout / command error /
