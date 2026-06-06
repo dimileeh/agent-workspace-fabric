@@ -175,6 +175,30 @@ def test_helper_smoke_parser_requires_command_at_span_start() -> None:
     assert uv_bare is not None
     assert uv_bare.positional_path is True
     assert uv_bare.has_project is False
+    # The release runbook invokes the *installed binary* by path
+    # (`/tmp/awf-release-install/bin/awf smoke run ...`), so a path-qualified
+    # `*/awf smoke run` start is parsed just like the bare `awf smoke run` form —
+    # mirroring how `_classify_init_command` accepts `*/awf init`. Otherwise a
+    # bare positional project smoke example in that release-doc form would return
+    # None and slip past R4 even though RELEASING.md is inside the smoke grammar
+    # contract.
+    release_bare = _parse_smoke_invocation(
+        '/tmp/awf-release-install/bin/awf smoke run "$HOME/p" --mocked-local'
+    )
+    assert release_bare is not None
+    assert release_bare.positional_path is True
+    assert release_bare.has_project is False
+    assert release_bare.has_mocked_local is True
+    release_ok = _parse_smoke_invocation(
+        "/tmp/awf-release-install/bin/awf smoke run --project /tmp/p --mocked-local"
+    )
+    assert release_ok is not None
+    assert release_ok.has_project is True
+    assert release_ok.positional_path is False
+    assert _parse_smoke_invocation("./bin/awf smoke run --mocked-local") is not None
+    # A path-qualified `*/awf` that is not a smoke invocation is still ignored, and
+    # a prose mention stays anchored out because a path token carries no spaces.
+    assert _parse_smoke_invocation("/tmp/awf-release-install/bin/awf service status") is None
 
 
 def test_helper_curl_installer_pattern_targets_pipe_to_interpreter() -> None:

@@ -681,6 +681,16 @@ def _parse_smoke_segment(segment: str) -> SmokeInvocation | None:
     init`` lane, leaving the mocked-smoke grammar on the ``uv run`` lanes able to
     regress undetected.
 
+    A path-qualified binary start (``(?:\\S*/)?awf smoke run``) is also accepted
+    so the release runbook's *installed-binary* form — e.g.
+    ``/tmp/awf-release-install/bin/awf smoke run "$HOME/p" --mocked-local``
+    (``RELEASING.md`` is inside ``FIRST_RUN_DOCS``) — is parsed rather than
+    skipped, mirroring the ``*/awf init`` handling in
+    :func:`_classify_init_command`. Without it a bare positional project smoke
+    example written in that release-doc form would return ``None`` and slip past
+    R4 with no CI signal. The path token cannot contain whitespace, so a
+    start-anchored prose mention still returns ``None``.
+
     Anchoring (rather than an unbounded ``re.search``) keeps a prose mention that
     merely references the command mid-sentence (e.g. ``the awf smoke run command``
     or ``see awf smoke run --mocked-local below``) from being parsed with the
@@ -690,7 +700,7 @@ def _parse_smoke_segment(segment: str) -> SmokeInvocation | None:
     first splits the line into command segments (:func:`_command_segment_starts`) so
     a smoke run *chained after* a separator is still reached despite this anchoring.
     """
-    match = re.match(r"(?:uv\s+run\b.*?\s+)?awf smoke run\b(?P<tail>.*)", segment)
+    match = re.match(r"(?:uv\s+run\b.*?\s+)?(?:\S*/)?awf smoke run\b(?P<tail>.*)", segment)
     if match is None:
         return None
     tail = match.group("tail")
