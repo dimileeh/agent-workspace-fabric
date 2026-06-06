@@ -254,10 +254,26 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
     assert glued_demo.has_implicit_project_path is True
     # A `--demo-path` that dropped its value (next token is another flag) is not an
     # implicit project path and does not swallow the following flag as its value.
+    # Because `--demo-path` is value-taking, the valueless form is also recorded as
+    # `demo_path_value_dropped` so R4 rejects the malformed line rather than counting
+    # it as a valid mocked smoke example.
     dropped_demo = _parse_smoke_invocation("awf smoke run --demo-path --mocked-local")
     assert dropped_demo is not None
     assert dropped_demo.has_implicit_project_path is False
     assert dropped_demo.has_mocked_local is True
+    assert dropped_demo.demo_path_value_dropped is True
+
+    # A trailing `--demo-path` (line ends with no value) is likewise a dropped value.
+    trailing_demo = _parse_smoke_invocation("awf smoke run --mocked-local --demo-path")
+    assert trailing_demo is not None
+    assert trailing_demo.has_implicit_project_path is False
+    assert trailing_demo.demo_path_value_dropped is True
+
+    # The `=`-glued empty form (`--demo-path=`) drops its value too.
+    glued_empty_demo = _parse_smoke_invocation("awf smoke run --demo-path= --mocked-local")
+    assert glued_empty_demo is not None
+    assert glued_empty_demo.has_implicit_project_path is False
+    assert glued_empty_demo.demo_path_value_dropped is True
 
     # A `--project` flag that drops its path value (the next token is another
     # flag) must not count as a satisfied `--project`, and must not swallow that
@@ -384,6 +400,11 @@ def test_helper_flags_smoke_invocation_offenses() -> None:
         offense("awf smoke run --project --mocked-local --format pretty")
         == "smoke --project missing value"
     )
+    # `--demo-path` is value-taking too, so a valueless `--demo-path` is malformed
+    # grammar rejected unconditionally — otherwise `awf smoke run --demo-path
+    # --mocked-local` leaves no offense and a real-doc sweep could count the invalid
+    # line as a valid mocked smoke example.
+    assert offense("awf smoke run --demo-path --mocked-local") == "smoke --demo-path missing value"
 
 
 def test_helper_extracts_fenced_command_lines() -> None:

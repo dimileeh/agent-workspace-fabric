@@ -267,6 +267,14 @@ class SmokeInvocation:
     # missing-`--project` check above): a project-free proof simply omits `--project`
     # entirely, it never writes a valueless `--project`.
     project_value_dropped: bool = False
+    # Whether the example wrote `--demo-path` (spaced or `=`-glued) but dropped its
+    # value. `--demo-path` is a value-taking smoke option (the CLI's fallback project
+    # path), so a valueless `awf smoke run --demo-path --mocked-local` is malformed
+    # grammar exactly like a valueless `--project`. R4 flags it unconditionally —
+    # without this the dropped-value `--demo-path` leaves `has_demo_path` false, emits
+    # no offense, and a real-doc sweep could even count the invalid line as a valid
+    # mocked smoke example.
+    demo_path_value_dropped: bool = False
 
 
 def _read(rel_path: str) -> str:
@@ -733,6 +741,7 @@ def _parse_smoke_segment(segment: str) -> SmokeInvocation | None:
     has_demo_path = False
     positional_path = False
     project_value_dropped = False
+    demo_path_value_dropped = False
     skip_next = False
     for index, token in enumerate(tokens):
         if skip_next:
@@ -753,16 +762,26 @@ def _parse_smoke_segment(segment: str) -> SmokeInvocation | None:
                 project_value_dropped = True
             continue
         # `--demo-path` is the CLI's "fallback project path", so its presence means
-        # the example references a project path even without `--project`.
+        # the example references a project path even without `--project`. Like
+        # `--project` it is value-taking, so a valueless form (next token is another
+        # flag, the line ended, or the glued form is empty) drops its value: it must
+        # not set `has_demo_path` or swallow the following flag, and is recorded as
+        # `demo_path_value_dropped` so R4 rejects the malformed line outright —
+        # otherwise `awf smoke run --demo-path --mocked-local` would emit no offense
+        # and slip past the gate as a valid mocked smoke example.
         if token.startswith("--demo-path="):
             if token[len("--demo-path=") :]:
                 has_demo_path = True
+            else:
+                demo_path_value_dropped = True
             continue
         if token == "--demo-path":
             nxt = tokens[index + 1] if index + 1 < len(tokens) else None
             if nxt is not None and not nxt.startswith("-"):
                 has_demo_path = True
                 skip_next = True
+            else:
+                demo_path_value_dropped = True
             continue
         if token.startswith("-"):
             if token in VALUE_FLAGS:
@@ -778,6 +797,7 @@ def _parse_smoke_segment(segment: str) -> SmokeInvocation | None:
         positional_path=positional_path,
         has_implicit_project_path=positional_path or has_demo_path,
         project_value_dropped=project_value_dropped,
+        demo_path_value_dropped=demo_path_value_dropped,
     )
 
 
@@ -842,12 +862,17 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
     `has_implicit_project_path` — because the example explicitly wrote `--project`
     yet gave it no path. This is distinct from the conditional missing-`--project`
     check: a valid project-free proof omits `--project` outright, it never writes a
-    valueless one.
+    valueless one. The same holds for the value-taking `--demo-path` fallback: a
+    valueless `awf smoke run --demo-path --mocked-local` is rejected unconditionally
+    via `demo_path_value_dropped`, so an invalid line that drops the fallback path
+    cannot pass as a valid mocked smoke example.
     """
     if invocation.positional_path:
         return "bare positional path"
     if invocation.project_value_dropped:
         return "smoke --project missing value"
+    if invocation.demo_path_value_dropped:
+        return "smoke --demo-path missing value"
     if (
         invocation.has_mocked_local
         and not invocation.has_project
