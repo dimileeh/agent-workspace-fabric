@@ -211,24 +211,25 @@ def test_unremovable_present_path_raises_state_cleanup_failed(
 ) -> None:
     """An authorized removal that fails on a present path raises ``STATE_CLEANUP_FAILED``.
 
-    Making the ``AWF_HOME`` directory read-only blocks ``rm`` from unlinking the
-    config file inside it, modeling a path that exists but cannot be removed. The
+    Creating ``config.yml`` as a directory makes the uninstaller's ``rm -f`` (which
+    targets it as a ``file`` kind) fail with "Is a directory", modeling a path that
+    exists but cannot be removed. Unlike a ``chmod 0o500`` parent, this fails
+    reliably under any user — including root, which bypasses directory write
+    permissions (``CAP_DAC_OVERRIDE``) as many Docker-based CI runners do. The
     failure must surface non-zero with its token rather than be masked as success.
     """
     harness.add_uname("Linux", "x86_64")
     harness.add_uv(list_output="")
     harness.add_pipx(list_output="")
-    config = harness.write_awf_config()
-    home = harness.awf_home()
-    home.chmod(0o500)  # read+execute, no write: rm cannot unlink children
-    try:
-        result = _run(harness, ["--purge-config", "--yes"])
+    # Create config.yml as a directory so the uninstaller's ``rm -f`` reliably fails.
+    config = harness.awf_home() / "config.yml"
+    config.mkdir(parents=True, exist_ok=True)
 
-        assert result.returncode != 0
-        assert "STATE_CLEANUP_FAILED" in result.stderr
-        assert config.exists()
-    finally:
-        home.chmod(0o700)  # restore so pytest can clean the temp tree up
+    result = _run(harness, ["--purge-config", "--yes"])
+
+    assert result.returncode != 0
+    assert "STATE_CLEANUP_FAILED" in result.stderr
+    assert config.exists()
 
 
 @pytest.mark.unit
