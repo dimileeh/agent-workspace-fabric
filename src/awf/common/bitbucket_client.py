@@ -359,9 +359,12 @@ class BitBucketClient:
         log. External (non-Pipelines) failing statuses have no BitBucket logs and
         fall back to ``pytest_fallback_commands`` (same evidence path as GitHub).
         """
+        ctx = self._pr_context.get(repo.slug())
+        source_branch = ctx.source_branch if ctx is not None else None
         statuses = await self._paginate(
             f"{self._repo_path(repo)}/commit/{quote(head_sha, safe='')}/statuses",
             operation="bitbucket fetch_failing_check_logs statuses",
+            params={"refname": source_branch} if source_branch else None,
         )
         failed = [s for s in statuses if str(s.get("state") or "").upper() in {"FAILED", "STOPPED"}]
         if not failed:

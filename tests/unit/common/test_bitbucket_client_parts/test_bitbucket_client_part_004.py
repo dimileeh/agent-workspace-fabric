@@ -125,6 +125,48 @@ async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> 
     assert failures[0].run_id is None  # external fallback path
 
 
+async def test_failing_check_logs_scopes_statuses_by_refname() -> None:
+    """Scope the commit-statuses fetch by the PR source branch (refname).
+
+    BitBucket statuses are ref-scoped; ``fetch_pr_status`` already filters by the
+    source branch, so ``fetch_failing_check_logs`` must use the same refname (from
+    remembered PR context) or the two calls can disagree about which statuses exist
+    for the head commit.
+    """
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)  # primes _pr_context with source branch "feature/head"
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "SUCCESSFUL", "name": "ok"}],
+    )
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    statuses_calls = [
+        r for r in fake.calls("GET") if r.url.path == f"{_REPO}/commit/{_HEAD}/statuses"
+    ]
+    assert len(statuses_calls) == 2
+    assert all(r.url.params.get("refname") == "feature/head" for r in statuses_calls)
+
+
+async def test_failing_check_logs_omits_refname_without_pr_context() -> None:
+    """Without remembered PR context, fall back to an unscoped statuses fetch."""
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "SUCCESSFUL", "name": "ok"}],
+    )
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert failures == ()
+    statuses_call = next(
+        r for r in fake.calls("GET") if r.url.path == f"{_REPO}/commit/{_HEAD}/statuses"
+    )
+    assert "refname" not in statuses_call.url.params
+
+
 # ── rerun_failed_workflow_jobs ────────────────────────────────────────────────
 
 
