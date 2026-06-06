@@ -288,6 +288,45 @@ def test_remove_uv_with_no_binaries_at_recorded_dir_fails_closed(
 
 
 @pytest.mark.unit
+def test_remove_uv_marker_default_follows_custom_awf_home(
+    harness: InstallerHarness,
+) -> None:
+    """With only ``AWF_HOME`` customised, the marker default tracks it (no second seam).
+
+    Regression: the ``AWF_UV_MARKER`` default is derived from ``${AWF_HOME}`` rather
+    than hardcoded to ``${HOME}/.awf``. A user who sets only ``AWF_HOME`` to a custom
+    path must have ``--remove-uv`` probe ``${AWF_HOME}/uv-bootstrap.marker`` — the
+    same place ``install.sh``'s ``bootstrap_uv`` wrote it — instead of the ``~/.awf``
+    default, which would refuse with ``UV_REMOVAL_REFUSED_UNOWNED`` even though AWF
+    owns this uv.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_uv(list_output="")
+    custom_home = harness.home / "custom-awf"
+    uv_bin_dir = harness.home / ".local" / "bin"
+    uv_bin_dir.mkdir(parents=True, exist_ok=True)
+    uv_bin = uv_bin_dir / "uv"
+    uv_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    # Seed the marker under the CUSTOM home only; the legacy ~/.awf path is absent.
+    marker = custom_home / "uv-bootstrap.marker"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"installed_by=awf\nuv_bin_dir={uv_bin_dir}\n", encoding="utf-8")
+
+    # Pass only AWF_HOME — AWF_UV_MARKER is deliberately NOT set, so the script's
+    # derived default decides where the lane looks for the marker.
+    result = harness.run(
+        ["--remove-uv", "--yes"],
+        script=UNINSTALLER,
+        extra_env={"AWF_HOME": str(custom_home)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    # The marker under the custom home authorized removal and was cleared.
+    assert not uv_bin.exists()
+    assert not marker.exists()
+
+
+@pytest.mark.unit
 def test_remove_uv_binary_deletion_failure_preserves_marker(
     harness: InstallerHarness,
 ) -> None:

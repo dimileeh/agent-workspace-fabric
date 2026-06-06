@@ -25,9 +25,12 @@
 #                                 official https://astral.sh/uv/install.sh).
 #   AWF_INSTALL_FORCE_INTERACTIVE treat stdin as a TTY so the bootstrap confirm
 #                                 prompt can be exercised under a piped stdin.
+#   AWF_HOME                      base dir for AWF host state; the uv-ownership
+#                                 marker default is derived from it (defaults to
+#                                 ${HOME}/.awf).
 #   AWF_UV_MARKER                 path of the uv-ownership marker bootstrap_uv
 #                                 writes after a real uv bootstrap (defaults to
-#                                 ${HOME}/.awf/uv-bootstrap.marker). The hosted
+#                                 ${AWF_HOME}/uv-bootstrap.marker). The hosted
 #                                 uninstaller (packaging/uninstall.sh) consumes
 #                                 it to prove AWF bootstrapped uv before removing
 #                                 it; overridable so install/uninstall tests share
@@ -40,11 +43,18 @@ PACKAGE="agent-workspace-fabric"
 DEFAULT_REPO_URL="https://github.com/dimileeh/aira-agent-workspace-fabric"
 MANIFEST_BASENAME="awf-install-manifest.json"
 
+# Base dir for AWF host state. Matches the host setup default (~/.awf; see
+# src/awf/host_setup/config.py) and the hosted uninstaller's AWF_HOME, so the
+# uv-ownership marker below tracks a custom AWF_HOME on both scripts without a
+# separate seam.
+AWF_HOME="${AWF_HOME:-${HOME}/.awf}"
 # uv-ownership marker. Written only on a real bootstrap_uv (never under --dry-run)
 # so the hosted uninstaller's marker-gated --remove-uv can prove AWF installed uv
-# and refuse to remove a uv the user brought themselves. Overridable via the
-# AWF_UV_MARKER env seam for hermetic install/uninstall tests.
-AWF_UV_MARKER="${AWF_UV_MARKER:-${HOME}/.awf/uv-bootstrap.marker}"
+# and refuse to remove a uv the user brought themselves. Derived from ${AWF_HOME}
+# so a custom AWF_HOME moves it automatically (the uninstaller derives the same
+# default); overridable via the AWF_UV_MARKER env seam for hermetic install/
+# uninstall tests.
+AWF_UV_MARKER="${AWF_UV_MARKER:-${AWF_HOME}/uv-bootstrap.marker}"
 
 VERSION=""
 CHANNEL="stable"

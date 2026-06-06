@@ -36,7 +36,8 @@
 #                                  (defaults to ${HOME}/.awf).
 #   AWF_UV_MARKER                  path of the uv-ownership marker install.sh
 #                                  writes (defaults to
-#                                  ${HOME}/.awf/uv-bootstrap.marker).
+#                                  ${AWF_HOME}/uv-bootstrap.marker, so it tracks a
+#                                  custom AWF_HOME without a second seam).
 #   AWF_UNINSTALL_FORCE_INTERACTIVE treat stdin as a TTY so the destructive
 #                                  confirm prompt can be exercised under a piped
 #                                  stdin.
@@ -50,7 +51,11 @@ PACKAGE="agent-workspace-fabric"
 # (~/.awf; see src/awf/host_setup/config.py and src/awf/cli/init_ops.py).
 AWF_HOME="${AWF_HOME:-${HOME}/.awf}"
 # uv-ownership marker the installer writes on a real bootstrap (see install.sh).
-AWF_UV_MARKER="${AWF_UV_MARKER:-${HOME}/.awf/uv-bootstrap.marker}"
+# Derived from ${AWF_HOME} (resolved just above) so a custom AWF_HOME moves the
+# marker for both scripts in lockstep — install.sh writes it and this script
+# probes it from the same ${AWF_HOME}/uv-bootstrap.marker default — rather than
+# leaving --remove-uv pinned to ~/.awf while the state lanes follow AWF_HOME.
+AWF_UV_MARKER="${AWF_UV_MARKER:-${AWF_HOME}/uv-bootstrap.marker}"
 
 INSTALL_DIR=""
 SHELL_OVERRIDE=""
@@ -114,6 +119,10 @@ Options:
                         AWF bootstrapped it (else UV_REMOVAL_REFUSED_UNOWNED).
   --all                 Convenience: managed package + --purge-config + --purge-state
                         (NOT credentials, NOT uv unless --remove-uv is also given).
+                        Interactive --all confirms each destructive path on its own
+                        (state, then config); answering yes then no removes the
+                        earlier path before the run stops with CONFIRMATION_REQUIRED.
+                        Pass --yes to authorize the whole set up front.
   --shell <name>        Override shell detection (zsh|bash|fish) for PATH advice.
   --help                Print this help and exit.
 
@@ -361,6 +370,14 @@ purge_state() {
     # service/ is a directory; config.yml is a file. Both are the only entries the
     # allowlist authorizes — ${AWF_HOME} and any sibling (e.g. a secrets store) are
     # never touched.
+    #
+    # Each lane confirms independently, so an interactive --all (state + config)
+    # prompts twice: answering yes to service/ then no to config.yml removes
+    # service/ (announced via the "Removed ..." line below) before the run stops
+    # with CONFIRMATION_REQUIRED. That partial purge is intentional — every delete
+    # stays individually consent-gated rather than gambling the whole set on one
+    # prompt — and is documented under --all in usage(); --yes authorizes both
+    # up front.
     remove_state_path "$PURGE_STATE" "${AWF_HOME}/service" "dir" "AWF host state"
     remove_state_path "$PURGE_CONFIG" "${AWF_HOME}/config.yml" "file" "AWF config"
 }

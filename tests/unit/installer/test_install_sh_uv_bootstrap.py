@@ -171,6 +171,36 @@ def test_real_bootstrap_writes_uv_ownership_marker(harness: InstallerHarness) ->
 
 
 @pytest.mark.unit
+def test_real_bootstrap_marker_follows_custom_awf_home(harness: InstallerHarness) -> None:
+    """The ownership marker default tracks a custom ``AWF_HOME`` (symmetric with uninstall.sh).
+
+    ``bootstrap_uv`` writes the marker at ``${AWF_HOME}/uv-bootstrap.marker``. With
+    only ``AWF_HOME`` customised (no ``AWF_UV_MARKER`` seam) the marker must land
+    under the custom home, not the hardcoded ``~/.awf``, so the hosted uninstaller —
+    which derives the same default — finds it for marker-gated ``--remove-uv``.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_awf(version="0.1.0")
+    installer = harness.write_uv_installer(succeeds=True)
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+    custom_home = harness.home / "custom-awf"
+
+    result = harness.run(
+        ["--bootstrap-uv"],
+        manifest=manifest,
+        extra_env={"AWF_UV_INSTALLER": str(installer), "AWF_HOME": str(custom_home)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    marker = custom_home / "uv-bootstrap.marker"
+    assert marker.exists()
+    assert "installed_by=awf" in marker.read_text(encoding="utf-8")
+    # The hardcoded ~/.awf default must NOT have been used.
+    assert not _uv_marker(harness).exists()
+
+
+@pytest.mark.unit
 def test_bootstrap_does_not_claim_preexisting_uv_in_default_dir(harness: InstallerHarness) -> None:
     """A bootstrap that refreshes a preexisting uv must NOT write the ownership marker.
 
