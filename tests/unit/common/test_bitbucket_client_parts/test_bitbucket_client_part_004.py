@@ -125,6 +125,54 @@ async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> 
     assert failures[0].run_id is None  # external fallback path
 
 
+async def test_failing_check_logs_stopped_pipeline_step_keeps_log_evidence() -> None:
+    """A STOPPED/ERROR pipeline step must keep its pipeline UUID and step log.
+
+    Regression for PRRT_kwDOSJAM6s6Hm9af: the commit-status filter accepts
+    ``{"FAILED", "STOPPED"}``, but ``_failing_pipeline_steps`` previously matched
+    only ``"FAILED"`` step results. A manually-stopped pipeline (steps with result
+    ``"STOPPED"``) therefore found a pipeline yet yielded zero failing steps, so it
+    fell through to the external fallback with ``run_id=None`` and an empty log,
+    silently discarding the real pipeline UUID and partial step output.
+    """
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "STOPPED", "name": "Pipeline #5", "key": "PIPELINE"}],
+    )
+    fake.page("GET", _PIPELINES, values=[{"uuid": "pipe-1", "state": {"name": "STOPPED"}}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/",
+        values=[
+            {"uuid": "step-1", "name": "Build", "state": {"result": {"name": "SUCCESSFUL"}}},
+            {"uuid": "step-2", "name": "Test", "state": {"result": {"name": "STOPPED"}}},
+            {"uuid": "step-3", "name": "Deploy", "state": {"result": {"name": "ERROR"}}},
+        ],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/step-2/log",
+        text="E   cancelled mid-run\n",
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/step-3/log",
+        text="E   infrastructure error\n",
+    )
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD, log_tail_chars=3000
+    )
+    by_name = {f.name: f for f in failures}
+    assert set(by_name) == {"Test", "Deploy"}  # STOPPED and ERROR steps both surface
+    assert by_name["Test"].run_id == "pipe-1"  # pipeline UUID preserved, not None
+    assert "cancelled mid-run" in by_name["Test"].log_excerpt
+    assert by_name["Deploy"].run_id == "pipe-1"
+    assert "infrastructure error" in by_name["Deploy"].log_excerpt
+
+
 async def test_failing_check_logs_surfaces_external_status_alongside_failing_steps() -> None:
     """A non-Pipelines FAILED status must still surface when a pipeline step fails.
 

@@ -605,7 +605,14 @@ class BitBucketClient:
     async def _failing_pipeline_steps(
         self, repo: RepoRef, pipeline_uuid: str
     ) -> list[dict[str, Any]]:
-        """Return the steps of a pipeline whose result is FAILED."""
+        """Return the steps of a pipeline that did not succeed.
+
+        Matches FAILED, plus STOPPED (manually cancelled) and ERROR (infrastructure)
+        results, mirroring the ``{"FAILED", "STOPPED"}`` commit-status filter in
+        ``fetch_failing_check_logs``. Without STOPPED/ERROR here a stopped pipeline
+        finds no failing steps and falls back to ``_external_status_failure``, which
+        discards the pipeline UUID and any partial step log.
+        """
         steps = await self._paginate(
             f"{self._repo_path(repo)}/pipelines/{quote(pipeline_uuid, safe='')}/steps/",
             operation="bitbucket fetch_failing_check_logs steps",
@@ -615,7 +622,7 @@ class BitBucketClient:
             state = step.get("state")
             result = state.get("result") if isinstance(state, dict) else None
             result_name = result.get("name") if isinstance(result, dict) else None
-            if str(result_name or "").upper() == "FAILED":
+            if str(result_name or "").upper() in {"FAILED", "STOPPED", "ERROR"}:
                 failing.append(step)
         return failing
 
