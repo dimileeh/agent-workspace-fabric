@@ -31,6 +31,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
 from awf.common.github_client import GitHubClientError, RepoRef
@@ -237,6 +238,31 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     await self._terminate_failed(
                         workspace_id,
                         message=f"monitor: github error: {exc}"[:2000],
+                    )
+                    return
+                except BitBucketClientError as exc:
+                    # BitBucket workspaces fetch status via ``BitBucketClient``,
+                    # which raises ``BitBucketClientError`` (not
+                    # ``GitHubClientError``) on API/transport failures. Without
+                    # this catch the error would escape ``run()`` and crash the
+                    # background monitor task instead of marking the workspace
+                    # failed. Preserve the actionable ``reason_code`` end-to-end
+                    # — the exception already carries a redacted body, so its
+                    # ``str()`` is safe to log/persist.
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.failed",
+                            "workspace_id": workspace_id,
+                            "reason": "bitbucket_error",
+                            "reason_code": exc.reason_code,
+                            "message": str(exc)[:400],
+                        },
+                    )
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=f"monitor: bitbucket error: {exc}"[:2000],
+                        reason_code=exc.reason_code,
                     )
                     return
                 if _clear_transient_base_fetch_retry_state(state, context="fetch_pr_status"):
