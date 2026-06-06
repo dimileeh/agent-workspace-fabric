@@ -843,6 +843,15 @@ bootstrap_uv() {
     [ -s "$installer_file" ] \
         || fail UV_BOOTSTRAP_FAILED "downloaded uv installer is empty: ${src}"
     local uv_bin_dir="${HOME}/.local/bin"
+    # Capture whether uv already lived in uv_bin_dir *before* we run the installer.
+    # uv can be installed in the default ${HOME}/.local/bin yet be absent from PATH
+    # (a fresh shell, profile not yet sourced), which is exactly what makes
+    # prepare_install_method's `command -v uv` miss and route here. In that case the
+    # binaries are the user's, not ours, so we must not later claim ownership of them.
+    local uv_preexisted=0
+    if [ -e "${uv_bin_dir}/uv" ] || [ -e "${uv_bin_dir}/uvx" ]; then
+        uv_preexisted=1
+    fi
     UV_INSTALL_DIR="$uv_bin_dir" UV_NO_MODIFY_PATH=1 sh "$installer_file" \
         || fail UV_BOOTSTRAP_FAILED "the uv installer exited non-zero"
     case ":${PATH}:" in
@@ -859,7 +868,16 @@ bootstrap_uv() {
     # (no timestamp) and never written under --dry-run, which returns above before
     # any mutation. Marker failures must not fail an otherwise successful install,
     # so a write problem only warns.
-    if mkdir -p "$(dirname "$AWF_UV_MARKER")" 2>/dev/null &&
+    #
+    # Only claim ownership when AWF actually created the binaries. If uv (or uvx)
+    # already sat in uv_bin_dir before the installer ran, it was placed by the user,
+    # so writing the marker would let a later `uninstall.sh --remove-uv` delete a uv
+    # the user installed themselves — breaking the documented "uv you installed
+    # yourself is never removed" contract. Skip the marker in that case; the
+    # uninstaller then refuses --remove-uv with UV_REMOVAL_REFUSED_UNOWNED.
+    if [ "$uv_preexisted" -eq 1 ]; then
+        say "uv was already installed in ${uv_bin_dir}; not marking it AWF-owned, so --remove-uv will not remove it."
+    elif mkdir -p "$(dirname "$AWF_UV_MARKER")" 2>/dev/null &&
         printf 'installed_by=awf\nuv_bin_dir=%s\n' "$uv_bin_dir" >"$AWF_UV_MARKER" 2>/dev/null; then
         :
     else

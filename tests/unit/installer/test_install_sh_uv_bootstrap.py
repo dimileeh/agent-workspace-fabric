@@ -171,6 +171,43 @@ def test_real_bootstrap_writes_uv_ownership_marker(harness: InstallerHarness) ->
 
 
 @pytest.mark.unit
+def test_bootstrap_does_not_claim_preexisting_uv_in_default_dir(harness: InstallerHarness) -> None:
+    """A bootstrap that refreshes a preexisting uv must NOT write the ownership marker.
+
+    uv can already live in the default ``~/.local/bin`` yet be absent from ``PATH``
+    (profile not sourced in this shell), so ``prepare_install_method``'s
+    ``command -v uv`` misses and routes into ``bootstrap_uv``. The binaries are the
+    user's, not AWF's. Writing the marker would let a later
+    ``uninstall.sh --remove-uv`` delete a uv the user installed themselves, breaking
+    the "uv you installed yourself is never removed" contract — so no marker is
+    written and the install still completes.
+    """
+    harness.add_uname("Linux", "x86_64")
+    harness.add_awf(version="0.1.0")
+    # Seed a preexisting uv in the default bootstrap dir WITHOUT putting it on PATH,
+    # so command -v uv misses and the bootstrap lane still runs over it.
+    preexisting = harness.home / ".local" / "bin" / "uv"
+    preexisting.parent.mkdir(parents=True, exist_ok=True)
+    preexisting.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    preexisting.chmod(0o755)
+    installer = harness.write_uv_installer(succeeds=True)
+    wheel, digest = harness.write_wheel(version="0.1.0")
+    manifest = harness.write_manifest(wheel=wheel, sha256=digest, version="0.1.0")
+
+    result = harness.run(
+        ["--bootstrap-uv"], manifest=manifest, extra_env={"AWF_UV_INSTALLER": str(installer)}
+    )
+
+    assert result.returncode == 0, result.stderr
+    # The bootstrap actually ran (the seam installer was invoked)...
+    assert "uv-installer" in "\n".join(harness.calls())
+    # ...the install proceeded via the resolved uv...
+    assert "uv tool install" in "\n".join(harness.calls())
+    # ...but AWF did not claim ownership of the user's preexisting uv.
+    assert not _uv_marker(harness).exists()
+
+
+@pytest.mark.unit
 def test_bootstrap_dry_run_writes_no_marker(harness: InstallerHarness) -> None:
     """``--bootstrap-uv --dry-run`` plans the bootstrap and writes no marker."""
     harness.add_uname("Linux", "x86_64")
