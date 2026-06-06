@@ -126,11 +126,15 @@ def test_mocked_smoke_examples_use_project_flag() -> None:
             invocation = _parse_smoke_invocation(line)
             if invocation is None:
                 continue
-            if invocation.has_mocked_local and rel_path in mocked_examples_by_context:
-                mocked_examples_by_context[rel_path] += 1
             offense = _smoke_invocation_offense(invocation)
             if offense is not None:
                 offenders.append(f"{rel_path}: {offense} in `{invocation.raw}`")
+            elif invocation.has_mocked_local and rel_path in mocked_examples_by_context:
+                # Mirror R2's stricter guard: only a *valid* (non-offending)
+                # `--mocked-local` example counts toward the per-context tally, so
+                # a doc whose only mocked-smoke example is offending still surfaces
+                # in `missing_contexts` instead of being silently marked covered.
+                mocked_examples_by_context[rel_path] += 1
 
     missing_contexts = sorted(
         rel_path for rel_path, count in mocked_examples_by_context.items() if count == 0
