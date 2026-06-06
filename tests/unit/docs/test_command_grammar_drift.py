@@ -190,12 +190,14 @@ class SmokeInvocation:
     has_project: bool
     has_mocked_local: bool
     positional_path: bool
-    # Whether the example references a project path at all — a bare positional path
-    # or a `--demo-path <value>` (the CLI's "fallback project path"). R4's
-    # missing-`--project` check is conditional on this: a project-free proof such
-    # as `awf smoke run --mocked-local --format pretty` references no project path
+    # Whether the example supplies a project path *outside* of `--project` — a bare
+    # positional path or a `--demo-path <value>` (the CLI's "fallback project path").
+    # A `--project <path>` example does *not* set this (ask `has_project` for that);
+    # the field exists only to gate R4's missing-`--project` check, which is
+    # conditional on an implicit project path: a project-free proof such as
+    # `awf smoke run --mocked-local --format pretty` supplies no implicit path
     # (the CLI defaults `--project` to the cwd), so it must not be flagged.
-    references_project_path: bool = False
+    has_implicit_project_path: bool = False
     # Whether the example wrote `--project` (spaced or `=`-glued) but dropped its
     # value — the next token is another flag, the line ended, or the glued form is
     # empty. This is malformed grammar regardless of whether a project path is
@@ -643,7 +645,7 @@ def _parse_smoke_segment(segment: str) -> SmokeInvocation | None:
         has_project=has_project,
         has_mocked_local=has_mocked_local,
         positional_path=positional_path,
-        references_project_path=positional_path or has_demo_path,
+        has_implicit_project_path=positional_path or has_demo_path,
         project_value_dropped=project_value_dropped,
     )
 
@@ -689,8 +691,8 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
     regression in either direction is caught: a bare positional path, a
     `--mocked-local` example that *references a project path* yet dropped
     `--project`, and a `--project` example that dropped `--mocked-local` are each
-    offenders. The missing-`--project` check is conditional on a project path
-    actually being referenced (`references_project_path`): per the plan's
+    offenders. The missing-`--project` check is conditional on an implicit project
+    path actually being supplied (`has_implicit_project_path`): per the plan's
     contract it rejects "omits `--project` *when a project path is referenced in
     that example*", so a project-free proof like
     `awf smoke run --mocked-local --format pretty` (the CLI defaults `--project`
@@ -700,7 +702,7 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
 
     A `--project` that dropped its value (`awf smoke run --project --mocked-local
     ...`) is malformed grammar and is rejected *unconditionally* — independent of
-    `references_project_path` — because the example explicitly wrote `--project`
+    `has_implicit_project_path` — because the example explicitly wrote `--project`
     yet gave it no path. This is distinct from the conditional missing-`--project`
     check: a valid project-free proof omits `--project` outright, it never writes a
     valueless one.
@@ -712,7 +714,7 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
     if (
         invocation.has_mocked_local
         and not invocation.has_project
-        and invocation.references_project_path
+        and invocation.has_implicit_project_path
     ):
         return "mocked smoke missing --project"
     if invocation.has_project and not invocation.has_mocked_local:
@@ -895,39 +897,40 @@ def test_helper_extracts_awf_smoke_invocations() -> None:
         positional_path=False,
     )
 
-    # The canonical example references no project path (it goes through `--project`,
-    # not a bare positional), so `references_project_path` stays False.
+    # The canonical example supplies no *implicit* project path — its path goes
+    # through `--project`, not a bare positional — so `has_implicit_project_path`
+    # stays False (use `has_project` to ask whether `--project` itself was given).
     assert mocked is not None
-    assert mocked.references_project_path is False
+    assert mocked.has_implicit_project_path is False
 
     bare_path = _parse_smoke_invocation('awf smoke run "$HOME/awf-eval-project" --mocked-local')
     assert bare_path is not None
     assert bare_path.has_project is False
     assert bare_path.positional_path is True
-    # A bare positional path is itself a project-path reference.
-    assert bare_path.references_project_path is True
+    # A bare positional path is itself an implicit project path.
+    assert bare_path.has_implicit_project_path is True
 
     no_project_proof = _parse_smoke_invocation("awf smoke run --format pretty")
     assert no_project_proof is not None
     assert no_project_proof.positional_path is False
     assert no_project_proof.has_project is False
-    # A project-free proof references no project path at all.
-    assert no_project_proof.references_project_path is False
+    # A project-free proof supplies no implicit project path at all.
+    assert no_project_proof.has_implicit_project_path is False
 
-    # `--demo-path` (the CLI's fallback project path) references a project path even
+    # `--demo-path` (the CLI's fallback project path) is an implicit project path even
     # without `--project` — both the spaced and `=`-glued forms.
     demo_only = _parse_smoke_invocation("awf smoke run --mocked-local --demo-path /tmp/demo")
     assert demo_only is not None
     assert demo_only.has_project is False
-    assert demo_only.references_project_path is True
+    assert demo_only.has_implicit_project_path is True
     glued_demo = _parse_smoke_invocation("awf smoke run --mocked-local --demo-path=/tmp/demo")
     assert glued_demo is not None
-    assert glued_demo.references_project_path is True
-    # A `--demo-path` that dropped its value (next token is another flag) is not a
-    # project-path reference and does not swallow the following flag as its value.
+    assert glued_demo.has_implicit_project_path is True
+    # A `--demo-path` that dropped its value (next token is another flag) is not an
+    # implicit project path and does not swallow the following flag as its value.
     dropped_demo = _parse_smoke_invocation("awf smoke run --demo-path --mocked-local")
     assert dropped_demo is not None
-    assert dropped_demo.references_project_path is False
+    assert dropped_demo.has_implicit_project_path is False
     assert dropped_demo.has_mocked_local is True
 
     # A `--project` flag that drops its path value (the next token is another
