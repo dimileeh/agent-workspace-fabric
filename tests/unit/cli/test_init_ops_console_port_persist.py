@@ -88,6 +88,26 @@ def test_persist_matches_key_case_insensitively_without_duplicating(tmp_path: Pa
 
 
 @pytest.mark.unit
+def test_persist_updates_all_duplicate_assignments(tmp_path: Path) -> None:
+    """Every duplicate assignment is updated, not just the first.
+
+    Later env parsing overwrites earlier keys with later ones, so a stale trailing
+    duplicate would otherwise win and resolve to the wrong console port.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AWF_CONSOLE_HOST_PORT=3000\nAWF_OTHER=keep\nAWF_CONSOLE_HOST_PORT=5000\n",
+        encoding="utf-8",
+    )
+
+    _persist_console_host_port(env_file, 4321)
+
+    assert env_file.read_text(encoding="utf-8") == (
+        "AWF_CONSOLE_HOST_PORT=4321\nAWF_OTHER=keep\nAWF_CONSOLE_HOST_PORT=4321\n"
+    )
+
+
+@pytest.mark.unit
 def test_persist_does_not_touch_console_url(tmp_path: Path) -> None:
     """``AWF_CONSOLE_URL`` is left untouched when persisting the host port."""
     env_file = tmp_path / ".env"

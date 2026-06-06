@@ -738,6 +738,7 @@ def _persist_console_host_port(env_file: Path, console_port: int) -> None:
     text = env_file.read_text(encoding="utf-8")
     target_identity = _env_assignment_key_identity("AWF_CONSOLE_HOST_PORT")
     lines = text.splitlines(keepends=True)
+    updated = False
     for index, line in enumerate(lines):
         key = _env_assignment_key(line)
         if key is None or _env_assignment_key_identity(key) != target_identity:
@@ -745,6 +746,11 @@ def _persist_console_host_port(env_file: Path, console_port: int) -> None:
         body = line.rstrip("\r\n")
         newline = line[len(body) :]
         lines[index] = f"{_replace_env_assignment_value(body, value)}{newline}"
+        updated = True
+    if updated:
+        # Update every matching assignment: later commands parse env files
+        # line-by-line and let later keys overwrite earlier ones, so leaving a
+        # stale trailing duplicate would persist the wrong console port.
         env_file.write_text("".join(lines), encoding="utf-8")
         return
 
