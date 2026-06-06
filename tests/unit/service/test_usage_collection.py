@@ -770,9 +770,12 @@ async def test_provider_switch_with_no_records_baseline_adds_new_source_usage(
 
     snap = read_latest_usage_snapshot("ws_no_records_switch", work_dir=tmp_path)
     assert snap is not None
+    assert snap.provider == "codex"
+    assert snap.ccusage_source == "codex"
     assert snap.status == "available"
     assert snap.reason is None
     assert snap.total_tokens == 550
+    assert snap.baseline is None
     assert snap.run_delta == {
         "input_tokens": None,
         "cached_input_tokens": None,
