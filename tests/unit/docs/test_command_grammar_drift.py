@@ -440,8 +440,20 @@ def _init_arg_status(line: str) -> str | None:
     ``"help"`` is kept distinct from ``"ok"`` so a help-only invocation is not
     flagged as a missing-path offender, yet also cannot stand in for the
     path-bearing example each first-run init context must demonstrate.
+
+    The match is anchored at the start of ``line`` (``re.match``, not
+    ``re.search``), with a leading ``uv run ...`` runner prefix allowed before
+    ``awf init`` so the documented ``uv run --python 3.12 --extra dev awf init
+    .`` lane is still classified — mirroring :func:`_parse_smoke_invocation`.
+    Anchoring keeps a prose backtick span that merely references the command
+    mid-sentence (e.g. ``run awf init later`` or ``see awf init below``) from
+    being parsed with the trailing prose token as a path and miscounted as a
+    valid ``awf init <path>`` example: such a span neither begins with ``awf
+    init`` nor with a ``uv run`` prefix, so it returns ``None``. An unbounded
+    ``re.search`` here would let that prose hit silently satisfy R2's
+    per-context "at least one valid example" gate.
     """
-    match = re.search(r"(?<![\w-])awf init\b(?P<tail>.*)", line)
+    match = re.match(r"(?:uv\s+run\b.*?\s+)?awf init\b(?P<tail>.*)", line)
     if match is None:
         return None
     tokens = _split_tail(match.group("tail"))
@@ -680,6 +692,18 @@ def test_helper_flags_bare_awf_init_command() -> None:
     # The legitimate lower-level command and project-init alias are not flagged.
     assert _init_arg_status("awf service bootstrap") is None
     assert _init_arg_status("awf profile init . --write") is None
+    # A prose backtick span that merely references `awf init` mid-sentence is not
+    # an invocation: it must return None rather than misreading the trailing prose
+    # token as a path (which would inflate R2's per-context example count and let a
+    # doc with no real `awf init <path>` example silently pass the gate). This
+    # mirrors `_parse_smoke_invocation`'s start-anchored guard.
+    assert _init_arg_status("run awf init later") is None
+    assert _init_arg_status("see awf init below") is None
+    # The documented `uv run ... awf init .` lane is a real command line, not a
+    # prose reference, so the runner prefix is unwrapped and the path classified.
+    assert _init_arg_status("uv run --python 3.12 --extra dev awf init .") == "ok"
+    assert _init_arg_status("uv run --extra dev awf init") == "bare"
+    assert _init_arg_status("uv run --extra dev awf init --write-profile --yes") == "flag-only"
 
 
 def test_helper_read_missing_doc_fails_with_actionable_message() -> None:
