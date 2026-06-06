@@ -19,6 +19,13 @@ class ClaudeCodeAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:
         return AgentRuntime.claude_code
 
+    @property
+    def runtime_scratch_paths(self) -> tuple[str, ...]:
+        # ``claude`` creates nested git worktrees for its isolated subagents
+        # under ``.claude/worktrees/`` inside the checkout. Exclude that
+        # agent-runtime state from AWF's validation-cleanliness guard.
+        return (".claude/worktrees/",)
+
     def get_provider(self, model: str | None) -> str:
         del model
         return "anthropic"

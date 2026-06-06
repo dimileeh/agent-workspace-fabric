@@ -93,6 +93,7 @@ from awf.db.enums import (
 )
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
+from awf.runtime.agent_scratch import apply_agent_scratch_excludes
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -257,6 +258,25 @@ async def execute(
             agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
             agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
             usage_sampler=self._usage_sampler,
+        )
+        # Make the agent runtime's checkout-local scratch dirs (e.g.
+        # claude_code's ``.claude/worktrees/``) git-ignored in this worktree
+        # before the agent can create them, so AWF's validation-cleanliness
+        # guard treats them as ignored agent-runtime state rather than a dirty
+        # tree. No-op for agents that declare no scratch paths; runs on both the
+        # initial and recovery paths since each later runs validation.
+        await apply_agent_scratch_excludes(
+            run_git=lambda args: self._runner.run(
+                [
+                    "git",
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                    *args,
+                ]
+            ),
+            worktree_path=worktree_path,
+            scratch_paths=adapter.runtime_scratch_paths,
         )
         profile = _profile_for_workspace(
             ws,

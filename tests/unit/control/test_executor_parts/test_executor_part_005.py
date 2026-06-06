@@ -342,6 +342,46 @@ class TestFailurePaths:
         assert len(fake.calls) == 5
 
     @pytest.mark.unit
+    async def test_applies_agent_scratch_excludes_before_agent_run(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The executor must hand the agent's checkout-local scratch paths to
+        # the git-native exclude writer before the agent runs, so the
+        # validation guard later treats them as ignored rather than dirty.
+        import awf.control.executor.execution_flow as execution_flow
+
+        calls: list[dict[str, Any]] = []
+
+        async def _spy_apply(
+            *,
+            run_git: Any,
+            worktree_path: Path,
+            scratch_paths: tuple[str, ...],
+            **kwargs: Any,
+        ) -> bool:
+            calls.append({"worktree_path": worktree_path, "scratch_paths": scratch_paths})
+            return True
+
+        monkeypatch.setattr(execution_flow, "apply_agent_scratch_excludes", _spy_apply)
+
+        ws_id = await _seed_ready_workspace(factory, agent="claude_code")
+        fake.queue_result(returncode=2, stderr="claude: boom")  # adapter dies
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # abbrev-ref
+        fake.queue_result(returncode=0)  # git add -A (no-op)
+        fake.queue_result(returncode=0, stdout="")  # diff --cached empty
+        fake.queue_result(returncode=0, stdout="0\n")  # rev-list = 0
+
+        await executor.execute(ws_id)
+
+        assert len(calls) == 1
+        assert calls[0]["scratch_paths"] == (".claude/worktrees/",)
+        assert calls[0]["worktree_path"].name == ws_id
+
+    @pytest.mark.unit
     async def test_cached_diff_git_error_is_treated_as_no_staged_paths(
         self,
         executor: WorkspaceExecutor,

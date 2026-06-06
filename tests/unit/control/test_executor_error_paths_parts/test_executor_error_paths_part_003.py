@@ -778,6 +778,10 @@ class TestPullRequestUnexpectedErrorPart001:
             def name(self) -> AgentRuntime:
                 return AgentRuntime.codex
 
+            @property
+            def runtime_scratch_paths(self) -> tuple[str, ...]:
+                return ()
+
             async def run(
                 self,
                 *,

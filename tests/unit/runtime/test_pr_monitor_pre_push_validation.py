@@ -13,10 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED, ComposeExecCleanupError
-from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.profiles.models import WorkspaceProfile
 from awf.runtime.pr_monitor_runner import pre_push_validation as pre_push_validation_module
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _git_push_failure_outcome,
@@ -39,6 +36,20 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     make_runner,
     seed_monitoring_workspace,
 )
+from tests.unit.runtime._pre_push_validation_helpers import (
+    _command_result,
+    _CommandlessFailureValidationResult,
+    _coverage_result,
+    _failing_coverage_result,
+    _FakeValidation,
+    _mark_git_worktree,
+    _OverriddenFirstFailureValidationResult,
+    _provider_coverage_failure_without_command,
+    _seed_monitoring_workspace_without_attempt,
+    _set_resolved_profile,
+    _validation_result,
+    _validation_runs,
+)
 
 
 @pytest.fixture
@@ -46,36 +57,6 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     """Yield a scoped async SQLAlchemy session factory for tests."""
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-
-
-class _FakeValidation:
-    """Minimal validation runner used to script pass/fail outcomes."""
-
-    def __init__(
-        self,
-        *results: ValidationResult | Exception,
-        coverage_result: ValidationCoverageResult | None = None,
-    ) -> None:
-        """Store queued validation results for later retrieval."""
-        self.results = list(results)
-        self.coverage_result = coverage_result
-        self.calls: list[dict[str, object]] = []
-        self.coverage_calls: list[dict[str, object]] = []
-
-    async def run_profile_phases(self, **kwargs: object) -> ValidationResult:
-        """Return the next queued validation outcome."""
-        self.calls.append(dict(kwargs))
-        if not self.results:
-            raise AssertionError("validation called more times than expected")
-        result = self.results.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    async def run_profile_coverage(self, **kwargs: object) -> ValidationCoverageResult | None:
-        """Stub profile coverage step; included for interface compatibility."""
-        self.coverage_calls.append(dict(kwargs))
-        return self.coverage_result
 
 
 @pytest.mark.unit
@@ -111,223 +92,6 @@ def test_pre_push_validation_structural_helpers_are_single_source() -> None:
     assert isinstance(retry_function.body[-1], ast.While)
     assert isinstance(retry_function.body[-1].test, ast.Constant)
     assert retry_function.body[-1].test.value is True
-
-
-def _command_result(
-    tmp_path: Path,
-    *,
-    ok: bool,
-    reason_code: str | None = None,
-    command: str = "pytest -q",
-    returncode: int | None = None,
-    artifact_name: str | None = None,
-) -> ValidationCommandResult:
-    """Build a deterministic validation command result with local artifact paths."""
-    if reason_code is None:
-        reason_code = "VALIDATION_OK" if ok else "PYTEST_TEST_FAILURE"
-    label = artifact_name or ("ok" if ok else command.replace("/", "_").replace(" ", "_"))
-    stdout_path = tmp_path / f"{label}.stdout"
-    stderr_path = tmp_path / f"{label}.stderr"
-    stdout_path.write_text("passed\n" if ok else "failed\n", encoding="utf-8")
-    stderr_path.write_text("", encoding="utf-8")
-    return ValidationCommandResult(
-        command=command,
-        returncode=0 if ok else (returncode if returncode is not None else 1),
-        duration_seconds=0.1,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        reason_code=reason_code,
-    )
-
-
-def _validation_result(
-    tmp_path: Path,
-    *,
-    ok: bool,
-    reason_code: str | None = None,
-    command: str = "pytest -q",
-    returncode: int | None = None,
-    artifact_name: str | None = None,
-) -> ValidationResult:
-    """Wrap one command result into a single-command validation result."""
-    return ValidationResult(
-        commands=[
-            _command_result(
-                tmp_path,
-                ok=ok,
-                reason_code=reason_code,
-                command=command,
-                returncode=returncode,
-                artifact_name=artifact_name,
-            )
-        ]
-    )
-
-
-class _CommandlessFailureValidationResult(ValidationResult):
-    """Validation result that exposes a first failure outside command records."""
-
-    _first_failure: ValidationCommandResult
-
-    def __init__(self, first_failure: ValidationCommandResult) -> None:
-        super().__init__(commands=[])
-        object.__setattr__(self, "_first_failure", first_failure)
-
-    @property
-    def all_passed(self) -> bool:
-        return False
-
-    @property
-    def first_failure(self) -> ValidationCommandResult | None:
-        return self._first_failure
-
-
-class _OverriddenFirstFailureValidationResult(ValidationResult):
-    """Validation result whose provider-level first failure differs from commands."""
-
-    _first_failure: ValidationCommandResult
-
-    def __init__(
-        self,
-        *,
-        commands: list[ValidationCommandResult],
-        first_failure: ValidationCommandResult,
-    ) -> None:
-        super().__init__(commands=commands)
-        object.__setattr__(self, "_first_failure", first_failure)
-
-    @property
-    def all_passed(self) -> bool:
-        return False
-
-    @property
-    def first_failure(self) -> ValidationCommandResult | None:
-        return self._first_failure
-
-
-def _coverage_result(tmp_path: Path) -> ValidationCoverageResult:
-    """Build a successful explicit coverage result for pre-push coverage tests."""
-    return ValidationCoverageResult(
-        provider="python",
-        percent=99.5,
-        minimum_percent=99.0,
-        enforce=True,
-        status="passed",
-        reason_code="COVERAGE_OK",
-        command_result=_command_result(tmp_path, ok=True, reason_code="COVERAGE_OK"),
-        gaps=[{"path": "src/awf/runtime/pr_monitor_runner/pre_push_validation.py"}],
-    )
-
-
-def _failing_coverage_result(tmp_path: Path) -> ValidationCoverageResult:
-    """Build a failed coverage result whose command exited successfully."""
-    return ValidationCoverageResult(
-        provider="python",
-        percent=98.5,
-        minimum_percent=99.0,
-        enforce=True,
-        status="failed",
-        reason_code="COVERAGE_BELOW_THRESHOLD",
-        command_result=_command_result(
-            tmp_path,
-            ok=True,
-            reason_code="VALIDATION_OK",
-            command="coverage run -m pytest && coverage report",
-            artifact_name="coverage_below_threshold",
-        ),
-        gaps=[{"path": "src/awf/runtime/pr_monitor_runner/pre_push_validation.py"}],
-    )
-
-
-def _provider_coverage_failure_without_command() -> ValidationCoverageResult:
-    """Build a failed provider result without an associated command record."""
-    return ValidationCoverageResult(
-        provider="python",
-        percent=None,
-        minimum_percent=99.0,
-        enforce=True,
-        status="failed",
-        reason_code="COVERAGE_PROVIDER_FAILED",
-        provider_failure_evidence=["coverage provider did not produce totals"],
-    )
-
-
-async def _set_resolved_profile(
-    factory: async_sessionmaker[AsyncSession],
-    workspace_id: str,
-    *,
-    include_coverage: bool = False,
-) -> None:
-    """Attach a simple resolved validation profile to the workspace."""
-    profile_payload: dict[str, object] = {
-        "name": "test-profile",
-        "phases": {"validate": ["pytest -q"]},
-    }
-    if include_coverage:
-        profile_payload["validation"] = {
-            "coverage": {
-                "minimum_percent": 99.0,
-                "command": "coverage run -m pytest && coverage report",
-            },
-            "strategy": {"final_gate": "coverage"},
-        }
-    profile = WorkspaceProfile.model_validate(profile_payload)
-    async with factory() as session:
-        ws = await WorkspaceRepository(session).get(workspace_id)
-        assert ws is not None
-        ws.resolved_profile = profile.model_dump(mode="json", by_alias=True)
-        await session.commit()
-
-
-def _mark_git_worktree(worktree: Path) -> None:
-    """Make a lightweight temp directory look like a git worktree to guards."""
-    worktree.mkdir(parents=True, exist_ok=True)
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
-
-
-async def _seed_monitoring_workspace_without_attempt(
-    factory: async_sessionmaker[AsyncSession],
-) -> str:
-    """Create a monitoring workspace row without a task-attempt record."""
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        ws = await repo.create(
-            repo_url="git@github.com:dimileeh/aira-web.git",
-            branch_base="development",
-            task_title="monitor test without attempt",
-            task_prompt="x",
-            agent="claude_code",
-            test_commands=["pytest -q"],
-            requires_database=False,
-            auto_merge=True,
-        )
-        for target in (
-            WorkspaceStatus.provisioning,
-            WorkspaceStatus.ready,
-            WorkspaceStatus.running,
-            WorkspaceStatus.validating,
-            WorkspaceStatus.pushing,
-            WorkspaceStatus.monitoring_pr,
-        ):
-            await repo.transition(ws, to=target, reason_code="X")
-        ws.branch_name = f"awf/{ws.id}"
-        ws.remote_push_branch = ws.branch_name
-        ws.base_commit = "a" * 40
-        ws.compose_project_name = f"awf_{ws.id}"
-        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
-        ws.pr_url = "https://github.com/dimileeh/aira-web/pull/42"
-        ws.pr_number = 42
-        await session.commit()
-        return ws.id
-
-
-async def _validation_runs(
-    factory: async_sessionmaker[AsyncSession],
-    workspace_id: str,
-) -> list[Any]:
-    """Return all persisted validation runs for a workspace."""
-    async with factory() as session:
-        return await ValidationRunRepository(session).list_for_workspace(workspace_id)
 
 
 @pytest.mark.unit
@@ -1367,6 +1131,75 @@ async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fail
     assert result.validation_run_id is None
     check_worktree_clean.assert_awaited_once()
     rev_parse_head.assert_awaited_once_with(worktree)
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_worktree_check_installs_agent_scratch_excludes(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The monitor guard must install adapter scratch excludes before checking cleanliness.
+
+    A monitor-adopted or resumed workspace may never have passed through the
+    executor's scratch-exclude setup, yet the monitor's own fix-pass agent run
+    can create ``.claude/worktrees/``. The pre-push worktree guard therefore has
+    to (re)install the adapter's scratch excludes before judging cleanliness, or
+    it would refuse the otherwise clean tree (regression for thread
+    ``PRRT_kwDOSJAM6s6HjHiR``).
+    """
+    worktree = tmp_path / "worktrees" / "ws-scratch"
+
+    class _ScratchAdapter(FakeAdapter):
+        @property
+        def runtime_scratch_paths(self) -> tuple[str, ...]:
+            return (".claude/worktrees/",)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=_ScratchAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    call_order: list[str] = []
+    applied_scratch_paths: list[tuple[str, ...]] = []
+
+    async def _spy_apply(
+        *,
+        run_git: Any,
+        worktree_path: Path,
+        scratch_paths: tuple[str, ...],
+    ) -> bool:
+        call_order.append("apply")
+        applied_scratch_paths.append(scratch_paths)
+        return True
+
+    clean_check = ValidationWorktreeCheck(clean=True, reason_code=None, message=None)
+
+    async def _spy_clean(**_kwargs: Any) -> ValidationWorktreeCheck:
+        call_order.append("check")
+        return clean_check
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "apply_agent_scratch_excludes",
+        _spy_apply,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.validation_worktree.check_validation_worktree_clean",
+        _spy_clean,
+    )
+
+    result = await pre_push_validation_module._pre_push_validation_worktree_check(
+        runner,
+        worktree_path=worktree,
+    )
+
+    assert result is clean_check
+    assert applied_scratch_paths == [(".claude/worktrees/",)]
+    assert call_order == ["apply", "check"]
 
 
 @pytest.mark.unit
