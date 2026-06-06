@@ -347,6 +347,12 @@ def test_helper_flags_smoke_invocation_offenses() -> None:
         offense('awf smoke run --project "$HOME/p" --format pretty')
         == "project smoke missing --mocked-local"
     )
+    # The `--demo-path` fallback references a project path just like `--project`,
+    # so an example that targets a project via `--demo-path` yet drops
+    # `--mocked-local` is the same dropped-`--mocked-local` regression and is
+    # rejected too — otherwise a doc could swap canonical
+    # `--project <p> --mocked-local` for `--demo-path <p>` and slip past R4.
+    assert offense("awf smoke run --demo-path /tmp/demo") == "project smoke missing --mocked-local"
     # A `--project` that dropped its value is malformed grammar and is rejected
     # unconditionally — even when no project path is otherwise referenced, so the
     # conditional missing-`--project` exemption cannot let it slip through.

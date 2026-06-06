@@ -800,8 +800,14 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
     `--project <path>` *with* `--mocked-local`. Enforcement is symmetric so a
     regression in either direction is caught: a bare positional path, a
     `--mocked-local` example that *references a project path* yet dropped
-    `--project`, and a `--project` example that dropped `--mocked-local` are each
-    offenders. The missing-`--project` check is conditional on an implicit project
+    `--project`, and any example that *references a project path* (via `--project`
+    or the `--demo-path` fallback) yet dropped `--mocked-local` are each
+    offenders. The dropped-`--mocked-local` check keys on
+    `has_implicit_project_path` (not just `has_project`) so a documented
+    `awf smoke run --demo-path <path>` that swaps the canonical `--project <path>
+    --mocked-local` for the fallback option and silently loses the no-token
+    `--mocked-local` grammar is still flagged. The missing-`--project` check is
+    conditional on an implicit project
     path actually being supplied (`has_implicit_project_path`): per the plan's
     contract it rejects "omits `--project` *when a project path is referenced in
     that example*", so a project-free proof like
@@ -827,7 +833,9 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
         and invocation.has_implicit_project_path
     ):
         return "mocked smoke missing --project"
-    if invocation.has_project and not invocation.has_mocked_local:
+    if (
+        invocation.has_project or invocation.has_implicit_project_path
+    ) and not invocation.has_mocked_local:
         return "project smoke missing --mocked-local"
     return None
 
