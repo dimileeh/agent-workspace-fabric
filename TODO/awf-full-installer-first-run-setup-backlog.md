@@ -33,14 +33,72 @@ respects an eight-workspace local capacity cap.
 - H02 plain-secret policy: allow `chmod 600` plain-file provider secrets only
   for Linux/headless setups after explicit warning and consent. Keyring and env
   refs remain preferred.
-- H03 execution model: use `codex` with `gpt-5.5` and `xhigh` reasoning effort
-  for all AWF implementation workspaces in this backlog.
+- H03 execution model: default to `codex` with `gpt-5.5` and `xhigh`
+  reasoning effort for AWF implementation workspaces unless an operator gives
+  an explicit per-wave override. Operator override on 2026-06-03: launch T07,
+  T08, T10, and T16 with `claude_code`, `claude-opus-4-8`, `high`. Operator
+  override on 2026-06-06: launch T18 and T20 with `claude_code`,
+  `claude-opus-4-8`, `high`, and launch T21 with the same settings after T20
+  merges.
 - H04 launch preflight: before launching implementation workspaces, clean
   expired AWF resources, rebuild local service images, and rerun AWF bootstrap.
 
 H01 through H04 are complete for scheduling purposes. Later H01-H04 dependency
 references keep the graph traceable, but they are not additional human approval
 holds unless a human operator explicitly reopens one of the decisions above.
+
+## Verified Progress
+
+Last verified: 2026-06-06 from `git log origin/development`, `gh pr view`,
+and `awf workspace show/list`. T09, T18, and T20 are merged into
+`development`. T21 implementation work from failed workspace
+`ws_8846dc92df1c4f02929f707b` was salvaged into
+[PR #428](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/428)
+and adopted by AWF PR monitor `ws_9a7281385e294d6faa9ac756`. T19 remains
+blocked on T21.
+
+| Task | Status | Evidence |
+| --- | --- | --- |
+| T01 | done - merged | [PR #296](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/296), merge commit `1715777e`, merged 2026-05-29T00:06:11Z |
+| T02 | done - merged | [PR #295](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/295), merge commit `72e7ce57`, merged 2026-05-29T01:36:57Z |
+| T03 | done - merged | [PR #302](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/302), merge commit `38064c4e`, merged 2026-05-29T22:28:28Z |
+| T04 | done - merged | [PR #332](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/332), merge commit `e23f1f96`, merged 2026-05-31T23:23:46Z |
+| T05 | done - merged | [PR #319](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/319), merge commit `04ffb8cc`, merged 2026-05-31T01:49:22Z |
+| T06 | done - merged | [PR #333](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/333), merge commit `b6a65be`, merged 2026-06-01T01:53:14Z |
+| T07 | done - merged | [PR #367](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/367), merge commit `45cb384a`, merged 2026-06-03T18:00:56Z |
+| T08 | done - merged | [PR #370](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/370), merge commit `4f44329b`, merged 2026-06-03T22:13:28Z |
+| T09 | done - merged | [PR #393](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/393), merge commit `50d02a57`, merged 2026-06-05T23:12:30Z |
+| T10 | done - merged | [PR #366](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/366), merge commit `4b81380a`, merged 2026-06-04T00:12:35Z |
+| T11 | done - merged | [PR #303](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/303), merge commit `959ac5e9`, merged 2026-05-29T10:09:37Z |
+| T12 | done - merged | [PR #318](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/318), merge commit `0cac3fc7`, merged 2026-05-31T07:20:40Z |
+| T13 | done - merged | [PR #344](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/344), merge commit `8134826f`, merged 2026-06-01T02:59:00Z |
+| T14 | done - merged | [PR #394](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/394), merge commit `f99f2f0b`, merged 2026-06-05T18:25:06Z |
+| T15 | done - merged | [PR #390](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/390), merge commit `05c83ac8`, merged 2026-06-05T19:04:39Z |
+| T16 | done - merged | [PR #371](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/371), merge commit `f7196bd0`, merged 2026-06-03T18:59:52Z |
+| T17 | done - merged | [PR #391](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/391), merge commit `ed9ed32d`, merged 2026-06-05T14:01:49Z |
+| T18 | done - merged | [PR #425](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/425), merge commit `ff96f37b`, merged 2026-06-06T03:14:45Z |
+| T20 | done - merged | [PR #426](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/426), merge commit `35c7b1bf`, merged 2026-06-05T23:45:33Z |
+| T21 | salvaged - PR monitor active | [PR #428](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/428), source workspace `ws_8846dc92df1c4f02929f707b`, PR monitor `ws_9a7281385e294d6faa9ac756` |
+
+Current runnable workspace set:
+
+- T21 source workspace `ws_8846dc92df1c4f02929f707b` failed after producing
+  real implementation commits; the branch is salvaged as PR #428.
+- T21 PR #428 is monitored by `ws_9a7281385e294d6faa9ac756` with
+  `claude_code`, `claude-opus-4-8`, `high`.
+- T19 remains blocked on T21.
+- AWF currently has one active workspace: T21 PR monitor
+  `ws_9a7281385e294d6faa9ac756`.
+
+Scheduled workspace set:
+
+| Task | Current workspace | Agent | Status at verification |
+| --- | --- | --- | --- |
+| T21 | `ws_9a7281385e294d6faa9ac756` | `claude_code` / `claude-opus-4-8` / `high` | PR #428 monitor requested |
+
+Next tasks after current work is ready:
+
+- Launch T19 only after T21 merges.
 
 ## What Already Exists
 
@@ -84,25 +142,27 @@ These are reuse targets, not work to rebuild:
 | H02 | Decide first-run provider copy and plain-secret consent wording | human | done - locked | P1 | - | human |
 | H03 | Decide AWF implementation workspace execution model | human | done - locked | P0 | - | human |
 | H04 | Complete launch preflight for implementation workspaces | human | done - locked | P0 | - | human |
-| T01 | Lock public CLI grammar and hard-switch no-path `awf init` | workspace | planned | P0 | H03, H04 | foundation |
-| T02 | Add host setup config schema and source-checkout asset model | workspace | planned | P0 | H03, H04 | foundation |
-| T03 | Add first-run error contract and rendering helpers | workspace | planned | P0 | T02 | foundation |
-| T04 | Add `awf setup --dry-run` system checks and readiness payload | workspace | planned | P0 | T01, T02, T03 | setup |
-| T05 | Add `awf start` wrapper over existing service bootstrap | workspace | planned | P0 | T01, T02, T03 | start |
-| T06 | Add keychain/env/plain-file credential ref backends | workspace | planned | P0 | T02, T03, H02 | credentials |
-| T07 | Add provider setup orchestration with GitHub first-class | workspace | planned | P0 | T04, T06 | credentials |
-| T08 | Add Claude/Codex client config diff, backup, and write helpers | workspace | planned | P1 | T02, T03, T04 | clients |
-| T09 | Add setup/start/init/client MCP tools | workspace | planned | P1 | T04, T05, T08 | mcp |
-| T10 | Add no-token local proof and mocked smoke path | workspace | planned | P0 | T04, T05 | smoke |
-| T11 | Add install manifest generator and release metadata contract | workspace | planned | P0 | T01, H01 | release |
-| T12 | Add checked-in `install.sh` with checksum verification | workspace | planned | P0 | T11, H01 | installer |
-| T13 | Ensure wheel/source packages contain bootstrap and installer assets | workspace | planned | P0 | T02, T11, T12 | packaging |
-| T14 | Add clean-install and source-lane E2E smoke harness | workspace | planned | P0 | T05, T10, T12, T13 | e2e |
-| T15 | Update README, Quickstart, upgrade, uninstall, and source lanes | workspace | planned | P0 | T01, T04, T05, T10, T12, T13 | docs |
-| T16 | Add release workflow checks for manifest, checksums, and installer smoke | workspace | planned | P0 | T11, T12, T13, H01 | release |
-| T17 | Add support-bundle and log redaction coverage for setup secrets | workspace | planned | P0 | T06, T07 | security |
-| T18 | Add docs drift tests for setup/start/init command grammar | workspace | planned | P1 | T01, T15 | docs |
-| T19 | Final integration, full coverage, and first-run lane validation | coordination | planned | P0 | T07, T09, T14, T15, T16, T17, T18 | final |
+| T01 | Lock public CLI grammar and hard-switch no-path `awf init` | workspace | done - merged (#296) | P0 | H03, H04 | foundation |
+| T02 | Add host setup config schema and source-checkout asset model | workspace | done - merged (#295) | P0 | H03, H04 | foundation |
+| T03 | Add first-run error contract and rendering helpers | workspace | done - merged (#302) | P0 | T02 | foundation |
+| T04 | Add `awf setup --dry-run` system checks and readiness payload | workspace | done - merged (#332) | P0 | T01, T02, T03 | setup |
+| T05 | Add `awf start` wrapper over existing service bootstrap | workspace | done - merged (#319) | P0 | T01, T02, T03 | start |
+| T06 | Add keychain/env/plain-file credential ref backends | workspace | done - merged (#333) | P0 | T02, T03, H02 | credentials |
+| T07 | Add provider setup orchestration with GitHub first-class | workspace | done - merged (#367) | P0 | T04, T06 | credentials |
+| T08 | Add Claude/Codex client config diff, backup, and write helpers | workspace | done - merged (#370) | P1 | T02, T03, T04 | clients |
+| T09 | Add setup/start/init/client MCP tools | workspace | done - merged (#393) | P1 | T04, T05, T08 | mcp |
+| T10 | Add no-token local proof and mocked smoke path | workspace | done - merged (#366) | P0 | T04, T05 | smoke |
+| T11 | Add install manifest generator and release metadata contract | workspace | done - merged (#303) | P0 | T01, H01 | release |
+| T12 | Add checked-in `install.sh` with checksum verification | workspace | done - merged (#318) | P0 | T11, H01 | installer |
+| T13 | Ensure wheel/source packages contain bootstrap and installer assets | workspace | done - merged (#344) | P0 | T02, T11, T12 | packaging |
+| T14 | Add clean-install and source-lane E2E smoke harness | workspace | done - merged (#394) | P0 | T05, T10, T12, T13 | e2e |
+| T15 | Update README, Quickstart, upgrade, uninstall, and source lanes | workspace | done - merged (#390) | P0 | T01, T04, T05, T10, T12, T13 | docs |
+| T16 | Add release workflow checks for manifest, checksums, and installer smoke | workspace | done - merged (#371) | P0 | T11, T12, T13, H01 | release |
+| T17 | Add support-bundle and log redaction coverage for setup secrets | workspace | done - merged (#391) | P0 | T06, T07 | security |
+| T18 | Add docs drift tests for setup/start/init command grammar | workspace | done - merged (#425) | P1 | T01, T15 | docs |
+| T20 | Add explicit uv bootstrap contract to `install.sh` | workspace | done - merged (#426) | P0 | T12, T15 | installer |
+| T21 | Add hosted one-line `uninstall.sh` with AWF-managed cleanup contract | workspace | salvaged - PR #428 under monitor `ws_9a7281385e294d6faa9ac756` | P0 | T12, T15, T20 | installer |
+| T19 | Final integration, full coverage, and first-run lane validation | coordination | planned | P0 | T07, T09, T14, T15, T16, T17, T18, T20, T21 | final |
 
 ## Task Cards
 
@@ -211,6 +271,8 @@ Acceptance criteria:
 
 Owner type: workspace
 
+Status: done - merged in PR #296, merge commit `1715777e`
+
 Modules touched:
 
 - `src/awf/cli`
@@ -244,6 +306,8 @@ Required tests:
 ### T02 - Add Host Setup Config Schema And Source-Checkout Asset Model
 
 Owner type: workspace
+
+Status: done - merged in PR #295, merge commit `72e7ce57`
 
 Modules touched:
 
@@ -282,6 +346,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #302, merge commit `38064c4e`
+
 Modules touched:
 
 - `src/awf/host_setup`
@@ -314,6 +380,8 @@ Required tests:
 ### T04 - Add `awf setup --dry-run` System Checks And Readiness Payload
 
 Owner type: workspace
+
+Status: done - merged in PR #332, merge commit `e23f1f96`
 
 Modules touched:
 
@@ -364,6 +432,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #319, merge commit `04ffb8cc`
+
 Modules touched:
 
 - `src/awf/cli/start_commands.py`
@@ -400,6 +470,8 @@ Required tests:
 ### T06 - Add Keychain/Env/Plain-File Credential Ref Backends
 
 Owner type: workspace
+
+Status: done - merged in PR #333, merge commit `b6a65be`
 
 Modules touched:
 
@@ -439,6 +511,8 @@ Required tests:
 ### T07 - Add Provider Setup Orchestration With GitHub First-Class
 
 Owner type: workspace
+
+Status: done - merged in PR #367, merge commit `45cb384a`
 
 Modules touched:
 
@@ -482,6 +556,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #370, merge commit `4f44329b`
+
 Modules touched:
 
 - `src/awf/host_setup/clients.py`
@@ -519,6 +595,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #393, merge commit `50d02a57`
+
 Modules touched:
 
 - `src/awf/mcp/setup_tools.py`
@@ -554,6 +632,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #366, merge commit `4b81380a`
+
 Modules touched:
 
 - `src/awf/service/smoke.py`
@@ -586,6 +666,8 @@ Required tests:
 ### T11 - Add Install Manifest Generator And Release Metadata Contract
 
 Owner type: workspace
+
+Status: done - merged in PR #303, merge commit `959ac5e9`
 
 Modules touched:
 
@@ -620,6 +702,8 @@ Required tests:
 ### T12 - Add Checked-In `install.sh` With Checksum Verification
 
 Owner type: workspace
+
+Status: done - merged in PR #318, merge commit `0cac3fc7`
 
 Modules touched:
 
@@ -657,6 +741,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #344, merge commit `8134826f`
+
 Modules touched:
 
 - `pyproject.toml`
@@ -691,6 +777,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #394, merge commit `f99f2f0b`
+
 Modules touched:
 
 - tests/integration or scripts test harness
@@ -724,6 +812,8 @@ Required tests:
 ### T15 - Update README, Quickstart, Upgrade, Uninstall, And Source Lanes
 
 Owner type: workspace
+
+Status: done - merged in PR #390, merge commit `05c83ac8`
 
 Modules touched:
 
@@ -771,6 +861,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #371, merge commit `f7196bd0`
+
 Modules touched:
 
 - `.github/workflows/publish.yml`
@@ -800,6 +892,8 @@ Required tests:
 ### T17 - Add Support-Bundle And Log Redaction Coverage For Setup Secrets
 
 Owner type: workspace
+
+Status: done - merged in PR #391, merge commit `ed9ed32d`
 
 Modules touched:
 
@@ -833,6 +927,8 @@ Required tests:
 
 Owner type: workspace
 
+Status: done - merged in PR #425, merge commit `ff96f37b`
+
 Modules touched:
 
 - `tests/unit/docs`
@@ -859,6 +955,116 @@ Required tests:
 - Focused docs drift tests under `tests/unit/docs`.
 - Link/snippet tests for first-run commands.
 
+### T20 - Add Explicit uv Bootstrap Contract To `install.sh`
+
+Owner type: workspace
+
+Status: done - merged in PR #426, merge commit `35c7b1bf`
+
+Modules touched:
+
+- `packaging/install.sh`
+- `tests/unit/installer`
+- installer help/quickstart docs only where needed
+
+Depends on: T12, T15
+
+What:
+
+- Make missing-`uv` behavior explicit in the installer contract instead of a
+  generic dependency failure.
+- Preserve existing behavior when `uv` is already installed.
+- Preserve `--method pipx` as the configured fallback without attempting to
+  bootstrap `uv`.
+- Add an explicit non-interactive opt-in, such as `--bootstrap-uv`, for hosts
+  where `uv` is missing.
+- In an interactive terminal, allow a confirmed prompt before bootstrapping
+  `uv`; declining must leave the machine unchanged and print the manual install
+  choices.
+- Use the official Astral `uv` installer over HTTPS, with a hermetic test seam
+  for fixture/local installer scripts. Do not silently execute a second remote
+  installer.
+- Make `--dry-run` report the planned bootstrap/install steps without mutating
+  the machine.
+
+Acceptance criteria:
+
+- `install.sh --help` documents the `uv` bootstrap contract, including the
+  non-interactive flag and `pipx` fallback.
+- Missing `uv` in non-interactive mode without explicit opt-in fails with a
+  clear reason and actionable commands.
+- Missing `uv` with explicit opt-in bootstraps `uv`, then installs AWF through
+  the verified wheel path.
+- Existing checksum, version/channel, uninstall, PATH advice, and `pipx`
+  behaviors remain intact.
+- Fixture tests cover prompt accept/decline, dry-run, non-interactive failure,
+  explicit opt-in, existing-`uv`, and `pipx` fallback paths without real
+  network calls.
+
+Required tests:
+
+- Installer fixture/unit tests under `tests/unit/installer`.
+- Shell syntax/help tests for `packaging/install.sh`.
+- Narrow docs/help assertions for the new bootstrap contract.
+
+### T21 - Add Hosted One-Line `uninstall.sh` With AWF-Managed Cleanup Contract
+
+Owner type: workspace
+
+Status: running in `ws_8846dc92df1c4f02929f707b` with `claude_code`,
+`claude-opus-4-8`, `high`
+
+Modules touched:
+
+- `packaging/uninstall.sh`
+- shared installer/uninstaller shell helpers if T20 introduces them
+- `tests/unit/installer`
+- release/install docs only where needed
+
+Depends on: T12, T15, T20
+
+What:
+
+- Add a hosted one-line uninstall entrypoint suitable for:
+  `curl -fsSL https://aira.pro/awf/uninstall.sh | bash`.
+- Reuse or share the existing `install.sh --uninstall` uninstall logic; do not
+  create a second divergent uninstall implementation.
+- Remove only AWF-managed tool installs and explicitly selected local AWF
+  runtime/config/state.
+- Preserve user and agent credentials by default, including Claude/Codex auth,
+  `gh` config, SSH keys, Git config, provider API keys, and user project repos.
+- Add interactive prompts for destructive cleanup choices, including whether to
+  remove AWF local runtime state.
+- If T20 records that AWF bootstrapped `uv`, offer to uninstall `uv` only when
+  that AWF ownership marker is present. Default to preserving `uv`.
+- In non-interactive mode, require explicit flags for destructive state cleanup
+  and bootstrapped-`uv` removal. Without those flags, preserve credentials,
+  project repos, and unrelated tools.
+- Keep dry-run/plan output clear enough for security-conscious users to inspect
+  exactly what would be removed.
+
+Acceptance criteria:
+
+- `uninstall.sh --help` documents AWF-managed cleanup, credential preservation,
+  dry-run behavior, state-removal flags, and optional bootstrapped-`uv` removal.
+- One-line uninstall removes an AWF-managed package install without touching
+  agent credentials or user project repos.
+- Uninstall refuses unmanaged `awf` executables or clearly reports no-op state.
+- Optional local state cleanup is interactive by default and explicit in
+  non-interactive mode.
+- Optional `uv` removal is offered only when AWF installed `uv`; otherwise
+  `uv` is preserved.
+- Existing `install.sh --uninstall` behavior remains compatible or delegates to
+  the shared uninstall implementation.
+
+Required tests:
+
+- Installer/uninstaller fixture tests for managed install removal, unmanaged
+  refusal, dry-run, interactive cleanup accept/decline, non-interactive flags,
+  credential-preservation guards, and bootstrapped-`uv` ownership-marker logic.
+- Shell syntax/help tests for `packaging/uninstall.sh`.
+- Narrow docs/help assertions for the hosted uninstall contract.
+
 ### T19 - Final Integration, Full Coverage, And First-Run Lane Validation
 
 Owner type: coordination
@@ -867,7 +1073,7 @@ Modules touched:
 
 - Cross-cutting validation only unless small fixes are needed.
 
-Depends on: T07, T09, T14, T15, T16, T17, T18
+Depends on: T07, T09, T14, T15, T16, T17, T18, T20, T21
 
 What:
 
@@ -909,68 +1115,85 @@ Legend:
 
 ```text
 H01 ! installer hosting/trust (done)
-  +--> T11* install manifest
-          +--> T12* install.sh
-                 +--> T13* package assets
-                         +--> T14* E2E first-run lanes
-                         +--> T15* docs lanes
-                         +--> T16* release workflow checks
+  +--> T11* install manifest (done)
+          +--> T12* install.sh (done)
+                 +--> T13* package assets (done)
+                         +--> T14* E2E first-run lanes (done)
+                         +--> T15* docs lanes (done)
+                                +--> T20* uv bootstrap installer contract (done)
+                                      +--> T21* hosted uninstaller contract (running)
+                        +--> T16* release workflow checks (done)
 
 H02 ! credential consent wording (done)
-  +--> T06* credential ref backends
-          +--> T07* provider orchestration
-                  +--> T17* setup secret redaction
+  +--> T06* credential ref backends (done)
+          +--> T07* provider orchestration (done)
+                  +--> T17* setup secret redaction (done)
 
 H03 ! implementation execution model (done)
-  +--> T01* CLI grammar/init switch
-  +--> T02* config/source asset model
+  +--> T01* CLI grammar/init switch (done)
+  +--> T02* config/source asset model (done)
 
 H04 ! launch preflight (done)
-  +--> T01* CLI grammar/init switch
-  +--> T02* config/source asset model
+  +--> T01* CLI grammar/init switch (done)
+  +--> T02* config/source asset model (done)
 
-T01* CLI grammar/init switch
-  +--> T04* setup dry-run
-  +--> T05* start wrapper
-  +--> T11* install manifest
+T01* CLI grammar/init switch (done)
+  +--> T04* setup dry-run (done)
+  +--> T05* start wrapper (done)
+  +--> T11* install manifest (done)
 
-T02* config/source asset model
-  +--> T13* package assets
-  +--> T03* first-run errors/rendering
-          +--> T04* setup dry-run
-          +--> T05* start wrapper
-          +--> T06* credential backends
+T02* config/source asset model (done)
+  +--> T13* package assets (done)
+  +--> T03* first-run errors/rendering (done)
+          +--> T04* setup dry-run (done)
+          +--> T05* start wrapper (done)
+          +--> T06* credential backends (done)
 
-T04* setup dry-run
-  +--> T07* provider orchestration
-  +--> T08* client config helpers
-  +--> T09* MCP setup tools
-  +--> T10* no-token smoke proof
-          +--> T14* E2E first-run lanes
-          +--> T15* docs lanes
-                  +--> T18* docs drift tests
+T04* setup dry-run (done)
+  +--> T07* provider orchestration (done)
+  +--> T08* client config helpers (done)
+  +--> T09* MCP setup tools (done)
+  +--> T10* no-token smoke proof (done)
+          +--> T14* E2E first-run lanes (done)
+          +--> T15* docs lanes (done)
+                  +--> T18* docs drift tests (done)
 
-T05* start wrapper
-  +--> T09* MCP setup tools
-  +--> T10* no-token smoke proof
-  +--> T14* E2E first-run lanes
+T05* start wrapper (done)
+  +--> T09* MCP setup tools (done)
+  +--> T10* no-token smoke proof (done)
+  +--> T14* E2E first-run lanes (done)
 
-T08* client config helpers
-  +--> T09* MCP setup tools
+T08* client config helpers (done)
+  +--> T09* MCP setup tools (done)
 
 T07* provider orchestration    +--> T19 final integration and coverage
 T09* MCP setup tools           +--> T19 final integration and coverage
-T14* E2E first-run lanes       +--> T19 final integration and coverage
-T15* docs lanes                +--> T19 final integration and coverage
+T14* E2E first-run lanes       +--> T19 final integration and coverage (done)
+T15* docs lanes                +--> T19 final integration and coverage (done)
 T16* release workflow checks   +--> T19 final integration and coverage
-T17* setup secret redaction    +--> T19 final integration and coverage
-T18* docs drift tests          +--> T19 final integration and coverage
+T17* setup secret redaction    +--> T19 final integration and coverage (done)
+T18* docs drift tests          +--> T19 final integration and coverage (done)
+T20* uv bootstrap installer    +--> T19 final integration and coverage (done)
+T21* hosted uninstaller        +--> T19 final integration and coverage (running)
 ```
 
 ## Eight-Workspace Execution Schedule
 
 This schedule maximizes useful parallelism without launching tasks that are
 likely to collide or wait idle.
+
+### Current PM Snapshot - 2026-06-06
+
+Verified merged: T01, T02, T03, T04, T05, T06, T07, T08, T09, T10, T11,
+T12, T13, T14, T15, T16, T17, T18, and T20.
+
+Scheduled workspaces, using 1 of 8 available slots:
+
+- T21 hosted one-line uninstaller: salvaged PR #428 under AWF PR monitor
+  `ws_9a7281385e294d6faa9ac756` with `claude_code`, `claude-opus-4-8`,
+  `high`.
+
+T19 remains the final integration task after T21 is merged.
 
 ### Human Gate Before Wave 1
 
@@ -983,7 +1206,7 @@ preflight becomes stale before Wave 1 launch:
 | --- | --- | --- | --- |
 | H01 | done - locked | T11, T12, T13, T16 | Installer hosting and trust-chain decision. |
 | H02 | done - locked | T06 | Plain-secret consent and provider prompt wording. |
-| H03 | done - locked | T01, T02, downstream implementation workspaces | Execution model: `codex`, `gpt-5.5`, `xhigh`. |
+| H03 | done - locked | T01, T02, downstream implementation workspaces | Default execution model: `codex`, `gpt-5.5`, `xhigh`; T07/T08/T10/T16 use the 2026-06-03 operator override `claude_code`, `claude-opus-4-8`, `high`; T18/T20 use the 2026-06-06 operator override `claude_code`, `claude-opus-4-8`, `high`; T21 is planned with the same settings after T20 merges. |
 | H04 | done - locked | T01, T02, downstream implementation workspaces | Launch preflight: clean expired AWF resources, rebuild local service images, rerun AWF bootstrap. |
 
 Do not hold T06/T11/T12/T13/T16 for additional H01/H02 approval. If a future
@@ -995,8 +1218,10 @@ or any downstream implementation workspace.
 
 ### Wave 1 - Foundation
 
-Capacity used: 2 workspaces. T11 is intentionally held until the T01 dependency
-gate is complete.
+Status: complete. T01 and T02 are merged.
+
+Capacity used: 2 workspaces. T11 was intentionally held until the T01
+dependency gate completed.
 
 | Slot | Task | Why now |
 | --- | --- | --- |
@@ -1005,9 +1230,7 @@ gate is complete.
 
 Recommended launch:
 
-- Launch T01 and T02 first after the Human Gate Before Wave 1 table is clean.
-- Do not launch T11 in this wave; queue it behind the release manifest gate
-  below.
+- No remaining launch work in this wave.
 
 Conflict flags:
 
@@ -1015,7 +1238,9 @@ Conflict flags:
 
 ### Release Manifest Gate
 
-Capacity used: 1 workspace when T01 is merged or explicitly satisfied. H01 is
+Status: complete. T11 is merged.
+
+Capacity used: 1 workspace when T01 is merged or explicitly satisfied. H01 was
 already locked.
 
 | Slot | Task | Why now |
@@ -1023,6 +1248,8 @@ already locked.
 | 1 | T11 install manifest | H01 is done; can start after T01 is merged or explicitly satisfied by the human operator. |
 
 ### Wave 2 - Setup, Start, Credentials, Clients
+
+Current status: complete. T03, T04, T05, T06, and T08 are merged.
 
 Capacity used: up to 5 workspaces over the wave; T08 is queued behind T04.
 
@@ -1040,11 +1267,7 @@ the setup CLI and dry-run surface exist before client dispatch is added.
 
 Recommended launch:
 
-- Launch T03 first if possible.
-- Launch T04/T05/T06 only after T03 is merged or explicitly satisfied by the
-  human operator.
-- Launch T08 only after T04 is merged or explicitly satisfied by the human
-  operator.
+- No remaining launch work in this wave.
 Conflict flags:
 
 - T04, T06, and T08 all touch `src/awf/host_setup`. Keep each task scoped to
@@ -1052,6 +1275,9 @@ Conflict flags:
 - T04 and T08 share the setup CLI surface. T08 consumes T04's command shell and
   owns only client selector dispatch plus client helper wiring.
 ### Wave 3 - Integrations And Release Surface
+
+Current status: complete. T07, T08, T09, T10, T12, T13, T16, and T17 are
+merged.
 
 Capacity used: up to 7 workspace assignments over the wave; T13 queues behind
 T12, and T16 queues behind T13.
@@ -1068,13 +1294,7 @@ T12, and T16 queues behind T13.
 
 Recommended launch:
 
-- Launch T07, T09, T10, and T12 together once their dependencies are merged.
-- Launch T13 only after T02, T11, and T12 are merged or explicitly satisfied so
-  package asset configuration and tests include the checked-in installer script.
-- Launch T16 only after T11, T12, and T13 are merged or explicitly satisfied.
-  H01 is already locked. Keep T16 queued while T12 or T13 is still only in PR
-  monitor so release checks smoke the final installer and package artifact set.
-- Launch T17 after T07 defines provider setup payloads.
+- No remaining launch work in this wave.
 
 Conflict flags:
 
@@ -1087,6 +1307,8 @@ Conflict flags:
 
 ### Wave 4 - Documentation And End-To-End Proof
 
+Current status: T14 and T15 are merged.
+
 Capacity used: 2 workspaces.
 
 | Slot | Task | Depends on |
@@ -1096,7 +1318,7 @@ Capacity used: 2 workspaces.
 
 Recommended launch:
 
-- Run T14 and T15 in parallel after their listed dependencies are merged.
+- No remaining launch work in this wave.
 - Keep T15 focused on documenting the implemented setup/start/init/install
   behavior. Avoid changing CLI behavior in this wave.
 
@@ -1117,9 +1339,28 @@ Capacity used: 1 workspace.
 
 Recommended launch:
 
-- Launch T18 after T15 is merged.
+- No remaining launch work in this wave.
 - Keep T18 focused on drift tests and doc corrections. Avoid changing CLI
   behavior in this wave.
+
+### Wave 5B - Installer Bootstrap Follow-Up
+
+Capacity used: 1 workspace at a time.
+
+| Slot | Task | Depends on |
+| --- | --- | --- |
+| 1 | T20 uv bootstrap installer contract | T12, T15 |
+| 1 | T21 hosted one-line uninstaller | T12, T15, T20 |
+
+Recommended launch:
+
+- T21 is salvaged into PR #428 and monitored by
+  `ws_9a7281385e294d6faa9ac756`.
+- Keep T20 focused on `packaging/install.sh`, installer fixture tests, shell
+  help text, and only minimal install-lane docs if needed.
+- Keep T21 focused on `packaging/uninstall.sh`, shared uninstall helpers,
+  installer/uninstaller fixture tests, and only minimal uninstall-lane docs if
+  needed.
 
 ### Wave 6 - Final Integration
 
@@ -1127,7 +1368,7 @@ Capacity used: 1 coordination workspace or local operator run.
 
 | Slot | Task | Depends on |
 | --- | --- | --- |
-| 1 | T19 final integration and coverage | T07, T09, T14, T15, T16, T17, T18 |
+| 1 | T19 final integration and coverage | T07, T09, T14, T15, T16, T17, T18, T20, T21 |
 
 Recommended launch:
 
@@ -1153,12 +1394,16 @@ Lane C - Installer/release
   H01(done) -> T11 -> T12 -> T13 -> T14 -> T19
                               \
                                +-> T16 -> T19
+                               \
+                                +-> T20 -> T21 -> T19
 
 Lane D - Docs/DX
   T01 -> T04 -> T10 -> T15 -> T18 -> T19
    |      |
    +-> T05 ----^
   H01(done) -> T11 -> T12 -> T13 -^
+                               \
+                                +-> T20 -> T21 -> T19
 
 Lane E - Human credential consent
   H02(done) -> T06
@@ -1177,6 +1422,9 @@ prompt:
 | --- | --- | --- |
 | installer | manifest checksum mismatch | Abort before install and print reason plus artifact URL. |
 | installer | PATH target not reachable | Do not claim success unless `awf` is executable or exact shell fix is printed. |
+| installer | `uv` missing | Do not silently install `uv`; prompt interactively or require explicit non-interactive opt-in, while preserving `pipx` fallback. |
+| uninstaller | credential or project deletion risk | Preserve user/agent credentials and project repos by default; remove only AWF-managed install/runtime state after explicit confirmation or flags. |
+| uninstaller | `uv` removal | Offer `uv` removal only when an AWF ownership marker proves AWF installed it; default to preserving `uv`. |
 | setup | Docker missing/offline | Fail readiness, do not start Core. |
 | setup | invalid source checkout | Return `SOURCE_CHECKOUT_INVALID` and exact missing marker. |
 | setup | keychain unavailable | Offer env refs or explicit plain-file opt-in, no raw secret write by default. |
