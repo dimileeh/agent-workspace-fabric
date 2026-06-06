@@ -370,7 +370,7 @@ class BitBucketClient:
         if not failed:
             return ()
 
-        pipeline = await self._find_pipeline_for_commit(repo, head_sha)
+        pipeline = await self._find_pipeline_for_commit(repo, head_sha, source_branch)
         if pipeline is None:
             return tuple(
                 self._external_status_failure(status, pytest_fallback_commands) for status in failed
@@ -592,15 +592,35 @@ class BitBucketClient:
     # ── Pipeline-chain internals ───────────────────────────────────────────
 
     async def _find_pipeline_for_commit(
-        self, repo: RepoRef, commit_sha: str
+        self, repo: RepoRef, commit_sha: str, source_branch: str | None = None
     ) -> dict[str, Any] | None:
-        """Return the most recent pipeline for a commit, or ``None`` if none exist."""
+        """Return the most recent pipeline for a commit, scoped to the PR ref.
+
+        Multiple pipelines can target the same commit (a branch pipeline plus a PR
+        pipeline, or a later manual run). The failing commit status was already
+        scoped by ``refname`` to the PR source branch, so the pipeline lookup must
+        apply the same ref context — otherwise the newest pipeline by commit hash
+        alone may belong to a different ref and yield step logs that do not match
+        the failing status. When candidate pipelines expose ref metadata but none
+        match, return ``None`` so the caller falls back to the external-status path
+        rather than mis-attributing a wrong-ref log; when no pipeline exposes ref
+        metadata, keep the newest as before.
+        """
         pipelines = await self._paginate(
             f"{self._repo_path(repo)}/pipelines/",
             operation="bitbucket fetch_failing_check_logs pipelines",
             params={"target.commit.hash": commit_sha, "sort": "-created_on"},
         )
-        return pipelines[0] if pipelines else None
+        if not pipelines:
+            return None
+        if source_branch is None:
+            return pipelines[0]
+        matched = [p for p in pipelines if _pipeline_targets_branch(p, source_branch)]
+        if matched:
+            return matched[0]
+        if any(_pipeline_has_ref_info(p) for p in pipelines):
+            return None
+        return pipelines[0]
 
     async def _failing_pipeline_steps(
         self, repo: RepoRef, pipeline_uuid: str
@@ -951,6 +971,25 @@ def _is_pipeline_owned_status(status: dict[str, Any]) -> bool:
     if str(status.get("key") or "").upper() == "PIPELINE":
         return True
     return "/pipelines/" in str(status.get("url") or "")
+
+
+def _pipeline_targets_branch(pipeline: dict[str, Any], source_branch: str) -> bool:
+    """True when a pipeline's target ref is the PR source branch.
+
+    Matches both branch pipelines (``target.ref_name``) and PR pipelines
+    (``target.source``), the two ways a pipeline records the ref it ran on.
+    """
+    target = _as_dict(pipeline.get("target"))
+    return source_branch in {
+        _clean_optional_str(target.get("ref_name")),
+        _clean_optional_str(target.get("source")),
+    }
+
+
+def _pipeline_has_ref_info(pipeline: dict[str, Any]) -> bool:
+    """True when a pipeline's target exposes any ref identity to match against."""
+    target = _as_dict(pipeline.get("target"))
+    return any(_clean_optional_str(target.get(key)) is not None for key in ("ref_name", "source"))
 
 
 def _freeze_params(params: Mapping[str, str] | None) -> _FrozenParams:

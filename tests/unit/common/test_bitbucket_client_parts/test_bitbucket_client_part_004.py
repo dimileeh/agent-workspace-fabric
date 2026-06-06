@@ -284,6 +284,103 @@ async def test_failing_check_logs_omits_refname_without_pr_context() -> None:
     assert "refname" not in statuses_call.url.params
 
 
+async def test_failing_check_logs_pipeline_scoped_to_pr_ref() -> None:
+    """Pick the pipeline whose ref matches the PR source branch, not just newest.
+
+    Regression for PRRT_kwDOSJAM6s6HnDUF: the commit-status fetch is scoped by
+    refname to the PR source branch, so the pipeline lookup must apply the same
+    ref context. With both a branch and a PR pipeline on one commit, choosing the
+    newest by ``target.commit.hash`` alone could tail steps from a different ref.
+    """
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)  # primes _pr_context with source branch "feature/head"
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "FAILED", "name": "Pipeline #5", "key": "PIPELINE"}],
+    )
+    fake.page(
+        "GET",
+        _PIPELINES,
+        values=[
+            # newest, but for a different ref → must be skipped
+            {"uuid": "other-ref", "target": {"ref_name": "main"}},
+            # older, but a PR pipeline whose source is this PR's branch → selected
+            {"uuid": "pipe-1", "target": {"source": "feature/head"}},
+        ],
+    )
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/",
+        values=[{"uuid": "step-2", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/step-2/log",
+        text="FAILED tests/test_x.py::test_y\n",
+    )
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert [f.name for f in failures] == ["Test"]
+    assert failures[0].run_id == "pipe-1"  # matched the PR ref, not the newer other-ref pipeline
+
+
+async def test_failing_check_logs_pipeline_wrong_ref_falls_back_to_external() -> None:
+    """When every candidate pipeline targets a different ref, don't tail its log.
+
+    Returning a wrong-ref pipeline would attach an unrelated step log to the PR's
+    failing status, so the lookup yields no pipeline and the status falls back to
+    the external (pytest) evidence path instead.
+    """
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "FAILED", "name": "Pipeline #5", "key": "PIPELINE"}],
+    )
+    fake.page("GET", _PIPELINES, values=[{"uuid": "other-ref", "target": {"ref_name": "main"}}])
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    failures = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD, pytest_fallback_commands=["uv run pytest -q"]
+    )
+    assert len(failures) == 1
+    assert failures[0].run_id is None  # no matching pipeline → external fallback, no wrong log
+
+
+async def test_failing_check_logs_pipeline_without_ref_metadata_keeps_newest() -> None:
+    """When pipelines expose no ref identity, keep the newest (legacy behavior).
+
+    Older pipeline payloads may omit target ref metadata; rather than drop the
+    log evidence, fall back to the most recent pipeline by commit.
+    """
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "FAILED", "name": "Pipeline #5", "key": "PIPELINE"}],
+    )
+    fake.page("GET", _PIPELINES, values=[{"uuid": "pipe-1", "state": {"name": "COMPLETED"}}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/",
+        values=[{"uuid": "step-2", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pipe-1/steps/step-2/log",
+        text="FAILED tests/test_x.py::test_y\n",
+    )
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert [f.name for f in failures] == ["Test"]
+    assert failures[0].run_id == "pipe-1"
+
+
 # ── rerun_failed_workflow_jobs ────────────────────────────────────────────────
 
 
