@@ -115,10 +115,12 @@ INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 # service setup" carries no lead-in, so it keeps its backticks and is still
 # surfaced as a bare no-path R2 offender — ungated, the strip would unwrap that
 # legacy guidance and let the very wording this drift test rejects pass. The
-# qualifier sits before the span, so this form never collides with R3's
-# bootstrap-framing patterns (which key on `awf init` *followed by* "without a
-# path"); the sibling AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE below handles the
-# qualifier-*after* wording that does. A path-bearing `awf init <path>` span has
+# qualifier sits before the span, but the bootstrap framing of R3's broad
+# pattern (7) ("`awf init`…bootstraps…service") sits *after* it, so this form can
+# still collide there — which is why R3's `_bootstrap_offenders` applies the same
+# symmetric `_without_init_prohibitions` strip rather than only the after-span
+# one. The sibling AFTER_SPAN_NO_PATH_INIT_PROHIBITION_RE below handles the
+# qualifier-*after* wording. A path-bearing `awf init <path>` span has
 # its backtick after the path, not after `init`, so it is left untouched.
 # The lead-in carries a negative lookahead that rejects double-negative
 # *reminders* such as "Do not forget to use no-path `awf init`": "do not forget
@@ -806,13 +808,20 @@ def _smoke_invocation_offense(invocation: SmokeInvocation) -> str | None:
 
 
 def _bootstrap_offenders(text: str) -> list[str]:
-    # An after-span no-path `awf init` *prohibition* ("Do not run `awf init`
-    # without a path") must not be read as a bootstrap reintroduction: unwrap its
-    # backticks first so the R3 patterns (which key on the backticked span) do not
-    # fire on the very wording that forbids the legacy form. The strip is gated on
-    # a prohibition lead-in, so a prescriptive "run `awf init` without a path to
-    # bootstrap" keeps its backticks and is still flagged below.
-    text = _strip_after_span_init_prohibition(text)
+    # A no-path `awf init` *prohibition* must not be read as a bootstrap
+    # reintroduction: unwrap its backticks first so the R3 patterns (which key on
+    # the backticked span) do not fire on the very wording that forbids the legacy
+    # form. Use the same symmetric strip R2 applies (:func:`_without_init_prohibitions`)
+    # so *both* phrasings are exempted: the after-span "Do not run `awf init`
+    # without a path" *and* the before-span "Do not use no-path `awf init` to
+    # bootstrap the local service". The before-span form would otherwise pass R2
+    # (which unwraps it) yet still trip R3's broad `awf init`…bootstrap…service
+    # pattern (7), since the bootstrap framing sits *after* the span even when the
+    # no-path qualifier sits before it. The strip is gated on a prohibition lead-in
+    # (and rejects double-negative "do not forget" reminders), so a prescriptive
+    # "run `awf init` without a path to bootstrap" keeps its backticks and is still
+    # flagged below.
+    text = _without_init_prohibitions(text)
     # Return the *matched snippet* (``match.group(0)``), not the raw regex
     # pattern, so an R3 failure message names the offending text a developer can
     # grep for instead of an opaque pattern string they would have to re-search

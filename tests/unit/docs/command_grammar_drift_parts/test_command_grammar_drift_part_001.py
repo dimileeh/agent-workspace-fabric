@@ -530,6 +530,19 @@ def test_helper_flags_no_path_init_as_bootstrap_prose() -> None:
     # it must not be read as a bootstrap reintroduction.
     assert _bootstrap_offenders("Do not run `awf init` without a path for service setup.") == []
     assert _bootstrap_offenders("Never run `awf init` without a path; pass a repo.") == []
+    # A *before-span* no-path prohibition whose bootstrap framing follows the span
+    # ("Do not use no-path `awf init` to bootstrap the local service") must be
+    # exempted too: R2 already unwraps it, so R3 must not trip the broad
+    # `awf init`…bootstrap…service pattern (7) on the very wording that forbids the
+    # legacy form. R3 applies the same symmetric `_without_init_prohibitions` strip
+    # as R2 so the before- and after-span phrasings agree.
+    for before_span in (
+        "Do not use no-path `awf init` to bootstrap the local service.",
+        "Never use no-path `awf init` to bootstrap the local service.",
+    ):
+        assert _bootstrap_offenders(before_span) == []
+        # R2 likewise reads it as a prohibition, not a no-path command example.
+        assert "awf init" not in _inline_command_mentions(_without_init_prohibitions(before_span))
     # The exemption is gated on the prohibition lead-in: a *prescriptive* reuse of
     # the same wording (no `do not`/`never`) is still flagged as a reintroduction,
     # and a sentence break between the lead-in and the span breaks the exemption so
