@@ -262,11 +262,12 @@ async def _handoff_sync_release_pr_monitor(
         # BITBUCKET_AUTH_NOT_CONFIGURED on missing credentials) must map to a
         # reason-coded failure here instead of escaping uncaught and stranding the
         # workspace in ``running``.
+        safe_exception = redact_audit_text(repr(exc), limit=1900)
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
             failure_reason=FailureReason.infrastructure_failure,
-            message=f"sync_release_pr failed: {exc}",
+            message=f"sync_release_pr failed: {safe_exception}"[:2000],
             reason_code=exc.reason_code,
         )
         return
