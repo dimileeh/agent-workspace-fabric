@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from awf.common.bitbucket_client import (
-    BITBUCKET_ISSUE_TRACKER_DISABLED,
+    BITBUCKET_ISSUE_CAPTURE_FAILED,
     BitBucketAuth,
     BitBucketClient,
     BitBucketClientError,
@@ -276,13 +276,18 @@ async def test_create_issue_fallback_without_pr_context_raises() -> None:
     # that never happened and resolve the reviewer's thread, dropping the
     # follow-up. The error must PROPAGATE so the caller downgrades to
     # needs_human, matching create_issue's documented fail-safe contract.
+    #
+    # The reason code must be BITBUCKET_ISSUE_CAPTURE_FAILED, NOT
+    # BITBUCKET_ISSUE_TRACKER_DISABLED: the latter is catalogued as "note
+    # captured on the PR — no action required", which would mislead operators
+    # since no comment ran on this path (nothing durable was recorded).
     fake = FakeBitBucket()
     fake.enqueue("POST", f"{_REPO}/issues", status=404, json={"type": "error"})
     client = make_client(fake)  # no fetch_pr_status → no remembered PR context
     with pytest.raises(BitBucketClientError) as excinfo:
         await client.create_issue(repo=repo(), title="t", body="b")
     assert excinfo.value.status == 404
-    assert excinfo.value.reason_code == BITBUCKET_ISSUE_TRACKER_DISABLED
+    assert excinfo.value.reason_code == BITBUCKET_ISSUE_CAPTURE_FAILED
 
 
 async def test_step_log_404_is_tolerated_as_empty() -> None:

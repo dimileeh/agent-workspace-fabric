@@ -209,6 +209,25 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace logs <workspace_id>",
         _reason_catalog_link("BITBUCKET_ISSUE_TRACKER_DISABLED"),
     ),
+    "BITBUCKET_ISSUE_CAPTURE_FAILED": _ReasonText(
+        (
+            "AWF could not durably capture a deferred review note: the BitBucket "
+            "issue tracker is disabled and there was no PR context to fall back "
+            "to, so neither an issue nor a PR comment was recorded."
+        ),
+        (
+            "Treat the deferred follow-up as uncaptured — the thread stays "
+            "unresolved and the merge is blocked. Enable the BitBucket repository "
+            "issue tracker (or ensure PR context is available) and remonitor so "
+            "the note can be captured."
+        ),
+        (
+            "BitBucket returned 404 for the issues endpoint (tracker disabled) and "
+            "AWF had not yet remembered the PR, leaving no comment fallback target."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("BITBUCKET_ISSUE_CAPTURE_FAILED"),
+    ),
     "AWF_SETUP_PLACEHOLDER": _ReasonText(
         "`awf setup` is registered but the first-run setup implementation is not active yet.",
         (

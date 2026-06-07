@@ -65,6 +65,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_error](#bitbucket_error)
 
+### BITBUCKET_ISSUE_CAPTURE_FAILED
+**Problem:** AWF could not durably capture a deferred review note: the BitBucket issue tracker is disabled and there was no PR context to fall back to, so neither an issue nor a PR comment was recorded.
+**Likely Cause:** BitBucket returned 404 for the issues endpoint (tracker disabled) and AWF had not yet remembered the PR, leaving no comment fallback target.
+**Operator Fix:** Treat the deferred follow-up as uncaptured — the thread stays unresolved and the merge is blocked. Enable the BitBucket repository issue tracker (or ensure PR context is available) and remonitor so the note can be captured.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#bitbucket_issue_capture_failed](#bitbucket_issue_capture_failed)
+
 ### BITBUCKET_ISSUE_TRACKER_DISABLED
 **Problem:** The BitBucket repository issue tracker is disabled, so AWF posted the tracking note as a pull-request comment instead of opening an issue.
 **Likely Cause:** BitBucket returned 404 for the issues endpoint because the repository issue tracker is turned off.

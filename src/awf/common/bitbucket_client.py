@@ -106,6 +106,13 @@ BITBUCKET_RATE_LIMITED = "BITBUCKET_RATE_LIMITED"
 BITBUCKET_PIPELINE_FULL_RERUN = "BITBUCKET_PIPELINE_FULL_RERUN"
 BITBUCKET_PIPELINE_NOT_RERUNNABLE = "BITBUCKET_PIPELINE_NOT_RERUNNABLE"
 BITBUCKET_ISSUE_TRACKER_DISABLED = "BITBUCKET_ISSUE_TRACKER_DISABLED"
+# Distinct from ``BITBUCKET_ISSUE_TRACKER_DISABLED`` (which the catalog documents as
+# "note captured on the PR — no action required"). This code means deferred capture
+# failed *entirely*: the issue tracker is disabled AND there was no remembered PR
+# context to fall back to, so neither an issue nor a PR comment was recorded. Using
+# the tracker-disabled code here would mislead operators into thinking the note was
+# captured when nothing durable was written.
+BITBUCKET_ISSUE_CAPTURE_FAILED = "BITBUCKET_ISSUE_CAPTURE_FAILED"
 BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
 # BitBucket answers 409 Conflict on the merge POST when a merge for this PR is
 # already in flight (typically a prior 202 async merge whose task-status poll was
@@ -616,6 +623,9 @@ class BitBucketClient:
         returning a PR- or issues-page URL: nothing durable was captured, so the
         deferred-capture caller must treat it as a failure and downgrade to human
         attention instead of resolving the thread (fail safe, mirroring the GitHub path).
+        The no-PR-context case carries ``BITBUCKET_ISSUE_CAPTURE_FAILED`` rather than
+        ``BITBUCKET_ISSUE_TRACKER_DISABLED`` so the propagated reason code does not
+        falsely imply the note was captured on the PR.
         """
         try:
             data = await self._request_json(
@@ -924,12 +934,6 @@ class BitBucketClient:
     async def _issue_fallback_to_comment(self, repo: RepoRef, title: str, body: str) -> str:
         """Post the issue content as a PR comment when the tracker is disabled."""
         ctx = self._pr_context.get(repo.slug())
-        _log.warning(
-            "bitbucket.issue_tracker_disabled",
-            repo=repo.slug(),
-            reason_code=BITBUCKET_ISSUE_TRACKER_DISABLED,
-            has_pr_context=ctx is not None,
-        )
         if ctx is None:
             # No PR context to comment on, and the tracker is disabled: nothing
             # durable can be captured (no issue filed, no comment posted).
@@ -940,12 +944,29 @@ class BitBucketClient:
             # handler downgrades to needs_human (this fault is non-transient, so it
             # blocks the merge), matching create_issue's documented fail-safe
             # contract — same reasoning as the comment-POST-failure path below.
+            #
+            # Carry BITBUCKET_ISSUE_CAPTURE_FAILED, NOT BITBUCKET_ISSUE_TRACKER_DISABLED:
+            # the latter is catalogued as "note captured on the PR — no action
+            # required", which is false here (no comment ran). A distinct code keeps
+            # operators from mistaking a total capture failure for a benign fallback.
+            _log.warning(
+                "bitbucket.issue_capture_failed",
+                repo=repo.slug(),
+                reason_code=BITBUCKET_ISSUE_CAPTURE_FAILED,
+                has_pr_context=False,
+            )
             raise BitBucketClientError(
                 operation="bitbucket create_issue comment-fallback",
                 status=404,
                 body="issue tracker disabled and no PR context to comment on",
-                reason_code=BITBUCKET_ISSUE_TRACKER_DISABLED,
+                reason_code=BITBUCKET_ISSUE_CAPTURE_FAILED,
             )
+        _log.warning(
+            "bitbucket.issue_tracker_disabled",
+            repo=repo.slug(),
+            reason_code=BITBUCKET_ISSUE_TRACKER_DISABLED,
+            has_pr_context=True,
+        )
         comment_body = f"{title}\n\n{body}"
         try:
             data = await self._request_json(
