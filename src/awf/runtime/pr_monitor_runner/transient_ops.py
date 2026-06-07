@@ -13,6 +13,7 @@ import re as re
 import time as time
 from typing import Any, cast
 
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
@@ -24,6 +25,7 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.constants import (
+    _BITBUCKET_TRANSIENT_RETRY_REASON,
     _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
     _GIT_FETCH_BASE_FAILED_REASON,
@@ -34,8 +36,10 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _collect_defer_items,
     _increment_base_fetch_retry_count,
     _is_transient_base_fetch_error,
+    _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
     _transient_base_fetch_retry_payload,
+    _transient_bitbucket_retry_payload,
     _transient_github_retry_payload,
     _with_ci_failures,
 )
@@ -124,6 +128,59 @@ async def _wait_after_transient_github_error(
             WorkspaceEventCreate(
                 event_type="monitor.github_transient_error_retrying",
                 reason_code=_GITHUB_TRANSIENT_RETRY_REASON,
+                payload=payload,
+            )
+        ],
+    )
+    await self._deps.sleep(wait_seconds)
+    return True
+
+
+async def _wait_after_transient_bitbucket_error(
+    self: Any,
+    exc: BitBucketClientError,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    context: str,
+    monitor_log: WorkspaceLogSink | None,
+) -> bool:
+    """Wait and keep polling on a recoverable BitBucket blip.
+
+    Mirrors :func:`_wait_after_transient_github_error` so BitBucket workspaces
+    survive transient rate-limit/transport/5xx faults instead of terminating
+    immediately. Returns ``True`` when the caller should retry (``continue``),
+    ``False`` when the error is deterministic and must fail the monitor.
+    """
+    if not _is_transient_bitbucket_client_error(exc):
+        return False
+    wait_seconds = self._config.poll_interval_seconds
+    payload = _transient_bitbucket_retry_payload(
+        exc,
+        context=context,
+        pr_number=pr_number,
+        wait_seconds=wait_seconds,
+    )
+    _log.warning(
+        "monitor.bitbucket_transient_error_retrying",
+        workspace_id=workspace_id,
+        **payload,
+    )
+    await self._write_monitor_log(
+        monitor_log,
+        {
+            "event": "monitor.bitbucket_transient_error_retrying",
+            "workspace_id": workspace_id,
+            "reason_code": _BITBUCKET_TRANSIENT_RETRY_REASON,
+            **payload,
+        },
+    )
+    await self._append_workspace_events(
+        workspace_id=workspace_id,
+        events=[
+            WorkspaceEventCreate(
+                event_type="monitor.bitbucket_transient_error_retrying",
+                reason_code=_BITBUCKET_TRANSIENT_RETRY_REASON,
                 payload=payload,
             )
         ],

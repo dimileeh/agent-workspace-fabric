@@ -82,6 +82,11 @@ _DEFAULT_MAX_PAGES = 50
 BITBUCKET_AUTH_NOT_CONFIGURED = "BITBUCKET_AUTH_NOT_CONFIGURED"
 BITBUCKET_AUTH_FAILED = "BITBUCKET_AUTH_FAILED"
 BITBUCKET_API_ERROR = "BITBUCKET_API_ERROR"
+# Transport-level failure (connection reset/refused, timeout, DNS) with no HTTP
+# status. Distinct from ``BITBUCKET_API_ERROR`` so the PR monitor can tell a
+# recoverable network blip apart from a deterministic abort (pagination cap,
+# SSRF origin guard) — those also carry ``status=None`` but must fail fast.
+BITBUCKET_TRANSPORT_ERROR = "BITBUCKET_TRANSPORT_ERROR"
 BITBUCKET_RATE_LIMITED = "BITBUCKET_RATE_LIMITED"
 BITBUCKET_PIPELINE_FULL_RERUN = "BITBUCKET_PIPELINE_FULL_RERUN"
 BITBUCKET_PIPELINE_NOT_RERUNNABLE = "BITBUCKET_PIPELINE_NOT_RERUNNABLE"
@@ -950,7 +955,7 @@ class BitBucketClient:
                     operation=operation,
                     status=None,
                     body=self._redact(str(exc)),
-                    reason_code=BITBUCKET_API_ERROR,
+                    reason_code=BITBUCKET_TRANSPORT_ERROR,
                 ) from exc
             if response.status_code == 429 and attempt < self._max_retries:
                 await self._sleep(self._retry_after_seconds(response, attempt))

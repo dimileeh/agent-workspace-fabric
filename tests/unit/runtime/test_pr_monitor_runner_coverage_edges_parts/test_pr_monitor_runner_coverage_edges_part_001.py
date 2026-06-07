@@ -11,6 +11,13 @@ import pytest_mock
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.bitbucket_client import (
+    BITBUCKET_API_ERROR,
+    BITBUCKET_AUTH_FAILED,
+    BITBUCKET_RATE_LIMITED,
+    BITBUCKET_TRANSPORT_ERROR,
+    BitBucketClientError,
+)
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
@@ -41,6 +48,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _as_utc,
     _increment_base_fetch_retry_count,
     _is_transient_base_fetch_error,
+    _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
     _redact_and_truncate_github_error,
 )
@@ -193,6 +201,14 @@ def _retry_events(ws: Workspace) -> list:
         event
         for event in ws.events
         if event.event_type == "monitor.github_transient_error_retrying"
+    ]
+
+
+def _bitbucket_retry_events(ws: Workspace) -> list:
+    return [
+        event
+        for event in ws.events
+        if event.event_type == "monitor.bitbucket_transient_error_retrying"
     ]
 
 
@@ -691,6 +707,132 @@ async def test_transient_retry_event_payload_is_structured_and_redacted(
         assert "https://<redacted>@github.com/example/repo" in payload["stderr"]
         assert len(payload["stderr"]) <= 400
         assert len(payload["message"]) <= 400
+
+
+@pytest.mark.unit
+def test_is_transient_bitbucket_client_error_classifies_recoverable_blips() -> None:
+    def err(*, status: int | None, reason_code: str) -> BitBucketClientError:
+        return BitBucketClientError(
+            operation="bitbucket fetch_pr_status",
+            status=status,
+            body="boom",
+            reason_code=reason_code,
+        )
+
+    # Recoverable: rate limit that survived internal backoff, transport blip,
+    # and 5xx server faults — symmetric to GitHub's transient markers.
+    assert _is_transient_bitbucket_client_error(err(status=429, reason_code=BITBUCKET_RATE_LIMITED))
+    assert _is_transient_bitbucket_client_error(
+        err(status=None, reason_code=BITBUCKET_TRANSPORT_ERROR)
+    )
+    for status in (500, 502, 503, 504):
+        assert _is_transient_bitbucket_client_error(
+            err(status=status, reason_code=BITBUCKET_API_ERROR)
+        )
+
+    # Deterministic: auth failure, 4xx client error, JSON parse (2xx body), and
+    # the pagination/SSRF safety aborts — which also carry ``status=None`` but
+    # map to ``BITBUCKET_API_ERROR`` and must fail fast, not loop.
+    assert not _is_transient_bitbucket_client_error(
+        err(status=403, reason_code=BITBUCKET_AUTH_FAILED)
+    )
+    assert not _is_transient_bitbucket_client_error(
+        err(status=404, reason_code=BITBUCKET_API_ERROR)
+    )
+    assert not _is_transient_bitbucket_client_error(
+        err(status=200, reason_code=BITBUCKET_API_ERROR)
+    )
+    assert not _is_transient_bitbucket_client_error(
+        err(status=None, reason_code=BITBUCKET_API_ERROR)
+    )
+
+
+@pytest.mark.unit
+async def test_wait_after_transient_bitbucket_error_retries_and_records_event(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    secret = "bbtoken_11AA22BB33CC44DD"
+    exc = BitBucketClientError(
+        operation="bitbucket fetch_pr_status",
+        status=503,
+        body=f"Service Unavailable: https://user:{secret}@bitbucket.org/repo " + ("x" * 600),
+        reason_code=BITBUCKET_API_ERROR,
+    )
+
+    retried = await runner._wait_after_transient_bitbucket_error(
+        exc,
+        workspace_id=workspace_id,
+        pr_number=42,
+        context="fetch_pr_status",
+        monitor_log=None,
+    )
+
+    assert retried is True
+    assert sleep_fn.calls == [60]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        events = _bitbucket_retry_events(ws)
+        assert len(events) == 1
+        event = events[0]
+        assert event.reason_code == "BITBUCKET_TRANSIENT_RETRY"
+        payload = event.payload
+        assert payload is not None
+        assert payload["context"] == "fetch_pr_status"
+        assert payload["operation"] == "bitbucket fetch_pr_status"
+        assert payload["status"] == 503
+        assert payload["reason_code"] == BITBUCKET_API_ERROR
+        assert payload["pr_number"] == 42
+        assert payload["wait_seconds"] == 60
+        assert secret not in str(payload)
+        assert len(payload["message"]) <= 400
+
+
+@pytest.mark.unit
+async def test_wait_after_transient_bitbucket_error_fails_fast_on_deterministic_fault(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    exc = BitBucketClientError(
+        operation="bitbucket fetch_pr_status",
+        status=403,
+        body="forbidden",
+        reason_code=BITBUCKET_AUTH_FAILED,
+    )
+
+    retried = await runner._wait_after_transient_bitbucket_error(
+        exc,
+        workspace_id=workspace_id,
+        pr_number=42,
+        context="fetch_pr_status",
+        monitor_log=None,
+    )
+
+    assert retried is False
+    assert sleep_fn.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert _bitbucket_retry_events(ws) == []
 
 
 @pytest.mark.unit

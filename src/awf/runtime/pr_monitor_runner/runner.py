@@ -249,6 +249,18 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     # failed. Preserve the actionable ``reason_code`` end-to-end
                     # — the exception already carries a redacted body, so its
                     # ``str()`` is safe to log/persist.
+                    #
+                    # Recoverable blips (rate-limit/transport/5xx) wait and
+                    # re-poll, symmetric to the GitHub path above; only
+                    # deterministic faults fall through and terminate.
+                    if await self._wait_after_transient_bitbucket_error(
+                        exc,
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        context="fetch_pr_status",
+                        monitor_log=monitor_log,
+                    ):
+                        continue
                     await self._write_monitor_log(
                         monitor_log,
                         {

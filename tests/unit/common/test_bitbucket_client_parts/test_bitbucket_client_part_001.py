@@ -18,6 +18,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_AUTH_FAILED,
     BITBUCKET_AUTH_NOT_CONFIGURED,
     BITBUCKET_RATE_LIMITED,
+    BITBUCKET_TRANSPORT_ERROR,
     BitBucketAuth,
     BitBucketClient,
     BitBucketClientError,
@@ -326,6 +327,9 @@ async def test_transport_error_raises_client_error_without_status() -> None:
     with pytest.raises(BitBucketClientError) as excinfo:
         await _create_pr(client)
     assert excinfo.value.status is None
+    # Transport blips carry a dedicated reason code so the PR monitor can tell
+    # them apart from deterministic ``status=None`` aborts (pagination/SSRF).
+    assert excinfo.value.reason_code == BITBUCKET_TRANSPORT_ERROR
 
 
 async def test_invalid_json_body_raises() -> None:
