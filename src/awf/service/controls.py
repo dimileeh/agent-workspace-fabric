@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import MergeCandidate, Operation, Workspace
+from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -32,7 +32,6 @@ from awf.runtime.operator_hints import (
     build_pending_operator_hint_payload,
     persist_operator_hint,
     remonitor_elapsed_settle_head_shas,
-    remonitor_has_elapsed_settle,
     utcnow,
 )
 from awf.runtime.pr_monitor import OperatorHint
@@ -133,33 +132,6 @@ def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> d
     if requested_at is None:
         raise RuntimeError("operator remonitor requested_at was not initialized")
     return requested_at
-
-
-def _remonitor_current_head_sha(
-    workspace: Workspace,
-    candidate: MergeCandidate | None,
-    monitor_state: dict[str, str],
-) -> str | None:
-    """Determine the effective head SHA for a remonitor, preferring workspace if past settle."""
-    candidate_head_sha = (
-        candidate.head_sha if candidate is not None and candidate.head_sha else None
-    )
-    workspace_head_sha = workspace.monitor_last_commit_sha
-    if (
-        candidate is not None
-        and candidate_head_sha is not None
-        and workspace_head_sha
-        and workspace_head_sha != candidate_head_sha
-        and workspace.pr_number is not None
-        and workspace.updated_at > candidate.updated_at
-        and remonitor_has_elapsed_settle(
-            monitor_state,
-            pr_number=workspace.pr_number,
-            head_sha=workspace_head_sha,
-        )
-    ):
-        return workspace_head_sha
-    return candidate_head_sha
 
 
 class WorkspaceControlService(_WorkspaceGuideMixin):
@@ -1401,6 +1373,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _operation_payload,
     _operator_operation_payload,
     _payload_matches_idempotency_identity,
+    _remonitor_current_head_sha,
     _reset_failed_workspace_for_remonitor,
     _with_secret_lease_evidence,
     _with_secret_lease_result,
