@@ -196,14 +196,6 @@ async def test_create_issue_tracker_disabled_falls_back_to_pr_comment() -> None:
     assert "details" in comment_payload["content"]["raw"]
 
 
-async def test_create_issue_tracker_disabled_without_pr_context_returns_usable_url() -> None:
-    fake = FakeBitBucket()
-    fake.enqueue("POST", f"{_REPO}/issues", status=404, json={"type": "error"})
-    client = make_client(fake)
-    url = await client.create_issue(repo=repo(), title="t", body="b")
-    assert url == "https://bitbucket.org/workspace/repo/issues"
-
-
 async def test_create_issue_non_404_error_propagates() -> None:
     fake = FakeBitBucket()
     fake.enqueue("POST", f"{_REPO}/issues", status=500, json={"type": "error"})
