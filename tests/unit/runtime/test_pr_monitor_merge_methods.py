@@ -1137,7 +1137,7 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A 409 ``BITBUCKET_MERGE_IN_PROGRESS`` must not finalise a failed operation.
+    """A 409 ``BITBUCKET_MERGE_IN_PROGRESS`` cancels (never fails) the operation.
 
     The reason code is transient: ``_wait_after_transient_bitbucket_error`` keeps
     the monitor polling and a later ``fetch_pr_status`` observes the in-flight
@@ -1145,6 +1145,12 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     permanent ``BITBUCKET_MERGE_FAILED`` operation here would leave an inconsistent
     audit trail (operation "failed" while the workspace completes), so the failure
     record is omitted for this reason code while still waiting and re-polling.
+
+    The running merge-attempt operation must still reach a terminal state: if the
+    in-flight merge completes before the next loop re-enters ``Merge`` the monitor
+    short-circuits to completion and never finishes this operation, orphaning it as
+    ``running`` forever. The attempt is therefore cancelled before returning the
+    transient blocker.
     """
     gh = _MergeMethodClient(
         repo_methods=("squash",),
@@ -1177,3 +1183,13 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
         )
     assert not any(op.error_code == "BITBUCKET_MERGE_FAILED" for op in operations)
     assert not any(op.status == OperationStatus.failed.value for op in operations)
+    # The merge-attempt operation must be terminal (cancelled), not orphaned as
+    # ``running`` — otherwise a later ShortCircuitCompleted leaves it stuck.
+    merge_ops = [
+        op
+        for op in operations
+        if isinstance(op.payload, dict) and op.payload.get("reason_code") == "MERGE"
+    ]
+    assert merge_ops, "expected a merge-attempt operation to be recorded"
+    assert all(op.status == OperationStatus.cancelled.value for op in merge_ops)
+    assert not any(op.status == OperationStatus.running.value for op in operations)

@@ -375,10 +375,17 @@ async def _attempt_merge_method(
         # merge's MERGED state, terminating the workspace *successfully*. Recording
         # a permanent ``failed`` operation here would leave an inconsistent audit
         # trail (operation "merge failed" vs. workspace "completed"), so for this
-        # reason code we skip the failure record and let the eventual outcome —
-        # the still-open merge operation finished by the succeeding re-poll, or the
-        # short-circuit completion — speak for itself. Unlike GitHub, BitBucket has
-        # a transient blocker that later succeeds, so this case is unique to it.
+        # reason code we do not fail the operation. We must still drive it to a
+        # terminal state, though: ``_attempt_merge_method`` already created a
+        # *running* monitor-state operation for this attempt, and if the in-flight
+        # merge completes before the next loop re-enters ``Merge`` the monitor
+        # takes ``ShortCircuitCompleted`` — which records its own separate
+        # operation and never finishes this one. Leaving it ``running`` would
+        # orphan it indefinitely and pollute active-operation/recovery state.
+        # Cancel it instead (neither failed nor succeeded — this attempt was
+        # superseded by the already-in-flight merge) so it is terminal without
+        # contradicting the eventual completion. Unlike GitHub, BitBucket has a
+        # transient blocker that later succeeds, so this case is unique to it.
         if exc.reason_code != BITBUCKET_MERGE_IN_PROGRESS:
             await self._finish_monitor_operation(
                 merge_operation,
@@ -408,6 +415,16 @@ async def _attempt_merge_method(
                     "operation": "merge_pr",
                     "merge_method": merge_method,
                     "error_message": str(exc),
+                },
+            )
+        else:
+            await self._finish_monitor_operation(
+                merge_operation,
+                status=OperationStatus.cancelled,
+                result={
+                    "status": "cancelled",
+                    "outcome": "bitbucket_merge_in_progress",
+                    "reason_code": BITBUCKET_MERGE_IN_PROGRESS,
                 },
             )
         return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
