@@ -528,12 +528,14 @@ def test_payload_matches_identity_skips_keys_absent_from_identity() -> None:
     )
 
 
+@pytest.mark.unit
 def test_claim_lease_is_live_false_for_missing_owner_or_expiry() -> None:
     now = datetime.now(UTC)
     assert not _claim_lease_is_live(None, now + timedelta(minutes=5), now=now)
     assert not _claim_lease_is_live("worker", None, now=now)
 
 
+@pytest.mark.unit
 def test_claim_lease_is_live_naive_expiry_against_aware_now() -> None:
     # Naive stored expiry + aware ``now`` (the realistic path) compares naively.
     now = datetime.now(UTC)
@@ -541,6 +543,7 @@ def test_claim_lease_is_live_naive_expiry_against_aware_now() -> None:
     assert _claim_lease_is_live("worker", naive_future, now=now)
 
 
+@pytest.mark.unit
 def test_claim_lease_is_live_aware_expiry_against_naive_now() -> None:
     # Symmetric guard: an aware expiry paired with a naive ``now`` must compare
     # naively rather than raising ``TypeError`` on a mixed-awareness comparison.
