@@ -787,6 +787,23 @@ _CI_DOCKER_PULL_SUCCESS_STATUS_MARKERS = (
     "status: image is up to date for ",
 )
 
+# Permanent (non-retryable) Docker pull / OCI registry error strings.  When any
+# of these phrases appear on a Docker pull-failure evidence line — or on a nearby
+# ``error response from daemon`` line within the timeout-evidence window — the pull
+# cannot succeed on a retry (auth denial, missing image/tag, unknown manifest).
+# These are checked against a narrow set of targets so generic terms like
+# ``"not found"`` and ``"unauthorized"`` do not fire on unrelated application log
+# lines that happen to sit near a ``docker pull failed`` summary.
+_CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS = (
+    "access denied",
+    "denied:",
+    "no such image",
+    "manifest unknown",
+    "not found",
+    "unauthorized",
+    "repository does not exist",
+)
+
 # ``gh run view --log-failed`` emits the whole failed step, so a real
 # integration/Go test that logs ``context deadline exceeded`` can sit in the same
 # excerpt as an unrelated Docker pull failure. A registry-timeout marker
@@ -1001,6 +1018,26 @@ def _docker_pull_command_succeeded(
     return False
 
 
+def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bool:
+    """Whether a Docker pull-failure evidence line represents a permanent error.
+
+    Returns True when the evidence line itself OR any adjacent line within
+    ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` that also carries the daemon-error
+    marker contains a permanent pull-error phrase (access-denied, no-such-image,
+    manifest-unknown, etc.).  Permanent errors cannot succeed on a retry, so their
+    evidence lines must not anchor transient-timeout attribution.
+    """
+    if any(marker in lines[index] for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS):
+        return True
+    start = max(0, index - _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW)
+    end = min(len(lines), index + _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW + 1)
+    return any(
+        _CI_DOCKER_DAEMON_ERROR_MARKER in lines[probe_index]
+        and any(marker in lines[probe_index] for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS)
+        for probe_index in range(start, end)
+    )
+
+
 def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     """Whether a generic network-timeout phrase is tied to a Docker pull failure.
 
@@ -1070,6 +1107,20 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     if not evidence_line_indexes:
         return False
     evidence_line_set = set(evidence_line_indexes)
+    # Filter out evidence lines that represent permanent (non-retryable) pull
+    # errors — access-denied, no-such-image, manifest-unknown, etc.  A permanent
+    # pull failure cannot succeed on a retry, so its proximity to an unrelated
+    # ``context deadline exceeded`` must not trigger a silent rerun.  The
+    # ``evidence_line_set`` above intentionally keeps ALL evidence lines (both
+    # transient and permanent) so that the uncorroborated-proximity guard below
+    # still works correctly for timeout lines that are themselves evidence lines.
+    transient_evidence_line_indexes = [
+        index
+        for index in evidence_line_indexes
+        if not _evidence_line_is_permanent_pull_failure(index, lines)
+    ]
+    if not transient_evidence_line_indexes:
+        return False
     # The bare ``failed to pull image`` substring is too loose to mark a line as a
     # kubelet/containerd application-image event: an ordinary app log line such as
     # ``failed to pull image catalog from https://cdn`` contains the substring but
@@ -1096,7 +1147,7 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
         )
         and any(
             abs(index - evidence_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
-            for evidence_index in evidence_line_indexes
+            for evidence_index in transient_evidence_line_indexes
         )
         for index, line in enumerate(lines)
     )

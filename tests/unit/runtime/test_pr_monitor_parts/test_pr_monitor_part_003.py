@@ -1345,3 +1345,87 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_docker_pull_access_denied_near_unrelated_timeout_reports_ci_failure(
+        self,
+    ) -> None:
+        """Canonical bug scenario from issue #452: a permanent access-denied pull error
+        followed by an unrelated ``context deadline exceeded`` within the evidence
+        window must NOT be treated as transient infra and rerun.  The image will never
+        appear — burning the rerun budget is worse than reporting it to the agent."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: pull access denied for myimage\n"
+                "Docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_docker_pull_no_such_image_near_unrelated_timeout_reports_ci_failure(
+        self,
+    ) -> None:
+        """A permanent ``No such image`` pull error with a nearby unrelated timeout
+        must be classified deterministic (not transient) even though a
+        ``context deadline exceeded`` sits within the evidence window.  The image
+        does not exist; retrying is futile."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: No such image: nonexistent-app:latest\n"
+                "Docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_docker_pull_manifest_unknown_near_unrelated_timeout_reports_ci_failure(
+        self,
+    ) -> None:
+        """A permanent ``manifest unknown`` pull error with a nearby unrelated
+        timeout must be classified deterministic.  The tag/digest does not exist
+        in the registry; a rerun will not fix it."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: manifest for myapp:v99 not found: "
+                "manifest unknown: manifest unknown\n"
+                "Docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
