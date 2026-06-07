@@ -1313,9 +1313,19 @@ def _pipeline_targets_branch(pipeline: dict[str, Any], source_branch: str) -> bo
 
 
 def _pipeline_has_ref_info(pipeline: dict[str, Any]) -> bool:
-    """True when a pipeline's target exposes any ref identity to match against."""
+    """True when a pipeline's target exposes any identity to match against.
+
+    Mirrors every dimension the lookup matches on — ``target.ref_name`` and
+    ``target.source`` (branch), plus ``target.pullrequest.id`` (PR). A PR-only
+    pipeline row that carries just a ``pullrequest.id`` (for a different PR) is
+    still identifiable, so the wrong-ref guard must count it; otherwise it reads
+    as "no ref info" and the caller falls back to ``pipelines[0]``, risking
+    attaching another PR's step logs to this monitor's failing checks.
+    """
     target = _as_dict(pipeline.get("target"))
-    return any(_clean_optional_str(target.get(key)) is not None for key in ("ref_name", "source"))
+    if any(_clean_optional_str(target.get(key)) is not None for key in ("ref_name", "source")):
+        return True
+    return _clean_optional_str(_as_dict(target.get("pullrequest")).get("id")) is not None
 
 
 def _pipeline_targets_pr(pipeline: dict[str, Any], pr_number: int) -> bool:

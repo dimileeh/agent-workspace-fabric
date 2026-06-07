@@ -375,6 +375,37 @@ async def test_failing_check_logs_pipeline_wrong_ref_falls_back_to_external() ->
     assert failures[0].run_id is None  # no matching pipeline → external fallback, no wrong log
 
 
+async def test_failing_check_logs_other_pr_pipeline_falls_back_to_external() -> None:
+    """A PR-only pipeline for a *different* PR must not be mis-attributed.
+
+    Regression for PRRT_kwDOSJAM6s6HoN62: when candidate pipelines carry only a
+    ``target.pullrequest.id`` (no ``ref_name``/``source``) and it belongs to
+    another PR, neither the PR-id nor the branch match fires. The wrong-ref guard
+    must still recognise the pipeline as ref-bearing and bail to the external
+    (pytest) fallback instead of attaching the other PR's step log via
+    ``pipelines[0]``.
+    """
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)  # this monitor is PR 42 on branch "feature/head"
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "FAILED", "name": "Pipeline #5", "key": "PIPELINE"}],
+    )
+    fake.page(
+        "GET",
+        _PIPELINES,
+        values=[{"uuid": "other-pr", "target": {"pullrequest": {"id": 99}}}],
+    )
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    failures = await client.fetch_failing_check_logs(
+        repo=repo(), pr_number=42, head_sha=_HEAD, pytest_fallback_commands=["uv run pytest -q"]
+    )
+    assert len(failures) == 1
+    assert failures[0].run_id is None  # other PR's pipeline → external fallback, no wrong log
+
+
 async def test_failing_check_logs_pipeline_without_ref_metadata_keeps_newest() -> None:
     """When pipelines expose no ref identity, keep the newest (legacy behavior).
 
