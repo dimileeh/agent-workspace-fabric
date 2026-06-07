@@ -691,14 +691,18 @@ _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
 # "app"`` event for an *application* image in an e2e deployment is a real
 # image/deploy bug the repair agent must see, so this marker only anchors a
 # registry timeout when explicit Docker pull context — a ``docker pull`` command
-# echo, a daemon error response, or a registry host / ``/v2/`` API path / ``pull
-# access denied`` — sits within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines, i.e.
-# the failing pull went through the Docker CLI / registry rather than a bare
-# kubelet event.
+# echo, or a registry host / ``/v2/`` API path / ``pull access denied`` — sits
+# within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines, i.e. the failing pull went
+# through the Docker CLI / registry rather than a bare kubelet event. A bare
+# ``error response from daemon`` line is deliberately *not* pull context: the
+# daemon emits it for any operation (``docker run``/``build``/start), so a
+# generic daemon timeout adjacent to a kubelet ``failed to pull image`` event
+# must not corroborate it. A daemon line only counts when it *also* carries
+# registry context — which the registry markers below already capture — keeping
+# this consistent with the same-line requirement in ``_is_docker_pull_failure_line``.
 _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER = "failed to pull image"
 _CI_DOCKER_PULL_CONTEXT_MARKERS = (
     "docker pull",
-    _CI_DOCKER_DAEMON_ERROR_MARKER,
     *_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS,
 )
 
@@ -800,12 +804,15 @@ def _is_docker_pull_failure_line(
     ``docker pull failed`` names the Docker CLI, so it qualifies on its own. The
     ``failed to pull image`` wording is shared with containerd / the Kubernetes
     kubelet, so it qualifies only when explicit Docker pull context (a ``docker
-    pull`` echo, daemon error, or registry host / ``/v2/`` path) sits within
+    pull`` echo, or a registry host / ``/v2/`` path) sits within
     ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines — otherwise a bare kubelet
     ``failed to pull image "app"`` event from an e2e deployment (a real image bug)
-    would be silently rerun. The generic ``error response from daemon`` wrapper
-    qualifies only when the same line also carries registry / image-pull context,
-    since the daemon emits it for any operation — a bare daemon timeout from a
+    would be silently rerun. A bare ``error response from daemon`` line is not
+    such context (it is excluded from ``_CI_DOCKER_PULL_CONTEXT_MARKERS``): the
+    daemon emits it for any operation, so a generic daemon timeout next to a
+    kubelet ``failed to pull image`` event must not corroborate it. The daemon
+    wrapper anchors only as its own evidence line, and only when that same line
+    also carries registry / image-pull context — a bare daemon timeout from a
     ``docker run`` test step is a real failure, not flaky registry infra.
     """
 

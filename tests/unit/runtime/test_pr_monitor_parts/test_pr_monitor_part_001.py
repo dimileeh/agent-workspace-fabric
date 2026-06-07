@@ -939,6 +939,33 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_bare_daemon_error_does_not_anchor_failed_to_pull_image(self) -> None:
+        """A bare ``Error response from daemon: context deadline exceeded`` line —
+        no registry/image-pull context — must not corroborate a nearby
+        kubelet-style ``Failed to pull image "app"`` event. Both are real failures
+        (a ``docker run`` daemon timeout and an application image/deploy bug), so
+        the daemon line is not Docker pull context and the failure must reach the
+        repair agent rather than be silently rerun as transient CI."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: context deadline exceeded\n"
+                'Failed to pull image "app": context deadline exceeded'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
         """A failure whose log matches neither transient nor registry-timeout
         markers falls through to the repair agent."""

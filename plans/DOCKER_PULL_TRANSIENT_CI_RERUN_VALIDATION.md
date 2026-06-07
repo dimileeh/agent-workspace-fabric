@@ -16,13 +16,19 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
   - `_CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER` (`"docker pull failed"`) — names
     the Docker CLI explicitly, so it anchors on its own.
   - `_CI_DOCKER_IMAGE_PULL_FAILURE_MARKER` (`"failed to pull image"`) +
-    `_CI_DOCKER_PULL_CONTEXT_MARKERS` (`"docker pull"` echo / daemon error /
-    registry hosts / `/v2/` / `"pull access denied"`) — this phrasing is shared by
+    `_CI_DOCKER_PULL_CONTEXT_MARKERS` (`"docker pull"` echo / registry hosts /
+    `/v2/` / `"pull access denied"`) — this phrasing is shared by
     Docker, containerd, and the Kubernetes kubelet, so a bare
     `Failed to pull image "app": context deadline exceeded` e2e/k8s deploy bug must
     reach the repair agent. It anchors a registry timeout only when corroborating
     Docker pull context sits within `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` lines
-    (review comment PRRT_kwDOSJAM6s6HqBMY).
+    (review comment PRRT_kwDOSJAM6s6HqBMY). A bare `"error response from daemon"`
+    line is deliberately excluded from this tuple (review comment
+    PRRT_kwDOSJAM6s6HqEY1): the daemon emits it for any operation, so a generic
+    daemon timeout adjacent to a kubelet `failed to pull image` event must not
+    corroborate it; a daemon line that genuinely carries registry context still
+    counts via the registry markers, keeping it consistent with the same-line
+    requirement in `_is_docker_pull_failure_line`.
   - `_CI_DOCKER_DAEMON_ERROR_MARKER` (`"error response from daemon"`) +
     `_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS` (registry hosts / `/v2/` API path /
     `"pull access denied"`) — a daemon-error line only anchors when it also carries
