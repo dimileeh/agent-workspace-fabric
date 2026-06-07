@@ -1130,3 +1130,209 @@ def test_service_git_environment_forwards_ssh_agent_socket(
 
     assert env["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
     assert "IdentityAgent=/run/host-services/ssh-auth.sock" in env["GIT_SSH_COMMAND"]
+
+
+class _RecordingForgeClient:
+    """Minimal ForgeClient stub that records aclose() calls."""
+
+    def __init__(self) -> None:
+        self.aclose_calls = 0
+
+    async def aclose(self) -> None:
+        self.aclose_calls += 1
+
+
+@pytest.mark.unit
+def test_release_forge_client_after_build_error_runs_without_event_loop() -> None:
+    """Outside a running loop the helper drives aclose() to completion."""
+    gh = _RecordingForgeClient()
+
+    worker_mod._release_forge_client_after_build_error(gh)  # type: ignore[arg-type]
+
+    assert gh.aclose_calls == 1
+
+
+@pytest.mark.unit
+def test_release_forge_client_after_build_error_schedules_on_running_loop() -> None:
+    """Inside a running loop the helper schedules a tracked close task."""
+
+    async def _drive() -> _RecordingForgeClient:
+        gh = _RecordingForgeClient()
+        worker_mod._release_forge_client_after_build_error(gh)  # type: ignore[arg-type]
+        # Scheduled, not yet run: yield control so the tracked task can finish.
+        assert worker_mod._PENDING_FORGE_CLIENT_CLOSERS
+        await asyncio.sleep(0)
+        return gh
+
+    gh = asyncio.run(_drive())
+
+    assert gh.aclose_calls == 1
+    # The done-callback drains the tracking set so it never grows unbounded.
+    assert not worker_mod._PENDING_FORGE_CLIENT_CLOSERS
+
+
+def _stub_worker_runtime_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    created: dict[str, Any],
+    *,
+    forge_client: object,
+    build_feature: Any,
+    build_release: Any,
+) -> None:
+    """Replace build_worker_runtime's heavy collaborators with light stubs."""
+
+    class _Runner:
+        pass
+
+    class _LogStore:
+        def __init__(self, *, root: Path, session_factory: object) -> None:
+            pass
+
+    class _ValidationRunner:
+        def __init__(self, *, runner: object, artifacts_dir: Path, log_store: object) -> None:
+            pass
+
+    class _PullRequestCreator:
+        def __init__(self, runner: object) -> None:
+            pass
+
+    class _BranchOpenPullRequestResolver:
+        def __init__(self, runner: object) -> None:
+            pass
+
+    class _GitManager:
+        def __init__(
+            self,
+            work_dir: Path,
+            *,
+            env: object | None = None,
+            worktree_owner_uid: int | None = None,
+            worktree_owner_gid: int | None = None,
+        ) -> None:
+            pass
+
+    class _ComposeManager:
+        def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+            pass
+
+    class _LocalSecretLeaseMountResolver:
+        def __init__(self, *, host_home: Path, work_dir: Path, host_env: object) -> None:
+            pass
+
+    class _ComposeStackLauncher:
+        def __init__(
+            self,
+            *,
+            compose: object,
+            agent_runtime_image: str,
+            auth_mount_resolver: object,
+            secret_lease_resolver: object,
+            companion_image_builder: object = None,
+        ) -> None:
+            pass
+
+    class _Provisioner:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            git: object,
+            stack_launcher: object,
+            config: object,
+            service_diagnostics: object = None,
+        ) -> None:
+            pass
+
+    class _WorkspaceExecutor:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            runner: object,
+            compose: object,
+            validation: object,
+            pr_creator: object,
+            config: object,
+            pr_monitor_factory: object,
+            log_store: object,
+            usage_sampler: object = None,
+        ) -> None:
+            created["executor_monitor_factory"] = pr_monitor_factory
+
+    class _ControlWorker:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            provisioner: object,
+            executor: object,
+            runtime_cleaner: object,
+            open_pr_resolver: object,
+            orphan_dir_reconciler: object = None,
+            classified_orphan_reaper: object = None,
+            auth_overlay_work_dir: object = None,
+            config: object,
+        ) -> None:
+            pass
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: object())
+    monkeypatch.setattr(worker_mod, "AsyncioSubprocessRunner", _Runner)
+    monkeypatch.setattr(worker_mod, "LogStore", _LogStore)
+    monkeypatch.setattr(worker_mod, "ValidationRunner", _ValidationRunner)
+    monkeypatch.setattr(worker_mod, "PullRequestCreator", _PullRequestCreator)
+    monkeypatch.setattr(worker_mod, "make_forge_client", lambda _forge, _runner: forge_client)
+    monkeypatch.setattr(worker_mod, "BranchOpenPullRequestResolver", _BranchOpenPullRequestResolver)
+    monkeypatch.setattr(worker_mod, "GitManager", _GitManager)
+    monkeypatch.setattr(worker_mod, "ComposeManager", _ComposeManager)
+    monkeypatch.setattr(worker_mod, "LocalSecretLeaseMountResolver", _LocalSecretLeaseMountResolver)
+    monkeypatch.setattr(worker_mod, "ComposeStackLauncher", _ComposeStackLauncher)
+    monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
+    monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _WorkspaceExecutor)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
+    monkeypatch.setattr(
+        worker_mod, "_merge_coordinator_for_database_url", _in_process_merge_coordinator
+    )
+    monkeypatch.setattr(worker_mod, "build_feature_pr_monitor", build_feature)
+    monkeypatch.setattr(worker_mod, "build_release_pr_monitor", build_release)
+
+
+@pytest.mark.unit
+def test_pr_monitor_factory_closes_forge_client_when_builder_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6HnRTp: a monitor-build failure must not leak
+    the forge client the factory built for the (never-run) monitor."""
+    created: dict[str, Any] = {}
+    forge_client = _RecordingForgeClient()
+
+    def _raising_builder(**_kwargs: object) -> object:
+        raise RuntimeError("builder boom")
+
+    _stub_worker_runtime_dependencies(
+        monkeypatch,
+        created,
+        forge_client=forge_client,
+        build_feature=_raising_builder,
+        build_release=_raising_builder,
+    )
+
+    worker_mod.build_worker_runtime(_settings(tmp_path))
+    factory = created["executor_monitor_factory"]
+
+    with pytest.raises(RuntimeError, match="builder boom"):
+        factory(
+            object(),
+            WorkspaceProfile(name="default"),
+            SimpleNamespace(
+                auto_merge=True,
+                initial_review_grace_period_seconds=None,
+                task_kind="feature_branch_pr",
+                repo_url="https://github.com/o/r.git",
+            ),
+        )
+
+    assert forge_client.aclose_calls == 1
