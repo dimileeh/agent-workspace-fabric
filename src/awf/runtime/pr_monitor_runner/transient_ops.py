@@ -225,7 +225,14 @@ async def _wait_after_transient_forge_error(
             context=context,
             monitor_log=monitor_log,
         )
-    return False  # pragma: no cover - only GitHub/BitBucket subclasses exist
+    # No per-forge wait helper exists for an unknown subclass, so we cannot emit
+    # a transient-retry event or honour a backoff. Fail loudly rather than
+    # silently classifying a possibly-transient fault as deterministic: a new
+    # forge must extend this dispatch. Mirrors the exhaustiveness raise in
+    # ``loop.py``.
+    raise RuntimeError(  # pragma: no cover - only GitHub/BitBucket subclasses exist
+        f"unknown ForgeClientError subclass: {type(exc).__name__}"
+    )
 
 
 async def _wait_after_transient_base_fetch_error(
