@@ -1027,13 +1027,17 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     manifest-unknown, etc.).  Permanent errors cannot succeed on a retry, so their
     evidence lines must not anchor transient-timeout attribution.
     """
-    if any(marker in lines[index] for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS):
+    clean_current = re.sub(r'"[^"]*"', "", lines[index])
+    if any(marker in clean_current for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS):
         return True
     start = max(0, index - _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW)
     end = min(len(lines), index + _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW + 1)
     return any(
         _CI_DOCKER_DAEMON_ERROR_MARKER in lines[probe_index]
-        and any(marker in lines[probe_index] for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS)
+        and any(
+            marker in re.sub(r'"[^"]*"', "", lines[probe_index])
+            for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS
+        )
         for probe_index in range(start, end)
     )
 

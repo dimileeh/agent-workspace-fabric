@@ -1429,3 +1429,57 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_image_name_containing_denied_with_timeout_dispatches_rerun(self) -> None:
+        """A Docker image whose name contains "denied:" as a substring must not
+        cause a transient pull timeout to be classified as a permanent failure.
+        Quoted substrings (the image reference) are stripped before checking
+        permanent-error markers so only real error phrases outside the image name
+        are matched."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull my-denied:latest\n"
+                "Docker pull failed with exit code 1\n"
+                'Failed to pull image "my-denied:latest": context deadline exceeded'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_image_name_containing_unauthorized_with_timeout_dispatches_rerun(
+        self,
+    ) -> None:
+        """An image whose name contains "unauthorized" must not prevent a genuine
+        transient network timeout from being rerun.  The marker check must ignore
+        the quoted image reference in the log line."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull unauthorized-service:latest\n"
+                "Docker pull failed with exit code 1\n"
+                'Failed to pull image "unauthorized-service:latest": context deadline exceeded'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
