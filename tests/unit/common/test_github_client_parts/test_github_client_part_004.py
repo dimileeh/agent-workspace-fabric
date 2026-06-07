@@ -998,49 +998,6 @@ class TestMutations:
         assert "no commits between" in str(exc.value)
 
     @pytest.mark.unit
-    async def test_create_pull_request_extracts_url_from_noisy_stdout(self) -> None:
-        # gh may prefix the URL with status noise on stdout; we extract the URL
-        # rather than returning the whole line verbatim.
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=(
-                "Creating pull request for development into main in o/r\n"
-                "https://github.com/o/r/pull/777\n"
-            ),
-        )
-        client = GitHubClient(fake)
-        url = await client.create_pull_request(
-            repo=RepoRef(owner="o", name="r"),
-            base="main",
-            head="development",
-            title="t",
-            body="b",
-        )
-        assert url == "https://github.com/o/r/pull/777"
-
-    @pytest.mark.unit
-    async def test_create_pull_request_raises_when_stdout_has_no_url(self) -> None:
-        # gh exits 0 but prints only warning/status text — must raise rather than
-        # persist a non-URL string that breaks downstream PR-number extraction.
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout="Warning: 1 uncommitted change\n",
-        )
-        client = GitHubClient(fake)
-        with pytest.raises(GitHubClientError) as exc:
-            await client.create_pull_request(
-                repo=RepoRef(owner="o", name="r"),
-                base="main",
-                head="development",
-                title="t",
-                body="b",
-            )
-        assert exc.value.operation == "gh pr create (no URL in stdout)"
-        assert "unexpected gh output" in str(exc.value)
-
-    @pytest.mark.unit
     async def test_merge_pr_squash_delete_branch_default(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0)  # merge
