@@ -618,6 +618,50 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_registry_timeout_phrase_without_docker_pull_reports_ci_failure(self) -> None:
+        """A real app/integration failure that merely logs a net/http timeout
+        phrase (no Docker pull / daemon evidence) must reach the repair agent,
+        not be silently rerun as transient CI."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "calling downstream payments service\n"
+                "net/http: request canceled while waiting for connection"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
+        """A failure whose log matches neither transient nor registry-timeout
+        markers falls through to the repair agent."""
+        failure = CheckFailure(
+            name="build",
+            conclusion="FAILURE",
+            log_excerpt="unexpected job termination with no diagnostic output",
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_docker_pull_with_structured_test_evidence_reports_ci_failure(self) -> None:
         failure = CheckFailure(
             name="python-coverage-shards (2)",

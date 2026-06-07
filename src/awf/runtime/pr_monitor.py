@@ -622,13 +622,29 @@ _CI_TRANSIENT_FAILURE_MARKERS = (
     "connection aborted",
     "recv failure",
     "tls handshake timeout",
-    "context deadline exceeded",
-    "timeout exceeded while awaiting headers",
-    "request canceled while waiting for connection",
     "failed to download",
     "network is unreachable",
     "runner has received a shutdown signal",
     "lost communication with the server",
+)
+
+# Docker pull / service-container registry timeouts. Unlike the unconditional
+# markers above, these Go context-timeout and net/http phrases also surface in
+# genuine application or integration test failures (an outbound HTTP/gRPC call
+# that times out is a real bug for the repair agent, not flaky infra). They only
+# count as transient CI when the same log also shows Docker pull / daemon
+# activity — i.e. a registry image pull that timed out before the job's real
+# work ran — so a real test failure that merely logs one of these phrases is
+# still reported instead of silently rerun.
+_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS = (
+    "context deadline exceeded",
+    "timeout exceeded while awaiting headers",
+    "request canceled while waiting for connection",
+)
+
+_CI_DOCKER_PULL_EVIDENCE_MARKERS = (
+    "docker pull",
+    "error response from daemon",
 )
 _CI_REQUIRED_ROLLUP_CHECK_NAMES = frozenset(
     {
@@ -698,7 +714,22 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
         return bool(failure.run_id) and failure.conclusion.upper() == "TIMED_OUT"
     if _looks_like_code_failure_text(log_text):
         return False
-    return any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS)
+    if any(marker in log_text for marker in _CI_TRANSIENT_FAILURE_MARKERS):
+        return True
+    return _log_shows_docker_registry_timeout(log_text)
+
+
+def _log_shows_docker_registry_timeout(log_text: str) -> bool:
+    """Whether a generic network-timeout phrase is backed by Docker pull evidence.
+
+    The phrases in ``_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS`` are only transient
+    when paired with Docker pull / daemon evidence; on their own they also match
+    real application/integration test failures that must reach the repair agent.
+    """
+
+    if not any(marker in log_text for marker in _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS):
+        return False
+    return any(marker in log_text for marker in _CI_DOCKER_PULL_EVIDENCE_MARKERS)
 
 
 def _looks_like_required_ci_rollup_failure(failure: CheckFailure) -> bool:
