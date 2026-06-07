@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.forge import (
     OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
-    detect_forge_from_url,
+    concrete_forge_for_repo,
 )
 from awf.common.git_identity import (
     git_safe_directory_config_args,
@@ -494,6 +494,7 @@ async def _resolve_preserved_active_branch_open_pr(
     branch_name: str | None,
     base_branch: str | None,
     expected_head_repo_slug: str | None = None,
+    resolved_forge: object = None,
 ) -> _BranchOpenPRLookup | None:
     if self._open_pr_resolver is None:
         return None
@@ -512,6 +513,14 @@ async def _resolve_preserved_active_branch_open_pr(
     # failing fast. The executor forge gate does not cover this worker recovery
     # path, so reject here.
     #
+    # Resolve the gate forge via ``concrete_forge_for_repo`` (persisted/resolved
+    # forge > repo-URL host > github), mirroring the executor forge gate, NOT plain
+    # URL detection. A bare ``owner/repo`` slug carries no host, so URL detection
+    # alone resolves it as GitHub (``RepoRef.from_url`` defaults bare slugs to
+    # github) — a BitBucket workspace configured with ``forge: bitbucket`` but a
+    # bare-slug ``repo_url`` would then slip past this gate into the GitHub
+    # resolver. Honoring the persisted forge first closes that gap.
+    #
     # Issue #345 Part 2 note: this gate is GitHub-ONLY on purpose, deliberately
     # NOT the shared ``ensure_forge_supported`` set. BitBucket Cloud is now a
     # supported forge generally (Part 2 ships ``BitBucketClient``), but the
@@ -526,13 +535,13 @@ async def _resolve_preserved_active_branch_open_pr(
     # generic code (and its "use a supported forge" fix text) would contradict the
     # real failure for a bitbucket.org operator. The honest reason is that the
     # open-PR resolver itself is GitHub-only.
-    detected_forge = detect_forge_from_url(repo_url)
-    if detected_forge is not None and detected_forge != "github":
+    gate_forge = concrete_forge_for_repo(resolved_forge, repo_url)
+    if gate_forge != "github":
         _log.warning(
             "worker.preserved_active_open_pr_lookup_forge_not_supported",
             branch_name=lookup_branch,
             base_branch=base_branch,
-            forge=detected_forge,
+            forge=gate_forge,
             reason_code=OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
         )
         return _BranchOpenPRLookup(
@@ -541,7 +550,7 @@ async def _resolve_preserved_active_branch_open_pr(
             ambiguity_reason="open_pr_lookup_forge_not_supported",
             payload={
                 "branch_name": lookup_branch,
-                "forge": detected_forge,
+                "forge": gate_forge,
                 "reason_code": OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
                 "failure": "open_pr_resolver_forge_not_supported",
                 "source": "open_pr_resolver",

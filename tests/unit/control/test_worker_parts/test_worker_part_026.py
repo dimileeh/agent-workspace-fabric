@@ -1164,6 +1164,46 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         assert resolver.calls == []
 
     @pytest.mark.unit
+    async def test_preserved_active_branch_open_pr_lookup_honors_persisted_forge_for_bare_slug(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # A BitBucket workspace configured with ``forge: bitbucket`` but a bare
+        # ``owner/repo`` slug has no host, so ``detect_forge_from_url`` resolves it
+        # as GitHub. URL detection alone would let this BitBucket workspace reach
+        # the GitHub-only resolver and attach a same-slug GitHub PR. The gate must
+        # honor the persisted/resolved forge first and fail fast instead.
+        branch_name = "awf/ws_branch"
+        resolver = _RecordingBranchOpenPRResolver({branch_name: []})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            open_pr_resolver=resolver,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+            repo_url="example/repo",
+            branch_name=branch_name,
+            base_branch="development",
+            resolved_forge="bitbucket",
+        )
+
+        assert lookup is not None
+        assert lookup.state == "failed"
+        assert lookup.ambiguity_reason == "open_pr_lookup_forge_not_supported"
+        assert lookup.payload == {
+            "branch_name": branch_name,
+            "forge": "bitbucket",
+            "reason_code": "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED",
+            "failure": "open_pr_resolver_forge_not_supported",
+            "source": "open_pr_resolver",
+        }
+        # The GitHub-only resolver must never be queried for a BitBucket repo.
+        assert resolver.calls == []
+
+    @pytest.mark.unit
     async def test_preserved_active_adopted_sync_feature_pr_fork_head_repo_attaches_monitor(
         self,
         session_factory: async_sessionmaker[AsyncSession],
