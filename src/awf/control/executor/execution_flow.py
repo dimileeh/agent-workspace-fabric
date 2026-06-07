@@ -25,6 +25,7 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
@@ -38,7 +39,6 @@ from awf.control.executor.constants import (
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
 )
 from awf.control.executor.forge_gate import (
-    new_pr_unsupported_forge_error,
     unsupported_forge_error,
 )
 from awf.control.executor.git_ops import (
@@ -300,8 +300,8 @@ async def execute(
             # repo_url that detects as github) slipped past it. Resolution
             # has now stamped + persisted the concrete forge onto
             # ``ws.resolved_profile``, so fail fast here — before profile
-            # setup, the agent run, push, and ``gh pr create`` — instead of
-            # letting an unsupported forge reach the gh path.
+            # setup, the agent run, and push — instead of letting an
+            # unsupported forge reach the push/PR-open step.
             resolved_forge_error = unsupported_forge_error(ws)
             if resolved_forge_error is not None:
                 await self._mark_failed(
@@ -312,26 +312,6 @@ async def execute(
                     reason_code=resolved_forge_error.reason_code,
                 )
                 return
-        # New-PR forge gate — opening a *new* PR shells ``gh pr create``
-        # (GitHub-only) via ``push_and_open``. BitBucket clears the forge gate
-        # above (it is supported for monitoring an existing PR), but new-PR
-        # creation is not forge-neutral yet. The resolved forge and ``ws.pr_url``
-        # are both fully known here, so fail fast — before profile setup, the
-        # agent run, validation, the post-agent commit, and ``gh pr create`` —
-        # rather than spend a full agent/validation attempt and leave a committed
-        # workspace only to reject new-PR creation at the push step. Existing-PR
-        # flows (recovery / sync, ``ws.pr_url`` set) reuse their PR without
-        # ``gh pr create`` and are never gated.
-        new_pr_forge_error = new_pr_unsupported_forge_error(ws)
-        if new_pr_forge_error is not None:
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.infrastructure_failure,
-                message=new_pr_forge_error.message,
-                reason_code=new_pr_forge_error.reason_code,
-            )
-            return
         if not await repair_agent_runtime_ownership(
             logger=_log,
             workspace_id=workspace_id,
@@ -1199,11 +1179,11 @@ async def execute(
         )
         return
 
-    # The new-PR forge gate (BitBucket without an existing PR fails fast because
-    # ``gh pr create`` is GitHub-only) runs right after the resolved profile is
-    # synced — before the agent run, validation, and the post-agent commit — so a
-    # BitBucket feature workspace never reaches this push step. See the
-    # ``new_pr_unsupported_forge_error`` gate near the resolved-forge re-check above.
+    # PR creation is forge-neutral: ``push_and_open`` does a plain ``git push``
+    # and routes the PR-open step through the resolved ``ForgeClient`` (GitHub or
+    # BitBucket Cloud). The forge client is resolved from the persisted profile +
+    # repo URL and passed in per-call, so a BitBucket feature workspace opens its
+    # PR via ``BitBucketClient`` instead of the GitHub-only ``gh pr create``.
 
     # ── Step 3: push + open PR ──────────────────────────────────────────
     if not await self._transition_if_current(
@@ -1230,16 +1210,99 @@ async def execute(
     audit_remote_branch = existing_pr_remote_branch or push_branch_name
 
     try:
-        pr = await self._pr_creator.push_and_open(
-            worktree_path=worktree_path,
-            branch_name=push_branch_name,
-            base_branch=ws.branch_base,
-            title=pr_title,
-            body=pr_body,
-            existing_pr_url=ws.pr_url,
-            remote_branch_name=existing_pr_remote_branch,
-            remote_url=existing_pr_remote_url,
-        )
+        if ws.pr_url:
+            # Reuse path: ``push_and_open`` only does a plain ``git push`` and
+            # reuses the existing PR — it never touches the forge client. Skip
+            # resolving one so a BitBucket reuse push is not gated on forge API
+            # env: ``make_forge_client`` builds ``BitBucketClient`` eagerly via
+            # ``from_env()``, which would fail the run on missing/invalid
+            # Bitbucket API env before the push, even though reuse makes no forge
+            # API call. (This mirrors the pre-forge-client flow, where reuse
+            # never resolved a forge client.)
+            pr = await self._pr_creator.push_and_open(
+                worktree_path=worktree_path,
+                branch_name=push_branch_name,
+                base_branch=ws.branch_base,
+                title=pr_title,
+                body=pr_body,
+                forge_client=None,
+                repo_url=ws.repo_url,
+                existing_pr_url=ws.pr_url,
+                remote_branch_name=existing_pr_remote_branch,
+                remote_url=existing_pr_remote_url,
+            )
+        else:
+            # New PR: ``make_forge_client`` builds the BitBucket client eagerly
+            # via ``from_env()``, so a missing/invalid BitBucket API env raises
+            # ``BitBucketClientError`` here — before ``push_and_open`` runs the
+            # git push or the create-PR call, so it cannot be wrapped as a
+            # ``PullRequestError`` downstream. Map it onto the same
+            # PR_CREATE_FAILED audit event + evidence that a ``create_pull_request``
+            # failure records (instead of falling through to the opaque
+            # "unexpected error" handler that emits no PR audit event), then fail
+            # the run. No git_push-succeeded event is recorded because the push
+            # never ran. ``BitBucketClientError`` is imported lazily so the
+            # GitHub-only hot path never pays for the httpx import it drags in
+            # (mirrors forge.make_forge_client / pr_creator). ``async with``
+            # releases the BitBucket httpx pool deterministically (GitHub aclose
+            # is a no-op).
+            from awf.common.bitbucket_client import BitBucketClientError
+
+            try:
+                forge_client = make_forge_client(
+                    concrete_forge_for_repo(profile.forge, ws.repo_url),
+                    self._runner,
+                )
+            except BitBucketClientError as exc:
+                _log.error(
+                    "executor.pr_failed",
+                    workspace_id=workspace_id,
+                    operation=exc.operation,
+                    returncode=exc.status if exc.status is not None else 0,
+                )
+                await self._record_executor_pr_audit_event(
+                    workspace_id,
+                    event_type=_AUDIT_PR_CREATED_EVENT,
+                    action="pr_create",
+                    outcome="failed",
+                    reason_code=_PR_CREATE_FAILED_REASON_CODE,
+                    branch_name=push_branch_name,
+                    remote_branch=audit_remote_branch,
+                    pr_number=None,
+                    pr_url=None,
+                    source_head_sha=None,
+                    evidence={
+                        "operation": exc.operation,
+                        "returncode": exc.status if exc.status is not None else 0,
+                        "error_message": exc.body.strip() or "<no output>",
+                    },
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.pushing,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=str(exc)[:2000],
+                    # Preserve the forge-specific reason code (e.g.
+                    # BITBUCKET_AUTH_NOT_CONFIGURED) so the failed workspace
+                    # carries actionable doctor guidance, matching the
+                    # PullRequestError path below instead of falling back to
+                    # the generic INFRASTRUCTURE_FAILURE.
+                    reason_code=exc.reason_code,
+                )
+                return
+            async with forge_client:
+                pr = await self._pr_creator.push_and_open(
+                    worktree_path=worktree_path,
+                    branch_name=push_branch_name,
+                    base_branch=ws.branch_base,
+                    title=pr_title,
+                    body=pr_body,
+                    forge_client=forge_client,
+                    repo_url=ws.repo_url,
+                    existing_pr_url=None,
+                    remote_branch_name=existing_pr_remote_branch,
+                    remote_url=existing_pr_remote_url,
+                )
     except PullRequestError as exc:
         _log.error(
             "executor.pr_failed",
@@ -1288,6 +1351,11 @@ async def execute(
             from_status=WorkspaceStatus.pushing,
             failure_reason=FailureReason.infrastructure_failure,
             message=str(exc)[:2000],
+            # Preserve a forge-specific reason code (e.g. BitBucket auth /
+            # rate-limit / transport) so the failed workspace carries the
+            # actionable doctor guidance; ``None`` (git push, GitHub, no-URL)
+            # falls back to ``INFRASTRUCTURE_FAILURE``.
+            reason_code=exc.reason_code,
         )
         return
     except Exception as exc:

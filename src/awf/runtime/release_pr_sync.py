@@ -250,6 +250,17 @@ async def find_or_create_release_pr(
                 body=body,
             )
         except GitHubClientError as exc:
+            if exc.returncode == 0:
+                # ``gh`` exited 0 but printed no parseable PR URL. GitHubClient
+                # signals exactly this case with returncode=0 (real gh failures
+                # carry the non-zero exit code). Surface it with the release-sync
+                # reason code rather than leaking the raw gh error, preserving the
+                # RELEASE_SYNC_PR_URL_INVALID contract downstream callers rely on.
+                raise ReleasePrSyncError(
+                    reason_code="RELEASE_SYNC_PR_URL_INVALID",
+                    message=f"gh pr create returned no parseable PR URL: {exc.stderr!r}",
+                    detail={"source_branch": source_branch, "target_branch": target_branch},
+                ) from exc
             # TOCTOU: the list above can race a concurrent sync run or a human
             # opening the same source→target PR before this create. GitHub
             # rejects the duplicate with a recognisable "already exists" error,

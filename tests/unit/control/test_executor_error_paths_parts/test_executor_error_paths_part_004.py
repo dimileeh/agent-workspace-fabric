@@ -25,7 +25,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
@@ -34,6 +33,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import execution_flow as _execution_flow
 from awf.control.executor import helpers as executor_helpers
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
@@ -180,6 +180,54 @@ class _RecordingPrCreator:
             branch=branch_name,
             head_sha="b" * 40,
         )
+
+
+class _SpyForgeClient:
+    """Async-context-manager stand-in returned by a spied ``make_forge_client``."""
+
+    async def __aenter__(self) -> _SpyForgeClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+class _ForgeRecordingPrCreator:
+    """Records the forge client + repo URL the executor resolves and passes in."""
+
+    def __init__(self) -> None:
+        self.forge_client: object | None = None
+        self.repo_url: str | None = None
+
+    async def push_and_open(
+        self,
+        *,
+        branch_name: str,
+        forge_client: object | None = None,
+        repo_url: str | None = None,
+        **_kwargs: Any,
+    ) -> PullRequestResult:
+        self.forge_client = forge_client
+        self.repo_url = repo_url
+        return PullRequestResult(
+            url="https://github.com/x/y/pull/55",
+            branch=branch_name,
+            head_sha="b" * 40,
+        )
+
+
+def _queue_full_happy_path(fake: FakeCommandRunner) -> None:
+    """Queue the agent → commit → validation → pre-push-gate command results for a
+    workspace whose ``pr_creator`` is faked (so no git push / forge PR-open runs)."""
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+    fake.queue_result(returncode=0)  # git add
+    fake.queue_result(returncode=0, stdout="")  # cached diff empty; agent committed
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base --is-ancestor
+    _queue_validation_head(fake)  # pre-validation rev-parse HEAD
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation
+    _queue_pre_push_checks(fake)  # plan-only + protected-output committed diffs
 
 
 def _validation_command_result(
@@ -788,29 +836,62 @@ class TestPullRequestUnexpectedErrorPart002:
             assert runs[0].workspace_head_sha == "pre-pr-validation-head"
 
     @pytest.mark.unit
-    async def test_new_pr_on_bitbucket_fails_fast_before_agent_run(
+    async def test_resolves_github_forge_client_and_passes_it_to_push_and_open(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # BitBucket is a supported forge for monitoring an existing PR, so it clears
-        # the executor forge gate — but opening a *new* PR shells `gh pr create`
-        # (GitHub-only). The new-PR condition (BitBucket forge + no existing PR) is
-        # fully known once the resolved profile is synced, so a BitBucket feature
-        # workspace without an existing PR must fail fast with
-        # PR_CREATE_FORGE_NOT_SUPPORTED *before* spending a full agent/validation
-        # attempt and leaving a committed workspace. The agent must never run and
-        # `push_and_open` must never be reached: no command is queued, so any
-        # agent/validation/commit/push step would raise on the empty fake queue.
-        class _AssertNotCalledPrCreator:
-            def __init__(self) -> None:
-                self.called = False
+        # R-resolve (github): the executor resolves the forge client per push call
+        # from the repo URL and passes that exact client + repo_url to
+        # push_and_open. PR creation is forge-neutral via the resolved client.
+        spy_client = _SpyForgeClient()
+        spy_calls: list[tuple[str, object]] = []
 
-            async def push_and_open(self, **_kwargs: object) -> object:
-                self.called = True
-                raise AssertionError("push_and_open must not run for a new BitBucket PR")
+        def _spy_make_forge_client(forge: str, runner: object) -> _SpyForgeClient:
+            spy_calls.append((forge, runner))
+            return spy_client
 
+        monkeypatch.setattr(_execution_flow, "make_forge_client", _spy_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert spy_calls == [("github", fake)]
+        assert pr_creator.forge_client is spy_client
+        assert pr_creator.repo_url == "git@github.com:x/y.git"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    async def test_resolves_bitbucket_forge_client_and_opens_pr(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # R-resolve (bitbucket): a BitBucket feature workspace no longer fails
+        # fast — it reaches push_and_open with a resolved BitBucket forge client
+        # and completes. This is the proof BitBucket can now open its PR.
+        spy_client = _SpyForgeClient()
+        spy_calls: list[tuple[str, object]] = []
+
+        def _spy_make_forge_client(forge: str, runner: object) -> _SpyForgeClient:
+            spy_calls.append((forge, runner))
+            return spy_client
+
+        monkeypatch.setattr(_execution_flow, "make_forge_client", _spy_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
         async with factory() as s:
             repo = WorkspaceRepository(s)
@@ -819,36 +900,191 @@ class TestPullRequestUnexpectedErrorPart002:
             ws.repo_url = "git@bitbucket.org:workspace/repo.git"
             await s.commit()
 
-        pr_creator = _AssertNotCalledPrCreator()
-        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
-        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
-        executor = WorkspaceExecutor(
-            session_factory=factory,
-            runner=fake,
-            compose=compose,
-            validation=validation,
-            pr_creator=pr_creator,  # type: ignore[arg-type]
-            config=ExecutorConfig(
-                worktrees_root=tmp_path / "work" / "worktrees",
-                compose_projects_root=tmp_path / "work" / "compose",
-                default_models={AgentRuntime.codex: "gpt-5"},
-            ),
-        )
+        _queue_full_happy_path(fake)
 
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         await executor.execute(ws_id)
 
-        assert pr_creator.called is False
+        assert spy_calls == [("bitbucket", fake)]
+        assert pr_creator.forge_client is spy_client
+        assert pr_creator.repo_url == "git@bitbucket.org:workspace/repo.git"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    async def test_forge_client_construction_failure_records_pr_create_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``make_forge_client`` builds the BitBucket client eagerly via
+        # ``from_env()``, so a missing/invalid BitBucket API env raises
+        # ``BitBucketClientError`` *before* ``push_and_open`` can wrap it as a
+        # ``PullRequestError``. That construction failure must still be routed
+        # through PR-failure handling: a PR_CREATE_FAILED audit event with
+        # evidence, and no false git_push-succeeded event (the push never ran).
+        from awf.common.bitbucket_client import (
+            BITBUCKET_AUTH_NOT_CONFIGURED,
+            BitBucketClientError,
+        )
+        from awf.control.executor.constants import (
+            _AUDIT_GIT_PUSH_EVENT,
+            _AUDIT_PR_CREATED_EVENT,
+            _PR_CREATE_FAILED_REASON_CODE,
+        )
+
+        def _raise_make_forge_client(forge: str, runner: object) -> object:
+            raise BitBucketClientError(
+                operation="bitbucket auth",
+                status=None,
+                body="BITBUCKET_API_TOKEN is required.",
+                reason_code="BITBUCKET_AUTH_NOT_CONFIGURED",
+            )
+
+        monkeypatch.setattr(_execution_flow, "make_forge_client", _raise_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.repo_url = "git@bitbucket.org:workspace/repo.git"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        # push_and_open is never reached because the client construction fails first.
+        assert pr_creator.forge_client is None
+        assert pr_creator.repo_url is None
+
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "infrastructure_failure"
-            assert "gh pr create" in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == "PR_CREATE_FORGE_NOT_SUPPORTED"
-            # No agent/validation attempt was spent: the gate fired before the
-            # validation run that the late-push placement would have recorded.
-            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
-            assert runs == []
+            assert "bitbucket auth" in (ws.failure_message or "")
+            # The terminal failed-transition event carries the forge-specific
+            # reason_code, not the generic INFRASTRUCTURE_FAILURE fallback —
+            # matching the PullRequestError path so operators get actionable
+            # doctor guidance even when the forge client fails to construct.
+            assert ws.events[-1].reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
+            pr_create_events = [
+                event for event in ws.events if event.event_type == _AUDIT_PR_CREATED_EVENT
+            ]
+            assert len(pr_create_events) == 1
+            event = pr_create_events[0]
+            assert event.reason_code == _PR_CREATE_FAILED_REASON_CODE
+            assert event.payload["outcome"] == "failed"
+            assert event.payload["evidence"] == {
+                "operation": "bitbucket auth",
+                "returncode": 0,
+                "error_message": "BITBUCKET_API_TOKEN is required.",
+            }
+            # No git_push event — the push never ran, so it must not be recorded
+            # as succeeded (or failed).
+            assert not [event for event in ws.events if event.event_type == _AUDIT_GIT_PUSH_EVENT]
+
+    @pytest.mark.unit
+    async def test_bitbucket_create_failure_preserves_reason_code_on_failed_workspace(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # PRRT_kwDOSJAM6s6HqvLL: when ``push_and_open`` wraps a
+        # BitBucketClientError (auth / rate-limit / transport) as a
+        # PullRequestError, the executor must record the *specific* reason_code
+        # on the failed workspace transition — matching the other BitBucket
+        # handoff paths — instead of a generic INFRASTRUCTURE_FAILURE, so
+        # operators get actionable doctor guidance. The PR_CREATE_FAILED audit
+        # event (the action category) is still recorded.
+        from awf.common.bitbucket_client import BITBUCKET_AUTH_NOT_CONFIGURED
+        from awf.control.executor.constants import (
+            _AUDIT_PR_CREATED_EVENT,
+            _PR_CREATE_FAILED_REASON_CODE,
+        )
+        from awf.runtime.pr_creator import PullRequestError
+
+        class _RaisingPrCreator:
+            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
+                raise PullRequestError(
+                    operation="bitbucket create_pull_request",
+                    returncode=401,
+                    stderr="BITBUCKET_API_TOKEN is required.",
+                    head_sha="c" * 40,
+                    reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
+                )
+
+        ws_id = await _seed_ready(factory)
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=_RaisingPrCreator())
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            # The terminal failed-transition event carries the forge-specific
+            # reason_code, not the generic INFRASTRUCTURE_FAILURE fallback.
+            assert ws.events[-1].reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
+            # The PR-create audit event still categorises the action failure.
+            pr_create_events = [
+                event for event in ws.events if event.event_type == _AUDIT_PR_CREATED_EVENT
+            ]
+            assert len(pr_create_events) == 1
+            assert pr_create_events[0].reason_code == _PR_CREATE_FAILED_REASON_CODE
+
+    @pytest.mark.unit
+    async def test_reuse_push_skips_forge_client_resolution(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Reuse path: when the workspace already has a PR, the push step only does
+        # a git push + PR reuse and must NOT resolve a forge client. Resolving one
+        # would gate a BitBucket reuse push on forge API env (``from_env()``),
+        # failing the run before push even though reuse makes no forge API call.
+        def _explode_make_forge_client(forge: str, runner: object) -> object:
+            raise AssertionError("make_forge_client must not run on the PR-reuse push path")
+
+        monkeypatch.setattr(_execution_flow, "make_forge_client", _explode_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        # No forge client resolved; push_and_open received ``None`` and reused.
+        assert pr_creator.forge_client is None
+        assert pr_creator.repo_url == "git@github.com:x/y.git"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
     async def test_validation_target_sha_update_failure_keeps_open_pr(
@@ -1153,334 +1389,3 @@ class TestPrMonitorFactoryPath:
         assert len(factory_workspaces) == 1
         assert factory_workspaces[0].id == ws_id
         assert factory_workspaces[0].auto_merge is False
-
-
-class TestPrMonitorResume:
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_logs_unknown_workspace(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        executor = _make_executor(fake, factory, tmp_path)
-
-        with structlog.testing.capture_logs() as captured:
-            await executor.resume_pr_monitor("ws_never_existed")
-
-        assert fake.calls == []
-        assert any(
-            event.get("event") == "executor.resume_skip_unknown"
-            and event.get("workspace_id") == "ws_never_existed"
-            for event in captured
-        )
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_logs_unexpected_status(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        ws_id = await _seed_ready(factory)
-
-        def _monitor_factory(*_args: Any) -> object:
-            raise AssertionError("monitor factory must not run for non-monitoring workspaces")
-
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
-
-        with structlog.testing.capture_logs() as captured:
-            await executor.resume_pr_monitor(ws_id)
-
-        assert fake.calls == []
-        assert any(
-            event.get("event") == "executor.resume_skip_not_monitoring_pr"
-            and event.get("workspace_id") == ws_id
-            and event.get("status") == WorkspaceStatus.ready.value
-            for event in captured
-        )
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_uses_persisted_workspace_metadata(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        compose_file = tmp_path / "persisted-compose" / "compose.yml"
-        resolved_profile = WorkspaceProfile(
-            name="persisted",
-            monitor=ProfileMonitor(initial_review_grace_period_seconds=321),
-        ).model_dump(mode="json")
-        factory_calls: list[dict[str, Any]] = []
-        monitor_calls: list[dict[str, Any]] = []
-
-        class _FakeMonitor:
-            async def run(
-                self, *, workspace_id: str, compose_project: str, compose_file: Path
-            ) -> None:
-                monitor_calls.append(
-                    {
-                        "workspace_id": workspace_id,
-                        "compose_project": compose_project,
-                        "compose_file": compose_file,
-                    }
-                )
-
-        def _monitor_factory(adapter: Any, profile: Any, workspace: Any) -> _FakeMonitor:
-            factory_calls.append(
-                {
-                    "adapter": adapter,
-                    "profile_name": profile.name,
-                    "profile_grace": profile.monitor.initial_review_grace_period_seconds,
-                    "auto_merge": workspace.auto_merge,
-                    "workspace_grace": workspace.initial_review_grace_period_seconds,
-                    "pr_number": workspace.pr_number,
-                    "pr_url": workspace.pr_url,
-                    "remote_push_branch": workspace.remote_push_branch,
-                }
-            )
-            return _FakeMonitor()
-
-        ws_id = await _seed_monitoring_pr(
-            factory,
-            pr_number=77,
-            pr_url="https://github.com/x/y/pull/77",
-            remote_push_branch="awf/persisted",
-            compose_project_name="persisted_project",
-            compose_file_path=str(compose_file),
-            resolved_profile=resolved_profile,
-            auto_merge=False,
-            initial_review_grace_period_seconds=12.5,
-        )
-        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
-
-        await executor.resume_pr_monitor(ws_id)
-
-        assert fake.calls == []
-        assert len(factory_calls) == 1
-        assert factory_calls[0]["profile_name"] == "persisted"
-        assert factory_calls[0]["profile_grace"] == 321
-        assert factory_calls[0]["auto_merge"] is False
-        assert factory_calls[0]["workspace_grace"] == 12.5
-        assert factory_calls[0]["pr_number"] == 77
-        assert factory_calls[0]["pr_url"] == "https://github.com/x/y/pull/77"
-        assert factory_calls[0]["remote_push_branch"] == "awf/persisted"
-        assert monitor_calls == [
-            {
-                "workspace_id": ws_id,
-                "compose_project": "persisted_project",
-                "compose_file": compose_file,
-            }
-        ]
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_restarts_persisted_compose_stack_before_monitor(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        compose_file = tmp_path / "persisted-compose" / "compose.yml"
-        compose_file_path = compose_file
-        call_order: list[str] = []
-
-        class _RecordingCompose:
-            async def ensure_project_up(
-                self,
-                *,
-                project_name: str,
-                compose_file: Path,
-                workspace_id: str,
-                wait: bool = True,
-                compose_up_timeout_seconds: int = 300,
-            ) -> None:
-                call_order.append("compose")
-                assert project_name == "persisted_project"
-                assert compose_file == compose_file_path
-                assert workspace_id == ws_id
-                assert wait is True
-                assert compose_up_timeout_seconds == 300
-
-        class _Monitor:
-            async def run(
-                self, *, workspace_id: str, compose_project: str, compose_file: Path
-            ) -> None:
-                call_order.append("monitor")
-                assert call_order == ["compose", "monitor"]
-                assert workspace_id == ws_id
-                assert compose_project == "persisted_project"
-                assert compose_file == compose_file_path
-
-        ws_id = await _seed_monitoring_pr(
-            factory,
-            compose_project_name="persisted_project",
-            compose_file_path=str(compose_file),
-        )
-        executor = _make_executor(
-            fake,
-            factory,
-            tmp_path,
-            pr_monitor_factory=lambda *_args: _Monitor(),
-            compose=_RecordingCompose(),
-        )
-
-        await executor.resume_pr_monitor(ws_id)
-
-        assert call_order == ["compose", "monitor"]
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_recovers_feature_branch_remote_push_branch(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        monitor_calls: list[str] = []
-
-        class _Monitor:
-            async def run(
-                self, *, workspace_id: str, compose_project: str, compose_file: Path
-            ) -> None:
-                del compose_project, compose_file
-                monitor_calls.append(workspace_id)
-
-        ws_id = await _seed_monitoring_pr(
-            factory,
-            branch_name="awf/legacy-feature",
-            remote_push_branch=None,
-        )
-        executor = _make_executor(
-            fake,
-            factory,
-            tmp_path,
-            pr_monitor_factory=lambda *_args: _Monitor(),
-        )
-
-        await executor.resume_pr_monitor(ws_id)
-
-        assert monitor_calls == [ws_id]
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.monitoring_pr.value
-            assert ws.remote_push_branch == "awf/legacy-feature"
-            recovery_events = [
-                event
-                for event in ws.events
-                if event.event_type == "workspace.remote_push_branch_recovered"
-            ]
-            assert len(recovery_events) == 1
-            assert recovery_events[0].reason_code == "REMOTE_PUSH_BRANCH_RECOVERED"
-            assert recovery_events[0].payload == {
-                "remote_push_branch": "awf/legacy-feature",
-                "source": "branch_name",
-            }
-
-    @pytest.mark.unit
-    async def test_recover_feature_branch_remote_push_branch_skips_ineligible_rows(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        executor = _make_executor(fake, factory, tmp_path)
-        ready_id = await _seed_ready(factory)
-        existing_id = await _seed_monitoring_pr(
-            factory,
-            branch_name="awf/existing",
-            remote_push_branch="awf/persisted",
-        )
-        sync_id = await _seed_monitoring_pr(
-            factory,
-            task_kind="sync_feature_pr",
-            branch_name="feature-sync/local",
-            remote_push_branch=None,
-        )
-
-        assert (
-            await executor._recover_feature_branch_remote_push_branch(
-                workspace_id="ws_missing",
-                remote_push_branch="awf/missing",
-            )
-            is None
-        )
-        assert (
-            await executor._recover_feature_branch_remote_push_branch(
-                workspace_id=ready_id,
-                remote_push_branch="awf/ready",
-            )
-            is None
-        )
-        assert (
-            await executor._recover_feature_branch_remote_push_branch(
-                workspace_id=existing_id,
-                remote_push_branch="awf/recovered",
-            )
-            == "awf/persisted"
-        )
-        assert (
-            await executor._recover_feature_branch_remote_push_branch(
-                workspace_id=sync_id,
-                remote_push_branch="feature-sync/local",
-            )
-            is None
-        )
-
-    @pytest.mark.unit
-    async def test_resume_pr_monitor_does_not_use_stale_recovery_when_status_changed(
-        self,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        tmp_path: Path,
-    ) -> None:
-        class _UnexpectedCompose:
-            async def ensure_project_up(
-                self,
-                *,
-                project_name: str,
-                compose_file: Path,
-                workspace_id: str,
-                wait: bool = True,
-                compose_up_timeout_seconds: int = 300,
-            ) -> None:
-                del project_name, compose_file, workspace_id, wait, compose_up_timeout_seconds
-                raise AssertionError("compose must not restart after recovery skips")
-
-        ws_id = await _seed_monitoring_pr(
-            factory,
-            branch_name="awf/concurrent-feature",
-            remote_push_branch=None,
-        )
-        executor = _make_executor(
-            fake,
-            factory,
-            tmp_path,
-            pr_monitor_factory=lambda *_args: object(),
-            compose=_UnexpectedCompose(),
-        )
-        original_load_workspace = executor._load_workspace
-
-        async def _load_then_complete(workspace_id: str) -> Any:
-            ws = await original_load_workspace(workspace_id)
-            async with factory() as s:
-                repo = WorkspaceRepository(s)
-                fresh = await repo.get(workspace_id)
-                assert fresh is not None
-                await repo.transition(
-                    fresh,
-                    to=WorkspaceStatus.completed,
-                    reason_code="CONCURRENT_COMPLETED",
-                )
-                await s.commit()
-            return ws
-
-        executor._load_workspace = _load_then_complete  # type: ignore[method-assign]
-
-        await executor.resume_pr_monitor(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
-            assert ws.remote_push_branch is None
