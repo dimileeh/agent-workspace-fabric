@@ -4,26 +4,74 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
 
 ## Change summary
 
-- `src/awf/runtime/pr_monitor.py`: added three transport-timeout markers to
-  `_CI_TRANSIENT_FAILURE_MARKERS` — `"context deadline exceeded"`,
-  `"client.timeout exceeded while awaiting headers"`,
-  `"request canceled while waiting for connection"`. No other logic changed; the
-  structured/code-failure short-circuit in `_looks_like_transient_ci_failure`
-  still runs first, and `_should_rerun_transient_ci`/`decide` gates are untouched.
+- `src/awf/runtime/pr_monitor.py`: classify Docker registry image-pull timeouts as
+  transient CI via **proximity-gated matching** — network-timeout phrases count as
+  transient only when they sit on, or within `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`
+  (2) lines of, an explicit Docker pull-failure anchor. The shipped approach adds
+  four constant groups and two helper functions, and **does not** touch
+  `_CI_TRANSIENT_FAILURE_MARKERS`:
+  - `_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS` — `"context deadline exceeded"`,
+    `"timeout exceeded while awaiting headers"`,
+    `"request canceled while waiting for connection"`.
+  - `_CI_DOCKER_PULL_FAILURE_MARKERS` — `"docker pull failed"`,
+    `"failed to pull image"` (image-pull wording, not the generic verb).
+  - `_CI_DOCKER_DAEMON_ERROR_MARKER` (`"error response from daemon"`) +
+    `_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS` (registry hosts / `/v2/` API path /
+    explicit pull wording) — a daemon-error line only anchors when it also carries
+    registry/image-pull context.
+  - `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` — the line-proximity window.
+  - `_is_docker_pull_failure_line(line)` — whether one log line evidences a Docker
+    image-pull failure.
+  - `_log_shows_docker_registry_timeout(log_text)` — whether a registry-timeout
+    phrase is line-co-located with a pull-failure line; called as the final clause
+    of `_looks_like_transient_ci_failure`.
+- The structured/code-failure short-circuit in `_looks_like_transient_ci_failure`
+  still runs first, `_CI_TRANSIENT_FAILURE_MARKERS` is matched before the new
+  logic, and `_should_rerun_transient_ci`/`decide` gate ordering is untouched.
 - `tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py`: added
-  three regression tests (TDD — written before the marker addition):
-  - `test_docker_pull_registry_timeout_dispatches_rerun` (full PR #449 log → `RerunTransientCI`)
-  - `test_docker_pull_request_canceled_dispatches_rerun` (second signature → `RerunTransientCI`)
-  - `test_docker_pull_with_structured_test_evidence_reports_ci_failure`
-    (timeout log + structured test evidence → `ReportCiFailure`, safeguard)
+  15 focused unit tests (TDD across the feature's commits). Grouped by intent:
+
+  Positive — registry timeout dispatches `RerunTransientCI`:
+  - `test_docker_pull_registry_timeout_dispatches_rerun` — full PR #449 log.
+  - `test_docker_pull_failed_wording_anchors_request_canceled_rerun` —
+    `"docker pull failed"` anchors a `request canceled` timeout.
+  - `test_awaiting_headers_timeout_without_client_prefix_dispatches_rerun` —
+    `"timeout exceeded while awaiting headers"` without a `Client.` prefix.
+  - `test_docker_failed_to_pull_image_timeout_dispatches_rerun` —
+    `"failed to pull image"` anchor.
+  - `test_daemon_error_with_registry_url_timeout_dispatches_rerun` — daemon error
+    carrying registry-URL context.
+
+  Negative — non-Docker / unanchored timeouts report `ReportCiFailure`:
+  - `test_docker_pull_echo_then_bare_request_canceled_reports_ci_failure` — a bare
+    `docker pull` command echo does not anchor.
+  - `test_registry_timeout_phrase_without_docker_pull_reports_ci_failure`.
+  - `test_context_deadline_exceeded_without_docker_pull_reports_ci_failure`.
+  - `test_successful_setup_pull_then_unrelated_test_timeout_reports_ci_failure` —
+    far-apart successful pull + real test timeout (line-proximity safeguard).
+  - `test_compact_cached_pull_then_test_timeout_at_window_reports_ci_failure` —
+    cached pull + test timeout at window distance.
+  - `test_app_failed_to_pull_records_timeout_reports_ci_failure` — generic
+    `failed to pull records` app error, no Docker/image wording.
+  - `test_daemon_error_timeout_without_pull_context_reports_ci_failure` — daemon
+    error with no registry context.
+  - `test_unrecognized_failure_log_reports_ci_failure` — unrecognized log.
+
+  Safeguard / helper:
+  - `test_docker_pull_with_structured_test_evidence_reports_ci_failure` — structured
+    test evidence still forces `ReportCiFailure` ahead of the new logic.
+  - `test_log_shows_docker_registry_timeout_lowercases_raw_text` — the helper
+    lowercases raw text so it is self-contained.
 
 ## Commands run (focused)
 
 ```
 uv run --python 3.12 --extra dev pytest \
   tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py -q \
-  -k "transient or docker_pull"
-=> 19 passed, 80 deselected
+  -k "docker or registry_timeout or awaiting_headers or request_canceled or \
+      context_deadline or daemon_error or failed_to_pull or unrecognized_failure or \
+      log_shows_docker or app_failed_to_pull or setup_pull or cached_pull"
+=> 15 passed, 96 deselected
 
 uv run --python 3.12 --extra dev ruff check \
   src/awf/runtime/pr_monitor.py \
@@ -41,16 +89,26 @@ uv run --python 3.12 --extra dev mypy
 
 ## Coverage reasoning
 
-The new markers are exercised by the two `RerunTransientCI` tests; the unchanged
-structured-evidence safeguard branch is exercised by the `ReportCiFailure` test.
-No new uncovered lines or branches are introduced. Full coverage gate
-(`pytest --cov`) and CI-equivalent suites are owned by AWF/GitHub after the agent
-finishes and were not run locally per the AWF workspace contract.
+Both new helper functions and every new constant group are exercised by the 15
+tests above: the positive tests drive the `RerunTransientCI` path through each
+anchor (pull-failed wording, image-pull wording, daemon-error + registry context)
+and each timeout marker; the negative tests cover the unanchored, far-proximity,
+generic-app-error, and no-context branches that must fall through to
+`ReportCiFailure`; the structured-evidence and lowercasing tests cover the
+short-circuit and helper-normalization branches. No new uncovered lines or
+branches are introduced. Full coverage gate (`pytest --cov`) and CI-equivalent
+suites are owned by AWF/GitHub after the agent finishes and were not run locally
+per the AWF workspace contract.
 
 ## Safeguards preserved
 
 - Structured test/code-failure evidence (`test_node_ids`/`assertion_snippets`)
-  still forces `ReportCiFailure` even when a transport-timeout marker is present
-  (locked in by the third test).
-- No generic `docker pull` / `exit code 1` marker added, so ordinary Docker
-  build/test failures without a transport-timeout phrase remain non-transient.
+  still forces `ReportCiFailure` even when a registry-timeout marker is present
+  (locked in by `test_docker_pull_with_structured_test_evidence_reports_ci_failure`).
+- Registry-timeout markers are only transient when line-co-located with a Docker
+  pull-*failure* line, so a real application/integration test timeout that merely
+  co-exists with an unrelated successful setup pull in the same `--log-failed`
+  excerpt still reaches the repair agent.
+- No generic `docker pull` echo / `exit code 1` marker added, so ordinary Docker
+  build/test failures without a co-located registry-timeout phrase remain
+  non-transient.
