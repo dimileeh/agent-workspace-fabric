@@ -274,3 +274,33 @@ class TestCiFailure:
 
         assert isinstance(action, RerunTransientCI), action
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_forward_permanent_detail_different_image_dispatches_rerun(
+        self,
+    ) -> None:
+        """An unrelated kubelet/containerd 'failed to pull image' permanent error
+        must not make an earlier transient Docker pull failure permanent when the
+        image refs differ.  The forward probe must confirm the detail line targets
+        the same image ref as the preceding 'docker pull <ref>' command echo
+        (PRRT_kwDOSJAM6s6HsT-2)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "context deadline exceeded\n"
+                "Docker pull failed with exit code 1\n"
+                'Failed to pull image "app:v99": manifest unknown'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)

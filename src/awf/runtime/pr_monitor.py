@@ -1018,6 +1018,32 @@ def _docker_pull_command_succeeded(
     return False
 
 
+def _forward_detail_ref_matches_pull(
+    detail_line: str, back_start: int, summary_index: int, lines: list[str]
+) -> bool:
+    """Whether a ``failed to pull image`` detail line targets the same image as
+    the preceding ``docker pull <ref>`` command echo.
+
+    Extracts the quoted image ref from *detail_line* using
+    ``_CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN`` and checks that the same ref
+    appears as a whitespace-delimited token in at least one ``docker pull``
+    command echo found in ``lines[back_start:summary_index]``.  Returns False
+    when the detail carries no quoted ref or when no matching command echo
+    exists in the backward window — both cases indicate the detail cannot be
+    confirmed as belonging to the same pull operation.
+    """
+    match = _CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN.search(detail_line)
+    if match is None:
+        return False
+    image_ref = match.group(1)
+    return any(
+        _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
+        and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
+        and image_ref in lines[k].split()
+        for k in range(back_start, summary_index)
+    )
+
+
 def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bool:
     """Whether a Docker pull-failure evidence line represents a permanent error.
 
@@ -1037,8 +1063,12 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     Forward detail probe: Docker sometimes emits the ``docker pull failed``
     summary *before* the containerd/kubelet ``failed to pull image "<ref>":
     <permanent-reason>`` detail line.  When such a detail follows a summary
-    within the window without an intervening new ``docker pull`` command echo, it
-    belongs to the same pull and makes the summary permanent.
+    within the window without an intervening new ``docker pull`` command echo,
+    **and** its quoted image ref matches the ref from the preceding
+    ``docker pull <ref>`` command echo, it belongs to the same pull and makes
+    the summary permanent.  A detail for a *different* image (e.g. an
+    unrelated kubelet event in the same step log) must not influence permanence
+    classification for this pull.
 
     In both directions, if a ``docker pull`` command echo (not itself a failure
     summary) appears between the probe line and the evidence line, that echo
@@ -1068,7 +1098,8 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     ):
         return True
     # Forward probe: when the evidence line is a "docker pull failed" summary,
-    # look forward for a "failed to pull image" detail with a permanent marker.
+    # look forward for a "failed to pull image" detail with a permanent marker
+    # that targets the same image ref as the preceding docker pull command echo.
     if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in lines[index]:
         end = min(len(lines), index + _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW + 1)
         return any(
@@ -1082,6 +1113,7 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                 and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
                 for k in range(index + 1, probe_index)
             )
+            and _forward_detail_ref_matches_pull(lines[probe_index], start, index, lines)
             for probe_index in range(index + 1, end)
         )
     return False
@@ -1191,6 +1223,14 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
             index in evidence_line_set
             or not any(
                 abs(index - uncorroborated_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
+                # An evidence line sitting strictly between the timeout and the
+                # uncorroborated pull means the timeout belongs to that evidence
+                # pull, not the kubelet event — only exclude when no such
+                # evidence line sits between them.
+                and not any(
+                    min(index, uncorroborated_index) < ev_idx < max(index, uncorroborated_index)
+                    for ev_idx in evidence_line_set
+                )
                 for uncorroborated_index in uncorroborated_image_pull_indexes
             )
         )
