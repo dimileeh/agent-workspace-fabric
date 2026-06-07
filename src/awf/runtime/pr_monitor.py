@@ -665,6 +665,10 @@ _CI_DOCKER_PULL_FAILURE_MARKERS = (
 # timeout when the *same line* also carries registry / image-pull context — an
 # outbound registry request (``/v2/`` API path or a known registry host) or
 # explicit pull wording — i.e. the daemon was fetching an image when it timed out.
+# Markers stay specific: a generic phrase such as ``pulling from`` would also match
+# unrelated daemon operations (e.g. ``failed while pulling from local volume``), so
+# only the registry API path, known hosts, and the registry-auth ``pull access
+# denied`` error qualify.
 _CI_DOCKER_DAEMON_ERROR_MARKER = "error response from daemon"
 _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "/v2/",
@@ -676,7 +680,6 @@ _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "quay.io",
     "public.ecr.aws",
     ".pkg.dev",
-    "pulling from",
     "pull access denied",
 )
 

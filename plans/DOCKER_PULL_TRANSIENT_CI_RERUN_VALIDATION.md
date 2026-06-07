@@ -17,8 +17,11 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
     `"failed to pull image"` (image-pull wording, not the generic verb).
   - `_CI_DOCKER_DAEMON_ERROR_MARKER` (`"error response from daemon"`) +
     `_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS` (registry hosts / `/v2/` API path /
-    explicit pull wording) — a daemon-error line only anchors when it also carries
-    registry/image-pull context.
+    `"pull access denied"`) — a daemon-error line only anchors when it also carries
+    registry/image-pull context. Markers stay specific: the generic phrase
+    `"pulling from"` was dropped (review comment issue:4642392722) because it also
+    matches non-registry daemon operations such as
+    `failed while pulling from local volume`.
   - `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` — the line-proximity window.
   - `_is_docker_pull_failure_line(line)` — whether one log line evidences a Docker
     image-pull failure.
@@ -29,7 +32,7 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
   still runs first, `_CI_TRANSIENT_FAILURE_MARKERS` is matched before the new
   logic, and `_should_rerun_transient_ci`/`decide` gate ordering is untouched.
 - `tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py`: added
-  15 focused unit tests (TDD across the feature's commits). Grouped by intent:
+  16 focused unit tests (TDD across the feature's commits). Grouped by intent:
 
   Positive — registry timeout dispatches `RerunTransientCI`:
   - `test_docker_pull_registry_timeout_dispatches_rerun` — full PR #449 log.
@@ -55,6 +58,10 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
     `failed to pull records` app error, no Docker/image wording.
   - `test_daemon_error_timeout_without_pull_context_reports_ci_failure` — daemon
     error with no registry context.
+  - `test_daemon_error_generic_pulling_from_phrase_reports_ci_failure` — a daemon
+    error whose text merely contains the generic phrase `pulling from`
+    (e.g. `failed while pulling from local volume`) does not anchor a nearby
+    timeout (review comment issue:4642392722).
   - `test_unrecognized_failure_log_reports_ci_failure` — unrecognized log.
 
   Safeguard / helper:
@@ -70,8 +77,9 @@ uv run --python 3.12 --extra dev pytest \
   tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py -q \
   -k "docker or registry_timeout or awaiting_headers or request_canceled or \
       context_deadline or daemon_error or failed_to_pull or unrecognized_failure or \
-      log_shows_docker or app_failed_to_pull or setup_pull or cached_pull"
-=> 15 passed, 96 deselected
+      log_shows_docker or app_failed_to_pull or setup_pull or cached_pull or \
+      pulling_from"
+=> 16 passed, 96 deselected
 
 uv run --python 3.12 --extra dev ruff check \
   src/awf/runtime/pr_monitor.py \
@@ -89,7 +97,7 @@ uv run --python 3.12 --extra dev mypy
 
 ## Coverage reasoning
 
-Both new helper functions and every new constant group are exercised by the 15
+Both new helper functions and every new constant group are exercised by the 16
 tests above: the positive tests drive the `RerunTransientCI` path through each
 anchor (pull-failed wording, image-pull wording, daemon-error + registry context)
 and each timeout marker; the negative tests cover the unanchored, far-proximity,

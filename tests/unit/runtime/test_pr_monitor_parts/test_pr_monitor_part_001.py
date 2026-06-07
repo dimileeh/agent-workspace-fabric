@@ -853,6 +853,32 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_daemon_error_generic_pulling_from_phrase_reports_ci_failure(self) -> None:
+        """A daemon error for a non-registry operation whose text merely contains the
+        generic phrase ``pulling from`` (e.g. ``failed while pulling from local
+        volume``) must not anchor a nearby timeout as a registry image pull. The
+        registry-context markers stay specific (``/v2/``, known hosts, ``pull access
+        denied``), so this real daemon timeout reaches the repair agent."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: failed while pulling from local volume\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_daemon_error_with_registry_url_timeout_dispatches_rerun(self) -> None:
         """A daemon error whose own line carries registry context (an outbound
         ``/v2/`` registry request) tying the timeout to an image pull is genuine
