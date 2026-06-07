@@ -1096,6 +1096,33 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_daemon_pull_access_denied_does_not_anchor_adjacent_timeout(self) -> None:
+        """``pull access denied`` is a synchronous registry 403 — it cannot itself
+        cause a ``context deadline exceeded``, so a daemon-error auth-denial line
+        must not anchor an *adjacent* unrelated timeout. A real auth-config bug
+        (``Error response from daemon: pull access denied for myapp``) sitting one
+        line away from an unrelated health-check/retry timeout must reach the repair
+        agent rather than be silently rerun as transient infra."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: pull access denied for myapp\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_bare_daemon_error_does_not_anchor_failed_to_pull_image(self) -> None:
         """A bare ``Error response from daemon: context deadline exceeded`` line —
         no registry/image-pull context — must not corroborate a nearby

@@ -666,12 +666,16 @@ _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER = "docker pull failed"
 # ordinary build/test step is a real Docker daemon timeout the repair agent must
 # see, not flaky registry infra. So a daemon-error line only anchors a registry
 # timeout when the *same line* also carries registry / image-pull context — an
-# outbound registry request (``/v2/`` API path or a known registry host) or
-# explicit pull wording — i.e. the daemon was fetching an image when it timed out.
+# outbound registry request (``/v2/`` API path or a known registry host) — i.e.
+# the daemon was reaching the registry when it timed out.
 # Markers stay specific: a generic phrase such as ``pulling from`` would also match
 # unrelated daemon operations (e.g. ``failed while pulling from local volume``), so
-# only the registry API path, known hosts, and the registry-auth ``pull access
-# denied`` error qualify. ``auth.docker.io`` is the Docker Hub registry-auth token
+# only the registry API path and known hosts qualify. A registry-auth ``pull access
+# denied`` error is deliberately *not* a marker: it is a synchronous 403, so it can
+# never itself be the timeout, and accepting it would let a real (permanent) auth
+# failure anchor an *adjacent unrelated* timeout and silently rerun it as transient
+# infra instead of surfacing the auth bug to the repair agent. ``auth.docker.io`` is
+# the Docker Hub registry-auth token
 # service: pulling from Docker Hub first fetches a bearer token from
 # ``auth.docker.io/token``, so a daemon timeout reported against that host (e.g.
 # ``Error response from daemon: Get "https://auth.docker.io/token?...": context
@@ -690,7 +694,6 @@ _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "quay.io",
     "public.ecr.aws",
     ".pkg.dev",
-    "pull access denied",
 )
 
 # ``failed to pull image "<ref>"`` is emitted by Docker, containerd, and the
@@ -705,9 +708,9 @@ _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
 # kubelet ``failed to pull image "app"`` event for an unrelated application image
 # must not corroborate it by mere line distance.
 #
-# Registry-*protocol* wording (a ``/v2/`` API request or a ``pull access denied``
-# error) is deliberately *not* accepted as proximity corroboration here, even
-# though the daemon-error branch above uses ``/v2/`` as same-line context. A
+# Registry-*protocol* wording (a ``/v2/`` API request) is deliberately *not*
+# accepted as proximity corroboration here, even though the daemon-error branch
+# above uses ``/v2/`` as same-line context. A
 # kubelet/containerd application-image event embeds that same wording in its own
 # (often multi-line) transport error — e.g. ``Failed to pull image
 # "ghcr.io/org/app": ... Head "https://ghcr.io/v2/...": context deadline
@@ -837,10 +840,10 @@ def _is_docker_pull_failure_line(
     the echo precedes successful setup pulls too, so a successful ``docker pull
     postgres:16`` next to a kubelet ``failed to pull image "app"`` event must not
     corroborate an unrelated application-image bug by mere line distance. A bare
-    registry *host*, and likewise a registry-*protocol* ``/v2/`` request or
-    ``pull access denied``, is not such context: a registry-qualified ``failed to
-    pull image "ghcr.io/org/app"`` event carries the host on the ref and embeds
-    the ``/v2/`` transport URL in its own error, so either would self-corroborate.
+    registry *host*, and likewise a registry-*protocol* ``/v2/`` request, is not
+    such context: a registry-qualified ``failed to pull image "ghcr.io/org/app"``
+    event carries the host on the ref and embeds the ``/v2/`` transport URL in its
+    own error, so either would self-corroborate.
     Otherwise a bare kubelet ``failed to pull image "app"`` event from an e2e
     deployment (a real image bug) would be silently rerun. A bare ``error response
     from daemon`` line is not such context: the daemon emits it for any operation,
@@ -874,8 +877,8 @@ def _image_pull_failure_is_corroborated(
     targets the *same* image ref as the failing line — compared as a
     whitespace-delimited token so a ``docker pull myapp:1`` echo cannot satisfy a
     ``failed to pull image "app"`` failure by substring. Registry-*protocol*
-    wording (a ``/v2/`` request or ``pull access denied``) is deliberately *not*
-    accepted by proximity: a kubelet/containerd application-image event embeds
+    wording (a ``/v2/`` request) is deliberately *not* accepted by proximity: a
+    kubelet/containerd application-image event embeds
     that same wording in its own (often multi-line) transport error — e.g.
     ``Failed to pull image "ghcr.io/org/app": ... Head "https://ghcr.io/v2/...":
     context deadline exceeded`` — so it would let a real deploy bug
