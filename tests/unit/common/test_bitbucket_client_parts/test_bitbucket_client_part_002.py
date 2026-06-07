@@ -15,7 +15,7 @@ from awf.common.bitbucket_client import (
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 
-from ._helpers import FakeBitBucket, make_client, pr_payload, repo
+from ._helpers import FakeBitBucket, RecordingSleep, make_client, pr_payload, repo
 
 pytestmark = pytest.mark.unit
 
@@ -229,3 +229,118 @@ async def test_merge_pr_missing_commit_hash_raises() -> None:
     with pytest.raises(BitBucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "merge_commit.hash" in str(excinfo.value)
+
+
+# ── merge_pr async (202 Accepted) task polling ───────────────────────────────
+
+
+async def test_merge_pr_async_202_polls_location_to_success() -> None:
+    # BitBucket runs merges asynchronously: a slow merge answers 202 with a
+    # Location header pointing at the task-status endpoint, which must be polled
+    # to a terminal status before the merge commit hash is known.
+    fake = FakeBitBucket()
+    poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-1"
+    fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
+    fake.enqueue(
+        "GET",
+        f"{_PR}/merge/task-status/task-1",
+        json={
+            "task_status": "SUCCESS",
+            "merge_result": {"state": "MERGED", "merge_commit": {"hash": "async-sha"}},
+        },
+    )
+    client = make_client(fake)
+    sha = await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert sha == "async-sha"
+
+
+async def test_merge_pr_async_202_polls_through_pending() -> None:
+    fake = FakeBitBucket()
+    poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-2"
+    fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
+    fake.enqueue("GET", f"{_PR}/merge/task-status/task-2", json={"task_status": "PENDING"})
+    fake.enqueue(
+        "GET",
+        f"{_PR}/merge/task-status/task-2",
+        json={"task_status": "SUCCESS", "merge_result": {"merge_commit": {"hash": "later-sha"}}},
+    )
+    sleep = RecordingSleep()
+    client = make_client(fake, sleep=sleep)
+    sha = await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert sha == "later-sha"
+    assert sleep.delays  # waited between polls
+
+
+async def test_merge_pr_async_202_task_id_fallback_without_location() -> None:
+    # Some 202 responses carry the task id only in the body; build the poll URL.
+    fake = FakeBitBucket()
+    fake.enqueue("POST", f"{_PR}/merge", status=202, json={"task_id": "task-7"})
+    fake.enqueue(
+        "GET",
+        f"{_PR}/merge/task-status/task-7",
+        json={"task_status": "SUCCESS", "merge_result": {"merge_commit": {"hash": "fallback-sha"}}},
+    )
+    client = make_client(fake)
+    sha = await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert sha == "fallback-sha"
+
+
+async def test_merge_pr_async_202_non_success_terminal_status_raises() -> None:
+    fake = FakeBitBucket()
+    poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-3"
+    fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
+    fake.enqueue("GET", f"{_PR}/merge/task-status/task-3", json={"task_status": "FAILED"})
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert "FAILED" in str(excinfo.value)
+
+
+async def test_merge_pr_async_202_poll_budget_exhausted_raises() -> None:
+    fake = FakeBitBucket()
+    poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-4"
+    fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
+    fake.enqueue("GET", f"{_PR}/merge/task-status/task-4", json={"task_status": "PENDING"})
+    client = make_client(fake, max_merge_polls=2, merge_poll_delay_seconds=0)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert "did not complete" in str(excinfo.value)
+
+
+async def test_merge_pr_async_202_non_dict_poll_body_keeps_polling() -> None:
+    # A malformed (non-dict) task-status body is treated as not-yet-terminal so a
+    # garbled poll cannot be misread as success; the bounded budget then trips.
+    fake = FakeBitBucket()
+    poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-5"
+    fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
+    fake.enqueue("GET", f"{_PR}/merge/task-status/task-5", json=["unexpected"])
+    client = make_client(fake, max_merge_polls=1, merge_poll_delay_seconds=0)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert "did not complete" in str(excinfo.value)
+
+
+async def test_merge_pr_async_202_off_origin_location_rejected() -> None:
+    # The poll Location is origin-checked (SSRF guard) before being requested with
+    # the Authorization header, exactly like pagination ``next`` links.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "POST",
+        f"{_PR}/merge",
+        status=202,
+        headers={"Location": "https://evil.example.com/steal"},
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert "origin" in str(excinfo.value).lower()
+    assert fake.calls("GET") == []  # never followed the foreign origin
+
+
+async def test_merge_pr_async_202_without_poll_location_raises() -> None:
+    fake = FakeBitBucket()
+    fake.enqueue("POST", f"{_PR}/merge", status=202, json={"unexpected": "shape"})
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert "poll location" in str(excinfo.value).lower()

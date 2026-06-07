@@ -82,6 +82,12 @@ _DEFAULT_MAX_PAGES = 50
 # origin-checked first). A single hop is the documented shape — the cap only bounds a
 # degraded/adversarial redirect chain.
 _DEFAULT_MAX_REDIRECTS = 5
+# BitBucket Cloud performs every merge asynchronously: a fast merge answers 200 with
+# the merged PR, but a slow one answers 202 with a ``Location`` header pointing at
+# ``merge/task-status/{task_id}`` that must be polled to a terminal status. These bound
+# that poll loop so a stuck task cannot hang the monitor.
+_DEFAULT_MAX_MERGE_POLLS = 30
+_DEFAULT_MERGE_POLL_DELAY_SECONDS = 2.0
 
 # Reason codes (flow end-to-end: exception → log field → event → policy).
 BITBUCKET_AUTH_NOT_CONFIGURED = "BITBUCKET_AUTH_NOT_CONFIGURED"
@@ -225,6 +231,8 @@ class BitBucketClient:
         etag_cache_size: int = _DEFAULT_ETAG_CACHE_SIZE,
         max_pages: int = _DEFAULT_MAX_PAGES,
         max_redirects: int = _DEFAULT_MAX_REDIRECTS,
+        max_merge_polls: int = _DEFAULT_MAX_MERGE_POLLS,
+        merge_poll_delay_seconds: float = _DEFAULT_MERGE_POLL_DELAY_SECONDS,
     ) -> None:
         """Store the injected HTTP client, auth, and retry/cache policy."""
         self._client = client
@@ -233,6 +241,8 @@ class BitBucketClient:
         self._max_retries = max_retries
         self._max_pages = max_pages
         self._max_redirects = max_redirects
+        self._max_merge_polls = max_merge_polls
+        self._merge_poll_delay_seconds = merge_poll_delay_seconds
         self._backoff_base_seconds = backoff_base_seconds
         self._near_limit_delay_seconds = near_limit_delay_seconds
         self._etag_cache_size = etag_cache_size
@@ -605,7 +615,16 @@ class BitBucketClient:
         method: str = "squash",
         delete_branch: bool = True,
     ) -> str:
-        """Merge a PR with the given method and return the merge commit hash."""
+        """Merge a PR with the given method and return the merge commit hash.
+
+        BitBucket Cloud runs every merge asynchronously: a fast merge answers 200
+        with the merged PR object, but a slow one answers 202 Accepted with a
+        ``Location`` header pointing at ``merge/task-status/{task_id}`` and no
+        ``merge_commit.hash`` yet. That 202 path is polled to a terminal task
+        status before deciding success/failure — otherwise a valid long-running
+        merge would be misrecorded as a missing-hash ``BitBucketClientError`` even
+        though BitBucket may still complete it.
+        """
         strategy = bb_merge_strategy_for_method(method)
         if strategy is None:
             raise BitBucketClientError(
@@ -614,12 +633,17 @@ class BitBucketClient:
                 body=f"unsupported merge method for BitBucket: {method!r}",
                 reason_code=BITBUCKET_MERGE_METHOD_UNSUPPORTED,
             )
-        data = await self._request_json(
+        merge_path = f"{self._pr_path(repo, pr_number)}/merge"
+        response = await self._request(
             "POST",
-            f"{self._pr_path(repo, pr_number)}/merge",
+            merge_path,
             operation="bitbucket merge_pr",
             json_body={"merge_strategy": strategy, "close_source_branch": delete_branch},
         )
+        if response.status_code == 202:
+            data: Any = await self._poll_merge_task(response, merge_path)
+        else:
+            data = self._parse_json(response, "bitbucket merge_pr")
         merge_commit = data.get("merge_commit") if isinstance(data, dict) else None
         if isinstance(merge_commit, dict):
             sha = _clean_optional_str(merge_commit.get("hash"))
@@ -633,6 +657,65 @@ class BitBucketClient:
             operation="bitbucket merge_pr",
             status=None,
             body="BitBucket merge response omitted merge_commit.hash",
+        )
+
+    async def _poll_merge_task(self, response: httpx.Response, merge_path: str) -> Any:
+        """Poll an async (202) merge task until it reaches a terminal status.
+
+        Returns the ``merge_result`` PR object on ``SUCCESS``; raises a
+        ``BitBucketClientError`` if the task reports a non-success terminal status
+        or does not complete within the bounded poll budget. The poll loop is
+        bounded so a stuck task cannot hang the monitor.
+        """
+        operation = "bitbucket merge_pr (task-status)"
+        poll_url = self._merge_task_poll_url(response, merge_path, operation)
+        for attempt in range(self._max_merge_polls):
+            if attempt:
+                await self._sleep(self._merge_poll_delay_seconds)
+            status = self._parse_json(
+                await self._request("GET", poll_url, operation=operation),
+                operation,
+            )
+            task_status = ""
+            merge_result: Any = None
+            if isinstance(status, dict):
+                task_status = str(status.get("task_status") or "").upper()
+                merge_result = status.get("merge_result")
+            if task_status == "SUCCESS":
+                return merge_result
+            if task_status and task_status != "PENDING":
+                raise BitBucketClientError(
+                    operation=operation,
+                    status=response.status_code,
+                    body=f"BitBucket merge task ended in non-success status {task_status!r}",
+                )
+        raise BitBucketClientError(
+            operation=operation,
+            status=response.status_code,
+            body=f"BitBucket merge task did not complete within {self._max_merge_polls} polls",
+        )
+
+    def _merge_task_poll_url(
+        self, response: httpx.Response, merge_path: str, operation: str
+    ) -> str:
+        """Resolve the merge task-status poll URL from a 202 response.
+
+        Prefers the documented ``Location`` header (origin-checked against the
+        forge host, same SSRF guard as pagination ``next``); falls back to a
+        ``task_id`` in the body. Raises if neither is present.
+        """
+        location: str | None = response.headers.get("Location")
+        if location:
+            self._assert_forge_origin(location, operation, what="merge task-status Location")
+            return location
+        body = self._parse_json(response, operation)
+        task_id = _clean_optional_str(body.get("task_id")) if isinstance(body, dict) else None
+        if task_id:
+            return f"{merge_path}/task-status/{quote(task_id, safe='')}"
+        raise BitBucketClientError(
+            operation=operation,
+            status=response.status_code,
+            body="BitBucket 202 merge response carried no task-status poll location",
         )
 
     # ── Pipeline-chain internals ───────────────────────────────────────────
