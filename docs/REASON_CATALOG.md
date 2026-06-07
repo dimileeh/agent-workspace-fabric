@@ -590,6 +590,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_already_merged](#pr_already_merged)
 
+### PR_CREATE_FORGE_NOT_SUPPORTED
+**Problem:** AWF could not open a new pull request because new-PR creation only supports GitHub.
+**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. BitBucket Cloud), but opening a new PR shells `gh pr create` and parses github.com PR URLs, so AWF fails fast at the push step instead of mis-routing to a same-slug GitHub repository.
+**Operator Fix:** No repository change is needed — the forge is supported for monitoring an existing PR. Open the pull request manually first (AWF will then monitor it), use a GitHub repository, or remonitor once forge-neutral PR creation lands.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#pr_create_forge_not_supported](#pr_create_forge_not_supported)
+
 ### PR_METADATA_FETCH_FAILED
 **Problem:** AWF could not fetch GitHub metadata for the requested PR.
 **Likely Cause:** GitHub auth, network access, rate limits, or repository permissions blocked the metadata query.

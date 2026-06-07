@@ -107,6 +107,23 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace adopt-pr",
         _reason_catalog_link("PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"),
     ),
+    "PR_CREATE_FORGE_NOT_SUPPORTED": _ReasonText(
+        ("AWF could not open a new pull request because new-PR creation only supports GitHub."),
+        (
+            "No repository change is needed — the forge is supported for monitoring "
+            "an existing PR. Open the pull request manually first (AWF will then "
+            "monitor it), use a GitHub repository, or remonitor once forge-neutral "
+            "PR creation lands."
+        ),
+        (
+            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "Cloud), but opening a new PR shells `gh pr create` and parses "
+            "github.com PR URLs, so AWF fails fast at the push step instead of "
+            "mis-routing to a same-slug GitHub repository."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("PR_CREATE_FORGE_NOT_SUPPORTED"),
+    ),
     "RELEASE_SYNC_FORGE_NOT_SUPPORTED": _ReasonText(
         (
             "AWF could not run release-PR sync because the release-PR sync path "

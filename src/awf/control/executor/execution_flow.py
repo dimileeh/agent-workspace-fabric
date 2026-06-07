@@ -37,7 +37,10 @@ from awf.control.executor.constants import (
     _PR_CREATE_FAILED_REASON_CODE,
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
 )
-from awf.control.executor.forge_gate import unsupported_forge_error
+from awf.control.executor.forge_gate import (
+    new_pr_unsupported_forge_error,
+    unsupported_forge_error,
+)
 from awf.control.executor.git_ops import (
     _git_error_indicates_missing_head_object,
     _git_name_lines,
@@ -1173,6 +1176,25 @@ async def execute(
             from_status=WorkspaceStatus.validating,
             failure_reason=FailureReason.infrastructure_failure,
             message=f"pre-push policy check failed: {exc!r}"[:2000],
+        )
+        return
+
+    # Opening a *new* PR shells ``gh pr create`` (GitHub-only) via
+    # ``push_and_open``. BitBucket cleared the executor forge gate (it is supported
+    # for monitoring an existing PR), but new-PR creation is not forge-neutral yet,
+    # so fail fast here with an honest reason code rather than mis-route to
+    # ``gh``/github.com. Existing-PR flows (recovery / sync) carry ``ws.pr_url`` and
+    # reuse their PR through ``push_and_open`` without ``gh pr create``, so they are
+    # never gated here. The forge is fully resolved by now, so this catches both a
+    # detected and an explicit BitBucket forge.
+    new_pr_forge_error = new_pr_unsupported_forge_error(ws)
+    if new_pr_forge_error is not None:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.validating,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=new_pr_forge_error.message,
+            reason_code=new_pr_forge_error.reason_code,
         )
         return
 

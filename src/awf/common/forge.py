@@ -64,6 +64,15 @@ FORGE_NOT_SUPPORTED_REASON_CODE = "FORGE_NOT_SUPPORTED"
 # honest reason code instead.
 OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE = "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED"
 
+# Distinct again from ``FORGE_NOT_SUPPORTED``: the forge *is* supported, but opening
+# a brand-new PR shells ``gh pr create`` via ``PullRequestCreator.push_and_open`` —
+# a GitHub-only operation that recognizes only ``github.com/.../pull/...`` URLs.
+# BitBucket Cloud is supported for *monitoring* an existing PR, but new-PR creation
+# is not forge-neutral yet, so a BitBucket feature workspace without an existing PR
+# fails fast with this honest reason code instead of mis-routing to github.com.
+# Mirrors ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` / ``RELEASE_SYNC_FORGE_NOT_SUPPORTED``.
+PR_CREATE_FORGE_NOT_SUPPORTED_REASON_CODE = "PR_CREATE_FORGE_NOT_SUPPORTED"
+
 _SUPPORTED_FORGES: frozenset[ForgeKind] = frozenset({"github", "bitbucket"})
 
 

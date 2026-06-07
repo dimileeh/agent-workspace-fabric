@@ -18,11 +18,27 @@ from types import SimpleNamespace
 
 import pytest
 
-from awf.control.executor.forge_gate import unsupported_forge_error
+from awf.control.executor.forge_gate import (
+    new_pr_unsupported_forge_error,
+    unsupported_forge_error,
+)
 
 
 def _ws(resolved_profile: object, repo_url: str) -> SimpleNamespace:
     return SimpleNamespace(resolved_profile=resolved_profile, repo_url=repo_url)
+
+
+def _new_pr_ws(
+    resolved_profile: object,
+    repo_url: str,
+    *,
+    pr_url: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        resolved_profile=resolved_profile,
+        repo_url=repo_url,
+        pr_url=pr_url,
+    )
 
 
 @pytest.mark.unit
@@ -48,3 +64,47 @@ def test_unknown_forge_still_fails_fast() -> None:
     error = unsupported_forge_error(_ws({"forge": "gitlab"}, "https://gitlab.com/o/r.git"))
     assert error is not None
     assert error.reason_code == "FORGE_NOT_SUPPORTED"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "resolved_profile, repo_url",
+    [
+        # Explicit BitBucket forge, detected BitBucket URL, and a legacy snapshot
+        # whose URL detects as BitBucket all resolve to bitbucket → new-PR gated.
+        ({"forge": "bitbucket"}, "git@github.com:owner/repo.git"),
+        (None, "git@bitbucket.org:workspace/repo.git"),
+        ({}, "https://bitbucket.org/workspace/repo"),
+    ],
+)
+def test_new_pr_on_bitbucket_without_existing_pr_fails_fast(
+    resolved_profile: object, repo_url: str
+) -> None:
+    error = new_pr_unsupported_forge_error(_new_pr_ws(resolved_profile, repo_url))
+    assert error is not None
+    assert error.reason_code == "PR_CREATE_FORGE_NOT_SUPPORTED"
+
+
+@pytest.mark.unit
+def test_new_pr_with_existing_pr_proceeds_on_bitbucket() -> None:
+    # An existing PR is reused via push_and_open without `gh pr create`, so a
+    # BitBucket recovery / sync workspace (pr_url set) is never gated.
+    ws = _new_pr_ws(
+        {"forge": "bitbucket"},
+        "git@bitbucket.org:workspace/repo.git",
+        pr_url="https://bitbucket.org/workspace/repo/pull-requests/7",
+    )
+    assert new_pr_unsupported_forge_error(ws) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "resolved_profile, repo_url",
+    [
+        ({"forge": "github"}, "https://github.com/owner/repo.git"),
+        # Undetectable / bare-slug URL with a non-concrete forge falls back to github.
+        (None, "owner/repo"),
+    ],
+)
+def test_new_pr_on_github_proceeds(resolved_profile: object, repo_url: str) -> None:
+    assert new_pr_unsupported_forge_error(_new_pr_ws(resolved_profile, repo_url)) is None

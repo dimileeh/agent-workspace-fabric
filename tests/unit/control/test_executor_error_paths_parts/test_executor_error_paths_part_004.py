@@ -788,6 +788,72 @@ class TestPullRequestUnexpectedErrorPart002:
             assert runs[0].workspace_head_sha == "pre-pr-validation-head"
 
     @pytest.mark.unit
+    async def test_new_pr_on_bitbucket_fails_fast_before_gh_pr_create(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # BitBucket is a supported forge for monitoring an existing PR, so it clears
+        # the executor forge gate — but opening a *new* PR shells `gh pr create`
+        # (GitHub-only). A BitBucket feature workspace without an existing PR must
+        # fail fast at the push step with PR_CREATE_FORGE_NOT_SUPPORTED instead of
+        # mis-routing to `gh`/github.com, so `push_and_open` must never run.
+        class _AssertNotCalledPrCreator:
+            def __init__(self) -> None:
+                self.called = False
+
+            async def push_and_open(self, **_kwargs: object) -> object:
+                self.called = True
+                raise AssertionError("push_and_open must not run for a new BitBucket PR")
+
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.repo_url = "git@bitbucket.org:workspace/repo.git"
+            await s.commit()
+
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="")  # cached diff empty; agent committed
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="pre-pr-validation-head\n")  # rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="src/awf/x.py\n")  # plan-only committed diff
+        fake.queue_result(returncode=0, stdout="M\0src/awf/x.py\0")  # protected committed diff
+
+        pr_creator = _AssertNotCalledPrCreator()
+        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=compose,
+            validation=validation,
+            pr_creator=pr_creator,  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={AgentRuntime.codex: "gpt-5"},
+            ),
+        )
+
+        await executor.execute(ws_id)
+
+        assert pr_creator.called is False
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "gh pr create" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "PR_CREATE_FORGE_NOT_SUPPORTED"
+
+    @pytest.mark.unit
     async def test_validation_target_sha_update_failure_keeps_open_pr(
         self,
         fake: FakeCommandRunner,
