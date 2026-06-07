@@ -665,35 +665,36 @@ _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER = "docker pull failed"
 # pulls. A bare ``Error response from daemon: context deadline exceeded`` from an
 # ordinary build/test step is a real Docker daemon timeout the repair agent must
 # see, not flaky registry infra. So a daemon-error line only anchors a registry
-# timeout when the *same line* also carries registry / image-pull context — an
-# outbound registry request (``/v2/`` API path or a known registry host) — i.e.
-# the daemon was reaching the registry when it timed out.
-# Markers stay specific: a generic phrase such as ``pulling from`` would also match
-# unrelated daemon operations (e.g. ``failed while pulling from local volume``), so
-# only the registry API path and known hosts qualify. A registry-auth ``pull access
-# denied`` error is deliberately *not* a marker: it is a synchronous 403, so it can
-# never itself be the timeout, and accepting it would let a real (permanent) auth
-# failure anchor an *adjacent unrelated* timeout and silently rerun it as transient
-# infra instead of surfacing the auth bug to the repair agent. ``auth.docker.io`` is
-# the Docker Hub registry-auth token
-# service: pulling from Docker Hub first fetches a bearer token from
-# ``auth.docker.io/token``, so a daemon timeout reported against that host (e.g.
-# ``Error response from daemon: Get "https://auth.docker.io/token?...": context
-# deadline exceeded``) is a registry pull failure even though it names neither a
-# ``/v2/`` path nor a ``registry-1.docker.io``/``index.docker.io`` host. That host
-# is contacted only for registry operations, so it stays as specific as the others.
+# timeout when the *same line* also carries evidence of an outbound registry
+# *request* — i.e. the daemon was reaching the registry when it timed out.
+#
+# That evidence must be a registry *request* form, **not** merely a registry host:
+# a bare image-reference host (``ghcr.io``, ``gcr.io``, ``quay.io``,
+# ``public.ecr.aws``, ``*.pkg.dev``) appears on the image *ref* of *permanent*,
+# non-timeout daemon errors too — ``Error response from daemon: pull access denied
+# for ghcr.io/org/app`` (a synchronous 403) or ``No such image: ghcr.io/org/app``.
+# Accepting the bare host would let such a permanent auth/image error anchor an
+# *adjacent unrelated* ``context deadline exceeded`` and silently rerun a real bug
+# as transient infra. So only request-form markers qualify:
+#   * ``/v2/`` — the registry distribution-API path. Every real image manifest/blob
+#     pull request to *any* registry (Docker Hub, GHCR, GCR, Quay, ECR, Artifact
+#     Registry) is ``https://<host>/v2/<repo>/...``, so a registry pull timeout
+#     against any of those hosts already carries ``/v2/`` (e.g. ``Error response
+#     from daemon: Get "https://ghcr.io/v2/org/app/manifests/v1": context deadline
+#     exceeded``). A bare image-ref host on a permanent error carries no ``/v2/``.
+#   * ``auth.docker.io`` — the Docker Hub registry-auth token service. Pulling from
+#     Docker Hub first fetches a bearer token from ``auth.docker.io/token``, so a
+#     daemon timeout reported against that host (``Error response from daemon: Get
+#     "https://auth.docker.io/token?...": context deadline exceeded``) is a registry
+#     pull failure even though it names no ``/v2/`` path. That host is contacted
+#     *only* for registry operations and can never be an image ref, so it is a
+#     request-form marker on its own.
+# A generic phrase such as ``pulling from`` is likewise excluded: it would match
+# unrelated daemon operations (e.g. ``failed while pulling from local volume``).
 _CI_DOCKER_DAEMON_ERROR_MARKER = "error response from daemon"
 _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "/v2/",
-    "registry-1.docker.io",
-    "index.docker.io",
-    "registry.hub.docker.com",
     "auth.docker.io",
-    "ghcr.io",
-    "gcr.io",
-    "quay.io",
-    "public.ecr.aws",
-    ".pkg.dev",
 )
 
 # ``failed to pull image "<ref>"`` is emitted by Docker, containerd, and the
@@ -849,9 +850,14 @@ def _is_docker_pull_failure_line(
     from daemon`` line is not such context: the daemon emits it for any operation,
     so a generic daemon timeout next to a kubelet ``failed to pull image`` event
     must not corroborate it. The daemon wrapper anchors only as its own evidence
-    line, and only when that same line also carries registry / image-pull context
-    — a bare daemon timeout from a ``docker run`` test step is a real failure, not
-    flaky registry infra.
+    line, and only when that same line also carries a registry *request* form
+    (``_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS`` — a ``/v2/`` distribution-API path
+    or the ``auth.docker.io`` token host). A bare image-reference host such as
+    ``ghcr.io`` is **not** such evidence: it also sits on the image ref of permanent
+    daemon errors (``pull access denied for ghcr.io/org/app``, ``No such image:
+    ghcr.io/org/app``), so accepting it would let a real auth/image bug anchor an
+    adjacent unrelated timeout. A bare daemon timeout from a ``docker run`` test
+    step is likewise a real failure, not flaky registry infra.
     """
 
     if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in line:

@@ -1018,8 +1018,9 @@ class TestCiFailure:
         """A daemon error for a non-registry operation whose text merely contains the
         generic phrase ``pulling from`` (e.g. ``failed while pulling from local
         volume``) must not anchor a nearby timeout as a registry image pull. The
-        registry-context markers stay specific (``/v2/``, known hosts, ``pull access
-        denied``), so this real daemon timeout reaches the repair agent."""
+        registry-context markers stay specific to request forms (``/v2/`` and the
+        ``auth.docker.io`` token host), so this real daemon timeout reaches the
+        repair agent."""
         failure = CheckFailure(
             name="integration-tests",
             conclusion="FAILURE",
@@ -1108,6 +1109,64 @@ class TestCiFailure:
             conclusion="FAILURE",
             log_excerpt=(
                 "Error response from daemon: pull access denied for myapp\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_daemon_registry_qualified_pull_access_denied_does_not_anchor_timeout(
+        self,
+    ) -> None:
+        """A registry-qualified permanent daemon error must not anchor an adjacent
+        timeout. ``Error response from daemon: pull access denied for
+        ghcr.io/org/app`` is a synchronous 403 (the registry host sits on the image
+        *ref*, not on an outbound request), so a nearby unrelated ``context deadline
+        exceeded`` must not let it pose as a transient registry pull. The auth bug
+        must reach the repair agent rather than be silently rerun: a bare image-
+        reference host is not a registry-*request* form."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: pull access denied for ghcr.io/org/app\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_daemon_registry_qualified_no_such_image_does_not_anchor_timeout(
+        self,
+    ) -> None:
+        """``Error response from daemon: No such image: ghcr.io/org/app`` is a
+        permanent missing-image error, not a registry timeout — the host is on the
+        image ref, not an outbound ``/v2/`` request. A nearby unrelated ``context
+        deadline exceeded`` must not anchor it as a transient pull; the real
+        image/config bug must reach the repair agent."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: No such image: ghcr.io/org/app:latest\n"
                 "context deadline exceeded"
             ),
             run_id="27091023772",

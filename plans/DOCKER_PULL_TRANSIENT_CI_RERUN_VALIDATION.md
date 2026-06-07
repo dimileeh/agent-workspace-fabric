@@ -47,15 +47,26 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
     registry context still counts via the registry markers, keeping it consistent
     with the same-line requirement in `_is_docker_pull_failure_line`.
   - `_CI_DOCKER_DAEMON_ERROR_MARKER` (`"error response from daemon"`) +
-    `_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS` (registry hosts / `/v2/` API path) —
-    a daemon-error line only anchors when it also carries registry/image-pull
-    context. Markers stay specific: the generic phrase `"pulling from"` was dropped
-    (review comment issue:4642392722) because it also matches non-registry daemon
-    operations such as `failed while pulling from local volume`. `"pull access
-    denied"` was likewise dropped (review comment issue:4642392722): it is a
+    `_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS` (registry *request* forms: the
+    `/v2/` distribution-API path and the `auth.docker.io` token host) — a
+    daemon-error line only anchors when it also carries an outbound registry
+    *request* form. Markers stay specific: the generic phrase `"pulling from"` was
+    dropped (review comment issue:4642392722) because it also matches non-registry
+    daemon operations such as `failed while pulling from local volume`. `"pull
+    access denied"` was likewise dropped (review comment issue:4642392722): it is a
     synchronous registry 403, so it can never itself be the timeout, and accepting
     it let a real (permanent) auth failure anchor an *adjacent unrelated* timeout
     and silently rerun it instead of surfacing the auth bug to the repair agent.
+    The bare image-reference registry hosts (`ghcr.io`, `gcr.io`, `quay.io`,
+    `public.ecr.aws`, `*.pkg.dev`, and the Docker endpoint hosts) were then dropped
+    too (review comment PRRT_kwDOSJAM6s6HqXaV): they sit on the image *ref* of
+    permanent, non-timeout daemon errors (`pull access denied for ghcr.io/org/app`,
+    `No such image: ghcr.io/org/app`), so a bare host let such a permanent
+    auth/image error anchor an adjacent unrelated `context deadline exceeded` and
+    silently rerun it. A genuine registry pull timeout against any of those hosts
+    already carries the `/v2/` request path (`Get "https://ghcr.io/v2/...":
+    context deadline exceeded`), so the request-form markers preserve real
+    transient detection while the bare host no longer poses as a pull request.
   - `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` — the line-proximity window.
   - `_is_docker_pull_failure_line(index, line, lines,
     docker_pull_command_indexes)` — whether one log line evidences a Docker
