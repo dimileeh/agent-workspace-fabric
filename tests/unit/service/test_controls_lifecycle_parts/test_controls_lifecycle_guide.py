@@ -14,6 +14,7 @@ from awf.runtime.operator_hints import (
     operator_hint_from_threads,
 )
 from awf.service.controls import (
+    WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideMissingPrUrlError,
     WorkspaceGuideStateError,
 )
@@ -163,6 +164,33 @@ async def test_guide_rejects_wrong_state_and_missing_pr_before_creating_operatio
     assert missing_pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}
     assert await _operations(session, requested.id) == []
     assert await _operations(session, missing_pr.id) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directive", ["", "   ", "\t\n"])
+async def test_guide_rejects_empty_or_whitespace_directive_before_creating_operation(
+    session: AsyncSession, directive: str
+) -> None:
+    """A blank directive must never persist an empty operator hint.
+
+    REST strips whitespace at the schema boundary, but the MCP tool only sets an
+    advisory ``minLength`` (not an enforced constraint), so the service itself
+    guards the directive and fails fast before touching the DB.
+    """
+    workspace = await _monitoring_workspace(session)
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceGuideEmptyDirectiveError) as empty_directive:
+        await service.guide_workspace(
+            workspace.id,
+            directive=directive,
+            idempotency_key="guide-empty",
+            expected_version=workspace.version,
+        )
+
+    assert empty_directive.value.error_code == "WORKSPACE_GUIDE_DIRECTIVE_REQUIRED"
+    assert await _operations(session, workspace.id) == []
+    assert workspace.monitor_threads_addressed in (None, {})
 
 
 @pytest.mark.unit

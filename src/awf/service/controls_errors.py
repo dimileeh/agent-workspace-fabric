@@ -116,6 +116,14 @@ class WorkspaceGuideMissingPrUrlError(WorkspaceControlError):
         )
 
 
+class WorkspaceGuideEmptyDirectiveError(WorkspaceControlError):
+    def __init__(self) -> None:
+        super().__init__(
+            error_code="WORKSPACE_GUIDE_DIRECTIVE_REQUIRED",
+            message="Workspace guide directive must not be empty or whitespace-only.",
+        )
+
+
 class WorkspaceGuideStateError(WorkspaceControlError):
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(

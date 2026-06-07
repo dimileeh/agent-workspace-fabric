@@ -41,6 +41,7 @@ from awf.service.controls_errors import (
     IdempotencyConflictError,
     VersionConflictError,
     WorkspaceControlError,
+    WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideMissingPrUrlError,
     WorkspaceGuideStateError,
     WorkspaceNotFoundError,
@@ -626,6 +627,11 @@ class WorkspaceControlService:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         directive_text = (directive or "").strip()
+        if not directive_text:
+            # REST strips whitespace at the schema boundary, but the MCP tool only
+            # advertises an advisory ``minLength``; guard here so a blank directive
+            # can never persist an empty operator hint that re-engages the agent.
+            raise WorkspaceGuideEmptyDirectiveError()
         reason_text = (reason or "").strip()
         workspace_for_payload = await self._require_workspace(repo, workspace_id)
         payload = _operator_operation_payload(
@@ -1544,6 +1550,7 @@ __all__ = [
     "IdempotencyConflictError",
     "VersionConflictError",
     "WorkspaceStackStopError",
+    "WorkspaceGuideEmptyDirectiveError",
     "WorkspaceGuideMissingPrUrlError",
     "WorkspaceGuideStateError",
     "WorkspaceRemonitorMissingPrUrlError",

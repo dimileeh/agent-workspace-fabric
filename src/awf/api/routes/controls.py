@@ -22,6 +22,7 @@ from awf.service.controls import (
     VersionConflictError,
     WorkspaceControlError,
     WorkspaceControlService,
+    WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideMissingPrUrlError,
     WorkspaceGuideStateError,
     WorkspaceNotFoundError,
@@ -240,6 +241,7 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
     elif isinstance(
         exc,
         (
+            WorkspaceGuideEmptyDirectiveError,
             WorkspaceGuideMissingPrUrlError,
             WorkspaceRemonitorMissingPrUrlError,
             WorkspaceValidateMissingPrUrlError,

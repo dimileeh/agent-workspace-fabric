@@ -16,6 +16,7 @@ from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
     WorkspaceControlError,
+    WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideMissingPrUrlError,
     WorkspaceGuideStateError,
     WorkspaceNotFoundError,
@@ -88,6 +89,10 @@ def test_require_idempotency_key_strips_valid_values() -> None:
         ),
         (
             WorkspaceGuideMissingPrUrlError(SimpleNamespace(status="monitoring_pr")),
+            400,
+        ),
+        (
+            WorkspaceGuideEmptyDirectiveError(),
             400,
         ),
         (
