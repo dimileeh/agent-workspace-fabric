@@ -52,14 +52,17 @@ from awf.common.bitbucket_client_parsing import (
     decode_thread_id,
     extract_diffstat_paths,
     html_href,
+    latest_external_review_activity,
     map_bb_merge_methods,
     merge_state_status_for,
     mergeable_state_for,
+    parse_bb_datetime,
     parse_check_state,
     parse_check_timings,
     parse_pr_terminal_state,
 )
 from awf.common.github_client import RepoRef
+from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
@@ -402,6 +405,16 @@ class BitBucketClient:
         )
         account_id = await self._current_account_id()
         merged, closed, merge_commit_sha = parse_pr_terminal_state(pr)
+        latest_review_at, latest_review_source = latest_external_review_activity(
+            comments, account_id=account_id
+        )
+        quiet_anchor_at, quiet_anchor_source = _quiet_period_anchor(
+            latest_external_review_activity_at=latest_review_at,
+            latest_external_review_activity_source=latest_review_source,
+            pr_created_at=parse_bb_datetime(pr.get("created_on")),
+            pr_updated_at=parse_bb_datetime(pr.get("updated_on")),
+            head_committed_at=None,
+        )
         return PRStatus(
             number=int(pr.get("id") or pr_number),
             head_sha=head_sha,
@@ -422,6 +435,10 @@ class BitBucketClient:
             closed=closed,
             merged=merged,
             merge_commit_sha=merge_commit_sha,
+            latest_external_review_activity_at=latest_review_at,
+            latest_external_review_activity_source=latest_review_source,
+            quiet_period_anchor_at=quiet_anchor_at,
+            quiet_period_anchor_source=quiet_anchor_source,
         )
 
     async def fetch_failing_check_logs(

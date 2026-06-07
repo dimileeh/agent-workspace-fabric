@@ -413,6 +413,37 @@ def build_general_review_comments(
     return tuple(reviews)
 
 
+def latest_external_review_activity(
+    comments: list[dict[str, Any]],
+    *,
+    account_id: str | None,
+) -> tuple[datetime | None, str | None]:
+    """Return the newest external (non-viewer) comment activity timestamp + source.
+
+    Mirrors the GitHub status path's ``_latest_activity_from_thread_comments``: every
+    non-deleted comment the viewer did not author counts as review activity — inline
+    *and* top-level, resolved threads included — so the non-check-reviewer quiet window
+    re-anchors on a late Bitbucket reviewer comment instead of decaying to the
+    head-only fallback (which would let a fresh comment be merged past immediately).
+    """
+    latest_at: datetime | None = None
+    latest_source: str | None = None
+    for comment in comments:
+        if comment.get("deleted") or comment.get("id") is None:
+            continue
+        if _is_viewer(comment, account_id):
+            continue
+        candidate = parse_bb_datetime(comment.get("updated_on")) or parse_bb_datetime(
+            comment.get("created_on")
+        )
+        if candidate is None:
+            continue
+        source = "review_thread_comment" if _comment_is_inline(comment) else "issue_comment"
+        if latest_at is None or candidate > latest_at:
+            latest_at, latest_source = candidate, source
+    return latest_at, latest_source
+
+
 def build_blocking_reviews(
     pr: dict[str, Any],
     *,

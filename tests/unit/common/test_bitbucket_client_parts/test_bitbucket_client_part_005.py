@@ -7,6 +7,8 @@ cacheable params, and the pure-parsing guard branches.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import httpx
 import pytest
 
@@ -20,6 +22,7 @@ from awf.common.bitbucket_client_parsing import (
     build_review_threads,
     extract_diffstat_paths,
     html_href,
+    latest_external_review_activity,
     parse_bb_datetime,
     parse_check_timings,
 )
@@ -94,6 +97,48 @@ async def test_account_id_is_cached_across_status_fetches() -> None:
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert len(fake.calls("GET")) == 9  # only one /2.0/user across both fetches
     assert sum(1 for r in fake.requests if r.url.path == "/2.0/user") == 1
+
+
+async def test_fetch_pr_status_populates_review_activity_anchor() -> None:
+    # A late external reviewer comment must populate latest_external_review_activity_at
+    # and quiet_period_anchor_at so the non-check-reviewer settle gate anchors on the
+    # new review activity instead of decaying to the head-only fallback (which would
+    # let a fresh Bitbucket comment be merged past immediately). Mirrors GitHub.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
+    fake.page(
+        "GET",
+        f"{_PR}/comments",
+        values=[
+            {
+                "id": 9,
+                "content": {"raw": "please fix"},
+                "user": {"account_id": "rev"},
+                "created_on": "2024-05-01T00:00:00Z",
+                "updated_on": "2024-05-02T00:00:00Z",
+            }
+        ],
+    )
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.latest_external_review_activity_at == datetime(2024, 5, 2, tzinfo=UTC)
+    assert status.latest_external_review_activity_source == "issue_comment"
+    assert status.quiet_period_anchor_at == datetime(2024, 5, 2, tzinfo=UTC)
+    assert status.quiet_period_anchor_source == "issue_comment"
+
+
+async def test_fetch_pr_status_without_activity_leaves_anchor_unset() -> None:
+    # No external review activity and no PR timestamps → anchor stays None so the
+    # settle gate keeps its head-only fallback (unchanged behavior).
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.latest_external_review_activity_at is None
+    assert status.quiet_period_anchor_at is None
 
 
 async def test_account_id_fetch_error_propagates() -> None:
@@ -415,6 +460,51 @@ def test_general_comments_skip_inline_deleted_and_empty() -> None:
     ]
     reviews = build_general_review_comments(comments, account_id="me")  # id 4 is viewer
     assert reviews == ()
+
+
+def test_latest_external_review_activity_picks_newest_external() -> None:
+    comments = [
+        # viewer-authored → ignored even though newest.
+        {
+            "id": 1,
+            "user": {"account_id": "me"},
+            "updated_on": "2024-06-01T00:00:00Z",
+            "inline": {"path": "a.py"},
+        },
+        {"id": 2, "deleted": True, "updated_on": "2024-05-01T00:00:00Z"},  # deleted → ignored
+        {"user": {"account_id": "rev"}, "updated_on": "2024-04-01T00:00:00Z"},  # no id → ignored
+        # external inline comment (older).
+        {
+            "id": 4,
+            "user": {"account_id": "rev"},
+            "created_on": "2024-01-01T00:00:00Z",
+            "inline": {"path": "a.py"},
+        },
+        # external general comment (newer) → wins, source issue_comment.
+        {"id": 5, "user": {"account_id": "rev"}, "updated_on": "2024-01-15T00:00:00Z"},
+    ]
+    at, source = latest_external_review_activity(comments, account_id="me")
+    assert at == datetime(2024, 1, 15, tzinfo=UTC)
+    assert source == "issue_comment"
+
+
+def test_latest_external_review_activity_inline_source_and_empty() -> None:
+    assert latest_external_review_activity([], account_id=None) == (None, None)
+    # A comment with no parseable timestamp is skipped (no activity).
+    assert latest_external_review_activity(
+        [{"id": 7, "user": {"account_id": "rev"}}], account_id="me"
+    ) == (None, None)
+    inline = [
+        {
+            "id": 8,
+            "user": {"account_id": "rev"},
+            "created_on": "2024-01-01T00:00:00Z",
+            "inline": {"path": "a.py"},
+        }
+    ]
+    at, source = latest_external_review_activity(inline, account_id="me")
+    assert at == datetime(2024, 1, 1, tzinfo=UTC)
+    assert source == "review_thread_comment"
 
 
 def test_build_blocking_reviews_flags_changes_requested_participant() -> None:
