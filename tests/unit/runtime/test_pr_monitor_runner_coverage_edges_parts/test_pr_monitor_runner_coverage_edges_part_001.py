@@ -421,58 +421,55 @@ async def test_monitor_run_terminates_on_github_status_error(
         assert _retry_events(ws) == []
 
 
-class _BitBucketMergeRaisingClient(DefaultMergeMethodGitHubClient):
-    """Forge double whose ``merge_pr`` raises ``BitBucketClientError``.
-
-    Models a BitBucket workspace reaching the ``Merge`` action after the forge
-    gate flip: status/merge-method fetches succeed via the inherited GitHub
-    plumbing, but the merge forge call raises ``BitBucketClientError`` (which
-    ``GitHubClientError``-only action arms cannot catch).
-    """
-
-    def __init__(self, cmd: FakeCommandRunner, *, reason_code: str) -> None:
-        super().__init__(cmd)
-        self._merge_reason_code = reason_code
-
-    async def merge_pr(
-        self,
-        *,
-        repo: RepoRef,
-        pr_number: int,
-        method: str = "squash",
-        delete_branch: bool = True,
-    ) -> str:
-        """Raise a deterministic BitBucket fault instead of merging."""
-        del repo, pr_number, method, delete_branch
-        raise BitBucketClientError(
-            operation="bitbucket merge_pr",
-            status=403,
-            body="merge is not permitted on this pull request",
-            reason_code=self._merge_reason_code,
-        )
-
-
 @pytest.mark.unit
 async def test_monitor_run_terminates_on_bitbucket_execute_error(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A deterministic ``BitBucketClientError`` escaping ``_execute`` terminates.
+
+    Regression for PRRT_kwDOSJAM6s6Hnm9b. ``_execute`` drives non-merge forge
+    actions (thread-resolve, CI-rerun, fix-cycle) whose action arms catch
+    ``GitHubClientError`` alone; a BitBucket workspace's forge raises
+    ``BitBucketClientError`` instead. The runner's outer ``execute_action`` arm
+    must catch it so a deterministic fault marks the workspace failed (preserving
+    the reason code) rather than escaping ``run()`` and crashing the background
+    monitor task.
+
+    Merge faults are NOT routed here — they follow the merge-blocker
+    notify-and-keep-polling path instead (see
+    ``test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling`` in
+    ``test_pr_monitor_merge_methods.py``), so this exercises a non-merge action
+    via a stubbed ``_execute``.
+    """
     cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
-    # The poll reports a clean, mergeable PR so ``decide`` picks ``Merge``; the
-    # forge double then raises a deterministic ``BitBucketClientError`` from
-    # ``merge_pr``.
-    cmd.queue_result(returncode=0)  # git fetch origin <base>
-    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-    cmd.queue_result(returncode=0, stdout=pr_payload())  # mergeable PR state
+    # A clean, mergeable poll so ``decide`` reaches an action; the stubbed
+    # ``_execute`` then raises the deterministic non-merge BitBucket fault.
+    cmd.queue_result(returncode=0)  # poll: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # poll: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # poll: mergeable PR
     runner = make_runner(
         factory=factory,
         cmd=cmd,
         adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
+        sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketMergeRaisingClient(cmd, reason_code="BITBUCKET_MERGE_FORBIDDEN"),
+        gh=DefaultMergeMethodGitHubClient(cmd),
     )
+
+    async def fake_execute(**_kwargs: object) -> bool:
+        # Model a non-merge forge call (e.g. resolve_thread) raising a
+        # deterministic BitBucket fault the GitHubClientError-only arm misses.
+        raise BitBucketClientError(
+            operation="bitbucket resolve_thread",
+            status=403,
+            body="thread resolution is not permitted for this token",
+            reason_code=BITBUCKET_AUTH_FAILED,
+        )
+
+    runner._execute = fake_execute  # type: ignore[method-assign]
 
     # Must not escape ``run()`` and crash the background monitor task.
     await runner.run(
@@ -486,10 +483,11 @@ async def test_monitor_run_terminates_on_bitbucket_execute_error(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert "bitbucket error" in (ws.failure_message or "")
-        assert ws.events[-1].reason_code == "BITBUCKET_MERGE_FORBIDDEN"
+        assert ws.events[-1].reason_code == BITBUCKET_AUTH_FAILED
         # Deterministic fault terminates rather than entering the transient
         # re-poll loop.
         assert _bitbucket_retry_events(ws) == []
+        assert sleep_fn.calls == []
 
 
 @pytest.mark.unit
@@ -500,9 +498,10 @@ async def test_monitor_run_retries_transient_bitbucket_execute_error(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
-    # The merge attempt hits a transient BitBucket blip (5xx) → wait + re-poll;
-    # the PR then shows merged upstream so the monitor short-circuits to
-    # completed instead of crashing or terminating.
+    # The merge attempt hits a transient BitBucket blip (5xx). It is classified
+    # as a merge blocker, so the merge-blocker arm (context ``merge_pr``) waits
+    # and re-polls; the PR then shows merged upstream so the monitor
+    # short-circuits to completed instead of crashing or terminating.
     cmd.queue_result(returncode=0)  # poll: git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # poll: base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload())  # poll: mergeable PR → Merge
@@ -557,7 +556,9 @@ async def test_monitor_run_retries_transient_bitbucket_execute_error(
         assert ws.status == WorkspaceStatus.completed.value
         retry_events = _bitbucket_retry_events(ws)
         assert len(retry_events) == 1
-        assert retry_events[0].payload["context"] == "execute_action"
+        # The transient merge fault is handled by the merge-blocker arm, which
+        # tags the retry with the ``merge_pr`` context.
+        assert retry_events[0].payload["context"] == "merge_pr"
 
 
 @pytest.mark.unit
