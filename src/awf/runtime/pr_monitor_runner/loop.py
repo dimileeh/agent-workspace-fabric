@@ -96,7 +96,13 @@ async def _post_workflow_scope_notification_best_effort(
             state=state,
             blocker_reason=blocker_reason,
         )
-    except GitHubClientError as exc:
+    except (GitHubClientError, BitBucketClientError) as exc:
+        # A BitBucket workspace posts the human hint through ``BitBucketClient``,
+        # whose ``post_comment`` raises ``BitBucketClientError`` (not
+        # ``GitHubClientError``). Catch it alongside the GitHub error so a
+        # transient or permanent comment failure degrades to a logged warning
+        # here too, instead of escaping this best-effort helper and aborting the
+        # surrounding workflow-scope failure handling.
         _log.warning(
             "monitor.workflow_scope_notification_failed",
             workspace_id=workspace_id,
@@ -1373,6 +1379,44 @@ async def _execute(
                     "reason_code": "GITHUB_ERROR",
                 },
                 error_code="GITHUB_ERROR",
+                error_message=str(exc),
+            )
+            raise
+        except BitBucketClientError as exc:
+            # A BitBucket workspace posts the human notification through
+            # ``BitBucketClient``, whose ``post_comment`` raises
+            # ``BitBucketClientError`` (not ``GitHubClientError``). Mirror the
+            # GitHub arm: a transient blip waits then keeps polling; a permanent
+            # fault finishes the operation as failed and re-raises. Without this
+            # arm a comment failure would escape ``_execute`` uncaught.
+            if await self._wait_after_transient_bitbucket_error(
+                exc,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="post_human_notification",
+                monitor_log=monitor_log,
+            ):
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "transient_bitbucket_error",
+                        "reason_code": "BITBUCKET_TRANSIENT_ERROR",
+                    },
+                    error_code="BITBUCKET_TRANSIENT_ERROR",
+                    error_message=str(exc),
+                )
+                return False
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "outcome": "bitbucket_error",
+                    "reason_code": "BITBUCKET_ERROR",
+                },
+                error_code="BITBUCKET_ERROR",
                 error_message=str(exc),
             )
             raise

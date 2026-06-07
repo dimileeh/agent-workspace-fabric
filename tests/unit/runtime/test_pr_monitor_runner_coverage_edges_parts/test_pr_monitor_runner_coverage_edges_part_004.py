@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
@@ -51,6 +52,7 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 from awf.service.merge_queue import MergeQueueBlocker
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -59,6 +61,24 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     review_node,
     seed_monitoring_workspace,
 )
+
+
+class _BitBucketPostCommentClient(DefaultMergeMethodGitHubClient):
+    """Command-based gh double whose ``post_comment`` raises a BitBucket error.
+
+    A BitBucket workspace's ``self._deps.gh`` is a ``BitBucketClient`` that raises
+    ``BitBucketClientError`` (not ``GitHubClientError``) from ``post_comment``.
+    Overriding only that method keeps the SyncBase push flow command-based while
+    exercising the best-effort workflow-scope-notification BitBucket arm.
+    """
+
+    def __init__(self, runner: FakeCommandRunner, exc: BitBucketClientError) -> None:
+        super().__init__(runner)
+        self._post_comment_exc = exc
+
+    async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
+        del repo, pr_number, body
+        raise self._post_comment_exc
 
 
 @pytest.fixture
@@ -488,6 +508,70 @@ async def test_execute_sync_base_workflow_scope_notification_failure_still_termi
     assert push_events[0].reason_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
     comment_calls = [call for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]]
     assert len(comment_calls) == 1
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_workflow_scope_bitbucket_notification_failure_still_terminates(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A BitBucket notification failure must degrade to a logged warning so the
+    terminal workflow-scope handling still runs instead of escaping uncaught."""
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(
+        returncode=1,
+        stderr=(
+            "remote: refusing to allow a Personal Access Token to create or update workflow "
+            "`.github/workflows/publish.yml` without `workflow` scope"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketPostCommentClient(
+            cmd,
+            BitBucketClientError(
+                operation="bitbucket post_comment",
+                status=403,
+                body="forbidden: missing scope",
+            ),
+        ),
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@bitbucket.org:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert state.iter_count == 0
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.failed.value
+    sync_operation = next(operation for operation in operations if operation.type == "sync_base")
+    assert sync_operation.status == OperationStatus.failed.value
+    assert sync_operation.error_code == "GITHUB_WORKFLOW_SCOPE_REQUIRED"
 
 
 @pytest.mark.unit

@@ -104,6 +104,24 @@ class _BitBucketSettlePollClient(DefaultMergeMethodGitHubClient):
         raise self._fetch_exc
 
 
+class _BitBucketPostCommentClient(DefaultMergeMethodGitHubClient):
+    """Command-based gh double whose ``post_comment`` raises a BitBucket error.
+
+    A BitBucket workspace's ``self._deps.gh`` is a ``BitBucketClient`` that raises
+    ``BitBucketClientError`` (not ``GitHubClientError``) from ``post_comment``.
+    Overriding only that method keeps the rest of the flow command-based while
+    exercising the human-notification BitBucket arms.
+    """
+
+    def __init__(self, runner: FakeCommandRunner, exc: BitBucketClientError) -> None:
+        super().__init__(runner)
+        self._post_comment_exc = exc
+
+    async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
+        del repo, pr_number, body
+        raise self._post_comment_exc
+
+
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
@@ -566,6 +584,113 @@ async def test_non_transient_human_notification_comment_error_raises(
             action=NotifyHuman(message="manual review needed"),
             workspace_id=workspace_id,
             repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_status_for_helpers(),
+            state=MonitorState(),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+
+@pytest.mark.unit
+async def test_transient_bitbucket_human_notification_comment_error_retries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A BitBucket workspace posts the NotifyHuman comment through BitBucketClient,
+    # whose post_comment raises BitBucketClientError (not GitHubClientError). A
+    # transient blip (rate limit) must wait and keep polling instead of escaping
+    # _execute uncaught — mirroring the GitHub transient arm.
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketPostCommentClient(
+            cmd,
+            BitBucketClientError(
+                operation="bitbucket post_comment",
+                status=429,
+                body="rate limited",
+                reason_code=BITBUCKET_RATE_LIMITED,
+            ),
+        ),
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=NotifyHuman(message="branch protection temporarily unavailable"),
+        workspace_id=workspace_id,
+        repo_url="git@bitbucket.org:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert state.threads_addressed_ids == {}
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.failure_message is None
+        retry_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.bitbucket_transient_error_retrying"
+        ]
+        assert len(retry_events) == 1
+        assert retry_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY"
+        assert retry_events[0].payload["context"] == "post_human_notification"
+        assert retry_events[0].payload["operation"] == "bitbucket post_comment"
+
+
+@pytest.mark.unit
+async def test_non_transient_bitbucket_human_notification_comment_error_raises(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A permanent BitBucket fault (403, token lacks the scope) during the
+    # NotifyHuman comment must propagate like the GitHub non-transient arm rather
+    # than being swallowed.
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketPostCommentClient(
+            cmd,
+            BitBucketClientError(
+                operation="bitbucket post_comment",
+                status=403,
+                body="forbidden: missing scope",
+            ),
+        ),
+    )
+
+    with pytest.raises(BitBucketClientError, match="forbidden: missing scope"):
+        await runner._execute(
+            action=NotifyHuman(message="manual review needed"),
+            workspace_id=workspace_id,
+            repo_url="git@bitbucket.org:dimileeh/aira-web.git",
             repo=RepoRef(owner="dimileeh", name="aira-web"),
             pr_number=42,
             status=_status_for_helpers(),

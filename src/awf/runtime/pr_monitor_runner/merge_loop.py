@@ -8,6 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
     OperationStatus,
@@ -1101,6 +1102,23 @@ async def handle_merge_action(
                 )
             except GitHubClientError as exc:
                 if await self._wait_after_transient_github_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="post_human_notification",
+                    monitor_log=monitor_log,
+                ):
+                    return False
+                raise
+            except BitBucketClientError as exc:
+                # A BitBucket workspace posts the human notification through
+                # ``BitBucketClient``, whose ``post_comment`` raises
+                # ``BitBucketClientError`` (not ``GitHubClientError``). Mirror the
+                # GitHub arm: a transient blip waits then keeps polling; a
+                # permanent fault re-raises. Without this arm a comment failure
+                # during the merge-method-preflight rejection notification would
+                # escape uncaught instead of being retried or surfaced.
+                if await self._wait_after_transient_bitbucket_error(
                     exc,
                     workspace_id=workspace_id,
                     pr_number=pr_number,

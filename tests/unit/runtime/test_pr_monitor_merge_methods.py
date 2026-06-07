@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_text
+from awf.common.bitbucket_client import BITBUCKET_RATE_LIMITED, BitBucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import OperationStatus
@@ -231,7 +232,7 @@ class _MergeMethodClient:
         repo_error: GitHubClientError | None = None,
         branch_error: GitHubClientError | None = None,
         merge_results: list[str | GitHubClientError] | None = None,
-        post_comment_error: GitHubClientError | None = None,
+        post_comment_error: GitHubClientError | BitBucketClientError | None = None,
     ) -> None:
         """Configure repository policy, branch policy, and merge outcomes."""
         self.repo_methods = repo_methods
@@ -519,6 +520,77 @@ async def test_merge_method_preflight_notification_transient_error_retries(
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_merge_method_preflight_notification_transient_bitbucket_error_retries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A BitBucket workspace posts the preflight-rejection notification through
+    BitBucketClient, whose post_comment raises BitBucketClientError (not
+    GitHubClientError). A transient blip must wait and keep polling instead of
+    escaping the merge loop uncaught — mirroring the GitHub transient arm."""
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
+            returncode=1,
+            stderr="HTTP 403 Resource not accessible by integration",
+        ),
+        post_comment_error=BitBucketClientError(
+            operation="bitbucket post_comment",
+            status=429,
+            body="rate limited",
+            reason_code=BITBUCKET_RATE_LIMITED,
+        ),
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == []
+    assert gh.comments == []
+    assert sleep_fn.calls == [60]
+    assert any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_merge_method_preflight_notification_permanent_bitbucket_error_raises(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A permanent BitBucket fault (403) during the preflight-rejection
+    notification must propagate like the GitHub non-transient arm rather than
+    being swallowed."""
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
+            returncode=1,
+            stderr="HTTP 403 Resource not accessible by integration",
+        ),
+        post_comment_error=BitBucketClientError(
+            operation="bitbucket post_comment",
+            status=403,
+            body="forbidden: missing scope",
+        ),
+    )
+
+    with pytest.raises(BitBucketClientError, match="forbidden: missing scope"):
+        await _execute_merge(
+            factory=factory,
+            tmp_path=tmp_path,
+            gh=gh,
+        )
 
 
 @pytest.mark.unit
