@@ -916,6 +916,47 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
+    async def test_reuse_push_skips_forge_client_resolution(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Reuse path: when the workspace already has a PR, the push step only does
+        # a git push + PR reuse and must NOT resolve a forge client. Resolving one
+        # would gate a BitBucket reuse push on forge API env (``from_env()``),
+        # failing the run before push even though reuse makes no forge API call.
+        def _explode_make_forge_client(forge: str, runner: object) -> object:
+            raise AssertionError("make_forge_client must not run on the PR-reuse push path")
+
+        monkeypatch.setattr(_execution_flow, "make_forge_client", _explode_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/x/y/pull/55"
+            ws.pr_number = 55
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        # No forge client resolved; push_and_open received ``None`` and reused.
+        assert pr_creator.forge_client is None
+        assert pr_creator.repo_url == "git@github.com:x/y.git"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
     async def test_validation_target_sha_update_failure_keeps_open_pr(
         self,
         fake: FakeCommandRunner,

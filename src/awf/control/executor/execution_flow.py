@@ -1210,27 +1210,50 @@ async def execute(
     audit_remote_branch = existing_pr_remote_branch or push_branch_name
 
     try:
-        # Resolve the forge client inside the try so a make_forge_client /
-        # BitBucket from_env() failure degrades to infrastructure_failure via the
-        # handlers below rather than crashing uncaught. ``async with`` releases the
-        # BitBucket httpx pool deterministically (GitHub aclose is a no-op).
-        forge_client = make_forge_client(
-            concrete_forge_for_repo(profile.forge, ws.repo_url),
-            self._runner,
-        )
-        async with forge_client:
+        if ws.pr_url:
+            # Reuse path: ``push_and_open`` only does a plain ``git push`` and
+            # reuses the existing PR — it never touches the forge client. Skip
+            # resolving one so a BitBucket reuse push is not gated on forge API
+            # env: ``make_forge_client`` builds ``BitBucketClient`` eagerly via
+            # ``from_env()``, which would fail the run on missing/invalid
+            # Bitbucket API env before the push, even though reuse makes no forge
+            # API call. (This mirrors the pre-forge-client flow, where reuse
+            # never resolved a forge client.)
             pr = await self._pr_creator.push_and_open(
                 worktree_path=worktree_path,
                 branch_name=push_branch_name,
                 base_branch=ws.branch_base,
                 title=pr_title,
                 body=pr_body,
-                forge_client=forge_client,
+                forge_client=None,
                 repo_url=ws.repo_url,
                 existing_pr_url=ws.pr_url,
                 remote_branch_name=existing_pr_remote_branch,
                 remote_url=existing_pr_remote_url,
             )
+        else:
+            # New PR: resolve the forge client inside the try so a
+            # make_forge_client / BitBucket from_env() failure degrades to
+            # infrastructure_failure via the handlers below rather than crashing
+            # uncaught. ``async with`` releases the BitBucket httpx pool
+            # deterministically (GitHub aclose is a no-op).
+            forge_client = make_forge_client(
+                concrete_forge_for_repo(profile.forge, ws.repo_url),
+                self._runner,
+            )
+            async with forge_client:
+                pr = await self._pr_creator.push_and_open(
+                    worktree_path=worktree_path,
+                    branch_name=push_branch_name,
+                    base_branch=ws.branch_base,
+                    title=pr_title,
+                    body=pr_body,
+                    forge_client=forge_client,
+                    repo_url=ws.repo_url,
+                    existing_pr_url=None,
+                    remote_branch_name=existing_pr_remote_branch,
+                    remote_url=existing_pr_remote_url,
+                )
     except PullRequestError as exc:
         _log.error(
             "executor.pr_failed",

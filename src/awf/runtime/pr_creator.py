@@ -97,7 +97,7 @@ class PullRequestCreator:
         base_branch: str,
         title: str,
         body: str,
-        forge_client: ForgeClient,
+        forge_client: ForgeClient | None = None,
         repo_url: str,
         existing_pr_url: str | None = None,
         remote_branch_name: str | None = None,
@@ -177,6 +177,19 @@ class PullRequestCreator:
         # the GitHub-only hot path never pays for the httpx import that the
         # BitBucket client drags in (mirrors ``forge.make_forge_client``).
         from awf.common.bitbucket_client import BitBucketClientError
+
+        if forge_client is None:  # pragma: no cover - open path always supplies one
+            # The reuse path (``existing_pr_url`` set) returns above without ever
+            # touching the forge client, so callers may omit it there. Opening a
+            # new PR requires one; treat a missing client as a forge failure
+            # rather than an ``AttributeError`` so it flows through the same
+            # structured error handling.
+            raise PullRequestError(
+                operation="create_pull_request (no forge client)",
+                returncode=0,
+                stderr="forge client required to open a new PR",
+                head_sha=head_sha,
+            )
 
         repo = RepoRef.from_url(remote_url or repo_url)
         try:

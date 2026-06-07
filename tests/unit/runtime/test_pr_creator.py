@@ -327,6 +327,32 @@ class TestPushAndOpen:
         assert all(call.args[:3] != ["gh", "pr", "create"] for call in runner.calls)
 
     @pytest.mark.unit
+    async def test_reuses_existing_pr_without_a_forge_client(self) -> None:
+        # Reuse needs no forge client at all: the caller may omit it (passing
+        # ``None``) because the reuse path returns after the git push and never
+        # touches the client. This lets the executor skip resolving a BitBucket
+        # client (and its env-dependent ``from_env()``) on a reuse push.
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_xyz",
+            base_branch="development",
+            title="Add docstring",
+            body="One-line docstring on the module.",
+            forge_client=None,
+            repo_url=_GH_REPO_URL,
+            existing_pr_url="https://github.com/dimileeh/aira-agent/pull/42",
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/42"
+        assert result.branch == "awf/ws_xyz"
+        assert all(call.args[:3] != ["gh", "pr", "create"] for call in runner.calls)
+
+    @pytest.mark.unit
     async def test_updates_existing_pr_with_explicit_remote_head_ref(self) -> None:
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)
