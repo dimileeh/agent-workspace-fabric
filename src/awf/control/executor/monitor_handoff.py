@@ -86,6 +86,7 @@ from awf.runtime.release_pr_sync import (
     NO_CHANGES_REASON_CODE,
     ReleasePrSyncError,
     count_commits_ahead,
+    ensure_release_sync_forge_supported,
     find_or_create_release_pr,
     release_pr_body,
     release_pr_title,
@@ -1106,9 +1107,22 @@ async def _handoff_sync_release_pr_monitor(
         # back to the workspace repo_url's host. Without this, a BitBucket
         # workspace whose snapshot predates the forge field would silently
         # construct a GitHubClient here instead of failing fast.
-        async with make_forge_client(
-            concrete_forge_for_repo(profile.forge, workspace.repo_url), self._runner
-        ) as gh:
+        client_forge = concrete_forge_for_repo(profile.forge, workspace.repo_url)
+        # Gate the *concrete client forge* before constructing the client: for a
+        # BitBucket release-sync workspace, ``make_forge_client`` would call
+        # ``BitBucketClient.from_env()`` and raise BITBUCKET_AUTH_NOT_CONFIGURED
+        # when credentials are absent — masking the intended
+        # RELEASE_SYNC_FORGE_NOT_SUPPORTED that release sync (GitHub-only) should
+        # report. Failing here (caught by the ``ReleasePrSyncError`` handler
+        # below) keeps the honest reason code and never builds a BitBucket client
+        # for this unsupported path.
+        ensure_release_sync_forge_supported(
+            client_forge,
+            repo_slug=repo.slug(),
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+        async with make_forge_client(client_forge, self._runner) as gh:
             metadata, created = await find_or_create_release_pr(
                 runner=self._runner,
                 gh=gh,
