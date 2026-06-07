@@ -667,6 +667,38 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_successful_setup_pull_then_unrelated_test_timeout_reports_ci_failure(
+        self,
+    ) -> None:
+        """A successful setup ``docker pull`` must not license rerunning a real
+        integration/Go test that logs ``context deadline exceeded`` many lines
+        later in the same ``gh run view --log-failed`` step. The timeout is not
+        part of the pull failure, so it must reach the repair agent."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "16: Pulling from library/postgres\n"
+                "Status: Downloaded newer image for postgres:16\n"
+                "=== RUN   TestPaymentsIntegration\n"
+                "    payments_test.go:88: calling downstream payments service\n"
+                "    payments_test.go:91: context deadline exceeded\n"
+                "--- FAIL: TestPaymentsIntegration (30.01s)"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
         """A failure whose log matches neither transient nor registry-timeout
         markers falls through to the repair agent."""

@@ -646,6 +646,14 @@ _CI_DOCKER_PULL_EVIDENCE_MARKERS = (
     "docker pull",
     "error response from daemon",
 )
+
+# A bare ``docker pull`` echo precedes both successful image pulls and pull
+# failures, and ``gh run view --log-failed`` emits the whole failed step. So a
+# real integration/Go test that logs ``context deadline exceeded`` can sit in the
+# same excerpt as an unrelated, successful setup pull. A registry-timeout marker
+# therefore only counts as Docker-caused when it is on (or within this many lines
+# of) a Docker pull / daemon line — not merely somewhere in the same step log.
+_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW = 2
 _CI_REQUIRED_ROLLUP_CHECK_NAMES = frozenset(
     {
         "ci-required",
@@ -720,16 +728,33 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
 
 
 def _log_shows_docker_registry_timeout(log_text: str) -> bool:
-    """Whether a generic network-timeout phrase is backed by Docker pull evidence.
+    """Whether a generic network-timeout phrase is tied to a Docker pull failure.
 
     The phrases in ``_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS`` are only transient
-    when paired with Docker pull / daemon evidence; on their own they also match
-    real application/integration test failures that must reach the repair agent.
+    when the timeout line is *part of* the Docker pull / daemon failure — on the
+    same line as, or within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of,
+    Docker pull / daemon evidence. A whole-log ``any(...)`` would also fire when
+    an unrelated (often successful) setup ``docker pull`` merely co-exists in the
+    same ``--log-failed`` step as a real application/integration test timeout
+    that must reach the repair agent.
     """
 
-    if not any(marker in log_text for marker in _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS):
+    lines = log_text.splitlines()
+    evidence_line_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if any(marker in line for marker in _CI_DOCKER_PULL_EVIDENCE_MARKERS)
+    ]
+    if not evidence_line_indexes:
         return False
-    return any(marker in log_text for marker in _CI_DOCKER_PULL_EVIDENCE_MARKERS)
+    return any(
+        any(marker in line for marker in _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS)
+        and any(
+            abs(index - evidence_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
+            for evidence_index in evidence_line_indexes
+        )
+        for index, line in enumerate(lines)
+    )
 
 
 def _looks_like_required_ci_rollup_failure(failure: CheckFailure) -> bool:
