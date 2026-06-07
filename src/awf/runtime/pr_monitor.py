@@ -1014,8 +1014,18 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     """
 
     lines = log_text.lower().splitlines()
+    # A ``docker pull failed ...`` *failure summary* line contains the ``docker
+    # pull`` substring too, but it is not a ``docker pull <ref>`` *command echo*:
+    # its ``split()`` tokens (``docker``/``pull``/``failed``/...) would let a
+    # ``failed to pull image "docker"`` kubelet event (``docker`` is a real Docker
+    # Hub image) match by token and be wrongly corroborated, dropping a real deploy
+    # bug out of ``uncorroborated_image_pull_indexes``. Self-evident pull-failure
+    # lines already anchor as their own evidence, so exclude them here.
     docker_pull_command_indexes = tuple(
-        index for index, line in enumerate(lines) if _CI_DOCKER_PULL_COMMAND_MARKER in line
+        index
+        for index, line in enumerate(lines)
+        if _CI_DOCKER_PULL_COMMAND_MARKER in line
+        and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in line
     )
     evidence_line_indexes = [
         index

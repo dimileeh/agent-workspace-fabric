@@ -268,3 +268,39 @@ phrases that are *not* themselves pull-failure evidence (the wrapped-kubelet cas
   `test_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure`)
   still pass — their timeout lines are bare kubelet phrases, not daemon evidence
   lines, so they remain excluded and reach the repair agent.
+
+## Follow-up — `docker pull failed` summary must not be read as a command echo (issue:4642392722)
+
+`docker_pull_command_indexes` in `_log_shows_docker_registry_timeout` collected
+every line containing the `docker pull` substring as a `docker pull <ref>` *command
+echo*. A `docker pull failed with exit code 1` *failure summary* also contains that
+substring, so it was added too. In `_image_pull_failure_is_corroborated` the
+corroboration check is `image_ref in lines[context_index].split()`; that summary line
+splits to `["docker", "pull", "failed", "with", "exit", "code", "1"]`, so an adjacent
+`Failed to pull image "docker"` kubelet event — `docker` is a real Docker Hub image —
+matched on the `docker` token and was wrongly treated as corroborated Docker-CLI
+evidence. That dropped the real application-image event out of
+`uncorroborated_image_pull_indexes`, so its own `context deadline exceeded` was no
+longer excluded and a real deploy bug would be silently rerun. The command-index set
+now excludes self-evident pull-failure lines
+(`_CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in line`); those already anchor as
+their own evidence, so genuine same-ref corroboration via real `docker pull <ref>`
+echoes is unaffected.
+
+- Covered by
+  `test_docker_pull_failed_summary_does_not_corroborate_same_token_image_event`
+  (kubelet `Failed to pull image "docker"` next to a `Docker pull failed with exit
+  code 1` summary → `ReportCiFailure`; fails as `RerunTransientCI` without the
+  command-index exclusion).
+- The existing positive
+  `test_docker_pull_failed_wording_anchors_request_canceled_rerun` still passes —
+  its real `docker pull postgres:16` echo line corroborates the genuine transient
+  pull, so it remains `RerunTransientCI`.
+
+### Deferred — duplicate `_thread`/`_review`/`_status` test helpers
+
+The review also noted that `_thread`, `_review`, and `_status` are defined
+identically across `test_pr_monitor_part_001.py`, `_part_002.py`, and `_part_003.py`.
+This is a pre-existing three-way duplication from the module split, not a correctness
+issue; centralizing the helpers (e.g. a shared `conftest.py`) is a maintainability
+follow-up left out of this bug-fix change to keep the diff minimal and scoped.

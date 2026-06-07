@@ -255,6 +255,41 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_docker_pull_failed_summary_does_not_corroborate_same_token_image_event(
+        self,
+    ) -> None:
+        """A ``docker pull failed ...`` *failure summary* must not be mistaken for a
+        ``docker pull <ref>`` *command echo*. Its ``split()`` tokens
+        (``docker``/``pull``/``failed``/...) would otherwise let an adjacent kubelet
+        ``Failed to pull image "docker"`` event — ``docker`` is a real Docker Hub
+        image — match by token and be wrongly corroborated as Docker-CLI pull
+        evidence, dropping it out of the uncorroborated set so its own
+        ``context deadline exceeded`` timeout is no longer excluded. That real
+        application-image deploy bug must reach the repair agent rather than be
+        silently rerun as transient infra."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestDeployApp\n"
+                '  Warning  Failed   kubelet  Failed to pull image "docker": '
+                "context deadline exceeded\n"
+                "Docker pull failed with exit code 1\n"
+                "--- FAIL: TestDeployApp (120.00s)"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_log_shows_docker_registry_timeout_lowercases_raw_text(self) -> None:
         """The helper is self-contained: it lowercases its own input, so raw
         mixed-case log text matches the all-lowercase marker tuples without the
