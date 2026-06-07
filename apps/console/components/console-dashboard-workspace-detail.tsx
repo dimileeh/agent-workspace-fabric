@@ -541,7 +541,7 @@ export function OperatorControlsBlock({
                 <span
                   id={`operator-control-tip-${workspaceId}-${control.action}`}
                   role="tooltip"
-                  className="pointer-events-none absolute left-0 top-[calc(100%+6px)] z-20 hidden max-w-56 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] font-medium text-white shadow-lg group-focus-within:block group-hover:block"
+                  className="pointer-events-none absolute left-0 top-[calc(100%+6px)] z-20 sr-only max-w-56 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] font-medium text-white shadow-lg group-focus-within:not-sr-only group-hover:not-sr-only"
                 >
                   {tooltip}
                 </span>
