@@ -75,6 +75,7 @@ _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_ADOPTION_INPUT_REQUIRED"},
     {"error_code": "INVALID_GITHUB_REPO"},
     {"error_code": "FORGE_NOT_SUPPORTED"},
+    {"error_code": "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"},
     {"error_code": "PR_NOT_FOUND"},
     {"error_code": "PR_ALREADY_CLOSED"},
     {"error_code": "PR_ALREADY_MERGED"},
