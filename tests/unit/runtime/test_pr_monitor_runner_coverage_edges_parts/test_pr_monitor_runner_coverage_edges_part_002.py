@@ -1294,11 +1294,18 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
         assert ws is not None
         # Not terminated: the forbidden task-resolve is handled in-loop as a blocker.
         assert ws.status == WorkspaceStatus.monitoring_pr.value
+        retry_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.bitbucket_transient_error_retrying"
+        ]
         resolution_events = await WorkspaceEventRepository(s).list(
             workspace_id=workspace_id,
             event_type="workspace.audit.comment_resolution",
             limit=10,
         )
+    # A deterministic 403 fault must not record transient retry events.
+    assert retry_events == []
     assert len(resolution_events) == 1
     payload = resolution_events[0].payload
     assert payload is not None
@@ -1306,3 +1313,5 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
     assert payload["outcome"] == "needs_human"
     assert resolution_events[0].reason_code == BITBUCKET_TASK_RESOLVE_FORBIDDEN
     assert payload["evidence"]["needs_human_thread_count"] == 1
+    # Task body_excerpt should not leak into event payloads.
+    assert "please add a regression test" not in repr(resolution_events[0].payload)
