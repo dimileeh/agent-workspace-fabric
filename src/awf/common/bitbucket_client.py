@@ -628,7 +628,12 @@ class BitBucketClient:
             if exc.status == 404:
                 return await self._issue_fallback_to_comment(repo, title, body)
             raise
-        return html_href(data) or self._issues_page_url(repo)
+        # Prefer the issue's own ``links.html.href``. If a successful create omits
+        # it, build the canonical issue URL from the returned ``id`` so deferred
+        # capture still points at the filed item; only when neither is available
+        # do we degrade to the generic issues list (better than nothing, but it
+        # has no guaranteed link to the specific issue).
+        return html_href(data) or self._issue_url_from_id(data, repo) or self._issues_page_url(repo)
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return enabled merge methods from the remembered PR destination branch.
@@ -1026,6 +1031,19 @@ class BitBucketClient:
 
     def _issues_page_url(self, repo: RepoRef) -> str:
         return f"https://bitbucket.org/{repo.owner}/{repo.name}/issues"
+
+    def _issue_url_from_id(self, data: Any, repo: RepoRef) -> str | None:
+        """Build the canonical issue URL from a created issue's numeric ``id``.
+
+        BitBucket's create-issue response carries an integer ``id`` even when it
+        omits ``links.html.href``; deriving ``.../issues/{id}`` from it keeps the
+        tracking URL pointing at the specific filed issue instead of the generic
+        list. Returns ``None`` when ``data`` is not a dict or lacks a usable id.
+        """
+        issue_id = data.get("id") if isinstance(data, dict) else None
+        if isinstance(issue_id, int):
+            return f"{self._issues_page_url(repo)}/{issue_id}"
+        return None
 
     def _pr_page_url(self, repo: RepoRef, pr_number: int) -> str:
         return f"https://bitbucket.org/{repo.owner}/{repo.name}/pull-requests/{pr_number}"

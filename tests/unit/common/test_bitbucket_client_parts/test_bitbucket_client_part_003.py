@@ -143,6 +143,38 @@ async def test_create_issue_returns_html_url() -> None:
     assert url == "https://bitbucket.org/workspace/repo/issues/7"
 
 
+async def test_create_issue_builds_url_from_id_when_href_missing() -> None:
+    # A successful create that omits ``links.html.href`` must still yield a URL that
+    # points at the specific filed issue (derived from the returned ``id``), not the
+    # generic issues list — otherwise deferred capture records a page with no
+    # guaranteed link to the tracking issue.
+    fake = FakeBitBucket()
+    fake.enqueue("POST", f"{_REPO}/issues", json={"id": 7})  # no links.html.href
+    client = make_client(fake)
+    url = await client.create_issue(repo=repo(), title="t", body="b")
+    assert url == "https://bitbucket.org/workspace/repo/issues/7"
+
+
+async def test_create_issue_falls_back_to_issues_page_without_href_or_id() -> None:
+    # Only when neither a specific href nor a usable numeric id is present does the
+    # URL degrade to the generic issues list (better than nothing).
+    fake = FakeBitBucket()
+    fake.enqueue("POST", f"{_REPO}/issues", json={"type": "issue"})  # no href, no id
+    client = make_client(fake)
+    url = await client.create_issue(repo=repo(), title="t", body="b")
+    assert url == "https://bitbucket.org/workspace/repo/issues"
+
+
+async def test_create_issue_falls_back_to_issues_page_when_response_not_dict() -> None:
+    # A malformed 200 (non-dict body) still resolves to the generic issues list
+    # rather than raising — the issue was created, just unparseable.
+    fake = FakeBitBucket()
+    fake.enqueue("POST", f"{_REPO}/issues", json=[])  # non-dict success body
+    client = make_client(fake)
+    url = await client.create_issue(repo=repo(), title="t", body="b")
+    assert url == "https://bitbucket.org/workspace/repo/issues"
+
+
 async def test_create_issue_tracker_disabled_falls_back_to_pr_comment() -> None:
     fake = FakeBitBucket()
     # Prime PR context so the fallback knows which PR to comment on.
