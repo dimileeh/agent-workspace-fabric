@@ -172,7 +172,12 @@ def _merge_method_mismatch_message(
 
 
 def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
-    """Build an operator-facing reason for merge-method policy preflight failures."""
+    """Build an operator-facing reason for merge-method policy preflight failures.
+
+    Only called with ``GitHubClientError``; ``BitBucketClientError`` has no
+    ``stderr`` attribute and is handled separately by
+    ``_bitbucket_merge_rejection_reason``.
+    """
     detail = " ".join(_redact_and_truncate_forge_error(exc.stderr).split())[:240]
     if detail:
         return f"GitHub rejected merge-method preflight: {detail}"
