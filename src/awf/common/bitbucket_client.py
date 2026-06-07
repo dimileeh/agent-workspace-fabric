@@ -51,11 +51,14 @@ from awf.common.bitbucket_client_parsing import (
     build_blocking_reviews,
     build_general_review_comments,
     build_review_threads,
+    build_unresolved_task_threads,
+    decode_task_id,
     decode_thread_id,
     extract_diffstat_paths,
     freeze_params,
     html_href,
     is_pipeline_owned_status,
+    is_task_thread_id,
     latest_external_review_activity,
     map_bb_merge_methods,
     merge_state_status_for,
@@ -68,6 +71,7 @@ from awf.common.bitbucket_client_parsing import (
     pipeline_targets_branch,
     pipeline_targets_pr,
 )
+from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.common.github_client_parsing import _quiet_period_anchor
 from awf.common.logging import get_logger
@@ -121,6 +125,13 @@ BITBUCKET_ISSUE_TRACKER_DISABLED = "BITBUCKET_ISSUE_TRACKER_DISABLED"
 # captured when nothing durable was written.
 BITBUCKET_ISSUE_CAPTURE_FAILED = "BITBUCKET_ISSUE_CAPTURE_FAILED"
 BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
+# A task-resolution PUT was rejected for lack of permission (403): the token cannot
+# resolve reviewer tasks. Distinct from the generic ``BITBUCKET_AUTH_FAILED`` so the
+# monitor surfaces it as a stable human blocker (NotifyHuman) — the agent addressing
+# the task again cannot fix a missing scope, so a deterministic, reason-coded escalation
+# avoids a retry storm. The task stays UNRESOLVED on BitBucket, so the merge gate keeps
+# blocking until an operator grants the scope or resolves the task.
+BITBUCKET_TASK_RESOLVE_FORBIDDEN = "BITBUCKET_TASK_RESOLVE_FORBIDDEN"
 # BitBucket answers 409 Conflict on the merge POST when a merge for this PR is
 # already in flight (typically a prior 202 async merge whose task-status poll was
 # interrupted by a transient fault and re-issued by the monitor) or when the PR has
@@ -175,13 +186,14 @@ def _is_bitbucket_merge_in_progress_body(body: str) -> bool:
     return "in progress" in lowered and "merge" in lowered
 
 
-class BitBucketClientError(Exception):
+class BitBucketClientError(ForgeClientError):
     """Raised when BitBucket Cloud returns an error or an unusable payload.
 
-    Mirrors ``GitHubClientError``: it carries a redacted body, the failing
-    operation, the HTTP status (``None`` for transport errors), and a stable
-    ``reason_code`` so the failure flows end-to-end. Catch this specifically,
-    never bare ``Exception``.
+    Mirrors ``GitHubClientError`` and shares the ``ForgeClientError`` base so a
+    single ``except ForgeClientError`` catches both: it carries a redacted body, the
+    failing operation, the HTTP status (``None`` for transport errors), and a stable
+    ``reason_code`` so the failure flows end-to-end. Catch this specifically (or the
+    shared base), never bare ``Exception``.
     """
 
     def __init__(
@@ -201,6 +213,15 @@ class BitBucketClientError(Exception):
         super().__init__(
             f"{operation} failed (status={status_label}): {self.body.strip() or '<no output>'}"
         )
+
+    def redacted_detail(self) -> str:
+        """Return the redacted response body — BitBucket's human-facing detail."""
+        return self.body
+
+    @property
+    def http_status(self) -> int | None:
+        """Return the BitBucket HTTP status (``None`` for transport-level faults)."""
+        return self.status
 
 
 @dataclass(frozen=True)
@@ -434,6 +455,14 @@ class BitBucketClient:
             f"{self._pr_path(repo, pr_number)}/diffstat",
             operation="bitbucket fetch_pr_status diffstat",
         )
+        # Reviewer tasks are exposed separately from comments; a PR with open tasks
+        # but no comments would otherwise assemble empty feedback and reach Merge
+        # (issue #445). Cache like comments (it is conditional-request friendly).
+        tasks = await self._paginate(
+            f"{self._pr_path(repo, pr_number)}/tasks",
+            operation="bitbucket fetch_pr_status tasks",
+            cache=True,
+        )
         account_id = await self._current_account_id()
         merged, closed, merge_commit_sha = parse_pr_terminal_state(pr)
         latest_review_at, latest_review_source = latest_external_review_activity(
@@ -451,8 +480,15 @@ class BitBucketClient:
             head_sha=head_sha,
             mergeable=mergeable_state_for(merged=merged, closed=closed),
             check_state=parse_check_state(statuses),
+            # Reviewer tasks join the inline-thread feed (not the comment feed): that
+            # gate routes every item to AddressComments regardless of author and
+            # resolves through ``resolve_thread`` — which dispatches the ``bbtask:``
+            # id to the task PUT. This makes open tasks block merge until addressed.
             unresolved_inline_threads=build_review_threads(
                 comments, repo=repo, pr_number=pr_number, account_id=account_id
+            )
+            + build_unresolved_task_threads(
+                tasks, repo=repo, pr_number=pr_number, account_id=account_id
             ),
             unresolved_review_comments=build_general_review_comments(
                 comments, account_id=account_id
@@ -612,7 +648,19 @@ class BitBucketClient:
         )
 
     async def resolve_thread(self, *, thread_id: str) -> None:
-        """Resolve a review thread (POST resolves; DELETE would REOPEN — never used)."""
+        """Resolve a review thread or reviewer task from its neutral id.
+
+        Forge-neutral dispatch: a ``bbtask:`` id is a reviewer *task*, resolved with
+        ``PUT .../tasks/{id}`` ``{"state": "RESOLVED"}``; a ``bb:`` id is an inline
+        comment thread, resolved with ``POST .../comments/{id}/resolve`` (DELETE would
+        REOPEN — never used). The PUT only commits the resolution *after* the agent has
+        addressed the task content (the fix-cycle calls this only for a resolvable
+        verdict), and a failed PUT raises so the addressed-state is rolled back and the
+        task re-surfaces as still-blocking next poll.
+        """
+        if is_task_thread_id(thread_id):
+            await self._resolve_task(thread_id)
+            return
         try:
             owner, name, pr_number, comment_id = decode_thread_id(thread_id)
         except ValueError as exc:
@@ -626,6 +674,37 @@ class BitBucketClient:
             f"/pullrequests/{pr_number}/comments/{comment_id}/resolve"
         )
         await self._request_json("POST", path, operation="bitbucket resolve_thread")
+
+    async def _resolve_task(self, thread_id: str) -> None:
+        """Mark a reviewer task RESOLVED via ``PUT .../tasks/{id}``.
+
+        A 403 (the token lacks task-resolution permission) is re-raised with the stable
+        ``BITBUCKET_TASK_RESOLVE_FORBIDDEN`` reason code so the monitor escalates to a
+        human blocker instead of retrying — the agent re-addressing the task cannot grant
+        a missing scope. Any other failure propagates so the fix-cycle rolls back the
+        addressed-state and the still-open task keeps blocking merge next poll.
+        """
+        owner, name, pr_number, task_id = decode_task_id(thread_id)
+        path = (
+            f"/2.0/repositories/{quote(owner, safe='')}/{quote(name, safe='')}"
+            f"/pullrequests/{pr_number}/tasks/{quote(task_id, safe='')}"
+        )
+        try:
+            await self._request_json(
+                "PUT",
+                path,
+                operation="bitbucket resolve_task",
+                json_body={"state": "RESOLVED"},
+            )
+        except BitBucketClientError as exc:
+            if exc.status == 403:
+                raise BitBucketClientError(
+                    operation="bitbucket resolve_task",
+                    status=exc.status,
+                    body=exc.body,
+                    reason_code=BITBUCKET_TASK_RESOLVE_FORBIDDEN,
+                ) from exc
+            raise
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Post a top-level PR comment."""

@@ -33,6 +33,7 @@ from urllib.parse import quote, urlsplit
 
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
+from awf.common.forge_errors import ForgeClientError
 from awf.common.logging import get_logger
 from awf.db.enums import ForgeKind
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
@@ -46,17 +47,41 @@ from awf.runtime.pr_monitor import (
 _log = get_logger(__name__)
 
 
-class GitHubClientError(Exception):
+# GitHub shells ``gh`` and carries no HTTP status, so it has no native per-fault
+# reason code. The shared ``ForgeClientError`` contract requires a stable
+# ``reason_code`` for every forge fault, so GitHub faults default to this code (the
+# PR monitor classifies transient-vs-deterministic from stderr markers, not this
+# code). Defined here, in a client file, so the reason catalog picks it up.
+GITHUB_API_ERROR = "GITHUB_API_ERROR"
+
+
+class GitHubClientError(ForgeClientError):
     """Raised when ``gh`` or GraphQL returns a non-zero exit / error payload."""
 
-    def __init__(self, *, operation: str, returncode: int, stderr: str) -> None:
+    def __init__(
+        self,
+        *,
+        operation: str,
+        returncode: int,
+        stderr: str,
+        reason_code: str = GITHUB_API_ERROR,
+    ) -> None:
         """Store redacted command failure context for monitor diagnostics."""
         self.operation = operation
         self.returncode = returncode
+        self.reason_code = reason_code
         self.stderr = redact_audit_text(stderr)
         super().__init__(
             f"{operation} failed (exit={returncode}): {self.stderr.strip() or '<no output>'}"
         )
+
+    def redacted_detail(self) -> str:
+        """Return the redacted gh stderr — GitHub's human-facing failure detail."""
+        return self.stderr
+
+    def merge_method_stderr(self) -> str:
+        """Return the gh stderr the merge-method-mismatch parser inspects."""
+        return self.stderr
 
 
 class PullRequestMetadataError(Exception):

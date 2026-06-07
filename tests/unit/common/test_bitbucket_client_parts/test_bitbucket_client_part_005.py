@@ -47,6 +47,7 @@ def _seed_fetch_status(fake: FakeBitBucket, *, account_body: object = None) -> N
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue(
         "GET", "/2.0/user", json=account_body if account_body is not None else {"account_id": "v"}
     )
@@ -74,6 +75,7 @@ async def test_fetch_pr_status_changed_paths_via_redirected_diffstat() -> None:
         f"{_REPO}/diffstat/{_HEAD}..d",
         values=[{"new": {"path": "src/changed.py"}}],
     )
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={"account_id": "v"})
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -97,10 +99,11 @@ async def test_account_id_is_cached_across_status_fetches() -> None:
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    assert len(fake.calls("GET")) == 9  # only one /2.0/user across both fetches
+    assert len(fake.calls("GET")) == 11  # only one /2.0/user across both fetches
     assert sum(1 for r in fake.requests if r.url.path == "/2.0/user") == 1
 
 
@@ -126,6 +129,7 @@ async def test_fetch_pr_status_populates_review_activity_anchor() -> None:
         ],
     )
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -156,6 +160,7 @@ async def test_account_id_fetch_error_propagates() -> None:
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})
     client = make_client(fake)
     with pytest.raises(BitBucketClientError) as excinfo:
@@ -185,6 +190,7 @@ async def test_account_id_failure_is_not_cached_then_succeeds() -> None:
         ],
     )
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})  # first poll fails
     fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})  # second poll succeeds
     client = make_client(fake)
@@ -227,6 +233,7 @@ async def test_account_id_malformed_body_is_not_cached_then_succeeds() -> None:
         ],
     )
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={})  # first poll: 200 but no account_id/uuid
     fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})  # second poll succeeds
     client = make_client(fake)
@@ -704,6 +711,7 @@ async def test_paginate_skips_non_dict_value_and_handles_empty_body() -> None:
     )
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.enqueue("GET", f"{_PR}/diffstat")  # empty body → page is None → no pagination
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={"account_id": "v"})
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)

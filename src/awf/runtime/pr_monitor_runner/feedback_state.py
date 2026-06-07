@@ -13,6 +13,7 @@ import re as re
 import time as time
 from typing import Any, cast
 
+from awf.common.bitbucket_client import BitBucketClient
 from awf.common.github_client import RepoRef
 from awf.db.repositories import (
     PRFeedbackResolutionRepository,
@@ -36,6 +37,28 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 
 
+def _forge_scm_provider(self: Any) -> str:
+    """Return the SCM provider key for the runner's resolved forge client.
+
+    The PR-feedback provenance/replay rows are keyed by ``scm_provider`` so a
+    GitHub and a BitBucket PR with the same numeric id never alias. ``self._deps.gh``
+    is the per-workspace resolved ``ForgeClient`` (a ``BitBucketClient`` or a
+    ``GitHubClient``), so it is the authoritative forge signal here — no DB re-read.
+    """
+    return "bitbucket" if isinstance(self._deps.gh, BitBucketClient) else "github"
+
+
+def _forge_pr_url(self: Any, repo: RepoRef, pr_number: int) -> str:
+    """Build the forge-correct PR web URL for provenance rows.
+
+    A hardcoded github.com URL would poison BitBucket provenance/replay state with a
+    nonexistent github.com link; derive the host/path shape from the resolved forge.
+    """
+    if isinstance(self._deps.gh, BitBucketClient):
+        return f"https://bitbucket.org/{repo.slug()}/pull-requests/{pr_number}"
+    return f"https://github.com/{repo.slug()}/pull/{pr_number}"
+
+
 async def _record_pr_feedback_resolution(
     self: Any,
     *,
@@ -51,10 +74,10 @@ async def _record_pr_feedback_resolution(
         return
     async with self._deps.session_factory() as s:
         await PRFeedbackResolutionRepository(s).record_resolution(
-            scm_provider="github",
+            scm_provider=_forge_scm_provider(self),
             repository_key=repo.slug(),
             pull_request_key=str(pr_number),
-            pull_request_url=f"https://github.com/{repo.slug()}/pull/{pr_number}",
+            pull_request_url=_forge_pr_url(self, repo, pr_number),
             head_sha=pr_head_sha,
             feedback_kind="review_comment",
             feedback_id=comment.comment_id,
@@ -106,7 +129,7 @@ async def _apply_pr_feedback_resolution_state(
         return False
     async with self._deps.session_factory() as s:
         rows = await PRFeedbackResolutionRepository(s).list_for_pr(
-            scm_provider="github",
+            scm_provider=_forge_scm_provider(self),
             repository_key=repo.slug(),
             pull_request_key=str(pr_number),
         )

@@ -89,6 +89,42 @@ def decode_thread_id(thread_id: str) -> tuple[str, str, int, str]:
     )
 
 
+# Neutral task-id encoding: ``bbtask:<owner>/<name>#<pr>:<task_id>``. Distinct prefix
+# from the ``bb:`` comment-thread encoding so the forge-neutral ``resolve_thread``
+# dispatch can tell a reviewer *task* (resolved via ``PUT .../tasks/{id}``) apart from
+# an inline comment thread (resolved via ``POST .../comments/{id}/resolve``). ``bb:``
+# never matches a ``bbtask:`` id (the colon after ``bb`` differs), so the two parsers
+# never collide.
+_TASK_ID_RE = re.compile(r"^bbtask:(?P<owner>[^/]+)/(?P<name>[^#]+)#(?P<pr>\d+):(?P<task>\d+)$")
+
+
+def encode_task_id(*, repo: RepoRef, pr_number: int, task_id: int | str) -> str:
+    """Encode repo/PR/task context into the neutral task-discriminated thread id."""
+    return f"bbtask:{repo.owner}/{repo.name}#{pr_number}:{task_id}"
+
+
+def decode_task_id(thread_id: str) -> tuple[str, str, int, str]:
+    """Decode a task thread id into ``(owner, name, pr_number, task_id)``.
+
+    Raises ``ValueError`` for an id that was not produced by :func:`encode_task_id`
+    so the resolve dispatch fails loudly rather than ``PUT``-ing to a guessed task.
+    """
+    match = _TASK_ID_RE.match(thread_id)
+    if match is None:
+        raise ValueError(f"Not a BitBucket task id: {thread_id!r}")
+    return (
+        match.group("owner"),
+        match.group("name"),
+        int(match.group("pr")),
+        match.group("task"),
+    )
+
+
+def is_task_thread_id(thread_id: str) -> bool:
+    """Return whether ``thread_id`` encodes a BitBucket reviewer task (not a comment)."""
+    return _TASK_ID_RE.match(thread_id) is not None
+
+
 def map_bb_merge_methods(strategies: Any) -> tuple[str, ...]:
     """Map BitBucket merge-strategy values to AWF method names, preserving order."""
     methods: list[str] = []
@@ -382,6 +418,86 @@ def build_review_threads(
                 is_resolved=False,
                 comments=external,
                 url=first.url,
+                is_outdated=False,
+            )
+        )
+    return tuple(threads)
+
+
+def _task_is_resolved(task: dict[str, Any]) -> bool:
+    """Return whether a BitBucket PR task is in a resolved state.
+
+    BitBucket task ``state`` is ``RESOLVED`` or ``UNRESOLVED``; anything that is not
+    explicitly ``UNRESOLVED`` is treated as not-blocking so a resolved (or
+    unrecognized terminal) task never wedges the merge gate.
+    """
+    return str(task.get("state") or "").upper() != "UNRESOLVED"
+
+
+def _task_creator(task: dict[str, Any]) -> dict[str, Any]:
+    """Return the task ``creator`` user object as a dict (empty when absent)."""
+    creator = task.get("creator")
+    return creator if isinstance(creator, dict) else {}
+
+
+def build_unresolved_task_threads(
+    tasks: list[dict[str, Any]],
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    account_id: str | None,
+) -> tuple[ReviewThread, ...]:
+    """Map UNRESOLVED BitBucket reviewer tasks to neutral inline review threads.
+
+    BitBucket exposes reviewer *tasks* separately from comments (the ``/tasks``
+    endpoint). A PR with open tasks but no comments would otherwise assemble empty
+    feedback and reach ``Merge`` (issue #445). Mapping each unresolved task to a
+    ``ReviewThread`` routes it through the existing address-comments gate (so the
+    agent addresses the task content and the monitor blocks merge until it is
+    resolved) and through ``resolve_thread`` (so auto-resolve mirrors comment-thread
+    resolution). The neutral ``thread_id`` carries a ``bbtask:`` discriminator so the
+    resolve dispatch issues a task ``PUT`` instead of a comment ``POST``.
+
+    Resolved tasks and tasks the viewer (AWF) authored are dropped — mirroring the
+    comment/thread filtering — so settled or self-authored tasks never block merge.
+    Tasks carry no diff anchor, so the thread is path/line-less (tolerated downstream).
+    """
+    threads: list[ReviewThread] = []
+    for task in tasks:
+        if task.get("id") is None or _task_is_resolved(task):
+            continue
+        creator = _task_creator(task)
+        if account_id is not None and _clean_optional_str(creator.get("account_id")) == account_id:
+            continue
+        raw = task.get("content")
+        body = raw.get("raw") if isinstance(raw, dict) else None
+        if not body or not body.strip():
+            continue
+        task_id = str(task["id"])
+        author = _clean_optional_str(creator.get("display_name") or creator.get("nickname"))
+        created_at = parse_bb_datetime(task.get("created_on"))
+        updated_at = parse_bb_datetime(task.get("updated_on"))
+        url = html_href(task)
+        threads.append(
+            ReviewThread(
+                thread_id=encode_task_id(repo=repo, pr_number=pr_number, task_id=task_id),
+                path=None,
+                line=None,
+                body_excerpt=body[:400],
+                author=author,
+                is_resolved=False,
+                comments=(
+                    ReviewThreadComment(
+                        comment_id=task_id,
+                        body=body,
+                        author=author,
+                        created_at=created_at,
+                        updated_at=updated_at,
+                        url=url,
+                        viewer_did_author=False,
+                    ),
+                ),
+                url=url,
                 is_outdated=False,
             )
         )
