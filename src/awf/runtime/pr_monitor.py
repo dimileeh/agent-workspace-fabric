@@ -987,13 +987,20 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     explicit ``failed to pull image`` line — it never anchors on its own.
 
     The timeout phrase must also belong to the pull it is attributed to. A timeout
-    on an *uncorroborated* ``failed to pull image`` line is that
+    that is part of an *uncorroborated* ``failed to pull image`` event is that
     kubelet/containerd application-image event's own error (a real deploy bug) —
     not the transient pull's — so it must not satisfy this check by sitting within
     the window of an unrelated Docker pull-failure evidence line (e.g. a service-
-    container ``docker pull failed``). Such lines were already excluded from the
-    evidence set; excluding them as timeout *sources* too keeps a real
-    application-image bug from being silently rerun by mere line proximity.
+    container ``docker pull failed``). That holds whether the timeout sits *on* the
+    ``failed to pull image`` line (``Failed to pull image "app": context deadline
+    exceeded``) or is *wrapped onto a following line* of the same event (``Failed to
+    pull image "app"`` then a bare ``context deadline exceeded`` on the next line) —
+    the wrapped form carries no ``failed to pull image`` text of its own, so an
+    on-line-only guard would let it be attributed to a nearby unrelated transient
+    pull failure. Any timeout marker within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW``
+    lines of an uncorroborated ``failed to pull image`` line is therefore excluded
+    as a timeout *source*, keeping a real application-image bug from being silently
+    rerun by mere line proximity.
     """
 
     lines = log_text.lower().splitlines()
@@ -1013,9 +1020,17 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     if not evidence_line_indexes:
         return False
     evidence_line_set = set(evidence_line_indexes)
+    uncorroborated_image_pull_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER in line and index not in evidence_line_set
+    ]
     return any(
         any(marker in line for marker in _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS)
-        and not (_CI_DOCKER_IMAGE_PULL_FAILURE_MARKER in line and index not in evidence_line_set)
+        and not any(
+            abs(index - uncorroborated_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
+            for uncorroborated_index in uncorroborated_image_pull_indexes
+        )
         and any(
             abs(index - evidence_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
             for evidence_index in evidence_line_indexes

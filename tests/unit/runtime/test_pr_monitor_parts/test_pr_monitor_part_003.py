@@ -986,6 +986,39 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_wrapped_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure(
+        self,
+    ) -> None:
+        """The wrapped multi-line variant of the uncorroborated-event guard: a
+        transient ``Docker pull failed`` anchor, then an *uncorroborated* kubelet
+        ``Failed to pull image "app"`` event whose ``context deadline exceeded``
+        error is wrapped onto the *next* line. The timeout line carries no ``failed
+        to pull image`` text of its own, so an on-line-only guard would attribute it
+        to the nearby transient anchor and silently rerun a real deploy bug. The
+        timeout belongs to the kubelet event, so the failure must reach the repair
+        agent (companion to the same-line
+        ``test_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure``)."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Docker pull failed with exit code 1\n"  # evidence index 0
+                'Failed to pull image "app"\n'  # uncorroborated index 1, no timeout
+                "context deadline exceeded"  # index 2 — wrapped kubelet error
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
         """A failure whose log matches neither transient nor registry-timeout
         markers falls through to the repair agent."""
