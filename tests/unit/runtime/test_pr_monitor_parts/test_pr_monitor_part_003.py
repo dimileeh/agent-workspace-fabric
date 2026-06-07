@@ -1117,6 +1117,38 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_app_failed_to_pull_image_phrase_does_not_suppress_transient_pull_timeout(
+        self,
+    ) -> None:
+        """An ordinary application log line that merely *contains* the
+        ``failed to pull image`` substring without a quoted ``"<ref>"`` (e.g.
+        ``failed to pull image catalog from https://cdn``) is not a
+        kubelet/containerd image-pull event, so it must not be treated as an
+        uncorroborated pull. A genuine service-container ``Docker pull failed``
+        registry timeout within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of such
+        an app line must therefore still be rerun as transient CI, not reported.
+        Regression for the loose-substring exclusion that blocked genuine reruns."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Docker pull failed with exit code 1\n"  # evidence index 0
+                "failed to pull image catalog from https://cdn\n"  # index 1 — app line, no ref
+                "context deadline exceeded"  # index 2 — registry timeout within window of index 0
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_uncorroborated_summary_does_not_suppress_self_evident_daemon_timeout(
         self,
     ) -> None:

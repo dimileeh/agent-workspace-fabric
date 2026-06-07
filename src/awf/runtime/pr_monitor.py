@@ -1051,10 +1051,20 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     if not evidence_line_indexes:
         return False
     evidence_line_set = set(evidence_line_indexes)
+    # The bare ``failed to pull image`` substring is too loose to mark a line as a
+    # kubelet/containerd application-image event: an ordinary app log line such as
+    # ``failed to pull image catalog from https://cdn`` contains the substring but
+    # is not a pull *event* (it carries no ``"<ref>"``). Treating it as an
+    # uncorroborated pull would let any genuine registry timeout within
+    # ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of it be excluded as that
+    # "event's" own error and silently reported instead of rerun. Genuine
+    # kubelet/containerd/Docker ``failed to pull image "<ref>"`` events always quote
+    # the ref (the same form ``_image_pull_failure_is_corroborated`` keys on), so
+    # require that quoted-ref shape here too.
     uncorroborated_image_pull_indexes = [
         index
         for index, line in enumerate(lines)
-        if _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER in line and index not in evidence_line_set
+        if _CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN.search(line) and index not in evidence_line_set
     ]
     return any(
         any(marker in line for marker in _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS)
