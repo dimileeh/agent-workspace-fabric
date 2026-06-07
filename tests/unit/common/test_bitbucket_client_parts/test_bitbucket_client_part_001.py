@@ -274,6 +274,80 @@ async def test_paginate_allows_relative_next_url() -> None:
     assert [v["id"] for v in values] == [1, 2]
 
 
+# ── Redirect following (BB diffstat/diff 302) ─────────────────────────────────
+
+
+async def test_request_follows_same_host_302_redirect() -> None:
+    # BB Cloud's PR diffstat/diff GETs answer 302 → resolved resource. The shared
+    # client does not auto-follow, so ``_request`` must follow same-host hops itself
+    # or the redirect body (not JSON) is silently swallowed.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "GET",
+        "/a",
+        status=302,
+        headers={"Location": "https://api.bitbucket.org/b?spec=x..y"},
+    )
+    fake.enqueue("GET", "/b", json={"ok": True})
+    client = make_client(fake)
+    body = await client._request_json("GET", "/a", operation="op")
+    assert body == {"ok": True}
+    assert [r.url.path for r in fake.calls("GET")] == ["/a", "/b"]
+
+
+async def test_paginate_follows_redirect_then_collects_values() -> None:
+    # The first diffstat hop redirects; pagination must resume from the resolved
+    # resource so ``changed_paths`` is actually populated.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "GET",
+        "/items",
+        status=302,
+        headers={"Location": "https://api.bitbucket.org/resolved?spec=x..y"},
+    )
+    fake.page("GET", "/resolved", values=[{"id": 1}, {"id": 2}])
+    client = make_client(fake)
+    values = await client._paginate("/items", operation="op")
+    assert [v["id"] for v in values] == [1, 2]
+
+
+async def test_request_rejects_redirect_to_foreign_host() -> None:
+    # A 302 ``Location`` is honored verbatim with the Authorization header, so a
+    # foreign target is the same SSRF risk as a foreign ``next``: refuse it before
+    # re-issuing the authenticated request.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "GET",
+        "/a",
+        status=302,
+        headers={"Location": "https://169.254.169.254/latest/meta-data"},
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client._request_json("GET", "/a", operation="op")
+    assert excinfo.value.reason_code == BITBUCKET_API_ERROR
+    assert "169.254.169.254" in str(excinfo.value)
+    assert len(fake.calls("GET")) == 1  # never followed to the foreign host
+
+
+async def test_request_aborts_after_max_redirects() -> None:
+    # A degraded endpoint that keeps redirecting to itself would loop forever; the
+    # hop cap turns that into a bounded, diagnosable BITBUCKET_API_ERROR.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "GET",
+        "/loop",
+        status=302,
+        headers={"Location": "https://api.bitbucket.org/loop"},
+    )
+    client = make_client(fake, max_redirects=3)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client._request_json("GET", "/loop", operation="op")
+    assert excinfo.value.reason_code == BITBUCKET_API_ERROR
+    assert "redirect" in str(excinfo.value).lower()
+    assert len(fake.calls("GET")) == 4  # initial + 3 followed hops, then aborted
+
+
 # ── Error mapping + redaction ─────────────────────────────────────────────────
 
 

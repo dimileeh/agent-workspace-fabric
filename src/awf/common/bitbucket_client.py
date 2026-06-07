@@ -77,6 +77,11 @@ _ERROR_BODY_LIMIT = 2000
 # statuses, diffstat, pipeline steps) have small real-world counts, so 50 pages is
 # never reached in practice — it only bounds a runaway/adversarial ``next`` chain.
 _DEFAULT_MAX_PAGES = 50
+# Some BB Cloud GETs (the PR ``diffstat``/``diff`` endpoints) answer with a 302 to the
+# resolved repo-level resource; the shared client does not auto-follow (so each hop is
+# origin-checked first). A single hop is the documented shape — the cap only bounds a
+# degraded/adversarial redirect chain.
+_DEFAULT_MAX_REDIRECTS = 5
 
 # Reason codes (flow end-to-end: exception → log field → event → policy).
 BITBUCKET_AUTH_NOT_CONFIGURED = "BITBUCKET_AUTH_NOT_CONFIGURED"
@@ -219,6 +224,7 @@ class BitBucketClient:
         near_limit_delay_seconds: float = _DEFAULT_NEAR_LIMIT_DELAY_SECONDS,
         etag_cache_size: int = _DEFAULT_ETAG_CACHE_SIZE,
         max_pages: int = _DEFAULT_MAX_PAGES,
+        max_redirects: int = _DEFAULT_MAX_REDIRECTS,
     ) -> None:
         """Store the injected HTTP client, auth, and retry/cache policy."""
         self._client = client
@@ -226,6 +232,7 @@ class BitBucketClient:
         self._secret_values = auth.secret_values()
         self._max_retries = max_retries
         self._max_pages = max_pages
+        self._max_redirects = max_redirects
         self._backoff_base_seconds = backoff_base_seconds
         self._near_limit_delay_seconds = near_limit_delay_seconds
         self._etag_cache_size = etag_cache_size
@@ -926,7 +933,18 @@ class BitBucketClient:
         (carrying the ``Authorization`` header) at an internal service (SSRF). A
         relative ``next`` is resolved against the safe ``base_url`` and is allowed.
         """
-        parsed = urlsplit(next_url)
+        self._assert_forge_origin(next_url, operation, what="pagination 'next'")
+
+    def _assert_forge_origin(self, url: str, operation: str, *, what: str) -> None:
+        """Reject an absolute ``url`` that points off the configured forge host.
+
+        Shared SSRF guard for both pagination ``next`` links and 3xx ``Location``
+        targets: either is an absolute URL httpx would honor verbatim (bypassing
+        ``base_url``) while still carrying the ``Authorization`` header, so a foreign
+        origin must be refused *before* the request is issued. A relative ``url`` is
+        resolved against the safe ``base_url`` and is allowed.
+        """
+        parsed = urlsplit(url)
         if not parsed.netloc:
             return
         base = self._client.base_url
@@ -935,7 +953,7 @@ class BitBucketClient:
                 operation=operation,
                 status=None,
                 body=(
-                    f"BitBucket pagination 'next' pointed at unexpected origin "
+                    f"BitBucket {what} pointed at unexpected origin "
                     f"{parsed.scheme}://{parsed.hostname}; expected host {base.host}"
                 ),
                 reason_code=BITBUCKET_API_ERROR,
@@ -976,25 +994,51 @@ class BitBucketClient:
         headers = {"Accept": "application/json", "Authorization": self._auth.header_value()}
         if extra_headers:
             headers.update(extra_headers)
-        attempt = 0
+        target = path
+        target_params = params
+        redirects = 0
         while True:
-            try:
-                response = await self._client.request(
-                    method, path, json=json_body, params=params, headers=headers
-                )
-            except httpx.RequestError as exc:
+            attempt = 0
+            while True:
+                try:
+                    response = await self._client.request(
+                        method, target, json=json_body, params=target_params, headers=headers
+                    )
+                except httpx.RequestError as exc:
+                    raise BitBucketClientError(
+                        operation=operation,
+                        status=None,
+                        body=self._redact(str(exc)),
+                        reason_code=BITBUCKET_TRANSPORT_ERROR,
+                    ) from exc
+                if response.status_code == 429 and attempt < self._max_retries:
+                    await self._sleep(self._retry_after_seconds(response, attempt))
+                    attempt += 1
+                    continue
+                break
+            await self._maybe_slow_for_near_limit(response)
+            location = response.headers.get("Location")
+            if not (response.is_redirect and location):
+                break
+            # BB Cloud's PR diffstat/diff GETs answer 302 → resolved resource. The
+            # shared client does not auto-follow, so each hop is origin-checked
+            # (SSRF, same guard as pagination ``next``) before being re-issued with
+            # the Authorization header. ``Location`` already carries the resolved
+            # query, so the original params are dropped on the next hop.
+            if redirects >= self._max_redirects:
                 raise BitBucketClientError(
                     operation=operation,
                     status=None,
-                    body=self._redact(str(exc)),
-                    reason_code=BITBUCKET_TRANSPORT_ERROR,
-                ) from exc
-            if response.status_code == 429 and attempt < self._max_retries:
-                await self._sleep(self._retry_after_seconds(response, attempt))
-                attempt += 1
-                continue
-            break
-        await self._maybe_slow_for_near_limit(response)
+                    body=(
+                        f"BitBucket redirects exceeded the {self._max_redirects}-hop cap; "
+                        "aborting a likely runaway redirect chain"
+                    ),
+                    reason_code=BITBUCKET_API_ERROR,
+                )
+            self._assert_forge_origin(location, operation, what="redirect Location")
+            redirects += 1
+            target = location
+            target_params = None
         if strict and response.status_code >= 400:
             raise self._error_for(response, operation)
         return response

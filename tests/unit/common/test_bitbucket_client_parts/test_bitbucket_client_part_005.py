@@ -46,6 +46,31 @@ def _seed_fetch_status(fake: FakeBitBucket, *, account_body: object = None) -> N
 # ── Client edge branches ──────────────────────────────────────────────────────
 
 
+async def test_fetch_pr_status_changed_paths_via_redirected_diffstat() -> None:
+    # BB Cloud's PR diffstat answers 302 → resolved diffstat resource. The client
+    # must follow the hop so ``changed_paths`` (used by the monitor's scope-policy
+    # check) reflects the real files instead of silently collapsing to empty.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.enqueue(
+        "GET",
+        f"{_PR}/diffstat",
+        status=302,
+        headers={"Location": f"https://api.bitbucket.org{_REPO}/diffstat/{_HEAD}..d"},
+    )
+    fake.page(
+        "GET",
+        f"{_REPO}/diffstat/{_HEAD}..d",
+        values=[{"new": {"path": "src/changed.py"}}],
+    )
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "v"})
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.changed_paths == ("src/changed.py",)
+
+
 async def test_fetch_pr_status_non_dict_body_raises() -> None:
     fake = FakeBitBucket()
     fake.enqueue("GET", _PR, json=[1, 2, 3])  # 200 but not an object
