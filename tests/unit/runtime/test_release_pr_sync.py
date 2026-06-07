@@ -232,9 +232,36 @@ class TestFindOrCreateReleasePr:
 
     @pytest.mark.unit
     async def test_unparseable_create_url_raises(self) -> None:
+        # ``gh`` exits 0 but prints no PR URL: GitHubClient.create_pull_request
+        # raises GitHubClientError(returncode=0). find_or_create_release_pr must
+        # translate that into the release-sync reason code rather than leaking the
+        # raw gh error, keeping the RELEASE_SYNC_PR_URL_INVALID contract.
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="[]")
         fake.queue_result(returncode=0, stdout="not-a-url\n")
+        gh = GitHubClient(fake)
+
+        with pytest.raises(ReleasePrSyncError) as exc:
+            await find_or_create_release_pr(
+                runner=fake,
+                gh=gh,
+                repo=_REPO,
+                source_branch="development",
+                target_branch="main",
+                title="t",
+                body="b",
+            )
+
+        assert exc.value.reason_code == "RELEASE_SYNC_PR_URL_INVALID"
+
+    @pytest.mark.unit
+    async def test_create_url_with_invalid_pr_number_raises(self) -> None:
+        # A github-shaped URL clears GitHubClient's URL guard but still fails
+        # parse_github_pull_request_url (e.g. PR number 0). That ValueError must
+        # surface as RELEASE_SYNC_PR_URL_INVALID from the post-create parse path.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="[]")
+        fake.queue_result(returncode=0, stdout="https://github.com/o/r/pull/0\n")
         gh = GitHubClient(fake)
 
         with pytest.raises(ReleasePrSyncError) as exc:
