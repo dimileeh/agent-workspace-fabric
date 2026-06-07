@@ -263,6 +263,40 @@ async def test_paginate_rejects_next_url_pointing_at_foreign_host() -> None:
     assert len(fake.calls("GET")) == 1  # never reached the foreign host
 
 
+async def test_paginate_rejects_next_url_with_same_host_but_foreign_port() -> None:
+    # ``urlsplit().hostname`` strips the port, so a ``next`` link to the forge host on
+    # a different port (e.g. ``:8443``) is a distinct TCP endpoint that would still
+    # receive the Authorization header (SSRF). The origin check must reject it.
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        "/items",
+        values=[{"id": 1}],
+        next_url="https://api.bitbucket.org:8443/items?page=2",
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client._paginate("/items", operation="op")
+    assert excinfo.value.reason_code == BITBUCKET_API_ERROR
+    assert len(fake.calls("GET")) == 1  # never reached the foreign port
+
+
+async def test_paginate_allows_next_url_with_explicit_default_port() -> None:
+    # The forge ``base_url`` omits the implicit :443, so a ``next`` link that spells
+    # the default HTTPS port out explicitly is the *same* origin and must be allowed.
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        "/items",
+        values=[{"id": 1}],
+        next_url="https://api.bitbucket.org:443/items?page=2",
+    )
+    fake.page("GET", "/items", values=[{"id": 2}])
+    client = make_client(fake)
+    values = await client._paginate("/items", operation="op")
+    assert [v["id"] for v in values] == [1, 2]
+
+
 async def test_paginate_allows_relative_next_url() -> None:
     # A relative ``next`` is resolved against the safe base_url by httpx, so the
     # origin guard must let it through.

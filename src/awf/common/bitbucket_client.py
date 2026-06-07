@@ -812,9 +812,14 @@ class BitBucketClient:
                     status=None,
                     body=f"BitBucket merge task ended in non-success status {task_status!r}",
                 )
+        # ``response`` is the original 202 merge POST, not the final poll: reusing
+        # ``response.status_code`` would label a poll-budget timeout ``status=202``,
+        # indistinguishable from a 202 Accepted and from a non-success terminal status
+        # (which already omits the HTTP status above). Omit it (rendered ``n/a``); the
+        # diagnostic signal is the exhausted poll budget carried in the body.
         raise BitBucketClientError(
             operation=operation,
-            status=response.status_code,
+            status=None,
             body=f"BitBucket merge task did not complete within {self._max_merge_polls} polls",
         )
 
@@ -1198,14 +1203,27 @@ class BitBucketClient:
         """Return whether ``url`` is relative or points at the configured forge host.
 
         A relative ``url`` is resolved against the safe ``base_url`` and is allowed; an
-        absolute ``url`` is allowed only when its host (and scheme, if present) match the
-        forge ``base_url``.
+        absolute ``url`` is allowed only when its host, port, and scheme (if present)
+        match the forge ``base_url``.
         """
         parsed = urlsplit(url)
         if not parsed.netloc:
             return True
         base = self._client.base_url
-        return parsed.hostname == base.host and (not parsed.scheme or parsed.scheme == base.scheme)
+        if parsed.hostname != base.host:
+            return False
+        if parsed.scheme and parsed.scheme != base.scheme:
+            return False
+        # ``hostname`` strips the port, so a ``next`` link or ``Location`` redirect to
+        # ``api.bitbucket.org:8443`` would otherwise pass the host check while steering
+        # an authenticated request at a different TCP endpoint (SSRF). Compare the
+        # effective ports — falling back to the scheme default when omitted — so the
+        # host:port pair, not just the host, must match the forge origin.
+        effective_scheme = parsed.scheme or base.scheme
+        default_port = {"https": 443, "http": 80}.get(effective_scheme)
+        parsed_port = parsed.port if parsed.port is not None else default_port
+        base_port = base.port if base.port is not None else default_port
+        return parsed_port == base_port
 
     def _assert_forge_origin(self, url: str, operation: str, *, what: str) -> None:
         """Reject an absolute ``url`` that points off the configured forge host.
