@@ -9,11 +9,11 @@ delegate-mixin decomposition used by the executor/worker orchestrators.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import MergeCandidateRepository, OperationRepository, WorkspaceRepository
 from awf.runtime.operator_hints import (
     build_pending_operator_hint_payload,
     persist_operator_hint,
@@ -29,10 +29,13 @@ from awf.service.controls_errors import (
 from awf.service.controls_helpers import (
     _add_control_audit_event,
     _cancel_stale_pr_monitor_recovery_operations,
+    _claim_reset_snapshot,
     _control_response,
     _event_payload,
     _operation_payload,
     _operator_operation_payload,
+    _remonitor_current_head_sha,
+    _reset_failed_workspace_for_remonitor,
     _reset_stale_monitor_execution_claims,
     _workspace_pr_operation_context,
 )
@@ -49,15 +52,16 @@ async def guide_workspace(
     idempotency_key: str | None = None,
     expected_version: int | None = None,
 ) -> WorkspaceControlResponse:
-    """Inject an operator ``directive`` into a live monitoring workspace.
+    """Inject an operator ``directive`` into a live or failed workspace.
 
     Purpose-named operator-guidance control (issue #447). It arms a PENDING
     :class:`OperatorHint` carrying the ``directive`` (the agent instruction,
     distinct from the audit ``reason``) so the monitor's next ``decide()``
     cycle re-engages the agent — even from a prior ``NotifyHuman`` wait —
-    without cancelling/re-adopting. It reuses the same OperatorHint engine
-    as ``remonitor`` but never changes workspace status (it mutates
-    ``monitor_threads_addressed`` while staying ``monitoring_pr``)."""
+    without cancelling/re-adopting. For ``monitoring_pr`` workspaces it
+    mutates ``monitor_threads_addressed`` without changing status; for
+    ``failed`` workspaces (issue #456) it resets to ``monitoring_pr``
+    using the same state-reset as ``remonitor``."""
 
     repo = WorkspaceRepository(self._session)
     operations = OperationRepository(self._session)
@@ -154,8 +158,37 @@ async def guide_workspace(
     # monitor while the original loop is still running. Clear stale leases
     # only; a live lease keeps ownership and picks up the directive on its
     # next monitor cycle.
+    #
+    # Exception: a failed workspace has no live worker — any claims belong
+    # to a dead worker and must be force-cleared so claim_monitoring_pr can
+    # acquire the row immediately after the failed→monitoring_pr transition
+    # (mirrors remonitor_workspace, which unconditionally nulls all claims).
     claims_reset = _reset_stale_monitor_execution_claims(workspace, now=utcnow())
-    await repo.advance_workspace_version(workspace)
+    # For failed→monitoring_pr resets, resolve the effective head SHA using the
+    # same logic as remonitor_workspace so the reopened merge candidate gets the
+    # post-settle workspace SHA instead of the potentially stale candidate.head_sha.
+    candidate_head_sha: str | None = None
+    if current == WorkspaceStatus.failed:
+        candidate_repo = MergeCandidateRepository(self._session)
+        open_candidate = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace_id)
+        candidate_head_sha = _remonitor_current_head_sha(workspace, open_candidate, monitor_state)
+        if candidate_head_sha is None:
+            latest = await candidate_repo.get_latest_for_workspace_with_merge_inputs(workspace_id)
+            candidate_head_sha = latest.head_sha if latest is not None and latest.head_sha else None
+    state_reset = await _reset_failed_workspace_for_remonitor(
+        self._session, workspace, candidate_head_sha=candidate_head_sha
+    )
+    if state_reset is not None:
+        remaining = _claim_reset_snapshot(workspace)
+        workspace.monitor_claimed_by = None
+        workspace.monitor_claim_expires_at = None
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+        for key, val in remaining.items():
+            if val is not None:
+                claims_reset[key] = val
+    if state_reset is None:
+        await repo.advance_workspace_version(workspace)
     event_payload: dict[str, object | None] = {
         "reason": reason,
         "directive": directive_text,
@@ -163,17 +196,29 @@ async def guide_workspace(
         "claims_reset": claims_reset,
         "pending_operator_hint": pending_operator_hint,
     }
+    if state_reset is not None:
+        event_payload["state_reset"] = state_reset
     if cancelled_recovery_operations:
         event_payload["cancelled_recovery_operations"] = cancelled_recovery_operations
         event_payload["cancelled_recovery_reason_code"] = _OPERATOR_GUIDE_REASON_CODE
         event_payload["cancelled_recovery_requested_action"] = OperationType.guide.value
     event_payload = _event_payload(event_payload, expected_version=expected_version)
-    await repo.add_event(
-        workspace,
-        event_type="workspace.guide_requested",
-        reason_code=_OPERATOR_GUIDE_REASON_CODE,
-        payload=event_payload,
-    )
+    if state_reset is not None:
+        await repo.add_event_with_states(
+            workspace,
+            event_type="workspace.guide_requested",
+            old_state=cast(str, state_reset["from"]),
+            new_state=cast(str, state_reset["to"]),
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            payload=event_payload,
+        )
+    else:
+        await repo.add_event(
+            workspace,
+            event_type="workspace.guide_requested",
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            payload=event_payload,
+        )
     await _add_control_audit_event(
         repo,
         workspace,
@@ -188,6 +233,8 @@ async def guide_workspace(
         "claims_reset": claims_reset,
         **_workspace_pr_operation_context(workspace),
     }
+    if state_reset is not None:
+        result["state_reset"] = state_reset
     if cancelled_recovery_operations:
         result["cancelled_recovery_operations"] = cancelled_recovery_operations
     await operations.finish(
