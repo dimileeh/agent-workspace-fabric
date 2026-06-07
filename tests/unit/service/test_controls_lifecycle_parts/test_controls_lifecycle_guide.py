@@ -177,6 +177,47 @@ async def test_guide_idempotency_identity_ignores_reason_whitespace(
 
 
 @pytest.mark.unit
+async def test_guide_idempotency_identity_excludes_volatile_pr_head(
+    session: AsyncSession,
+) -> None:
+    """A same-key retry must replay even after the monitor records a new head.
+
+    Volatile PR/head context (``source_head_sha``/``source_base_sha``) is
+    persisted for provenance but kept out of the idempotency identity. When the
+    first response is lost and the monitor pushes/records a new head before the
+    client retries with the same key, the changed head must not turn a safe
+    retry into IDEMPOTENCY_CONFLICT — the original operation is replayed.
+    """
+    workspace = await _monitoring_workspace(session)
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="do the thing",
+        idempotency_key="guide-head-moved",
+        expected_version=workspace.version,
+    )
+    # The monitor pushes a new head and records it before the client retries.
+    workspace.monitor_last_commit_sha = "f" * 40
+    workspace.base_commit = "e" * 40
+    await session.flush()
+
+    replay = await service.guide_workspace(
+        workspace.id,
+        directive="do the thing",
+        idempotency_key="guide-head-moved",
+        expected_version=workspace.version - 1,
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert response.operation_id == replay.operation_id
+    assert len(operations) == 1
+    # The originally persisted head context is preserved on the replayed op.
+    assert operations[0].payload["source_head_sha"] == "h" * 40
+    assert operations[0].payload["source_base_sha"] == "b" * 40
+
+
+@pytest.mark.unit
 async def test_guide_preserves_unexpired_monitor_and_execution_leases(
     session: AsyncSession,
 ) -> None:

@@ -69,7 +69,7 @@ async def guide_workspace(
         raise WorkspaceGuideEmptyDirectiveError()
     reason_text = (reason or "").strip()
     workspace_for_payload = await self._require_workspace(repo, workspace_id)
-    payload = _operator_operation_payload(
+    base_payload = _operator_operation_payload(
         # Hash the *stripped* reason so the idempotency identity matches the
         # persisted hint (which stores ``reason_text``). REST strips at the
         # schema boundary, but a direct Python/MCP caller retrying with a
@@ -78,12 +78,22 @@ async def guide_workspace(
         reason=reason_text or None,
         reason_code=_OPERATOR_GUIDE_REASON_CODE,
         requested_action=OperationType.guide.value,
-        extra={
-            "directive": directive_text,
+        extra={"directive": directive_text},
+    )
+    # Persist the PR/head context for provenance, but keep it OUT of the
+    # idempotency identity. The monitor may push/record a new head between the
+    # first request and a same-key retry (e.g. after a lost first response), so
+    # a volatile ``source_head_sha``/``source_base_sha`` must not turn a
+    # legitimate safe-retry into IDEMPOTENCY_CONFLICT. The identity is the
+    # stable directive/reason payload only, mirroring ``request_rebase_workspace``.
+    operation_payload = _operation_payload(
+        {
+            **base_payload,
             **_workspace_pr_operation_context(workspace_for_payload),
         },
+        expected_version=expected_version,
     )
-    operation_payload = _operation_payload(payload, expected_version=expected_version)
+    idempotency_payload = _operation_payload(base_payload, expected_version=expected_version)
     prepared = await self._prepare_operation(
         repo,
         operations,
@@ -92,6 +102,8 @@ async def guide_workspace(
         payload=operation_payload,
         idempotency_key=idempotency_key,
         expected_version=expected_version,
+        idempotency_payload_identity=idempotency_payload,
+        idempotency_identity_keys=frozenset({*base_payload.keys(), "expected_version"}),
     )
     workspace = prepared.workspace
     if prepared.replay is not None:
