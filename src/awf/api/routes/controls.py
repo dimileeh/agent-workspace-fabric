@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.deps import get_db_session, require_api_token
 from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import (
+    HttpExceptionErrorResponse,
     OperationResponse,
     WorkspaceControlRequest,
     WorkspaceControlResponse,
@@ -106,7 +107,20 @@ async def remonitor_workspace(
         raise _http_error(exc) from exc
 
 
-@router.post("/guide", response_model=WorkspaceControlResponse)
+@router.post(
+    "/guide",
+    response_model=WorkspaceControlResponse,
+    responses={
+        400: {
+            "model": HttpExceptionErrorResponse,
+            "description": "Bad Request",
+        },
+        409: {
+            "model": HttpExceptionErrorResponse,
+            "description": "Conflict",
+        },
+    },
+)
 async def guide_workspace(
     workspace_id: str,
     payload: WorkspaceGuideRequest,

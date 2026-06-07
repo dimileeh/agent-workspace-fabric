@@ -211,3 +211,21 @@ def test_guide_request_directive_schema_rejects_whitespace_only() -> None:
     directive_schema = WorkspaceGuideRequest.model_json_schema()["properties"]["directive"]
     assert directive_schema["minLength"] == 1
     assert directive_schema["pattern"] == r"\S"
+
+
+@pytest.mark.unit
+def test_guide_route_documents_bad_directive_and_ineligible_state_errors() -> None:
+    # ``guide`` surfaces 400 for bad directives (WorkspaceGuideEmptyDirectiveError /
+    # WorkspaceGuideMissingPrUrlError) and 409 for ineligible workspace state
+    # (WorkspaceGuideStateError) via ``_http_error``. The regenerated OpenAPI contract
+    # must advertise those so client generators and operator docs are complete.
+    from awf.api.app import create_app
+
+    openapi = create_app(use_lifespan=False).openapi()
+    guide_responses = openapi["paths"]["/v1/workspaces/{workspace_id}/guide"]["post"]["responses"]
+
+    for code, description in (("400", "Bad Request"), ("409", "Conflict")):
+        assert code in guide_responses, f"guide route must document {code}"
+        assert guide_responses[code]["description"] == description
+        schema = guide_responses[code]["content"]["application/json"]["schema"]
+        assert schema["$ref"] == "#/components/schemas/HttpExceptionErrorResponse"
