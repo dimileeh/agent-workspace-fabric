@@ -85,17 +85,22 @@ def bitbucket_git_config_entries() -> tuple[tuple[str, str], ...]:
     helper is appended (standard git multi-value semantics). ``useHttpPath``
     keeps the credential scoped correctly for bitbucket.org paths.
 
-    The ``insteadOf`` rewrite mirrors the GitHub
+    The ``insteadOf`` rewrites mirror the GitHub
     ``url.https://github.com/.insteadOf = git@github.com:`` entry so an SSH-form
-    bitbucket remote (``git@bitbucket.org:ws/repo.git``) is rewritten to HTTPS and
-    actually authenticates with the configured token instead of silently falling
-    back to SSH and ignoring ``BITBUCKET_API_TOKEN`` / ``BITBUCKET_EMAIL``.
+    bitbucket remote is rewritten to HTTPS and actually authenticates with the
+    configured token instead of silently falling back to SSH and ignoring
+    ``BITBUCKET_API_TOKEN`` / ``BITBUCKET_EMAIL``. Both SSH URL shapes that
+    ``RepoRef.from_url`` accepts are covered: the scp-like
+    ``git@bitbucket.org:ws/repo.git`` form and the
+    ``ssh://git@bitbucket.org/ws/repo.git`` form (``insteadOf`` is multi-valued,
+    so both rewrites apply).
     """
     return (
         ("credential.https://bitbucket.org.helper", ""),
         ("credential.https://bitbucket.org.helper", _BITBUCKET_CREDENTIAL_HELPER),
         ("credential.https://bitbucket.org.useHttpPath", "true"),
         ("url.https://bitbucket.org/.insteadOf", "git@bitbucket.org:"),
+        ("url.https://bitbucket.org/.insteadOf", "ssh://git@bitbucket.org/"),
     )
 
 

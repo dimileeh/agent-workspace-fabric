@@ -68,10 +68,18 @@ def test_bitbucket_git_config_entries_reference_env_names_not_token() -> None:
 @pytest.mark.unit
 def test_bitbucket_git_config_entries_rewrite_ssh_remotes_to_https() -> None:
     # Mirrors the GitHub ``url.https://github.com/.insteadOf = git@github.com:``
-    # rewrite so an SSH-form bitbucket remote (git@bitbucket.org:ws/repo.git)
-    # is rewritten to HTTPS and actually uses the token credential helper.
-    entries = dict(bitbucket_git_config_entries())
-    assert entries["url.https://bitbucket.org/.insteadOf"] == "git@bitbucket.org:"
+    # rewrite so an SSH-form bitbucket remote is rewritten to HTTPS and actually
+    # uses the token credential helper. ``insteadOf`` is multi-valued: both SSH
+    # URL shapes that ``RepoRef.from_url`` accepts must be covered — the scp-like
+    # ``git@bitbucket.org:ws/repo.git`` form and the
+    # ``ssh://git@bitbucket.org/ws/repo.git`` form.
+    insteadof_values = [
+        value
+        for key, value in bitbucket_git_config_entries()
+        if key == "url.https://bitbucket.org/.insteadOf"
+    ]
+    assert "git@bitbucket.org:" in insteadof_values
+    assert "ssh://git@bitbucket.org/" in insteadof_values
 
 
 @pytest.mark.unit
