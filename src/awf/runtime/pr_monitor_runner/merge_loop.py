@@ -720,6 +720,10 @@ async def handle_merge_action(
         fresh_action: MonitorAction | None = None
         fresh_status: PRStatus | None = None
         merge_sha: str | None = None
+        # Keep the explicit two-member union (not the ``ForgeClientError`` base): the
+        # ``else`` arm below narrows ``not isinstance(..., BitBucketClientError)`` to
+        # ``GitHubClientError`` to read ``.stderr``. Collapsing to the base drops that
+        # narrowing and fails type-checking.
         merge_blocker: GitHubClientError | BitBucketClientError | None = None
         merge_method_preflight_error: GitHubClientError | None = None
         merge_method_notification_reason: str | None = None
@@ -984,6 +988,17 @@ async def handle_merge_action(
                                 repo=repo,
                                 base_branch=base_branch,
                             )
+                        # Intentionally narrow to ``GitHubClientError`` (not the shared
+                        # ``ForgeClientError`` base): ``_resolve_effective_merge_methods``
+                        # only reaches the GitHub merge-method endpoints, while
+                        # ``BitBucketClient.fetch_repo_merge_methods`` /
+                        # ``fetch_branch_pull_request_allowed_merge_methods`` serve from
+                        # cached ``_pr_context`` and never make HTTP calls, so no
+                        # ``BitBucketClientError`` can surface here today. Load-bearing
+                        # invariant: if a BitBucket method is ever changed to make a live
+                        # request, widen this to ``ForgeClientError`` so the fault still
+                        # routes through ``merge_method_preflight_error`` instead of
+                        # escaping ``handle_merge_action`` uncaught.
                         except GitHubClientError as exc:
                             merge_method_preflight_error = exc
                         else:
