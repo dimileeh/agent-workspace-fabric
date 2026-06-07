@@ -746,6 +746,18 @@ _CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN = re.compile(r'failed to pull image\s+
 # unrelated application image.
 _CI_DOCKER_PULL_COMMAND_MARKER = "docker pull"
 
+# A *successful* ``docker pull`` prints a ref-bearing terminal status — ``Status:
+# Downloaded newer image for <ref>`` or ``Status: Image is up to date for <ref>``.
+# Such a line between a ``docker pull <ref>`` echo and a same-ref ``failed to pull
+# image "<ref>"`` line proves the echoed pull *succeeded*, so the failure is a
+# separate kubelet/containerd deploy event (a real image bug), not the echoed
+# command's own output. The same-ref command echo alone is not evidence the pull
+# failed — a successful pre-pull emits one too — so it must not corroborate.
+_CI_DOCKER_PULL_SUCCESS_STATUS_MARKERS = (
+    "status: downloaded newer image for ",
+    "status: image is up to date for ",
+)
+
 # ``gh run view --log-failed`` emits the whole failed step, so a real
 # integration/Go test that logs ``context deadline exceeded`` can sit in the same
 # excerpt as an unrelated Docker pull failure. A registry-timeout marker
@@ -904,6 +916,15 @@ def _image_pull_failure_is_corroborated(
     ``Failed to pull image "ghcr.io/org/app": ... Head "https://ghcr.io/v2/...":
     context deadline exceeded`` — so it would let a real deploy bug
     self-corroborate and be silently rerun.
+
+    The same-ref echo must also evidence a *failed* pull, not merely that a pull
+    command appeared: a successful same-ref pre-pull echoes ``docker pull
+    ghcr.io/org/app`` too, and a kubelet ``Failed to pull image
+    "ghcr.io/org/app"`` event for that same ref nearby would then be silently
+    rerun as transient infra even though it is a real deploy bug. A successful
+    pull prints a ref-bearing ``Status: ...`` success line
+    (``_CI_DOCKER_PULL_SUCCESS_STATUS_MARKERS``) between the echo and the failure,
+    so an echo proven successful that way does not corroborate.
     """
 
     match = _CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN.search(line)
@@ -913,8 +934,41 @@ def _image_pull_failure_is_corroborated(
     return any(
         abs(index - context_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
         and image_ref in lines[context_index].split()
+        and not _docker_pull_command_succeeded(image_ref, context_index, index, lines)
         for context_index in docker_pull_command_indexes
     )
+
+
+def _docker_pull_command_succeeded(
+    image_ref: str,
+    command_index: int,
+    failure_index: int,
+    lines: list[str],
+) -> bool:
+    """Whether the ``docker pull <ref>`` echo printed a same-ref success status.
+
+    A successful ``docker pull`` emits a ref-bearing terminal status — ``Status:
+    Downloaded newer image for <ref>`` / ``Status: Image is up to date for
+    <ref>``. When such a line sits between the echo and the ``failed to pull
+    image "<ref>"`` line, the echoed pull *succeeded*, so the failure is a
+    separate kubelet/containerd deploy event (a real bug) rather than the echoed
+    command's output, and the echo must not corroborate it.
+
+    The ref is matched as a whitespace-delimited token (as the ``docker pull``
+    echo match is), not by substring, so a success status for a *different* image
+    whose name merely has ``<ref>`` as a prefix (``Status: Downloaded newer image
+    for app-db`` vs a failed ``app`` pull) does not spuriously suppress a genuine
+    same-ref pull failure.
+    """
+
+    lower, upper = sorted((command_index, failure_index))
+    for probe_index in range(lower + 1, upper):
+        probe = lines[probe_index]
+        if image_ref in probe.split() and any(
+            marker in probe for marker in _CI_DOCKER_PULL_SUCCESS_STATUS_MARKERS
+        ):
+            return True
+    return False
 
 
 def _log_shows_docker_registry_timeout(log_text: str) -> bool:

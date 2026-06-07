@@ -513,6 +513,67 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_successful_same_ref_pre_pull_does_not_corroborate_image_failure(
+        self,
+    ) -> None:
+        """A *successful* same-ref ``docker pull ghcr.io/org/app`` pre-pull — proven
+        by the ``Status: Image is up to date for ghcr.io/org/app`` success line it
+        prints — sitting within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of a
+        kubelet ``Failed to pull image "ghcr.io/org/app"`` event must not corroborate
+        it. The echoed pull *succeeded*, so the failure is a separate deploy/image
+        bug (a real failure) that must reach the repair agent rather than be silently
+        rerun as transient CI. The bare same-ref command echo is not, on its own,
+        evidence that the same-ref Docker pull failed."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/app\n"
+                "Status: Image is up to date for ghcr.io/org/app\n"
+                'Failed to pull image "ghcr.io/org/app": context deadline exceeded'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_prefix_ref_success_status_does_not_suppress_same_ref_pull_failure(
+        self,
+    ) -> None:
+        """A success status for a *different* image whose name merely has the failed
+        ref as a prefix (``Status: Downloaded newer image for app-db`` vs a failed
+        ``app`` pull) must not suppress corroboration of a genuine same-ref ``app``
+        pull failure. The success status is matched on the ref as a whitespace token,
+        not by substring, so the real transient ``app`` pull failure is still rerun."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull app\n"
+                "Status: Downloaded newer image for app-db\n"
+                'failed to pull image "app": context deadline exceeded'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_k8s_failed_to_pull_image_without_docker_context_reports_ci_failure(
         self,
     ) -> None:

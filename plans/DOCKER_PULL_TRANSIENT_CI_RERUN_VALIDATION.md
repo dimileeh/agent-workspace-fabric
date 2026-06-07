@@ -189,3 +189,32 @@ per the AWF workspace contract.
 - No generic `docker pull` echo / `exit code 1` marker added, so ordinary Docker
   build/test failures without a co-located registry-timeout phrase remain
   non-transient.
+
+## Follow-up — same-ref echo must evidence a *failed* pull (PRRT_kwDOSJAM6s6Hqh9w)
+
+A same-ref `docker pull <ref>` *command* echo is printed for **successful**
+pre-pulls too, so it alone is not evidence that the same-ref Docker pull failed.
+`_image_pull_failure_is_corroborated` now also requires that the echoed pull did
+**not** print a ref-bearing success status
+(`_CI_DOCKER_PULL_SUCCESS_STATUS_MARKERS`: `"status: downloaded newer image
+for <ref>"` / `"status: image is up to date for <ref>"`) between the echo and the
+`failed to pull image "<ref>"` line, via the new `_docker_pull_command_succeeded`
+helper. Otherwise a successful same-ref pre-pull adjacent to a kubelet `Failed to
+pull image "<same ref>"` event (a real deploy bug) would be silently rerun as
+transient infra.
+
+The success-status check matches the ref as a whitespace-delimited **token**
+(`image_ref in probe.split()`), mirroring the `docker pull` echo match, so a
+success status for a *different* image whose name merely has the failed ref as a
+prefix (`Status: Downloaded newer image for app-db` vs a failed `app` pull) does
+not spuriously suppress a genuine same-ref pull failure.
+
+- Covered by `test_successful_same_ref_pre_pull_does_not_corroborate_image_failure`
+  (success status present → `ReportCiFailure`).
+- Covered by `test_prefix_ref_success_status_does_not_suppress_same_ref_pull_failure`
+  (different prefix-overlapping ref's success status → genuine same-ref failure
+  still `RerunTransientCI`; locks in the token-bounded match).
+- The positive `test_docker_failed_to_pull_image_timeout_dispatches_rerun` (no
+  success status between echo and failure → still `RerunTransientCI`) locks in that
+  genuine same-ref pull failures remain transient, exercising the
+  `_docker_pull_command_succeeded` False branch.
