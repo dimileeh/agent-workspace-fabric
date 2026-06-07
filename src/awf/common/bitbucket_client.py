@@ -1052,7 +1052,11 @@ class BitBucketClient:
                 )
             self._validate_next_url(next_url, operation)
             pages += 1
-            page = await self._request_json("GET", next_url, operation=operation)
+            # Propagate the caller's ``cache`` flag to every page, not just the
+            # first: otherwise pages 2+ silently bypass the ETag/If-None-Match
+            # optimization that ``cache=True`` callers (e.g. fetch_pr_status
+            # comments) asked for.
+            page = await self._request_json("GET", next_url, operation=operation, cache=cache)
         return values
 
     def _validate_next_url(self, next_url: str, operation: str) -> None:

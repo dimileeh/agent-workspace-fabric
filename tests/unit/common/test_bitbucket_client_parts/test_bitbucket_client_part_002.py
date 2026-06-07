@@ -178,6 +178,41 @@ async def test_fetch_pr_status_paginates_comments() -> None:
     assert bodies == {"first", "second"}
 
 
+async def test_paginate_propagates_cache_to_subsequent_pages() -> None:
+    """``cache=True`` must reach pages 2+, not just the first page (issue:4640573294).
+
+    Regression for the ``_paginate`` cache-propagation gap: subsequent ``next``
+    pages were fetched without the ``cache`` keyword, so they neither sent nor
+    stored an ETag and silently bypassed the conditional-request optimization the
+    caller asked for.
+    """
+    fake = FakeBitBucket()
+    page2_url = f"https://api.bitbucket.org{_PR}/comments?page=2"
+    # First pass primes the conditional cache: both pages answer with an ETag.
+    fake.page(
+        "GET", f"{_PR}/comments", values=[{"id": 1}], next_url=page2_url, headers={"ETag": "p1"}
+    )
+    fake.page(
+        "GET", f"{_PR}/comments", values=[{"id": 2}], headers={"ETag": "p2"}, params={"page": "2"}
+    )
+    # Second pass re-serves both pages so the primed page-2 ETag is exercised.
+    fake.page(
+        "GET", f"{_PR}/comments", values=[{"id": 1}], next_url=page2_url, headers={"ETag": "p1"}
+    )
+    fake.page(
+        "GET", f"{_PR}/comments", values=[{"id": 2}], headers={"ETag": "p2"}, params={"page": "2"}
+    )
+    client = make_client(fake)
+    first = await client._paginate(f"{_PR}/comments", operation="bitbucket test", cache=True)
+    assert [value["id"] for value in first] == [1, 2]
+    await client._paginate(f"{_PR}/comments", operation="bitbucket test", cache=True)
+    page2_requests = [r for r in fake.calls("GET") if r.url.params.get("page") == "2"]
+    assert page2_requests, "expected a page-2 request on each pass"
+    # Only a propagated ``cache=True`` stores the page-2 ETag on pass one and sends
+    # it back as ``If-None-Match`` on pass two.
+    assert page2_requests[-1].headers.get("If-None-Match") == "p2"
+
+
 def _general_comment(comment_id: int, body: str) -> dict:
     return {
         "id": comment_id,
