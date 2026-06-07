@@ -28,6 +28,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_auth
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
@@ -156,9 +157,22 @@ class GitManager:
         Clones on first call; fetches on subsequent calls. Returns the mirror path.
         Concurrent calls for the same ``repo_url`` are serialized so the initial
         clone doesn't race.
+
+        For a bitbucket.org repo, a credential preflight runs first: if the
+        BitBucket git credentials are not configured it raises a reason-coded
+        ``GitOperationError`` instead of attempting an unauthenticated clone of a
+        private repo (which would fail opaquely or hang). GitHub repos are
+        unaffected.
         """
         self._mirrors_dir.mkdir(parents=True, exist_ok=True)
         mirror_path = self._mirror_path(repo_url)
+        # Label the preflight failure with the operation ``ensure_mirror`` would
+        # actually attempt: an existing mirror only fetches (``mirror.update``),
+        # so a credential failure there must not masquerade as a first-time clone.
+        self._bitbucket_auth_preflight(
+            repo_url,
+            operation="mirror.update" if mirror_path.exists() else "mirror.clone",
+        )
         lock = self._lock_for_mirror(mirror_path)
 
         async with lock:
@@ -473,6 +487,26 @@ class GitManager:
         slug = _slugify_repo(repo_url)
         digest = hashlib.sha256(repo_url.encode("utf-8")).hexdigest()[:12]
         return self._mirrors_dir / f"{slug}-{digest}.git"
+
+    def _bitbucket_auth_preflight(self, repo_url: str, *, operation: str) -> None:
+        """Fail fast with a reason code when a bitbucket.org repo lacks git creds.
+
+        Reads the manager's git env (which the worker populates with the live
+        process environment), so it sees the same ``BITBUCKET_*`` credentials the
+        credential helper would use. No-op for non-bitbucket repos. ``operation``
+        labels the git step the caller would otherwise have run (clone vs update)
+        so the reason-coded failure is not misread as a first-time clone.
+        """
+        try:
+            verify_bitbucket_git_auth(repo_url, self._env if self._env is not None else os.environ)
+        except GitAuthNotConfiguredError as exc:
+            raise GitOperationError(
+                operation=operation,
+                returncode=128,
+                stdout="",
+                stderr=str(exc),
+                reason_code=exc.reason_code,
+            ) from exc
 
     async def _run(self, args: list[str], *, operation: str) -> GitResult:
         _log.debug("git.exec", operation=operation, args=args)

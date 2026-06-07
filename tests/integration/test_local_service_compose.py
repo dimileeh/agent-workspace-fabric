@@ -292,6 +292,12 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
             "${AWF_LOCAL_CAPACITY_DIND_SLOTS:-}"
         )
         assert environment["SSH_AUTH_SOCK"] == expected_ssh_auth_sock_target
+        # BitBucket Cloud credentials must reach the control-plane container so
+        # the worker can authenticate git (clone + push) for bitbucket.org repos
+        # and the REST ForgeClient can build auth (issue #461). Default empty.
+        assert environment["BITBUCKET_API_TOKEN"] == "${BITBUCKET_API_TOKEN:-}"
+        assert environment["BITBUCKET_EMAIL"] == "${BITBUCKET_EMAIL:-}"
+        assert environment["BITBUCKET_AUTH_MODE"] == "${BITBUCKET_AUTH_MODE:-}"
 
     postgres = services["postgres"]
     assert postgres["environment"]["POSTGRES_PASSWORD"] == "${AWF_POSTGRES_PASSWORD:-awf_dev}"

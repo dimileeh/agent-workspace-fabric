@@ -136,6 +136,117 @@ class TestEnsureMirror:
         assert m1.exists() and m2.exists()
 
 
+class TestEnsureMirrorBitBucketAuth:
+    """BitBucket git-auth preflight in ``ensure_mirror`` (issue #461).
+
+    The preflight converts an otherwise opaque clone failure (or TTY hang) for a
+    private bitbucket.org repo into a fast, reason-coded error, and leaves the
+    GitHub path completely unchanged.
+    """
+
+    _BB_URL = "https://bitbucket.org/ws/repo.git"
+    _TOKEN = "ATATT-mirror-token-do-not-render"
+
+    @pytest.mark.unit
+    async def test_missing_credentials_raise_before_any_git_runs(
+        self,
+        manager: GitManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+        monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+
+        calls: list[list[str]] = []
+
+        async def _record(args: list[str], *, operation: str) -> git_module.GitResult:
+            calls.append(args)
+            return git_module.GitResult(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(manager, "_run", _record)
+
+        with pytest.raises(GitOperationError) as raised:
+            await manager.ensure_mirror(self._BB_URL)
+
+        assert raised.value.reason_code == "BITBUCKET_GIT_AUTH_NOT_CONFIGURED"
+        # No mirror exists yet, so the failure is labelled as a clone.
+        assert raised.value.operation == "mirror.clone"
+        # No git subprocess should have run: we fail fast, never attempting an
+        # unauthenticated clone of a private repo.
+        assert calls == []
+        # The error names the missing var, never a secret value.
+        assert self._TOKEN not in str(raised.value)
+
+    @pytest.mark.unit
+    async def test_missing_credentials_on_existing_mirror_label_update(
+        self,
+        manager: GitManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # When the mirror already exists, ``ensure_mirror`` would only fetch, so a
+        # credential failure must be labelled ``mirror.update``, not ``mirror.clone``.
+        monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+        monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+
+        manager._mirrors_dir.mkdir(parents=True, exist_ok=True)
+        manager._mirror_path(self._BB_URL).mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(GitOperationError) as raised:
+            await manager.ensure_mirror(self._BB_URL)
+
+        assert raised.value.reason_code == "BITBUCKET_GIT_AUTH_NOT_CONFIGURED"
+        assert raised.value.operation == "mirror.update"
+
+    @pytest.mark.unit
+    async def test_configured_credentials_clone_with_plain_url(
+        self,
+        work_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+        monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+        manager = GitManager(
+            work_dir,
+            env={
+                "BITBUCKET_API_TOKEN": self._TOKEN,
+                "BITBUCKET_EMAIL": "agent@example.com",
+            },
+        )
+
+        calls: list[list[str]] = []
+
+        async def _record(args: list[str], *, operation: str) -> git_module.GitResult:
+            calls.append(args)
+            return git_module.GitResult(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(manager, "_run", _record)
+
+        await manager.ensure_mirror(self._BB_URL)
+
+        # Preflight passed and the clone ran with the URL unchanged — the token
+        # is never embedded in the clone URL (auth flows via the env helper).
+        clone_calls = [args for args in calls if args[:3] == ["git", "clone", "--mirror"]]
+        assert clone_calls, "expected a git clone --mirror invocation"
+        assert self._BB_URL in clone_calls[0]
+        # The token must not appear in any git argument.
+        assert all(self._TOKEN not in arg for call in calls for arg in call)
+
+    @pytest.mark.unit
+    async def test_github_repo_skips_bitbucket_preflight(
+        self,
+        manager: GitManager,
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A non-bitbucket repo must clone normally with no bitbucket env at all.
+        monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+        monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+
+        mirror = await manager.ensure_mirror(str(origin_repo))
+
+        assert mirror.exists()
+        assert (mirror / "HEAD").exists()
+
+
 class TestAddWorktree:
     @pytest.mark.unit
     async def test_creates_worktree_with_new_branch(

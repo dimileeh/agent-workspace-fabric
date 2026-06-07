@@ -65,6 +65,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_error](#bitbucket_error)
 
+### BITBUCKET_GIT_AUTH_NOT_CONFIGURED
+**Problem:** AWF could not authenticate git over HTTPS to a bitbucket.org repository because the BitBucket git credentials are not configured.
+**Likely Cause:** The worker tried to clone or push a bitbucket.org repository but BITBUCKET_API_TOKEN and/or BITBUCKET_EMAIL were missing, so git had no credential for HTTPS basic auth. AWF fails fast with this reason code instead of attempting an unauthenticated clone that would hang or fail opaquely.
+**Operator Fix:** Set BITBUCKET_API_TOKEN and BITBUCKET_EMAIL in the AWF service environment (the same Atlassian API token credentials the BitBucket REST client uses), then remonitor or recreate the workspace.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#bitbucket_git_auth_not_configured](#bitbucket_git_auth_not_configured)
+
 ### BITBUCKET_ISSUE_CAPTURE_FAILED
 **Problem:** AWF could not durably capture a deferred review note: the BitBucket issue tracker is disabled and there was no PR context to fall back to, so neither an issue nor a PR comment was recorded.
 **Likely Cause:** BitBucket returned 404 for the issues endpoint (tracker disabled) and AWF had not yet remembered the PR, leaving no comment fallback target.
