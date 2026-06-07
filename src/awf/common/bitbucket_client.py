@@ -787,7 +787,10 @@ class BitBucketClient:
         )
         if isinstance(data, dict):
             self._account_id = _clean_optional_str(data.get("account_id") or data.get("uuid"))
-        self._account_id_fetched = True
+        # Cache only a successful identity resolution; a malformed 200 (non-dict or
+        # missing account_id/uuid) must not terminally disable viewer-self filtering,
+        # so a later poll retries /2.0/user — matching this method's docstring contract.
+        self._account_id_fetched = self._account_id is not None
         return self._account_id
 
     def _remember_pr(self, repo: RepoRef, pr_number: int, pr: dict[str, Any]) -> None:

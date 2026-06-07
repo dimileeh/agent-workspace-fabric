@@ -129,6 +129,39 @@ async def test_account_id_non_dict_body_leaves_account_none() -> None:
     assert status.number == 42
 
 
+async def test_account_id_malformed_body_is_not_cached_then_succeeds() -> None:
+    # A malformed 200 (non-dict, or a dict without account_id/uuid) must not be
+    # cached as a terminal result: that would permanently disable viewer-self
+    # filtering after a single bad response. A later poll has to retry /2.0/user
+    # so self-comment filtering recovers, matching _current_account_id's contract.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])  # first poll: empty
+    fake.page(
+        "GET",
+        f"{_PR}/comments",  # second poll: the viewer's own comment
+        values=[
+            {
+                "id": 1,
+                "content": {"raw": "hi"},
+                "user": {"account_id": "me"},
+                "created_on": "2024-01-01T00:00:00Z",
+            }
+        ],
+    )
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.enqueue("GET", "/2.0/user", json={})  # first poll: 200 but no account_id/uuid
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})  # second poll succeeds
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    # Second poll: /2.0/user is retried (not served from the terminal cache) and now
+    # resolves the viewer, so their own comment is filtered out.
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert sum(1 for r in fake.requests if r.url.path == "/2.0/user") == 2
+    assert len(status.unresolved_review_comments) == 0
+
+
 async def test_create_issue_fallback_returns_pr_page_url_when_comment_has_no_href() -> None:
     fake = FakeBitBucket()
     _seed_fetch_status(fake)
