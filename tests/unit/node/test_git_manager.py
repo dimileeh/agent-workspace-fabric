@@ -168,11 +168,33 @@ class TestEnsureMirrorBitBucketAuth:
             await manager.ensure_mirror(self._BB_URL)
 
         assert raised.value.reason_code == "BITBUCKET_GIT_AUTH_NOT_CONFIGURED"
+        # No mirror exists yet, so the failure is labelled as a clone.
+        assert raised.value.operation == "mirror.clone"
         # No git subprocess should have run: we fail fast, never attempting an
         # unauthenticated clone of a private repo.
         assert calls == []
         # The error names the missing var, never a secret value.
         assert self._TOKEN not in str(raised.value)
+
+    @pytest.mark.unit
+    async def test_missing_credentials_on_existing_mirror_label_update(
+        self,
+        manager: GitManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # When the mirror already exists, ``ensure_mirror`` would only fetch, so a
+        # credential failure must be labelled ``mirror.update``, not ``mirror.clone``.
+        monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+        monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+
+        manager._mirrors_dir.mkdir(parents=True, exist_ok=True)
+        manager._mirror_path(self._BB_URL).mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(GitOperationError) as raised:
+            await manager.ensure_mirror(self._BB_URL)
+
+        assert raised.value.reason_code == "BITBUCKET_GIT_AUTH_NOT_CONFIGURED"
+        assert raised.value.operation == "mirror.update"
 
     @pytest.mark.unit
     async def test_configured_credentials_clone_with_plain_url(
