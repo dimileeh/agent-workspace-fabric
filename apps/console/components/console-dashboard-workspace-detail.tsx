@@ -290,6 +290,10 @@ export function WorkspaceSummary({
         </div>
         <WorkspaceRecoveryBlock item={mergeQueueItem} workspace={workspace} overview={overview} />
         <OperatorControlsBlock
+          // Reset the block's local confirm state when the operator switches
+          // workspaces so a pending destructive cancel confirmation can never
+          // carry over onto a different (still cancel-enabled) workspace.
+          key={overview.workspace_id}
           controls={operatorControls}
           state={operatorActionState}
           workspaceId={overview.workspace_id}

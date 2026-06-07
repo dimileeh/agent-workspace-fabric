@@ -177,4 +177,75 @@ test.describe("Operator cancel control", () => {
     await page.waitForTimeout(200);
     expect(cancelPosts).toBe(0);
   });
+
+  test("does not carry an open cancel confirmation across a workspace switch", async ({ page }) => {
+    const SECOND_WORKSPACE_ID = "ws_mock456";
+
+    const workspacePayload = (id: string, title: string) => ({
+      workspace_id: id,
+      title,
+      repo_url: "https://github.com/test/repo",
+      base_branch: "main",
+      agent: "test-agent",
+      status: "running",
+      version: 7,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    });
+
+    // Two running, cancel-enabled workspaces. Switching between them keeps cancel
+    // enabled, so only a per-workspace state reset can drop a stale confirmation.
+    await page.route("/api/awf/workspaces/overview*", async (route) => {
+      await route.fulfill({
+        json: {
+          items: [
+            workspacePayload(WORKSPACE_ID, "First Workspace"),
+            workspacePayload(SECOND_WORKSPACE_ID, "Second Workspace"),
+          ],
+          has_more: false,
+        },
+      });
+    });
+    for (const id of [WORKSPACE_ID, SECOND_WORKSPACE_ID]) {
+      const title = id === WORKSPACE_ID ? "First Workspace" : "Second Workspace";
+      await page.route(`/api/awf/workspaces/${id}`, async (route) => {
+        await route.fulfill({ json: workspacePayload(id, title) });
+      });
+      await page.route(`/api/awf/workspaces/${id}/runtime`, async (route) => {
+        await route.fulfill({ json: { status: "running" } });
+      });
+      await page.route(`/api/awf/workspaces/${id}/events*`, async (route) => {
+        await route.fulfill({ json: { items: [], has_more: false } });
+      });
+      await page.route(`/api/awf/workspaces/${id}/operations*`, async (route) => {
+        await route.fulfill({ json: { items: [], has_more: false } });
+      });
+      await page.route(`/api/awf/workspaces/${id}/logs`, async (route) => {
+        await route.fulfill({ json: { items: [], has_more: false } });
+      });
+    }
+
+    await page.goto(`/?workspaceId=${WORKSPACE_ID}`);
+
+    const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
+    await expect(cancelButton).toBeVisible();
+    await expect(cancelButton).toBeEnabled();
+
+    // Open the cancel confirmation for the first workspace.
+    await cancelButton.click();
+    const confirmation = page.getByTestId("operator-cancel-confirm");
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation).toContainText(WORKSPACE_ID);
+
+    // Switch to the second (also cancel-enabled) workspace. The destructive
+    // confirmation must not survive the switch onto a different workspace.
+    await page
+      .getByRole("button", { name: "Open workspace details for Second Workspace" })
+      .click();
+    await expect(page.getByText(SECOND_WORKSPACE_ID, { exact: false }).first()).toBeVisible();
+    await expect(confirmation).not.toBeVisible();
+  });
 });
