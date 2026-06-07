@@ -345,7 +345,7 @@ test.describe("Operator cancel control", () => {
     expect(cancelPosts).toBe(0);
   });
 
-  test("keeps cancel disabled when only terminal cancel rows are in details", async ({ page }) => {
+  test("keeps cancel enabled when only terminal cancel rows are in details", async ({ page }) => {
     let cancelPosts = 0;
     await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
       cancelPosts += 1;
@@ -423,7 +423,7 @@ test.describe("Operator cancel control", () => {
 
     const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
     await expect(cancelButton).toBeVisible();
-    await expect(cancelButton).toBeDisabled();
+    await expect(cancelButton).toBeEnabled();
     await page.waitForTimeout(200);
     expect(cancelPosts).toBe(0);
   });

@@ -187,16 +187,26 @@ function hasActiveOperation(context: WorkspaceOperatorContext): boolean {
 }
 
 function hasActiveCancellationOperation(context: WorkspaceOperatorContext): boolean {
+  const cancellationOperations = (context.operations ?? []).filter((operation) =>
+    cancellationOperationTypes.has(operation.type),
+  );
+
   const recoveryOperation = context.workspace?.recovery?.current_operation ?? context.overview.recovery?.current_operation ?? null;
   if (recoveryOperation) {
     if (cancellationOperationTypes.has(recoveryOperation.type) && !terminalOperationStatuses.has(recoveryOperation.status)) {
       return true;
     }
   }
-  if ((context.operations ?? []).some((operation) => cancellationOperationTypes.has(operation.type) && !terminalOperationStatuses.has(operation.status))) {
+  if (cancellationOperations.some((operation) => !terminalOperationStatuses.has(operation.status))) {
     return true;
   }
-  return context.overview.active_operation === "cancel" || context.overview.active_operation === "stop";
+  if (cancellationOperations.length > 0) {
+    return false;
+  }
+  if (context.overview.active_operation === "cancel" || context.overview.active_operation === "stop") {
+    return true;
+  }
+  return false;
 }
 
 function eligibleEnoughForActiveReason(action: WorkspaceOperatorAction, context: WorkspaceOperatorContext): boolean {
