@@ -826,6 +826,58 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_daemon_error_timeout_without_pull_context_reports_ci_failure(self) -> None:
+        """A bare ``Error response from daemon: context deadline exceeded`` from an
+        ordinary ``docker run``/``docker build`` test step — no registry URL, image,
+        or pull wording — is a real Docker daemon timeout, not a registry image
+        pull, so it must reach the repair agent, not be silently rerun. The
+        ``error response from daemon`` marker is emitted for any daemon operation,
+        so it only anchors a registry timeout with registry/image-pull context."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker run --rm postgres:16 pg_isready\n"
+                "Error response from daemon: context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_daemon_error_with_registry_url_timeout_dispatches_rerun(self) -> None:
+        """A daemon error whose own line carries registry context (an outbound
+        ``/v2/`` registry request) tying the timeout to an image pull is genuine
+        transient infra and is still rerun after the marker is narrowed."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
         """A failure whose log matches neither transient nor registry-timeout
         markers falls through to the repair agent."""

@@ -645,17 +645,39 @@ _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS = (
 # A bare ``docker pull`` *command* echo precedes both successful image pulls and
 # pull failures, so it cannot anchor causation: a successful setup pull followed
 # by an unrelated test timeout looks identical to a real registry timeout. Only
-# Docker pull-*failure* wording — a daemon error response or an explicit
-# pull-failed message — actually evidences that a pull (not the job's real work)
-# is what timed out. The marker must stay Docker-specific: a bare ``failed to
-# pull`` phrase also appears in real application errors (e.g. ``failed to pull
-# records: context deadline exceeded``) that carry no Docker/daemon/image wording
-# and must reach the repair agent, so we anchor on ``failed to pull image`` —
-# the Docker/containerd image-pull failure phrasing — not the generic verb.
+# Docker pull-*failure* wording — an explicit pull-failed message — actually
+# evidences that a pull (not the job's real work) is what timed out. The marker
+# must stay Docker-specific: a bare ``failed to pull`` phrase also appears in real
+# application errors (e.g. ``failed to pull records: context deadline exceeded``)
+# that carry no Docker/daemon/image wording and must reach the repair agent, so we
+# anchor on ``failed to pull image`` — the Docker/containerd image-pull failure
+# phrasing — not the generic verb.
 _CI_DOCKER_PULL_FAILURE_MARKERS = (
-    "error response from daemon",
     "docker pull failed",
     "failed to pull image",
+)
+
+# ``Error response from daemon: ...`` is emitted for *any* Docker daemon operation
+# (``docker run``/``build``/``exec``, container start, healthcheck), not just image
+# pulls. A bare ``Error response from daemon: context deadline exceeded`` from an
+# ordinary build/test step is a real Docker daemon timeout the repair agent must
+# see, not flaky registry infra. So a daemon-error line only anchors a registry
+# timeout when the *same line* also carries registry / image-pull context — an
+# outbound registry request (``/v2/`` API path or a known registry host) or
+# explicit pull wording — i.e. the daemon was fetching an image when it timed out.
+_CI_DOCKER_DAEMON_ERROR_MARKER = "error response from daemon"
+_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
+    "/v2/",
+    "registry-1.docker.io",
+    "index.docker.io",
+    "registry.hub.docker.com",
+    "ghcr.io",
+    "gcr.io",
+    "quay.io",
+    "public.ecr.aws",
+    ".pkg.dev",
+    "pulling from",
+    "pull access denied",
 )
 
 # ``gh run view --log-failed`` emits the whole failed step, so a real
@@ -737,6 +759,23 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     return _log_shows_docker_registry_timeout(log_text)
 
 
+def _is_docker_pull_failure_line(line: str) -> bool:
+    """Whether one (lowercased) log line evidences a Docker *image-pull* failure.
+
+    Unambiguous pull-failure wording (``docker pull failed``/``failed to pull
+    image``) qualifies on its own. The generic ``error response from daemon``
+    wrapper qualifies only when the same line also carries registry / image-pull
+    context, since the daemon emits it for any operation — a bare daemon timeout
+    from a ``docker run`` test step is a real failure, not flaky registry infra.
+    """
+
+    if any(marker in line for marker in _CI_DOCKER_PULL_FAILURE_MARKERS):
+        return True
+    return _CI_DOCKER_DAEMON_ERROR_MARKER in line and any(
+        marker in line for marker in _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS
+    )
+
+
 def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     """Whether a generic network-timeout phrase is tied to a Docker pull failure.
 
@@ -753,9 +792,7 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
 
     lines = log_text.lower().splitlines()
     evidence_line_indexes = [
-        index
-        for index, line in enumerate(lines)
-        if any(marker in line for marker in _CI_DOCKER_PULL_FAILURE_MARKERS)
+        index for index, line in enumerate(lines) if _is_docker_pull_failure_line(line)
     ]
     if not evidence_line_indexes:
         return False
