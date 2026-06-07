@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository
+from awf.db.repositories import OperationRepository, TaskAttemptRepository
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_STATE_KEY,
     operator_hint_from_threads,
@@ -26,6 +26,7 @@ from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers
     _operations,
     _service,
     _workspace,
+    _workspace_with_candidate,
 )
 
 
@@ -357,7 +358,10 @@ async def test_guide_rejects_wrong_state_and_missing_pr_before_creating_operatio
 
     assert wrong_state.value.detail == {
         "status": WorkspaceStatus.requested.value,
-        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+        "eligible_statuses": [
+            WorkspaceStatus.monitoring_pr.value,
+            WorkspaceStatus.failed.value,
+        ],
     }
     assert missing_pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}
     assert await _operations(session, requested.id) == []
@@ -427,4 +431,146 @@ async def test_guide_rearms_pending_hint_after_prior_needs_human_wait(
     assert restored is not None
     assert restored.status == "pending"
     assert restored.directive == "implement, do not defer"
-    assert restored.operation_id != "op_old"
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_with_pr_resets_for_monitor_restart(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace with a PR resets it to monitoring_pr (issue #456)."""
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/88"
+    workspace.pr_number = 88
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "monitor crashed during ci wait"
+    workspace.monitor_iter_count = 6
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="fix the rebase conflict and continue",
+        reason="operator decision to restart failed monitor",
+        idempotency_key="guide-failed-reset",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    persisted = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert workspace.monitor_iter_count == 0
+    assert workspace.version == 2
+    assert operations[0].status == "succeeded"
+    assert persisted["directive"] == "fix the rebase conflict and continue"
+    assert persisted["reason"] == "operator decision to restart failed monitor"
+    assert persisted["reason_code"] == "OPERATOR_GUIDE"
+    assert persisted["status"] == "pending"
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.reason_code == "OPERATOR_GUIDE"
+    assert guide_event.old_state == WorkspaceStatus.failed.value
+    assert guide_event.new_state == WorkspaceStatus.monitoring_pr.value
+    assert guide_event.payload["state_reset"] == {
+        "from": WorkspaceStatus.failed.value,
+        "to": WorkspaceStatus.monitoring_pr.value,
+        "monitor_iter_count_reset_from": 6,
+        "candidate_reopened": False,
+    }
+    audit_event = next(e for e in events if e.event_type == "workspace.audit.control_operation")
+    assert audit_event.reason_code == "OPERATOR_GUIDE"
+    assert audit_event.payload["action"] == OperationType.guide.value
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_reopens_merge_candidate(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace with a closed candidate reopens it (issue #456)."""
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.failed,
+        title="failed candidate guide",
+    )
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "monitor crashed during repair"
+    workspace.monitor_iter_count = 5
+    candidate.status = "closed"
+    candidate.close_reason = "STALE_MONITOR_FAILED"
+    candidate.closed_at = datetime.now(UTC)
+    candidate.merged_at = datetime.now(UTC)
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="continue with the fix",
+        idempotency_key="guide-failed-candidate",
+        expected_version=workspace.version,
+    )
+    attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+    events = await _events(session, workspace.id)
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert attempt is not None
+    assert attempt.status == WorkspaceStatus.monitoring_pr.value
+    assert candidate.status == "open"
+    assert candidate.close_reason is None
+    assert candidate.closed_at is None
+    assert candidate.merged_at is None
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.payload["state_reset"]["candidate_reopened"] is True
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_without_pr_rejected(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace with no PR raises MissingPrUrl, not StateError (issue #456)."""
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    # No pr_url set
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceGuideMissingPrUrlError) as exc_info:
+        await service.guide_workspace(workspace.id, directive="fix the issue")
+
+    assert exc_info.value.error_code == "WORKSPACE_PR_URL_REQUIRED"
+    assert await _operations(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_idempotency_replays(
+    session: AsyncSession,
+) -> None:
+    """Same-key retry on a guide-from-failed workspace returns the cached operation (issue #456)."""
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/89"
+    workspace.pr_number = 89
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="continue with the implementation",
+        idempotency_key="guide-failed-idempotency",
+        expected_version=workspace.version,
+    )
+    # After the first call workspace.version == 2 (state reset advanced it).
+    replay = await service.guide_workspace(
+        workspace.id,
+        directive="continue with the implementation",
+        idempotency_key="guide-failed-idempotency",
+        expected_version=workspace.version - 1,
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert response.operation_id == replay.operation_id
+    assert len(operations) == 1

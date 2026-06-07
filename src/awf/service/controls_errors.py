@@ -9,11 +9,12 @@ _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
 )
-# guide is a no-state-transition control: it injects a directive into a *live*
-# monitoring workspace, so only ``monitoring_pr`` is eligible. Re-engaging a
-# ``failed`` workspace stays remonitor's job (issue #447). Defined here as the
-# single source of truth and imported by ``controls_guide.py``.
-_GUIDE_ELIGIBLE_STATUSES = (WorkspaceStatus.monitoring_pr,)
+# guide injects a directive into a live monitoring workspace (``monitoring_pr``)
+# or re-engages a ``failed`` workspace that still has a PR (issue #456), performing
+# the same state-reset as remonitor so operators can use the directive/audit split
+# without falling back to ``remonitor --reason``. Defined here as the single source
+# of truth and imported by ``controls_guide.py``.
+_GUIDE_ELIGIBLE_STATUSES = (WorkspaceStatus.monitoring_pr, WorkspaceStatus.failed)
 _VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _REBASE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 

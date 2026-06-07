@@ -9,7 +9,7 @@ delegate-mixin decomposition used by the executor/worker orchestrators.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
@@ -33,6 +33,7 @@ from awf.service.controls_helpers import (
     _event_payload,
     _operation_payload,
     _operator_operation_payload,
+    _reset_failed_workspace_for_remonitor,
     _reset_stale_monitor_execution_claims,
     _workspace_pr_operation_context,
 )
@@ -155,7 +156,9 @@ async def guide_workspace(
     # only; a live lease keeps ownership and picks up the directive on its
     # next monitor cycle.
     claims_reset = _reset_stale_monitor_execution_claims(workspace, now=utcnow())
-    await repo.advance_workspace_version(workspace)
+    state_reset = await _reset_failed_workspace_for_remonitor(self._session, workspace)
+    if state_reset is None:
+        await repo.advance_workspace_version(workspace)
     event_payload: dict[str, object | None] = {
         "reason": reason,
         "directive": directive_text,
@@ -163,17 +166,29 @@ async def guide_workspace(
         "claims_reset": claims_reset,
         "pending_operator_hint": pending_operator_hint,
     }
+    if state_reset is not None:
+        event_payload["state_reset"] = state_reset
     if cancelled_recovery_operations:
         event_payload["cancelled_recovery_operations"] = cancelled_recovery_operations
         event_payload["cancelled_recovery_reason_code"] = _OPERATOR_GUIDE_REASON_CODE
         event_payload["cancelled_recovery_requested_action"] = OperationType.guide.value
     event_payload = _event_payload(event_payload, expected_version=expected_version)
-    await repo.add_event(
-        workspace,
-        event_type="workspace.guide_requested",
-        reason_code=_OPERATOR_GUIDE_REASON_CODE,
-        payload=event_payload,
-    )
+    if state_reset is not None:
+        await repo.add_event_with_states(
+            workspace,
+            event_type="workspace.guide_requested",
+            old_state=cast(str, state_reset["from"]),
+            new_state=cast(str, state_reset["to"]),
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            payload=event_payload,
+        )
+    else:
+        await repo.add_event(
+            workspace,
+            event_type="workspace.guide_requested",
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            payload=event_payload,
+        )
     await _add_control_audit_event(
         repo,
         workspace,
@@ -188,6 +203,8 @@ async def guide_workspace(
         "claims_reset": claims_reset,
         **_workspace_pr_operation_context(workspace),
     }
+    if state_reset is not None:
+        result["state_reset"] = state_reset
     if cancelled_recovery_operations:
         result["cancelled_recovery_operations"] = cancelled_recovery_operations
     await operations.finish(
