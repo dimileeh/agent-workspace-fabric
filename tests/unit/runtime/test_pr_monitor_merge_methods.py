@@ -231,7 +231,7 @@ class _MergeMethodClient:
         branch_methods: tuple[str, ...] | None = None,
         repo_error: GitHubClientError | None = None,
         branch_error: GitHubClientError | None = None,
-        merge_results: list[str | GitHubClientError] | None = None,
+        merge_results: list[str | GitHubClientError | BitBucketClientError] | None = None,
         post_comment_error: GitHubClientError | BitBucketClientError | None = None,
     ) -> None:
         """Configure repository policy, branch policy, and merge outcomes."""
@@ -293,7 +293,7 @@ class _MergeMethodClient:
         assert delete_branch is True
         self.merge_calls.append(method)
         result = self.merge_results.pop(0)
-        if isinstance(result, GitHubClientError):
+        if isinstance(result, GitHubClientError | BitBucketClientError):
             raise result
         return result
 
@@ -1054,3 +1054,75 @@ async def test_unclassified_single_merge_failure_notifies_without_method_blocker
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A permanent BitBucket merge fault notifies a human instead of terminating.
+
+    BitBucket workspaces merge through ``BitBucketClient.merge_pr``, which raises
+    ``BitBucketClientError`` (not ``GitHubClientError``). A deterministic failure
+    (branch restrictions, unresolved tasks, a 4xx) must follow the GitHub
+    merge-blocker behaviour — post a human notification and keep polling — rather
+    than escaping ``_attempt_merge_method`` and terminating the workspace.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="merge_pr",
+                status=403,
+                body="merge checks have not passed",
+            )
+        ],
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert len(gh.comments) == 1
+    assert "BitBucket rejected the merge attempt" in gh.comments[0]
+    assert sleep_fn.calls == [60]
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_transient_bitbucket_merge_failure_waits_without_notify(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A transient BitBucket merge blip waits and re-polls without notifying."""
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="merge_pr",
+                status=429,
+                body="rate limited",
+                reason_code=BITBUCKET_RATE_LIMITED,
+            )
+        ],
+    )
+
+    terminal, _state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert gh.comments == []
+    assert sleep_fn.calls == [60]

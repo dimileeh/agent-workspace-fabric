@@ -34,6 +34,7 @@ from awf.runtime.pr_monitor_runner.gates import (
     _NonCheckReviewerSettleDecision,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _bitbucket_merge_rejection_reason,
     _clear_transient_base_fetch_retry_state,
     _gate_requires_validation_recovery,
     _initial_review_grace_wait_seconds,
@@ -71,7 +72,7 @@ class _MergeAttemptResult:
 
     outcome: _MergeAttemptOutcome
     merge_sha: str | None = None
-    blocker: GitHubClientError | None = None
+    blocker: GitHubClientError | BitBucketClientError | None = None
     notification_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -350,6 +351,50 @@ async def _attempt_merge_method(
                 notification_reason=notification_reason,
             )
         return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
+    except BitBucketClientError as exc:
+        # BitBucket workspaces merge through ``BitBucketClient.merge_pr``, which
+        # raises ``BitBucketClientError`` (not ``GitHubClientError``) on a
+        # deterministic merge failure — branch restrictions, unresolved tasks,
+        # missing approvals, or a permanent 4xx. Without this arm the error
+        # escapes ``_attempt_merge_method`` and terminates the workspace at the
+        # runner's outer catch, whereas the GitHub arm classifies the same shape
+        # of failure as a merge blocker that notifies a human and keeps polling.
+        # Mirror that: finish the operation as failed, record the audit event,
+        # and return a BLOCKER so the merge-blocker arm waits on transient blips
+        # and otherwise notifies-and-keeps-polling. BitBucket carries no
+        # per-method rejection signal to retry alternative methods against, so
+        # every fault is a generic blocker.
+        await self._finish_monitor_operation(
+            merge_operation,
+            status=OperationStatus.failed,
+            result={
+                "status": "failed",
+                "outcome": "bitbucket_merge_failed",
+                "reason_code": "BITBUCKET_MERGE_FAILED",
+            },
+            error_code="BITBUCKET_MERGE_FAILED",
+            error_message=str(exc),
+        )
+        await self._record_pr_monitor_audit_event(
+            workspace_id=workspace_id,
+            event_type=_AUDIT_MERGE_RESULT_EVENT,
+            action="merge",
+            outcome="failed",
+            reason_code="BITBUCKET_MERGE_FAILED",
+            pr_number=pr_number,
+            status=merge_status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=OperationType.monitor_state.value,
+            monitor_log=monitor_log,
+            evidence={
+                "operation": "merge_pr",
+                "merge_method": merge_method,
+                "error_message": str(exc),
+            },
+        )
+        return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
 
     merge_marker = _merge_completion_marker(
         merge_sha=merge_sha,
@@ -585,7 +630,7 @@ async def handle_merge_action(
         fresh_action: MonitorAction | None = None
         fresh_status: PRStatus | None = None
         merge_sha: str | None = None
-        merge_blocker: GitHubClientError | None = None
+        merge_blocker: GitHubClientError | BitBucketClientError | None = None
         merge_method_preflight_error: GitHubClientError | None = None
         merge_method_notification_reason: str | None = None
         recheck_error: GitHubClientError | None = None
@@ -1158,27 +1203,44 @@ async def handle_merge_action(
             )
 
         if merge_blocker is not None:
-            if await self._wait_after_transient_github_error(
-                merge_blocker,
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                context="merge_pr",
-                monitor_log=monitor_log,
-            ):
-                return False
-            # Branch protection often blocks merges; fall back to the
-            # release-PR flow rather than failing.
+            if isinstance(merge_blocker, BitBucketClientError):
+                # Recoverable BitBucket blips (rate limit/transport/5xx) wait and
+                # re-poll; a deterministic merge fault falls through to the
+                # notify-and-keep-polling path, symmetric to the GitHub arm.
+                if await self._wait_after_transient_bitbucket_error(
+                    merge_blocker,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="merge_pr",
+                    monitor_log=monitor_log,
+                ):
+                    return False
+                blocker_detail = str(merge_blocker)[:400]
+                blocker_reason = _bitbucket_merge_rejection_reason(merge_blocker)
+            else:
+                if await self._wait_after_transient_github_error(
+                    merge_blocker,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="merge_pr",
+                    monitor_log=monitor_log,
+                ):
+                    return False
+                blocker_detail = _redact_and_truncate_github_error(merge_blocker.stderr)
+                blocker_reason = _merge_rejection_reason(merge_blocker.stderr)
+            # Branch protection / restrictions often block merges; fall back to
+            # the release-PR notify flow rather than failing the workspace.
             _log.warning(
                 "monitor.merge_blocked_falling_back_to_notify",
                 workspace_id=workspace_id,
-                stderr=_redact_and_truncate_github_error(merge_blocker.stderr),
+                stderr=blocker_detail,
             )
             await self._post_human_notification_once(
                 repo=repo,
                 pr_number=pr_number,
                 status=merge_status,
                 state=state,
-                blocker_reason=_merge_rejection_reason(merge_blocker.stderr),
+                blocker_reason=blocker_reason,
             )
             await self._deps.sleep(self._config.poll_interval_seconds)
             return False

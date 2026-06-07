@@ -528,6 +528,18 @@ def _merge_rejection_reason(stderr: str) -> str:
     return "GitHub rejected the merge attempt"
 
 
+def _bitbucket_merge_rejection_reason(exc: BitBucketClientError) -> str:
+    """Describe a deterministic BitBucket merge failure for a human notification.
+
+    Mirrors :func:`_merge_rejection_reason`. ``exc`` already carries a redacted
+    body (set at construction) and always renders a non-empty
+    ``operation failed (status=...)`` summary, so surface it directly; collapse
+    whitespace and cap to match the GitHub wording.
+    """
+    detail = " ".join(str(exc).split())[:240]
+    return f"BitBucket rejected the merge attempt: {detail}"
+
+
 def _transient_github_retry_payload(
     exc: GitHubClientError,
     *,
