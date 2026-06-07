@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.bitbucket_client import (
+    BITBUCKET_AUTH_FAILED,
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TASK_RESOLVE_FORBIDDEN,
     BitBucketClientError,
@@ -757,9 +758,10 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     tmp_path: Path,
 ) -> None:
     # A permanent BitBucket fault (403, token lacks the scope) during resolve_thread
-    # must record COMMENT_RESOLUTION_FAILED and clear the addressed marker WITHOUT
-    # escaping the fix cycle — mirroring the GitHub arm's "do NOT drop out of the
-    # monitor" behaviour rather than terminating the workspace.
+    # must forward the forge-native reason code (BITBUCKET_AUTH_FAILED here) and clear
+    # the addressed marker WITHOUT escaping the fix cycle — mirroring the GitHub arm's
+    # "do NOT drop out of the monitor" behaviour rather than terminating the workspace,
+    # and keeping the fault diagnosable instead of collapsing it to a generic placeholder.
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
@@ -780,6 +782,7 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
                 operation="bitbucket resolve_thread",
                 status=403,
                 body="forbidden: missing scope",
+                reason_code=BITBUCKET_AUTH_FAILED,
             ),
         ),
     )
@@ -830,7 +833,7 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     assert resolution_events[0].payload is not None
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "failed"
-    assert resolution_events[0].payload["reason_code"] == "COMMENT_RESOLUTION_FAILED"
+    assert resolution_events[0].payload["reason_code"] == BITBUCKET_AUTH_FAILED
     assert resolution_events[0].payload["evidence"] == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,

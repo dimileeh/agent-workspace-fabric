@@ -497,8 +497,10 @@ async def _run_fix_cycle(
             # ``decide()`` would treat the still-open thread as handled forever and
             # let auto-merge bypass live feedback (the #305 mode). Transient blips
             # wait and requeue (``continue``); permanent faults clear the addressed
-            # marker and record ``COMMENT_RESOLUTION_FAILED`` without dropping out of
-            # the monitor. The transient-retry audit reason code stays forge-specific.
+            # marker and record the forge-native ``exc.reason_code`` without dropping
+            # out of the monitor. Both the transient-retry and permanent-failure audit
+            # reason codes stay forge-specific so a BitBucket fault keeps its actionable
+            # code (e.g. ``BITBUCKET_AUTH_FAILED``) instead of a generic placeholder.
             transient_retry_reason = (
                 _BITBUCKET_TRANSIENT_RETRY_REASON
                 if isinstance(exc, BitBucketClientError)
@@ -591,7 +593,11 @@ async def _run_fix_cycle(
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
                 action="resolve_thread",
                 outcome="failed",
-                reason_code="COMMENT_RESOLUTION_FAILED",
+                # Forward the forge-native reason code (GitHub: GITHUB_API_ERROR;
+                # BitBucket: e.g. BITBUCKET_API_ERROR / BITBUCKET_AUTH_FAILED) so a
+                # permanent comment-resolve fault stays diagnosable — matching the
+                # task path above rather than collapsing to a generic placeholder.
+                reason_code=exc.reason_code,
                 pr_number=pr_number,
                 status=None,
                 base_branch=base_branch or "",
