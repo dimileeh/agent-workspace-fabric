@@ -45,6 +45,14 @@ from awf.runtime.pr_monitor import (
 
 _log = get_logger(__name__)
 
+# ``gh pr create`` prints the PR URL as the only non-empty, non-warning line of
+# stdout. Searching (rather than full-match) tolerates leading "Creating pull
+# request..." status noise from current/future gh versions without persisting a
+# non-URL string as the PR URL — the caller stores this verbatim and downstream
+# PR-number extraction would otherwise silently yield ``None`` and break the
+# monitor handoff.
+_PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
+
 
 class GitHubClientError(Exception):
     """Raised when ``gh`` or GraphQL returns a non-zero exit / error payload."""
@@ -1225,7 +1233,18 @@ class GitHubClient:
                 returncode=result.returncode,
                 stderr=result.stderr,
             )
-        return result.stdout.strip()
+        match = _PR_URL_PATTERN.search(result.stdout)
+        if match is None:
+            # gh exited 0 but printed status/warning text rather than a PR URL.
+            # Returning that verbatim would persist a non-URL ``pr_url`` and the
+            # subsequent PR-number extraction would yield ``None``, breaking the
+            # monitor handoff — fail loudly with the structured error instead.
+            raise GitHubClientError(
+                operation="gh pr create (no URL in stdout)",
+                returncode=0,
+                stderr=f"unexpected gh output: {result.stdout.strip()[:500]}",
+            )
+        return match.group(0)
 
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return repository-level merge methods enabled for pull requests."""
