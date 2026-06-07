@@ -827,6 +827,37 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_unrelated_setup_pull_echo_does_not_corroborate_image_failure(
+        self,
+    ) -> None:
+        """A successful service-container setup ``docker pull postgres:16`` echo
+        sitting within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of a kubelet
+        ``Failed to pull image "app"`` event for an *unrelated* application image
+        must not corroborate it: the echo targets a different image (and a
+        successful setup pull at that), so the real application-image bug must reach
+        the repair agent rather than be silently rerun as transient CI."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "Status: Downloaded newer image for postgres:16\n"
+                '    deploy_test.go:51: Failed to pull image "app": '
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_k8s_failed_to_pull_image_without_docker_context_reports_ci_failure(
         self,
     ) -> None:
