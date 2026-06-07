@@ -29,6 +29,7 @@ from awf.runtime.pr_monitor import (
     SyncBase,
     WaitForCI,
     _ci_transient_rerun_state_key,
+    _log_shows_docker_registry_timeout,
     _mark_review_thread_addressed,
     _should_rerun_transient_ci,
     decide,
@@ -597,6 +598,23 @@ class TestCiFailure:
 
         assert isinstance(action, RerunTransientCI)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_log_shows_docker_registry_timeout_lowercases_raw_text(self) -> None:
+        """The helper is self-contained: it lowercases its own input, so raw
+        mixed-case log text matches the all-lowercase marker tuples without the
+        caller having to pre-lowercase. Guards against a future caller passing
+        unnormalized text and silently getting a False negative."""
+        raw_log = (
+            "/usr/bin/docker pull postgres:16\n"
+            'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
+            "context deadline exceeded (Client.Timeout exceeded while awaiting headers)\n"
+            "Docker pull failed with exit code 1"
+        )
+
+        assert _log_shows_docker_registry_timeout(raw_log) is True
+        # Pre-lowercased text (today's only caller) keeps returning True.
+        assert _log_shows_docker_registry_timeout(raw_log.lower()) is True
 
     @pytest.mark.unit
     def test_docker_pull_echo_then_bare_request_canceled_reports_ci_failure(self) -> None:

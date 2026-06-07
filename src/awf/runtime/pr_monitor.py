@@ -751,7 +751,7 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     agent.
     """
 
-    lines = log_text.splitlines()
+    lines = log_text.lower().splitlines()
     evidence_line_indexes = [
         index
         for index, line in enumerate(lines)
