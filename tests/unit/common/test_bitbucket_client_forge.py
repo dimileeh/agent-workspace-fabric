@@ -105,7 +105,7 @@ def test_bb_merge_strategy_for_method(method: str, expected: str | None) -> None
 @pytest.mark.parametrize(
     "states, expected",
     [
-        ([], CheckState.SUCCESS),
+        ([], CheckState.PENDING),
         ([{"state": "SUCCESSFUL"}], CheckState.SUCCESS),
         ([{"state": "INPROGRESS"}], CheckState.PENDING),
         ([{"state": "FAILED"}, {"state": "SUCCESSFUL"}], CheckState.FAILURE),

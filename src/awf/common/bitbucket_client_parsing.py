@@ -208,9 +208,17 @@ _BB_STATUS_SUCCESS = {"SUCCESSFUL"}
 def parse_check_state(statuses: list[dict[str, Any]]) -> CheckState:
     """Reduce BitBucket commit build-statuses to a neutral aggregate ``CheckState``.
 
-    Any FAILED/STOPPED → FAILURE; else any INPROGRESS/PENDING → PENDING; else
-    (all SUCCESSFUL, or no statuses reported) → SUCCESS.
+    No statuses reported → PENDING; any FAILED/STOPPED → FAILURE; else any
+    INPROGRESS/PENDING → PENDING; else (all SUCCESSFUL) → SUCCESS.
+
+    An empty status page is treated as PENDING rather than SUCCESS: a freshly
+    pushed PR has no commit status until Pipelines posts one, and reporting
+    SUCCESS there would let ``decide()`` skip the WaitForCI gate and merge
+    before any check completed. This mirrors the GitHub path, which defaults a
+    missing rollup to PENDING (see ``github_client`` ``fetch_pr_status``).
     """
+    if not statuses:
+        return CheckState.PENDING
     saw_pending = False
     for status in statuses:
         state = str(status.get("state") or "").upper()
