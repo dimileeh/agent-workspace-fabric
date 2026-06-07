@@ -596,6 +596,28 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_awaiting_headers_timeout_without_client_prefix_dispatches_rerun(self) -> None:
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
+                "net/http: timeout exceeded while awaiting headers"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_docker_pull_with_structured_test_evidence_reports_ci_failure(self) -> None:
         failure = CheckFailure(
             name="python-coverage-shards (2)",

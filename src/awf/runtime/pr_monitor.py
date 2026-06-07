@@ -623,7 +623,7 @@ _CI_TRANSIENT_FAILURE_MARKERS = (
     "recv failure",
     "tls handshake timeout",
     "context deadline exceeded",
-    "client.timeout exceeded while awaiting headers",
+    "timeout exceeded while awaiting headers",
     "request canceled while waiting for connection",
     "failed to download",
     "network is unreachable",
