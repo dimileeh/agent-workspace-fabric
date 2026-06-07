@@ -37,6 +37,12 @@ _log = get_logger(__name__)
 
 NO_CHANGES_REASON_CODE = "NO_CHANGES_TO_SYNC"
 
+# Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (GitHub or
+# BitBucket Cloud), but release-PR sync is GitHub-only — it shells ``gh pr list`` /
+# ``gh pr view`` and parses github.com-only PR URLs. Mirrors
+# ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
+RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE = "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
+
 
 class ReleasePrSyncError(Exception):
     """Structured failure while preparing a release-PR sync."""
@@ -171,6 +177,34 @@ async def find_or_create_release_pr(
 
     Returns the resolved adoption metadata plus a ``created`` flag.
     """
+
+    if repo.forge != "github":
+        # Release-PR sync is GitHub-only: the open-PR lookup shells ``gh pr
+        # list``, adoption metadata shells ``gh pr view``, and the created-PR URL
+        # is parsed with the github.com-only ``parse_github_pull_request_url`` —
+        # only ``gh.create_pull_request`` is forge-neutral. BitBucket Cloud is a
+        # *supported* forge (issue #345 Part 2), so it clears the executor forge
+        # gate and reaches here; without this guard those GitHub-only steps would
+        # mis-route to github.com for the same owner/repo slug (a different
+        # repository) or reject the bitbucket.org create URL as
+        # ``RELEASE_SYNC_PR_URL_INVALID``. Fail closed with an honest reason code
+        # before any ``gh`` call — a forge-neutral release sync is deferred
+        # follow-up work. Mirrors ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and
+        # ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
+        raise ReleasePrSyncError(
+            reason_code=RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE,
+            message=(
+                "release-PR sync is GitHub-only (shells `gh pr list` / `gh pr view` "
+                f"and parses github.com PR URLs); forge {repo.forge!r} requires a "
+                "forge-neutral release sync."
+            ),
+            detail={
+                "repo_slug": repo.slug(),
+                "forge": repo.forge,
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+            },
+        )
 
     repo_slug = repo.slug()
     existing_number = await _find_open_same_repo_pr_number(
