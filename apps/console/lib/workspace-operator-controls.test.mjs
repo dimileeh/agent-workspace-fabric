@@ -196,7 +196,7 @@ test("cancel success and failure summaries format the Cancel label", () => {
   );
 });
 
-test("terminal cancellation details keep cancel action disabled for overview stop/cancel flags", () => {
+test("terminal cancellation details no longer block cancel action when stop/cancel operations are terminal", () => {
   const terminalStatuses = ["succeeded", "failed", "cancelled", "canceled"];
   for (const activeOperation of ["cancel", "stop"]) {
     for (const status of terminalStatuses) {
@@ -208,8 +208,8 @@ test("terminal cancellation details keep cancel action disabled for overview sto
         operations: [operation({ type: activeOperation, status })],
       }).find((item) => item.action === "cancel");
       assert.ok(control, `missing cancel control for ${activeOperation}/${status}`);
-      assert.equal(control.enabled, false, `${activeOperation} should stay disabled while overview is ${activeOperation} even after terminal ${status}`);
-      assert.equal(control.reason, "cancel/stop already active");
+      assert.equal(control.enabled, true, `${activeOperation} should become enabled once cancellation operation is terminal`);
+      assert.equal(control.reason, null);
       assert.equal(control.visible, true);
     }
   }
