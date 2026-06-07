@@ -782,6 +782,6 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 ### WORKSPACE_STATE_NOT_GUIDABLE
 **Problem:** Workspace is not in a state eligible for operator guidance.
 **Likely Cause:** The workspace is not in `monitoring_pr`; operator guidance can only steer the PR monitor while it owns an open pull request.
-**Operator Fix:** Wait until the workspace reaches `monitoring_pr` (an open PR is being monitored), then re-issue `awf workspace guide`. Inspect state with `awf workspace get <id>`.
+**Operator Fix:** Wait until the workspace reaches `monitoring_pr` (an open PR is being monitored), then re-issue `awf workspace guide`. Inspect state with `awf workspace show <workspace_id>`.
 **Related Command:** `awf workspace guide`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_state_not_guidable](#workspace_state_not_guidable)
