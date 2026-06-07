@@ -24,6 +24,7 @@ Neutral-type contract is owned by ``runtime.pr_monitor`` (do NOT change it). We 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +40,10 @@ from awf.runtime.pr_monitor import (
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
+
+# Hashable, order-stable representation of query params, used as part of the
+# ETag-cache key in ``BitBucketClient`` (one entry per ``(method, path, params)``).
+_FrozenParams = tuple[tuple[str, str], ...]
 
 # ── Merge-method vocabulary mapping (issue #345 decision D5) ───────────────
 # AWF speaks GitHub's three method names through the merge gate; BitBucket Cloud
@@ -526,3 +531,70 @@ def _tail(text: str, n: int) -> str:
     if len(text) <= n:
         return text
     return "…[truncated]…\n" + text[-n:]
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Return ``value`` if it is a dict, else an empty dict (payload guard)."""
+    return value if isinstance(value, dict) else {}
+
+
+def is_pipeline_owned_status(status: dict[str, Any]) -> bool:
+    """True when a commit build-status belongs to BitBucket Pipelines itself.
+
+    Pipelines posts its own commit status (key ``PIPELINE``, url pointing at the
+    repo's ``/pipelines/`` results); that status is already covered by the
+    per-step failures, so it must not be re-emitted as an external check. Any
+    other FAILED/STOPPED status (third-party linters, deploy gates, …) is
+    external and should still surface for triage.
+    """
+    if str(status.get("key") or "").upper() == "PIPELINE":
+        return True
+    return "/pipelines/" in str(status.get("url") or "")
+
+
+def pipeline_targets_branch(pipeline: dict[str, Any], source_branch: str) -> bool:
+    """True when a pipeline's target ref is the PR source branch.
+
+    Matches both branch pipelines (``target.ref_name``) and PR pipelines
+    (``target.source``), the two ways a pipeline records the ref it ran on.
+    """
+    target = _as_dict(pipeline.get("target"))
+    return source_branch in {
+        _clean_optional_str(target.get("ref_name")),
+        _clean_optional_str(target.get("source")),
+    }
+
+
+def pipeline_has_ref_info(pipeline: dict[str, Any]) -> bool:
+    """True when a pipeline's target exposes any identity to match against.
+
+    Mirrors every dimension the lookup matches on — ``target.ref_name`` and
+    ``target.source`` (branch), plus ``target.pullrequest.id`` (PR). A PR-only
+    pipeline row that carries just a ``pullrequest.id`` (for a different PR) is
+    still identifiable, so the wrong-ref guard must count it; otherwise it reads
+    as "no ref info" and the caller falls back to ``pipelines[0]``, risking
+    attaching another PR's step logs to this monitor's failing checks.
+    """
+    target = _as_dict(pipeline.get("target"))
+    if any(_clean_optional_str(target.get(key)) is not None for key in ("ref_name", "source")):
+        return True
+    return _clean_optional_str(_as_dict(target.get("pullrequest")).get("id")) is not None
+
+
+def pipeline_targets_pr(pipeline: dict[str, Any], pr_number: int) -> bool:
+    """True when a pipeline ran for THIS pull request.
+
+    Bitbucket PR pipelines carry ``target.pullrequest.id``; branch and manual
+    pipelines do not. Matching it distinguishes the PR pipeline from a branch
+    pipeline that ran on the same commit and source branch — both match the
+    branch ref, so without this their steps could be mis-attributed to the PR.
+    """
+    pr_id = _as_dict(_as_dict(pipeline.get("target")).get("pullrequest")).get("id")
+    return _clean_optional_str(pr_id) == str(pr_number)
+
+
+def freeze_params(params: Mapping[str, str] | None) -> _FrozenParams:
+    """Freeze query params into a hashable, order-stable cache-key component."""
+    if not params:
+        return ()
+    return tuple(sorted((str(key), str(value)) for key, value in params.items()))

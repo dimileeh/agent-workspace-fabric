@@ -43,7 +43,9 @@ import httpx
 
 from awf.common.audit import redact_audit_text
 from awf.common.bitbucket_client_parsing import (
+    _as_dict,
     _clean_optional_str,
+    _FrozenParams,
     _tail,
     bb_merge_strategy_for_method,
     build_blocking_reviews,
@@ -51,7 +53,9 @@ from awf.common.bitbucket_client_parsing import (
     build_review_threads,
     decode_thread_id,
     extract_diffstat_paths,
+    freeze_params,
     html_href,
+    is_pipeline_owned_status,
     latest_external_review_activity,
     map_bb_merge_methods,
     merge_state_status_for,
@@ -60,6 +64,9 @@ from awf.common.bitbucket_client_parsing import (
     parse_check_state,
     parse_check_timings,
     parse_pr_terminal_state,
+    pipeline_has_ref_info,
+    pipeline_targets_branch,
+    pipeline_targets_pr,
 )
 from awf.common.github_client import RepoRef
 from awf.common.github_client_parsing import _quiet_period_anchor
@@ -146,9 +153,6 @@ def _is_bitbucket_merge_in_progress_body(body: str) -> bool:
     """
     lowered = body.lower()
     return any(signal in lowered for signal in _BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS)
-
-
-_FrozenParams = tuple[tuple[str, str], ...]
 
 
 class BitBucketClientError(Exception):
@@ -528,7 +532,7 @@ class BitBucketClient:
         failures.extend(
             self._external_status_failure(status, pytest_fallback_commands)
             for status in failed
-            if not _is_pipeline_owned_status(status)
+            if not is_pipeline_owned_status(status)
         )
         return tuple(failures)
 
@@ -875,15 +879,15 @@ class BitBucketClient:
         )
         if not pipelines:
             return None
-        pr_matched = [p for p in pipelines if _pipeline_targets_pr(p, pr_number)]
+        pr_matched = [p for p in pipelines if pipeline_targets_pr(p, pr_number)]
         if pr_matched:
             return pr_matched[0]
         if source_branch is None:
             return pipelines[0]
-        matched = [p for p in pipelines if _pipeline_targets_branch(p, source_branch)]
+        matched = [p for p in pipelines if pipeline_targets_branch(p, source_branch)]
         if matched:
             return matched[0]
-        if any(_pipeline_has_ref_info(p) for p in pipelines):
+        if any(pipeline_has_ref_info(p) for p in pipelines):
             return None
         return pipelines[0]
 
@@ -1111,7 +1115,7 @@ class BitBucketClient:
     ) -> Any:
         """Send a request and decode JSON, honoring ETag conditional requests."""
         extra_headers: dict[str, str] = {}
-        cache_key = (method.upper(), path, _freeze_params(params)) if cache else None
+        cache_key = (method.upper(), path, freeze_params(params)) if cache else None
         cached: tuple[str, Any] | None = None
         if cache_key is not None:
             cached = self._etag_cache.get(cache_key)
@@ -1445,70 +1449,3 @@ class BitBucketClient:
         self._etag_cache.move_to_end(key)
         while len(self._etag_cache) > self._etag_cache_size:
             self._etag_cache.popitem(last=False)
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    """Return ``value`` if it is a dict, else an empty dict (payload guard)."""
-    return value if isinstance(value, dict) else {}
-
-
-def _is_pipeline_owned_status(status: dict[str, Any]) -> bool:
-    """True when a commit build-status belongs to BitBucket Pipelines itself.
-
-    Pipelines posts its own commit status (key ``PIPELINE``, url pointing at the
-    repo's ``/pipelines/`` results); that status is already covered by the
-    per-step failures, so it must not be re-emitted as an external check. Any
-    other FAILED/STOPPED status (third-party linters, deploy gates, …) is
-    external and should still surface for triage.
-    """
-    if str(status.get("key") or "").upper() == "PIPELINE":
-        return True
-    return "/pipelines/" in str(status.get("url") or "")
-
-
-def _pipeline_targets_branch(pipeline: dict[str, Any], source_branch: str) -> bool:
-    """True when a pipeline's target ref is the PR source branch.
-
-    Matches both branch pipelines (``target.ref_name``) and PR pipelines
-    (``target.source``), the two ways a pipeline records the ref it ran on.
-    """
-    target = _as_dict(pipeline.get("target"))
-    return source_branch in {
-        _clean_optional_str(target.get("ref_name")),
-        _clean_optional_str(target.get("source")),
-    }
-
-
-def _pipeline_has_ref_info(pipeline: dict[str, Any]) -> bool:
-    """True when a pipeline's target exposes any identity to match against.
-
-    Mirrors every dimension the lookup matches on — ``target.ref_name`` and
-    ``target.source`` (branch), plus ``target.pullrequest.id`` (PR). A PR-only
-    pipeline row that carries just a ``pullrequest.id`` (for a different PR) is
-    still identifiable, so the wrong-ref guard must count it; otherwise it reads
-    as "no ref info" and the caller falls back to ``pipelines[0]``, risking
-    attaching another PR's step logs to this monitor's failing checks.
-    """
-    target = _as_dict(pipeline.get("target"))
-    if any(_clean_optional_str(target.get(key)) is not None for key in ("ref_name", "source")):
-        return True
-    return _clean_optional_str(_as_dict(target.get("pullrequest")).get("id")) is not None
-
-
-def _pipeline_targets_pr(pipeline: dict[str, Any], pr_number: int) -> bool:
-    """True when a pipeline ran for THIS pull request.
-
-    Bitbucket PR pipelines carry ``target.pullrequest.id``; branch and manual
-    pipelines do not. Matching it distinguishes the PR pipeline from a branch
-    pipeline that ran on the same commit and source branch — both match the
-    branch ref, so without this their steps could be mis-attributed to the PR.
-    """
-    pr_id = _as_dict(_as_dict(pipeline.get("target")).get("pullrequest")).get("id")
-    return _clean_optional_str(pr_id) == str(pr_number)
-
-
-def _freeze_params(params: Mapping[str, str] | None) -> _FrozenParams:
-    """Freeze query params into a hashable, order-stable cache-key component."""
-    if not params:
-        return ()
-    return tuple(sorted((str(key), str(value)) for key, value in params.items()))
