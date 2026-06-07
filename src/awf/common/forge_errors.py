@@ -42,8 +42,8 @@ class ForgeClientError(Exception):
     a catch site can read the uniform contract over either subclass.
     """
 
-    operation: str
-    reason_code: str
+    operation: str = ""
+    reason_code: str = "FORGE_CLIENT_ERROR"
 
     def redacted_detail(self) -> str:
         """Return the already-redacted human-facing failure detail.

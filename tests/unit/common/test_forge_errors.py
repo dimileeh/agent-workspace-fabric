@@ -31,6 +31,11 @@ def test_base_normalized_accessor_defaults() -> None:
     assert exc.redacted_detail() == "boom"
     assert exc.merge_method_stderr() == ""
     assert exc.http_status is None
+    # The base must be safe to read on the uniform contract even when a subclass
+    # forgets to set them (or the base itself is instantiated): a catch site typed
+    # on ``ForgeClientError`` reads ``reason_code`` without an ``AttributeError``.
+    assert exc.reason_code == "FORGE_CLIENT_ERROR"
+    assert exc.operation == ""
 
 
 @pytest.mark.unit
