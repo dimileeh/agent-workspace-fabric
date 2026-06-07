@@ -58,12 +58,26 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_auth_not_configured](#bitbucket_auth_not_configured)
 
+### BITBUCKET_ERROR
+**Problem:** AWF hit a permanent BitBucket API fault while the PR monitor was performing a non-merge action (for example posting a comment or the human notification) and gave up on that action.
+**Likely Cause:** BitBucket returned a non-transient error (such as 4xx authorization/validation) that retrying would not resolve, so the monitor operation finished as failed and re-raised.
+**Operator Fix:** Inspect the workspace monitor log for the BitBucket response, fix the underlying cause (credentials, permissions, or PR/repo state), then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#bitbucket_error](#bitbucket_error)
+
 ### BITBUCKET_ISSUE_TRACKER_DISABLED
 **Problem:** The BitBucket repository issue tracker is disabled, so AWF posted the tracking note as a pull-request comment instead of opening an issue.
 **Likely Cause:** BitBucket returned 404 for the issues endpoint because the repository issue tracker is turned off.
 **Operator Fix:** Enable the BitBucket repository issue tracker if durable issues are wanted; otherwise no action is required — the note was captured on the PR.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_issue_tracker_disabled](#bitbucket_issue_tracker_disabled)
+
+### BITBUCKET_MERGE_FAILED
+**Problem:** BitBucket rejected the pull-request merge the PR monitor attempted, so the merge operation finished as failed.
+**Likely Cause:** BitBucket returned a non-transient merge error (such as a merge conflict, failed merge check, or insufficient permissions) that AWF could not safely retry.
+**Operator Fix:** Resolve the merge blocker on the PR (conflicts, required checks, or branch permissions) in BitBucket, then remonitor the workspace.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#bitbucket_merge_failed](#bitbucket_merge_failed)
 
 ### BITBUCKET_PIPELINE_FULL_RERUN
 **Problem:** AWF re-ran the entire BitBucket pipeline because BitBucket Cloud has no failed-only rerun API (that action is UI-only).
@@ -78,6 +92,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Re-run the pipeline from the BitBucket UI, or verify the PR pipeline configuration (custom/manual pipelines and required variables are not auto-rerunnable), then remonitor the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_pipeline_not_rerunnable](#bitbucket_pipeline_not_rerunnable)
+
+### BITBUCKET_TRANSIENT_ERROR
+**Problem:** AWF hit a transient BitBucket API blip while the PR monitor was performing an action, so it waited and kept polling instead of failing the workspace outright.
+**Likely Cause:** BitBucket returned a temporary error (such as a 5xx or rate-limit response) that is expected to clear on its own.
+**Operator Fix:** Usually no action is required — the monitor retries automatically. If the condition persists across many polls, check BitBucket status and the workspace monitor log, then remonitor.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#bitbucket_transient_error](#bitbucket_transient_error)
 
 ### CALLBACK_DELIVERY_BUDGET_EXCEEDED
 **Problem:** AWF could not send an outbound callback because target validation consumed the full delivery timeout budget before the POST could start.
