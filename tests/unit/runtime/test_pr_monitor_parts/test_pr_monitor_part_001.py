@@ -805,7 +805,8 @@ class TestCiFailure:
     def test_docker_failed_to_pull_image_timeout_dispatches_rerun(self) -> None:
         """A Docker-specific ``failed to pull image`` failure tied to a registry
         timeout is genuine transient infra and is rerun, confirming the marker
-        still recognizes real image-pull failures after being narrowed."""
+        still recognizes real image-pull failures when corroborated by a nearby
+        ``docker pull`` command echo."""
         failure = CheckFailure(
             name="python-coverage-shards (2)",
             conclusion="FAILURE",
@@ -823,6 +824,40 @@ class TestCiFailure:
         )
 
         assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_k8s_failed_to_pull_image_without_docker_context_reports_ci_failure(
+        self,
+    ) -> None:
+        """A bare Kubernetes/containerd kubelet ``Failed to pull image "app"``
+        event for an *application* image in an e2e deployment — no ``docker pull``
+        echo, daemon error, or registry/``/v2/`` context — is a real image/deploy
+        bug, not flaky registry infra. ``failed to pull image`` wording is shared
+        with containerd/k8s, so without corroborating Docker pull context it must
+        reach the repair agent rather than be silently rerun. (``--- FAIL`` Go
+        output is not caught by ``_looks_like_code_failure_text``, so this would
+        otherwise be misrouted to ``RerunTransientCI``.)"""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestDeployApp\n"
+                "    deploy_test.go:42: waiting for app pod to become ready\n"
+                '    deploy_test.go:51: Failed to pull image "app": '
+                "context deadline exceeded\n"
+                "--- FAIL: TestDeployApp (120.00s)"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
 
     @pytest.mark.unit

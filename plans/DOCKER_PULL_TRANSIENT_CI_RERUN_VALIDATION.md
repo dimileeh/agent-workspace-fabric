@@ -13,8 +13,16 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
   - `_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS` — `"context deadline exceeded"`,
     `"timeout exceeded while awaiting headers"`,
     `"request canceled while waiting for connection"`.
-  - `_CI_DOCKER_PULL_FAILURE_MARKERS` — `"docker pull failed"`,
-    `"failed to pull image"` (image-pull wording, not the generic verb).
+  - `_CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER` (`"docker pull failed"`) — names
+    the Docker CLI explicitly, so it anchors on its own.
+  - `_CI_DOCKER_IMAGE_PULL_FAILURE_MARKER` (`"failed to pull image"`) +
+    `_CI_DOCKER_PULL_CONTEXT_MARKERS` (`"docker pull"` echo / daemon error /
+    registry hosts / `/v2/` / `"pull access denied"`) — this phrasing is shared by
+    Docker, containerd, and the Kubernetes kubelet, so a bare
+    `Failed to pull image "app": context deadline exceeded` e2e/k8s deploy bug must
+    reach the repair agent. It anchors a registry timeout only when corroborating
+    Docker pull context sits within `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` lines
+    (review comment PRRT_kwDOSJAM6s6HqBMY).
   - `_CI_DOCKER_DAEMON_ERROR_MARKER` (`"error response from daemon"`) +
     `_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS` (registry hosts / `/v2/` API path /
     `"pull access denied"`) — a daemon-error line only anchors when it also carries
@@ -23,8 +31,9 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
     matches non-registry daemon operations such as
     `failed while pulling from local volume`.
   - `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` — the line-proximity window.
-  - `_is_docker_pull_failure_line(line)` — whether one log line evidences a Docker
-    image-pull failure.
+  - `_is_docker_pull_failure_line(index, line, pull_context_indexes)` — whether one
+    log line evidences a Docker image-pull failure (the `failed to pull image`
+    branch requires Docker pull context within the proximity window).
   - `_log_shows_docker_registry_timeout(log_text)` — whether a registry-timeout
     phrase is line-co-located with a pull-failure line; called as the final clause
     of `_looks_like_transient_ci_failure`.
@@ -32,7 +41,7 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
   still runs first, `_CI_TRANSIENT_FAILURE_MARKERS` is matched before the new
   logic, and `_should_rerun_transient_ci`/`decide` gate ordering is untouched.
 - `tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py`: added
-  16 focused unit tests (TDD across the feature's commits). Grouped by intent:
+  17 focused unit tests (TDD across the feature's commits). Grouped by intent:
 
   Positive — registry timeout dispatches `RerunTransientCI`:
   - `test_docker_pull_registry_timeout_dispatches_rerun` — full PR #449 log.
@@ -41,7 +50,7 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
   - `test_awaiting_headers_timeout_without_client_prefix_dispatches_rerun` —
     `"timeout exceeded while awaiting headers"` without a `Client.` prefix.
   - `test_docker_failed_to_pull_image_timeout_dispatches_rerun` —
-    `"failed to pull image"` anchor.
+    `"failed to pull image"` anchor corroborated by a nearby `docker pull` echo.
   - `test_daemon_error_with_registry_url_timeout_dispatches_rerun` — daemon error
     carrying registry-URL context.
 
@@ -62,6 +71,11 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
     error whose text merely contains the generic phrase `pulling from`
     (e.g. `failed while pulling from local volume`) does not anchor a nearby
     timeout (review comment issue:4642392722).
+  - `test_k8s_failed_to_pull_image_without_docker_context_reports_ci_failure` — a
+    bare kubelet/containerd `Failed to pull image "app": context deadline exceeded`
+    e2e deploy event with no `docker pull`/daemon/registry context reaches the
+    repair agent rather than being silently rerun (review comment
+    PRRT_kwDOSJAM6s6HqBMY).
   - `test_unrecognized_failure_log_reports_ci_failure` — unrecognized log.
 
   Safeguard / helper:

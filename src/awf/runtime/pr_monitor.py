@@ -646,16 +646,19 @@ _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS = (
 # pull failures, so it cannot anchor causation: a successful setup pull followed
 # by an unrelated test timeout looks identical to a real registry timeout. Only
 # Docker pull-*failure* wording — an explicit pull-failed message — actually
-# evidences that a pull (not the job's real work) is what timed out. The marker
-# must stay Docker-specific: a bare ``failed to pull`` phrase also appears in real
-# application errors (e.g. ``failed to pull records: context deadline exceeded``)
-# that carry no Docker/daemon/image wording and must reach the repair agent, so we
-# anchor on ``failed to pull image`` — the Docker/containerd image-pull failure
-# phrasing — not the generic verb.
-_CI_DOCKER_PULL_FAILURE_MARKERS = (
-    "docker pull failed",
-    "failed to pull image",
-)
+# evidences that a pull (not the job's real work) is what timed out.
+#
+# ``docker pull failed`` names the Docker CLI explicitly, so it evidences a Docker
+# image-pull failure on its own. ``failed to pull image`` is handled separately
+# below: a bare ``failed to pull`` phrase appears in real application errors (e.g.
+# ``failed to pull records: context deadline exceeded``), and the narrower ``failed
+# to pull image`` phrasing is shared by Docker, containerd, *and* the Kubernetes
+# kubelet (``Failed to pull image "app": context deadline exceeded``) — so on its
+# own it cannot tell a CI registry/service-container setup pull (transient infra)
+# apart from an application-image pull inside a k8s/containerd e2e deployment (a
+# real image/deploy bug). It therefore anchors only with corroborating Docker pull
+# context — see ``_CI_DOCKER_IMAGE_PULL_FAILURE_MARKER``.
+_CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER = "docker pull failed"
 
 # ``Error response from daemon: ...`` is emitted for *any* Docker daemon operation
 # (``docker run``/``build``/``exec``, container start, healthcheck), not just image
@@ -681,6 +684,22 @@ _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "public.ecr.aws",
     ".pkg.dev",
     "pull access denied",
+)
+
+# ``failed to pull image "<ref>"`` is emitted by Docker, containerd, and the
+# Kubernetes kubelet alike. A bare kubelet/containerd ``Failed to pull image
+# "app"`` event for an *application* image in an e2e deployment is a real
+# image/deploy bug the repair agent must see, so this marker only anchors a
+# registry timeout when explicit Docker pull context — a ``docker pull`` command
+# echo, a daemon error response, or a registry host / ``/v2/`` API path / ``pull
+# access denied`` — sits within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines, i.e.
+# the failing pull went through the Docker CLI / registry rather than a bare
+# kubelet event.
+_CI_DOCKER_IMAGE_PULL_FAILURE_MARKER = "failed to pull image"
+_CI_DOCKER_PULL_CONTEXT_MARKERS = (
+    "docker pull",
+    _CI_DOCKER_DAEMON_ERROR_MARKER,
+    *_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS,
 )
 
 # ``gh run view --log-failed`` emits the whole failed step, so a real
@@ -771,17 +790,31 @@ def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
     return _log_shows_docker_registry_timeout(log_text)
 
 
-def _is_docker_pull_failure_line(line: str) -> bool:
+def _is_docker_pull_failure_line(
+    index: int,
+    line: str,
+    pull_context_indexes: tuple[int, ...],
+) -> bool:
     """Whether one (lowercased) log line evidences a Docker *image-pull* failure.
 
-    Unambiguous pull-failure wording (``docker pull failed``/``failed to pull
-    image``) qualifies on its own. The generic ``error response from daemon``
-    wrapper qualifies only when the same line also carries registry / image-pull
-    context, since the daemon emits it for any operation — a bare daemon timeout
-    from a ``docker run`` test step is a real failure, not flaky registry infra.
+    ``docker pull failed`` names the Docker CLI, so it qualifies on its own. The
+    ``failed to pull image`` wording is shared with containerd / the Kubernetes
+    kubelet, so it qualifies only when explicit Docker pull context (a ``docker
+    pull`` echo, daemon error, or registry host / ``/v2/`` path) sits within
+    ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines — otherwise a bare kubelet
+    ``failed to pull image "app"`` event from an e2e deployment (a real image bug)
+    would be silently rerun. The generic ``error response from daemon`` wrapper
+    qualifies only when the same line also carries registry / image-pull context,
+    since the daemon emits it for any operation — a bare daemon timeout from a
+    ``docker run`` test step is a real failure, not flaky registry infra.
     """
 
-    if any(marker in line for marker in _CI_DOCKER_PULL_FAILURE_MARKERS):
+    if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in line:
+        return True
+    if _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER in line and any(
+        abs(index - context_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
+        for context_index in pull_context_indexes
+    ):
         return True
     return _CI_DOCKER_DAEMON_ERROR_MARKER in line and any(
         marker in line for marker in _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS
@@ -794,17 +827,26 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     The phrases in ``_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS`` are only transient
     when the timeout line is *part of* the Docker pull failure — on the same line
     as, or within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of, a Docker
-    pull-*failure* line (a daemon error response or an explicit pull-failed
-    message). Proximity to a bare ``docker pull`` *command* echo is not enough:
-    that echo precedes successful setup pulls too, so anchoring on it would still
-    fire when a successful pull merely co-exists in the same ``--log-failed`` step
-    as a real application/integration test timeout that must reach the repair
-    agent.
+    pull-*failure* line (a daemon error response, an explicit pull-failed message,
+    or a ``failed to pull image`` line corroborated by nearby Docker pull
+    context). Proximity to a bare ``docker pull`` *command* echo is not enough on
+    its own: that echo precedes successful setup pulls too, so anchoring on it
+    would still fire when a successful pull merely co-exists in the same
+    ``--log-failed`` step as a real application/integration test timeout that must
+    reach the repair agent. The ``docker pull`` echo only *corroborates* an
+    explicit ``failed to pull image`` line — it never anchors on its own.
     """
 
     lines = log_text.lower().splitlines()
+    pull_context_indexes = tuple(
+        index
+        for index, line in enumerate(lines)
+        if any(marker in line for marker in _CI_DOCKER_PULL_CONTEXT_MARKERS)
+    )
     evidence_line_indexes = [
-        index for index, line in enumerate(lines) if _is_docker_pull_failure_line(line)
+        index
+        for index, line in enumerate(lines)
+        if _is_docker_pull_failure_line(index, line, pull_context_indexes)
     ]
     if not evidence_line_indexes:
         return False
