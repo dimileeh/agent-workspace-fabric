@@ -686,6 +686,16 @@ class WorkspaceControlService:
         workspace.monitor_threads_addressed = monitor_state
         pending_operator_hint = build_pending_operator_hint_payload(hint)
         claims_reset = _claim_reset_snapshot(workspace)
+        # Re-engaging the monitor with a fresh directive must pre-empt any
+        # in-flight PR-monitor validate_only/rebase_only recovery op (same guard
+        # remonitor applies); otherwise the stale recovery cycle keeps running
+        # alongside the new directive cycle and conflicts on this workspace.
+        cancelled_recovery_operations = await _cancel_stale_pr_monitor_recovery_operations(
+            operations,
+            workspace_id=workspace.id,
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            requested_action=OperationType.guide.value,
+        )
         workspace.monitor_claimed_by = None
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
@@ -698,6 +708,10 @@ class WorkspaceControlService:
             "claims_reset": claims_reset,
             "pending_operator_hint": pending_operator_hint,
         }
+        if cancelled_recovery_operations:
+            event_payload["cancelled_recovery_operations"] = cancelled_recovery_operations
+            event_payload["cancelled_recovery_reason_code"] = _OPERATOR_GUIDE_REASON_CODE
+            event_payload["cancelled_recovery_requested_action"] = OperationType.guide.value
         event_payload = _event_payload(event_payload, expected_version=expected_version)
         await repo.add_event(
             workspace,
@@ -719,6 +733,8 @@ class WorkspaceControlService:
             "claims_reset": claims_reset,
             **_workspace_pr_operation_context(workspace),
         }
+        if cancelled_recovery_operations:
+            result["cancelled_recovery_operations"] = cancelled_recovery_operations
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,

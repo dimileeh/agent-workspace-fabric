@@ -207,7 +207,19 @@ async def _cancel_stale_pr_monitor_recovery_operations(
     operations: OperationRepository,
     *,
     workspace_id: str,
+    reason_code: str = _OPERATOR_REMONITOR_REASON_CODE,
+    requested_action: str = OperationType.remonitor.value,
 ) -> list[dict[str, object]]:
+    """Cancel in-flight PR-monitor ``validate_only``/``rebase_only`` recovery ops.
+
+    Operator controls that reset the monitor claim and re-engage the agent
+    (``remonitor`` and ``guide``) must clear any recovery operation the PR
+    monitor launched, or the stale recovery cycle keeps running alongside the
+    new directive cycle and conflicts on the same workspace. ``reason_code`` and
+    ``requested_action`` flow into the cancelled operation's audit trail so it
+    reflects the control that pre-empted it (defaults preserve ``remonitor``).
+    """
+
     cancelled: list[dict[str, object]] = []
     active: list[Operation] = []
     for status in (OperationStatus.pending, OperationStatus.running):
@@ -228,12 +240,12 @@ async def _cancel_stale_pr_monitor_recovery_operations(
             status=OperationStatus.cancelled,
             result={
                 "status": OperationStatus.cancelled.value,
-                "reason_code": _OPERATOR_REMONITOR_REASON_CODE,
-                "requested_action": OperationType.remonitor.value,
+                "reason_code": reason_code,
+                "requested_action": requested_action,
             },
-            error_code=_OPERATOR_REMONITOR_REASON_CODE,
+            error_code=reason_code,
             error_message=(
-                "Cancelled stale PR monitor recovery operation before operator remonitor."
+                f"Cancelled stale PR monitor recovery operation before operator {requested_action}."
             ),
         )
     return cancelled

@@ -8,7 +8,8 @@ from collections.abc import AsyncIterator
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.db.enums import OperationType, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import OperationRepository
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_STATE_KEY,
     operator_hint_from_threads,
@@ -138,6 +139,77 @@ async def test_guide_resets_claims_and_replays_exact_key(
     assert workspace.monitor_claimed_by is None
     assert workspace.execution_claimed_by is None
     assert operations[0].result["claims_reset"]["monitor_claimed_by"] == "monitor-worker"
+
+
+@pytest.mark.unit
+async def test_guide_cancels_stale_pr_monitor_recovery_ops(
+    session: AsyncSession,
+) -> None:
+    """Guide re-engages the monitor, so it must pre-empt in-flight PR-monitor
+    recovery ops (same guard as remonitor); operator-launched ops are left alone."""
+    workspace = await _monitoring_workspace(session)
+    operation_repo = OperationRepository(session)
+    stale_validate = await operation_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+        payload={
+            "owner": "pr_monitor",
+            "source": "pr_monitor",
+            "recovery_mode": "validate_only",
+            "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+        },
+    )
+    operator_validate = await operation_repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+        payload={
+            "owner": "operator",
+            "source": "operator_api",
+            "recovery_mode": "validate_only",
+            "reason_code": "OPERATOR_VALIDATE",
+        },
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="implement, do not defer",
+        idempotency_key="guide-cancel-stale-recovery",
+        expected_version=workspace.version,
+    )
+    operations = {op.id: op for op in await _operations(session, workspace.id)}
+    events = await _events(session, workspace.id)
+
+    assert operations[stale_validate.id].status == OperationStatus.cancelled.value
+    assert operations[stale_validate.id].error_code == "OPERATOR_GUIDE"
+    assert operations[stale_validate.id].result == {
+        "status": "cancelled",
+        "reason_code": "OPERATOR_GUIDE",
+        "requested_action": "guide",
+    }
+    # Operator-launched recovery ops are not pr_monitor-owned, so they survive.
+    assert operations[operator_validate.id].status == OperationStatus.running.value
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.payload["cancelled_recovery_operations"] == [
+        {
+            "operation_id": stale_validate.id,
+            "operation_type": OperationType.validate.value,
+            "operation_status": OperationStatus.running.value,
+        }
+    ]
+    assert guide_event.payload["cancelled_recovery_reason_code"] == "OPERATOR_GUIDE"
+    assert guide_event.payload["cancelled_recovery_requested_action"] == "guide"
+    guide_op = next(op for op in operations.values() if op.type == OperationType.guide.value)
+    assert guide_op.result["cancelled_recovery_operations"] == [
+        {
+            "operation_id": stale_validate.id,
+            "operation_type": OperationType.validate.value,
+            "operation_status": OperationStatus.running.value,
+        }
+    ]
 
 
 @pytest.mark.unit
