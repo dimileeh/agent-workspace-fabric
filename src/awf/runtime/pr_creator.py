@@ -1,19 +1,19 @@
-"""Pull-request creator — pushes the feature branch and opens or reuses a PR via ``gh``.
+"""Pull-request creator — pushes the feature branch and opens or reuses a PR.
 
 Two responsibilities:
 
 1. ``git -C <worktree> push -u origin <branch>`` — uploads the commits the
    coding CLI just made to the remote. When updating an adopted fork PR through
    an explicit push URL, AWF omits ``-u`` so credentialed URLs are not persisted
-   in branch upstream config.
-2. ``gh pr create --base <base> --head <branch> --title ... --body ...`` —
-   opens the PR on GitHub when one does not already exist. We capture stdout
-   which contains the PR URL.
+   in branch upstream config. The push is forge-neutral plain git.
+2. Open the PR via the injected :class:`~awf.common.forge.ForgeClient` when one
+   does not already exist. The forge client (GitHub or BitBucket) is resolved by
+   the caller and passed in per-call, so ``PullRequestCreator`` stays
+   forge-agnostic and stateless. The client returns the PR URL directly.
 
-We shell out to the ``gh`` CLI (not the GitHub REST API directly) because:
-- ``gh`` already handles auth via stored tokens / keyrings / env vars, so
-  AWF doesn't need to re-implement that.
-- Error messages are familiar to operators who already use ``gh``.
+``PullRequestCreator`` shells plain ``git`` for the push but never shells the
+forge CLI itself — the resolved ``ForgeClient`` owns the forge-specific PR-open
+call (``gh pr create`` for GitHub, the REST API for BitBucket).
 """
 
 from __future__ import annotations
@@ -23,15 +23,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.commands import AsyncCommandRunner
+from awf.common.forge import ForgeClient
 from awf.common.git_identity import git_safe_directory_config_args
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
-
-# gh prints the PR URL as the only non-empty, non-warning line of stdout.
-# Matching anywhere tolerates leading "Creating pull request..." noise from
-# future gh versions without tight-coupling to a specific release.
-_PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 
 # Redact credentials embedded in URLs before logging. Git/gh can emit
 # ``https://user:token@host`` in stderr under certain auth failures;
@@ -67,7 +64,7 @@ class PullRequestResult:
 
 
 class PullRequestError(Exception):
-    """Raised when push or ``gh pr create`` fails."""
+    """Raised when the git push or the forge PR-open call fails."""
 
     def __init__(
         self,
@@ -87,7 +84,7 @@ class PullRequestError(Exception):
 
 
 class PullRequestCreator:
-    """Pushes a feature branch and opens a PR via ``gh``."""
+    """Pushes a feature branch and opens a PR via an injected ``ForgeClient``."""
 
     def __init__(self, runner: AsyncCommandRunner) -> None:
         self._runner = runner
@@ -100,6 +97,8 @@ class PullRequestCreator:
         base_branch: str,
         title: str,
         body: str,
+        forge_client: ForgeClient,
+        repo_url: str,
         existing_pr_url: str | None = None,
         remote_branch_name: str | None = None,
         remote_url: str | None = None,
@@ -171,41 +170,52 @@ class PullRequestCreator:
                 head_sha=head_sha,
             )
 
-        # Step 2: open the PR. gh reads auth from ~/.config/gh by default.
-        pr = await self._runner.run(
-            [
-                "gh",
-                "pr",
-                "create",
-                "--base",
-                base_branch,
-                "--head",
-                branch_name,
-                "--title",
-                title,
-                "--body",
-                body,
-            ],
-            cwd=str(worktree_path),
-        )
-        if not pr.ok:
-            raise PullRequestError(
-                operation="gh pr create",
-                returncode=pr.returncode,
-                stderr=pr.stderr,
-                head_sha=head_sha,
-            )
+        # Step 2: open the PR through the resolved forge client. The client
+        # (GitHub or BitBucket) owns auth and the forge-specific call and returns
+        # the PR URL directly — no github-shaped regex, so a BitBucket URL is
+        # accepted verbatim (D7). ``BitBucketClientError`` is imported lazily so
+        # the GitHub-only hot path never pays for the httpx import that the
+        # BitBucket client drags in (mirrors ``forge.make_forge_client``).
+        from awf.common.bitbucket_client import BitBucketClientError
 
-        url_match = _PR_URL_PATTERN.search(pr.stdout)
-        if url_match is None:
+        repo = RepoRef.from_url(remote_url or repo_url)
+        try:
+            url = await forge_client.create_pull_request(
+                repo=repo,
+                base=base_branch,
+                head=branch_name,
+                title=title,
+                body=body,
+            )
+        except GitHubClientError as exc:
+            # Preserve the structured returncode + already-redacted stderr +
+            # operation (never ``str(exc)``, which could leak unredacted output);
+            # the executor keys its audit branch off ``exc.operation``.
             raise PullRequestError(
-                operation="gh pr create (no URL in stdout)",
+                operation=exc.operation,
+                returncode=exc.returncode,
+                stderr=exc.stderr,
+                head_sha=head_sha,
+            ) from exc
+        except BitBucketClientError as exc:
+            # BitBucket uses HTTP status (``None`` for transport errors) and a
+            # redacted ``body`` where GitHub uses returncode/stderr — map them
+            # onto the same structured PullRequestError fields.
+            raise PullRequestError(
+                operation=exc.operation,
+                returncode=exc.status if exc.status is not None else 0,
+                stderr=exc.body,
+                head_sha=head_sha,
+            ) from exc
+
+        if not url:
+            raise PullRequestError(
+                operation="create_pull_request (no URL)",
                 returncode=0,
-                stderr=f"unexpected gh output: {pr.stdout[:500]}",
+                stderr="forge returned an empty PR URL",
                 head_sha=head_sha,
             )
 
-        url = url_match.group(0)
         _log.info("pr.created", branch=branch_name, url=url)
         return PullRequestResult(url=url, branch=branch_name, head_sha=head_sha)
 

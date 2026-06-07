@@ -34,6 +34,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import execution_flow as _execution_flow
 from awf.control.executor import helpers as executor_helpers
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
@@ -180,6 +181,54 @@ class _RecordingPrCreator:
             branch=branch_name,
             head_sha="b" * 40,
         )
+
+
+class _SpyForgeClient:
+    """Async-context-manager stand-in returned by a spied ``make_forge_client``."""
+
+    async def __aenter__(self) -> _SpyForgeClient:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        return None
+
+
+class _ForgeRecordingPrCreator:
+    """Records the forge client + repo URL the executor resolves and passes in."""
+
+    def __init__(self) -> None:
+        self.forge_client: object | None = None
+        self.repo_url: str | None = None
+
+    async def push_and_open(
+        self,
+        *,
+        branch_name: str,
+        forge_client: object | None = None,
+        repo_url: str | None = None,
+        **_kwargs: Any,
+    ) -> PullRequestResult:
+        self.forge_client = forge_client
+        self.repo_url = repo_url
+        return PullRequestResult(
+            url="https://github.com/x/y/pull/55",
+            branch=branch_name,
+            head_sha="b" * 40,
+        )
+
+
+def _queue_full_happy_path(fake: FakeCommandRunner) -> None:
+    """Queue the agent → commit → validation → pre-push-gate command results for a
+    workspace whose ``pr_creator`` is faked (so no git push / forge PR-open runs)."""
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+    fake.queue_result(returncode=0)  # git add
+    fake.queue_result(returncode=0, stdout="")  # cached diff empty; agent committed
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base --is-ancestor
+    _queue_validation_head(fake)  # pre-validation rev-parse HEAD
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation
+    _queue_pre_push_checks(fake)  # plan-only + protected-output committed diffs
 
 
 def _validation_command_result(
@@ -788,29 +837,62 @@ class TestPullRequestUnexpectedErrorPart002:
             assert runs[0].workspace_head_sha == "pre-pr-validation-head"
 
     @pytest.mark.unit
-    async def test_new_pr_on_bitbucket_fails_fast_before_agent_run(
+    async def test_resolves_github_forge_client_and_passes_it_to_push_and_open(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # BitBucket is a supported forge for monitoring an existing PR, so it clears
-        # the executor forge gate — but opening a *new* PR shells `gh pr create`
-        # (GitHub-only). The new-PR condition (BitBucket forge + no existing PR) is
-        # fully known once the resolved profile is synced, so a BitBucket feature
-        # workspace without an existing PR must fail fast with
-        # PR_CREATE_FORGE_NOT_SUPPORTED *before* spending a full agent/validation
-        # attempt and leaving a committed workspace. The agent must never run and
-        # `push_and_open` must never be reached: no command is queued, so any
-        # agent/validation/commit/push step would raise on the empty fake queue.
-        class _AssertNotCalledPrCreator:
-            def __init__(self) -> None:
-                self.called = False
+        # R-resolve (github): the executor resolves the forge client per push call
+        # from the repo URL and passes that exact client + repo_url to
+        # push_and_open. PR creation is forge-neutral via the resolved client.
+        spy_client = _SpyForgeClient()
+        spy_calls: list[tuple[str, object]] = []
 
-            async def push_and_open(self, **_kwargs: object) -> object:
-                self.called = True
-                raise AssertionError("push_and_open must not run for a new BitBucket PR")
+        def _spy_make_forge_client(forge: str, runner: object) -> _SpyForgeClient:
+            spy_calls.append((forge, runner))
+            return spy_client
 
+        monkeypatch.setattr(_execution_flow, "make_forge_client", _spy_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        assert spy_calls == [("github", fake)]
+        assert pr_creator.forge_client is spy_client
+        assert pr_creator.repo_url == "git@github.com:x/y.git"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
+
+    @pytest.mark.unit
+    async def test_resolves_bitbucket_forge_client_and_opens_pr(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # R-resolve (bitbucket): a BitBucket feature workspace no longer fails
+        # fast — it reaches push_and_open with a resolved BitBucket forge client
+        # and completes. This is the proof BitBucket can now open its PR.
+        spy_client = _SpyForgeClient()
+        spy_calls: list[tuple[str, object]] = []
+
+        def _spy_make_forge_client(forge: str, runner: object) -> _SpyForgeClient:
+            spy_calls.append((forge, runner))
+            return spy_client
+
+        monkeypatch.setattr(_execution_flow, "make_forge_client", _spy_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
         async with factory() as s:
             repo = WorkspaceRepository(s)
@@ -819,36 +901,19 @@ class TestPullRequestUnexpectedErrorPart002:
             ws.repo_url = "git@bitbucket.org:workspace/repo.git"
             await s.commit()
 
-        pr_creator = _AssertNotCalledPrCreator()
-        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
-        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
-        executor = WorkspaceExecutor(
-            session_factory=factory,
-            runner=fake,
-            compose=compose,
-            validation=validation,
-            pr_creator=pr_creator,  # type: ignore[arg-type]
-            config=ExecutorConfig(
-                worktrees_root=tmp_path / "work" / "worktrees",
-                compose_projects_root=tmp_path / "work" / "compose",
-                default_models={AgentRuntime.codex: "gpt-5"},
-            ),
-        )
+        _queue_full_happy_path(fake)
 
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
         await executor.execute(ws_id)
 
-        assert pr_creator.called is False
+        assert spy_calls == [("bitbucket", fake)]
+        assert pr_creator.forge_client is spy_client
+        assert pr_creator.repo_url == "git@bitbucket.org:workspace/repo.git"
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "infrastructure_failure"
-            assert "gh pr create" in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == "PR_CREATE_FORGE_NOT_SUPPORTED"
-            # No agent/validation attempt was spent: the gate fired before the
-            # validation run that the late-push placement would have recorded.
-            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
-            assert runs == []
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
     async def test_validation_target_sha_update_failure_keeps_open_pr(
