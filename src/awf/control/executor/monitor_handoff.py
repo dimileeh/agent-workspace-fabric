@@ -344,6 +344,30 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             reason_code=exc.reason_code,
         )
         return
+    except BitBucketClientError as exc:
+        # The factory builds its forge client via ``make_forge_client``, so a
+        # BitBucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL raises
+        # ``BitBucketClientError`` (e.g. reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
+        # from ``BitBucketClient.from_env()`` before the monitor loop exists. This
+        # resume path bypasses the execute-time forge gate (execution_flow only
+        # runs it for ready -> execution), so the auth failure first surfaces here.
+        # Preserve that actionable reason code instead of flattening it into the
+        # generic MONITOR_RECOVERY_FAILED below — mirrors the initial handoff
+        # path's BitBucketClientError catch so operators get the auth-setup
+        # message on every monitor path.
+        _log.exception(
+            "executor.pr_monitor_resume_bitbucket_auth_failed",
+            workspace_id=workspace_id,
+            reason_code=exc.reason_code,
+        )
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"monitor recovery: {redact_audit_text(repr(exc), limit=1900)}"[:2000],
+            reason_code=exc.reason_code,
+        )
+        return
     except Exception as exc:
         _log.exception("executor.pr_monitor_resume_build_failed", workspace_id=workspace_id)
         await self._mark_failed(
