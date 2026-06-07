@@ -162,6 +162,7 @@ _CI_DOCKER_PULL_SUCCESS_STATUS_MARKERS = (
 _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS = (
     "access denied",
     "denied:",
+    ": denied",  # HTTP-style registry denial: 'Head "https://...": denied'
     "no such image",
     "manifest unknown",
     "not found",

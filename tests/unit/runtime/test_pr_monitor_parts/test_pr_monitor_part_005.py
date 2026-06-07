@@ -452,6 +452,37 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_registry_http_trailing_denied_near_unrelated_timeout_reports_ci_failure(
+        self,
+    ) -> None:
+        """A daemon denial that uses the HTTP-response form ``": denied"`` (colon-space
+        before "denied", nothing after) must be classified permanent.  The ``denied:``
+        marker alone misses this format because the daemon embeds the registry URL in
+        quotes — e.g. ``Error response from daemon: Head "https://ghcr.io/v2/...":
+        denied`` — and after quoted-string stripping only ``: denied`` remains.  A
+        nearby unrelated ``context deadline exceeded`` must NOT trigger RerunTransientCI
+        for a non-retryable auth failure (PRRT_kwDOSJAM6s6Hsmgv)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                'Error response from daemon: Head "https://ghcr.io/v2/org/app/manifests/latest": denied\n'
+                "Docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_forward_permanent_detail_beyond_timeout_window_reports_ci_failure(
         self,
     ) -> None:
