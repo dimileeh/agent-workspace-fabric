@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -551,3 +551,20 @@ def test_claim_lease_is_live_aware_expiry_against_naive_now() -> None:
     naive_now = aware_now.replace(tzinfo=None)
     assert _claim_lease_is_live("worker", aware_now + timedelta(minutes=5), now=naive_now)
     assert not _claim_lease_is_live("worker", aware_now - timedelta(minutes=5), now=naive_now)
+
+
+@pytest.mark.unit
+def test_claim_lease_is_live_non_utc_aware_expiry_converts_before_compare() -> None:
+    # An aware ``expires_at`` in a non-UTC offset must be converted to UTC before
+    # the tz-naive comparison; stripping the offset without converting would
+    # treat the local wall-clock as UTC and could mark an expired lease live.
+    plus_530 = timezone(timedelta(hours=5, minutes=30))
+    aware_now = datetime.now(UTC)
+    naive_now = aware_now.replace(tzinfo=None)
+    # Same instant as ``naive_now`` but expressed in +05:30 — its naive
+    # wall-clock reads ~5.5h ahead, so a non-converting strip would wrongly
+    # report it as live.
+    expired_other_zone = (aware_now - timedelta(minutes=5)).astimezone(plus_530)
+    assert not _claim_lease_is_live("worker", expired_other_zone, now=naive_now)
+    live_other_zone = (aware_now + timedelta(minutes=5)).astimezone(plus_530)
+    assert _claim_lease_is_live("worker", live_other_zone, now=naive_now)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -615,8 +615,11 @@ def _claim_lease_is_live(
     elif expires_at.tzinfo is not None and now.tzinfo is None:
         # Symmetric guard: callers pass an aware ``utcnow()`` today, but a naive
         # ``now`` paired with an aware ``expires_at`` would raise ``TypeError`` at
-        # the comparison below. Compare naively rather than crashing.
-        expires_at = expires_at.replace(tzinfo=None)
+        # the comparison below. Convert to UTC and then strip so the naive value
+        # represents the same instant regardless of the original offset (a
+        # non-UTC ``+05:30`` expiry must not compare as if its wall-clock were
+        # UTC, which could treat an already-expired lease as live).
+        expires_at = expires_at.astimezone(UTC).replace(tzinfo=None)
     return expires_at > now
 
 
