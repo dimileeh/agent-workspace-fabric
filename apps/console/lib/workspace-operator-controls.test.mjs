@@ -230,6 +230,22 @@ test("cancel remains disabled for stale overview cancel/stop flags without in-fl
   }
 });
 
+test("cancel remains disabled for stale overview cancel/stop flags while operations list is default empty", () => {
+  for (const activeOperation of ["cancel", "stop"]) {
+    const control = getWorkspaceOperatorControls({
+      overview: overview({
+        status: "running",
+        active_operation: activeOperation,
+      }),
+      operations: [],
+    }).find((item) => item.action === "cancel");
+    assert.ok(control, `missing cancel control for ${activeOperation} with empty operations`);
+    assert.equal(control.enabled, false, `cancel should stay disabled while overview is ${activeOperation} and operations list is empty`);
+    assert.equal(control.reason, "cancel/stop already active");
+    assert.equal(control.visible, true);
+  }
+});
+
 test("cancel stays disabled while a running cancel operation exists even if recovery cancel is terminal", () => {
   const control = getWorkspaceOperatorControls({
     overview: overview({

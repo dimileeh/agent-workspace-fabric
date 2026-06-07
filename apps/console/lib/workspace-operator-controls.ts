@@ -187,7 +187,10 @@ function hasActiveOperation(context: WorkspaceOperatorContext): boolean {
 }
 
 function hasActiveCancellationOperation(context: WorkspaceOperatorContext): boolean {
-  const hasOperationsData = context.operations !== undefined && context.operations !== null;
+  const hasOperationsData =
+    context.operations !== undefined &&
+    context.operations !== null &&
+    context.operations.length > 0;
   const recoveryOperation = context.workspace?.recovery?.current_operation ?? context.overview.recovery?.current_operation ?? null;
   if (recoveryOperation) {
     if (cancellationOperationTypes.has(recoveryOperation.type) && !terminalOperationStatuses.has(recoveryOperation.status)) {
