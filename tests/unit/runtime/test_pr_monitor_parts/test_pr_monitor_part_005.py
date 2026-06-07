@@ -276,6 +276,41 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_stale_echo_for_earlier_image_does_not_make_later_summary_permanent(
+        self,
+    ) -> None:
+        """A ``failed to pull image "<imageA>"`` permanent detail following a
+        ``docker pull failed`` summary must not make the summary permanent when the
+        only matching ``docker pull <imageA>`` echo predates an intervening
+        ``docker pull <imageB>`` echo.  The summary belongs to the imageB pull; the
+        backward ref-match search in ``_forward_detail_ref_matches_pull`` must start
+        from the most-recent echo (imageB), not from the beginning of the log.
+        With ``back_start=0`` the stale imageA echo at line 0 paired with the
+        imageA detail, misclassifying a transient registry timeout as permanent and
+        blocking a legitimate rerun (PRRT_kwDOSJAM6s6Hse5B)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/app:v1\n"  # index 0 — earlier echo for imageA
+                "/usr/bin/docker pull postgres:16\n"  # index 1 — echo for imageB (current)
+                "context deadline exceeded\n"  # index 2 — imageB registry timeout
+                "Docker pull failed with exit code 1\n"  # index 3 — summary for imageB
+                'Failed to pull image "ghcr.io/org/app:v1": access denied'  # index 4 — stale detail
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_forward_permanent_detail_different_image_dispatches_rerun(
         self,
     ) -> None:

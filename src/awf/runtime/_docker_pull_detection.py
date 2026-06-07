@@ -387,6 +387,18 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     # that targets the same image ref as the preceding docker pull command echo.
     if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in lines[index]:
         end = min(len(lines), index + _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW + 1)
+        # Narrow the backward ref-match search to the most recent docker pull
+        # echo before the summary: starting from 0 would let a stale echo for
+        # an earlier image pair with a detail for that image, wrongly marking
+        # the current (different-image) pull as permanent (PRRT_kwDOSJAM6s6Hse5B).
+        back_start = 0
+        for k in range(index - 1, -1, -1):
+            if (
+                _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
+                and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
+            ):
+                back_start = k
+                break
         return any(
             _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER in lines[probe_index]
             and any(
@@ -398,7 +410,7 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                 and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
                 for k in range(index + 1, probe_index)
             )
-            and _forward_detail_ref_matches_pull(lines[probe_index], 0, index, lines)
+            and _forward_detail_ref_matches_pull(lines[probe_index], back_start, index, lines)
             for probe_index in range(index + 1, end)
         )
     return False
