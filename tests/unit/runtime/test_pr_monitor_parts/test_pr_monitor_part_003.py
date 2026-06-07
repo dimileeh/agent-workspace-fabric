@@ -1483,3 +1483,35 @@ class TestCiFailure:
 
         assert isinstance(action, RerunTransientCI)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_interleaved_evidence_does_not_save_wrapped_kubelet_timeout(
+        self,
+    ) -> None:
+        """A kubelet-style event whose header and wrapped ``context deadline
+        exceeded`` line are split by an unrelated transient ``docker pull failed``
+        summary must still reach the repair agent.  The uncorroborated kubelet
+        header (index 0) precedes the timeout (index 2), so the timeout belongs
+        to that kubelet event regardless of the interleaved evidence line at
+        index 1.  Regression for the 'evidence between' heuristic that previously
+        skipped exclusion when any evidence line fell strictly between the timeout
+        and the preceding uncorroborated pull, silently rerunnig a real deploy bug."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                'Failed to pull image "app"\n'  # uncorroborated index 0
+                "Docker pull failed with exit code 1\n"  # evidence index 1 (interleaved)
+                "context deadline exceeded"  # index 2 — wrapped kubelet error
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)

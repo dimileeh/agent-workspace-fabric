@@ -508,13 +508,18 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
             index in evidence_line_set
             or not any(
                 abs(index - uncorroborated_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
-                # An evidence line sitting strictly between the timeout and the
-                # uncorroborated pull means the timeout belongs to that evidence
-                # pull, not the kubelet event — only exclude when no such
-                # evidence line sits between them.
-                and not any(
-                    min(index, uncorroborated_index) < ev_idx < max(index, uncorroborated_index)
-                    for ev_idx in evidence_line_set
+                # When the uncorroborated pull precedes the timeout (the typical
+                # kubelet header+wrapped-error ordering), an interleaved evidence
+                # line cannot claim the timeout — it still belongs to the kubelet
+                # event.  Only when the uncorroborated pull comes *after* the
+                # timeout can an evidence line sitting strictly between them
+                # plausibly attribute the timeout to the transient pull instead.
+                and (
+                    uncorroborated_index < index
+                    or not any(
+                        min(index, uncorroborated_index) < ev_idx < max(index, uncorroborated_index)
+                        for ev_idx in evidence_line_set
+                    )
                 )
                 for uncorroborated_index in uncorroborated_image_pull_indexes
             )
