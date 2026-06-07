@@ -1431,6 +1431,33 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_summary_first_then_daemon_access_denied_reports_ci_failure(self) -> None:
+        """When a log stream emits the ``docker pull failed`` summary *before* the
+        daemon permanent error line (reversed from the typical CLI ordering), the
+        forward daemon probe must detect the access-denied response and classify
+        the pull as permanent — not retryable — so an adjacent unrelated
+        ``context deadline exceeded`` does not trigger a wasteful rerun."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Docker pull failed with exit code 1\n"
+                "Error response from daemon: pull access denied for myimage\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_forward_permanent_detail_beyond_timeout_window_reports_ci_failure(
         self,
     ) -> None:

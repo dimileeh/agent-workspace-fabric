@@ -383,8 +383,8 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     ):
         return True
     # Forward probe: when the evidence line is a "docker pull failed" summary,
-    # look forward for a "failed to pull image" detail with a permanent marker
-    # that targets the same image ref as the preceding docker pull command echo.
+    # look forward for a daemon permanent error or a "failed to pull image"
+    # detail with a permanent marker that belongs to this pull.
     if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in lines[index]:
         end = min(len(lines), index + _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW + 1)
         # Narrow the backward ref-match search to the most recent docker pull
@@ -399,6 +399,26 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             ):
                 back_start = k
                 break
+        # Forward daemon probe: some log streams emit the summary before the
+        # daemon error line (opposite of the typical CLI ordering). A daemon
+        # permanent error appearing after the summary and before any new pull
+        # echo belongs to this pull and makes it non-retryable.
+        if any(
+            _CI_DOCKER_DAEMON_ERROR_MARKER in lines[probe_index]
+            and any(
+                marker in re.sub(r'"[^"]*"', "", lines[probe_index])
+                for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS
+            )
+            and not any(
+                _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
+                and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
+                for k in range(index + 1, probe_index)
+            )
+            for probe_index in range(index + 1, end)
+        ):
+            return True
+        # Forward detail probe: "failed to pull image" with permanent markers,
+        # same-ref as the preceding pull echo.
         return any(
             _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER in lines[probe_index]
             and any(
