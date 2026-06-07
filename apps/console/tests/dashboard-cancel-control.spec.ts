@@ -93,6 +93,10 @@ test.describe("Operator cancel control", () => {
     await expect(confirmation).toBeVisible();
     await expect(confirmation).toContainText(WORKSPACE_ID);
 
+    // While the confirmation is open every operator control is frozen so a stray
+    // click cannot trigger another action (or re-arm cancel) mid-confirmation.
+    await expect(cancelButton).toBeDisabled();
+
     // 2. Dismiss does not POST.
     await page.getByRole("button", { name: "Dismiss", exact: true }).click();
     await expect(confirmation).not.toBeVisible();

@@ -508,7 +508,10 @@ export function OperatorControlsBlock({
       <div className="flex flex-wrap gap-2">
         {visibleControls.map((control) => {
           const submitting = submittingAction === control.action;
-          const disabled = busy || !control.enabled;
+          // Freeze every control while a destructive confirmation is pending so
+          // an operator cannot trigger another action (or re-arm cancel) until
+          // they confirm or dismiss the open dialog.
+          const disabled = busy || !control.enabled || confirming !== null;
           const reason = busy && !submitting ? "operation active" : control.reason;
           const destructive = control.action === "cancel";
           const buttonClassName = destructive
