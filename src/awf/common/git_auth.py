@@ -20,6 +20,7 @@ Security contract (mirrors how the GitHub token reaches git):
 from __future__ import annotations
 
 from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 from awf.common.github_client import RepoRef
 
@@ -62,6 +63,19 @@ def is_bitbucket_repo(repo_url: str) -> bool:
         return RepoRef.from_url(repo_url).forge == "bitbucket"
     except ValueError:
         return False
+
+
+def _is_ssh_transport(repo_url: str) -> bool:
+    """Return whether ``repo_url`` uses git's SSH transport (not HTTPS).
+
+    SSH clones (``git@bitbucket.org:…`` scp-like form or ``ssh://git@bitbucket.org/…``)
+    authenticate with SSH keys, not the HTTPS credential helper, so the BitBucket
+    HTTPS-credential preflight must not apply to them.
+    """
+    value = repo_url.strip()
+    if value.startswith("git@"):
+        return True
+    return urlsplit(value).scheme.lower() == "ssh"
 
 
 def bitbucket_git_config_entries() -> tuple[tuple[str, str], ...]:
@@ -124,14 +138,16 @@ def apply_bitbucket_git_auth(env: dict[str, str], source_env: Mapping[str, str])
 def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     """Raise a reason-coded error if a bitbucket.org repo lacks git credentials.
 
-    No-op for non-bitbucket repos (GitHub git auth is unaffected). For a
-    bitbucket.org repo missing ``BITBUCKET_API_TOKEN`` and/or ``BITBUCKET_EMAIL``,
+    No-op for non-bitbucket repos (GitHub git auth is unaffected) and for SSH
+    bitbucket URLs (``git@bitbucket.org:…`` / ``ssh://git@bitbucket.org/…``), which
+    authenticate with SSH keys rather than the HTTPS credential helper. For an
+    HTTPS bitbucket.org repo missing ``BITBUCKET_API_TOKEN`` and/or ``BITBUCKET_EMAIL``,
     raises :class:`GitAuthNotConfiguredError` with
     ``reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED`` and a message that names
     only the missing env var(s) — never any value — turning an otherwise opaque
     clone failure (or TTY hang) into a fast, diagnosable error.
     """
-    if not is_bitbucket_repo(repo_url):
+    if not is_bitbucket_repo(repo_url) or _is_ssh_transport(repo_url):
         return
     missing = [
         name

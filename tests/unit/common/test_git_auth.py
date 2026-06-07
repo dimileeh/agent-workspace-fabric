@@ -145,6 +145,20 @@ def test_verify_bitbucket_git_auth_noop_for_github_repo() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "repo_url",
+    [
+        "git@bitbucket.org:ws/repo.git",
+        "ssh://git@bitbucket.org/ws/repo.git",
+    ],
+)
+def test_verify_bitbucket_git_auth_noop_for_ssh_bitbucket_repo(repo_url: str) -> None:
+    # SSH clones authenticate with SSH keys, not the HTTPS credential helper, so
+    # the preflight must not fail fast even when the HTTPS env vars are absent.
+    verify_bitbucket_git_auth(repo_url, {})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "source_env",
     [
         {},
