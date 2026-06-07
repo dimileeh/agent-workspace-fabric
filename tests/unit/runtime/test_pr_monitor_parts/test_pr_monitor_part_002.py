@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from awf.runtime.monitor_state_keys import _merge_method_blocked_key
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -261,3 +262,41 @@ class TestMonitorState:
         state.mark_addressed("T1", "defer")
         state.mark_addressed("T1", "fix_committed")
         assert state.threads_addressed_ids == {"T1": "fix_committed"}
+
+    @pytest.mark.unit
+    def test_review_thread_needs_attention_when_never_addressed(self) -> None:
+        """A thread with no prior verdict (verdict=None) needs attention."""
+        state = MonitorState()
+        thread = _thread(tid="T1")
+        assert _review_thread_needs_attention(state, thread) is True
+
+    @pytest.mark.unit
+    def test_review_thread_needs_attention_when_agent_failed(self) -> None:
+        """A thread with verdict ``agent_failed`` still needs attention.
+
+        ``agent_failed`` means AWF owes the thread another attempt; it must
+        not be treated as addressed (see ``_needs_comment_attention`` doc)."""
+        state = MonitorState(threads_addressed_ids={"T1": "agent_failed"})
+        thread = _thread(tid="T1")
+        assert _review_thread_needs_attention(state, thread) is True
+
+
+class TestMergeMethodBlocker:
+    """decide() must surface a merge-method blocker stored in state."""
+
+    @pytest.mark.unit
+    def test_merge_method_blocker_returns_notify_human_with_message(self) -> None:
+        """When a merge-method blocker is recorded in state, decide returns
+        NotifyHuman carrying the blocker message so the human-attention
+        comment includes a reason (e.g. 'squash merge is not allowed by
+        this repository ruleset')."""
+        key = _merge_method_blocked_key(pr_number=42, head_sha="abc123")
+        blocker_msg = "squash merge is not allowed by this repository's ruleset"
+        state = MonitorState(threads_addressed_ids={key: blocker_msg})
+        action = decide(
+            status=_status(head_sha="abc123"),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+        assert action.message == blocker_msg
