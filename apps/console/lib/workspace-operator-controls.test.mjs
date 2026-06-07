@@ -116,6 +116,96 @@ test("control eligibility revalidate requires validation recovery", () => {
   );
 });
 
+test("cancel control is visible and enabled for active non-terminal statuses", () => {
+  for (const status of [
+    "requested",
+    "provisioning",
+    "ready",
+    "running",
+    "validating",
+    "pushing",
+    "monitoring_pr",
+  ]) {
+    const control = getWorkspaceOperatorControls({
+      overview: overview({ status, pr_url: null }),
+    }).find((item) => item.action === "cancel");
+    assert.ok(control, `missing cancel control for ${status}`);
+    assert.equal(control.visible, true, `cancel should be visible for ${status}`);
+    assert.equal(control.enabled, true, `cancel should be enabled for ${status}`);
+    assert.equal(control.reason, null);
+    assert.equal(control.label, "Cancel");
+  }
+});
+
+test("cancel control is hidden and disabled for terminal and destroy statuses", () => {
+  for (const status of ["completed", "failed", "cancelled", "destroying", "destroyed"]) {
+    const control = getWorkspaceOperatorControls({
+      overview: overview({ status, pr_url: null }),
+    }).find((item) => item.action === "cancel");
+    assert.ok(control, `missing cancel control for ${status}`);
+    assert.equal(control.visible, false, `cancel should be hidden for ${status}`);
+    assert.equal(control.enabled, false, `cancel should be disabled for ${status}`);
+    assert.ok(control.reason, `cancel should carry a reason for ${status}`);
+  }
+});
+
+test("active operation disables cancel but keeps it visible for active statuses", () => {
+  const control = getWorkspaceOperatorControls({
+    overview: overview({ status: "running", pr_url: null, active_operation: "op_active" }),
+  }).find((item) => item.action === "cancel");
+  assert.ok(control, "missing cancel control");
+  assert.equal(control.enabled, false);
+  assert.equal(control.visible, true);
+  assert.equal(control.reason, "active operation");
+});
+
+test("cancel success and failure summaries format the Cancel label", () => {
+  assert.deepEqual(
+    summarizeWorkspaceOperatorSuccess("cancel", {
+      workspace_id: "ws_123",
+      operation_id: "op_cancel",
+      operation_status: "succeeded",
+      status: "cancelled",
+      message: "cancelled",
+    }),
+    {
+      action: "cancel",
+      operationId: "op_cancel",
+      status: "succeeded",
+      message: "Cancel succeeded: op_cancel",
+      warnings: [],
+    },
+  );
+  assert.deepEqual(
+    summarizeWorkspaceOperatorFailure({
+      ok: false,
+      status: 409,
+      message: "Workspace cannot be cancelled from this state.",
+      errorCode: "WORKSPACE_STATE_NOT_CANCELLABLE",
+      detail: {
+        detail: {
+          error_code: "WORKSPACE_STATE_NOT_CANCELLABLE",
+          message: "Workspace cannot be cancelled from this state.",
+        },
+      },
+    }),
+    {
+      errorCode: "WORKSPACE_STATE_NOT_CANCELLABLE",
+      message: "WORKSPACE_STATE_NOT_CANCELLABLE: Workspace cannot be cancelled from this state.",
+    },
+  );
+});
+
+test("active monitoring workspace exposes the full operator action set", () => {
+  const actions = new Set(
+    getWorkspaceOperatorControls({
+      overview: overview({ status: "monitoring_pr", pr_url: "https://github.test/pr/1" }),
+      mergeQueueItem: mergeQueueItem({ required_next_action: "validate" }),
+    }).map((control) => control.action),
+  );
+  assert.deepEqual(actions, new Set(["remonitor", "refresh", "revalidate", "cancel"]));
+});
+
 test("active operation disables all operator controls", () => {
   const eligible = {
     overview: overview({

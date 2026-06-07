@@ -60,6 +60,79 @@ test("remonitor BFF posts with server token and idempotency key", async () => {
   assert.equal(responseText.includes("server-token"), false);
 });
 
+test("cancel BFF maps to cancel endpoint and sends stop_stack", async () => {
+  const calls = [];
+  process.env.AWF_API_BASE_URL = "https://awf.example.test";
+  process.env.AWF_API_TOKEN = "server-token";
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return jsonResponse({
+      workspace_id: "ws_123",
+      operation_id: "op_cancel",
+      operation_status: "succeeded",
+      status: "cancelled",
+      message: "cancelled",
+    });
+  };
+
+  const response = await handleWorkspaceControlRoute(
+    "cancel",
+    "ws_123",
+    jsonRequest({
+      reason: "operator console cancel",
+      workspace_version: 7,
+      idempotency_key: "cancel-idem",
+    }),
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://awf.example.test/v1/workspaces/ws_123/cancel");
+  assert.equal(calls[0].init.method, "POST");
+  const headers = normalizeHeaders(calls[0].init.headers);
+  assert.equal(headers.authorization, "Bearer server-token");
+  assert.equal(headers["idempotency-key"], "cancel-idem");
+  assert.equal(headers["if-match"], "7");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    reason: "operator console cancel",
+    stop_stack: true,
+  });
+});
+
+test("cancel BFF sends stop_stack even without a reason", async () => {
+  const calls = recordAwfProxy({
+    workspace_id: "ws_123",
+    operation_id: "op_cancel",
+    operation_status: "succeeded",
+    status: "cancelled",
+    message: "cancelled",
+  });
+
+  const response = await handleWorkspaceControlRoute("cancel", "ws_123", rawRequest(""));
+
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].init.body), { stop_stack: true });
+});
+
+test("cancel BFF rejects requested_tier", async () => {
+  let called = false;
+  globalThis.fetch = async () => {
+    called = true;
+    return jsonResponse({});
+  };
+
+  const response = await handleWorkspaceControlRoute(
+    "cancel",
+    "ws_123",
+    jsonRequest({ requested_tier: 1 }),
+  );
+
+  assert.equal(called, false);
+  assert.equal(response.status, 400);
+  await assertInvalidRequest(response, "requested_tier is only supported for revalidate.");
+});
+
 test("refresh BFF preserves structured AWF errors", async () => {
   process.env.AWF_API_BASE_URL = "https://awf.example.test";
   process.env.AWF_API_TOKEN = "server-token";

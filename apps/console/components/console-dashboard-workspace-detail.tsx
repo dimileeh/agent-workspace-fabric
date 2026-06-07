@@ -3,6 +3,7 @@
 import {
 Activity,
 AlertCircle,
+Ban,
 CheckCircle2,
 FileText,
 Loader2,
@@ -11,7 +12,9 @@ RefreshCw,
 X
 } from "lucide-react";
 import {
-useLayoutEffect
+useEffect,
+useLayoutEffect,
+useState
 } from "react";
 
 import { formatAgentEffort,formatAgentLabel } from "@/lib/agent-format";
@@ -287,8 +290,13 @@ export function WorkspaceSummary({
         </div>
         <WorkspaceRecoveryBlock item={mergeQueueItem} workspace={workspace} overview={overview} />
         <OperatorControlsBlock
+          // Reset the block's local confirm state when the operator switches
+          // workspaces so a pending destructive cancel confirmation can never
+          // carry over onto a different (still cancel-enabled) workspace.
+          key={overview.workspace_id}
           controls={operatorControls}
           state={operatorActionState}
+          workspaceId={overview.workspace_id}
           onAction={onOperatorAction}
         />
         <UsageSummaryBlock
@@ -460,19 +468,34 @@ export function WorkspaceRecoveryBlock({
 export function OperatorControlsBlock({
   controls,
   state,
+  workspaceId,
   onAction,
 }: {
   controls: WorkspaceOperatorControl[];
   state: OperatorActionState;
+  workspaceId: string;
   onAction: (action: WorkspaceOperatorAction, requestedTier?: number) => void;
 }) {
+  const [confirming, setConfirming] = useState<WorkspaceOperatorAction | null>(null);
   const visibleControls = controls.filter((control) => control.visible);
-  if (visibleControls.length === 0) {
-    return null;
-  }
 
   const submittingAction = state.status === "submitting" ? state.action : null;
   const busy = submittingAction !== null;
+  const cancelControl = visibleControls.find((control) => control.action === "cancel");
+  const cancelConfirmEnabled = cancelControl !== undefined && cancelControl.enabled && !busy;
+
+  // Drop a pending cancel confirmation as soon as it no longer applies — the
+  // operator switched workspaces, cancel became disabled, or another operation
+  // started — so Confirm cancel can never act on a stale or guarded selection.
+  useEffect(() => {
+    if (confirming === "cancel" && !cancelConfirmEnabled) {
+      setConfirming(null);
+    }
+  }, [confirming, cancelConfirmEnabled]);
+
+  if (visibleControls.length === 0) {
+    return null;
+  }
 
   return (
     <div className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
@@ -485,16 +508,25 @@ export function OperatorControlsBlock({
       <div className="flex flex-wrap gap-2">
         {visibleControls.map((control) => {
           const submitting = submittingAction === control.action;
-          const disabled = busy || !control.enabled;
+          // Freeze every control while a destructive confirmation is pending so
+          // an operator cannot trigger another action (or re-arm cancel) until
+          // they confirm or dismiss the open dialog.
+          const disabled = busy || !control.enabled || confirming !== null;
           const reason = busy && !submitting ? "operation active" : control.reason;
+          const destructive = control.action === "cancel";
+          const buttonClassName = destructive
+            ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-white px-2.5 text-[11px] font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+            : "inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
           return (
             <div key={control.action} className="flex min-w-0 items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => onAction(control.action, control.requestedTier)}
+                onClick={() =>
+                  destructive ? setConfirming(control.action) : onAction(control.action, control.requestedTier)
+                }
                 disabled={disabled}
                 title={reason ? `${control.label}: ${reason}` : control.label}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                className={buttonClassName}
               >
                 <OperatorControlIcon action={control.action} spinning={submitting} />
                 {control.label}
@@ -504,6 +536,40 @@ export function OperatorControlsBlock({
           );
         })}
       </div>
+      {confirming === "cancel" && cancelConfirmEnabled ? (
+        <div
+          data-testid="operator-cancel-confirm"
+          className="grid gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-red-900"
+        >
+          <span className="min-w-0 break-words">
+            Cancel workspace <span className="mono">{workspaceId}</span>? This stops its stack and ends the run.
+          </span>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (!cancelConfirmEnabled) {
+                  return;
+                }
+                onAction("cancel");
+                setConfirming(null);
+              }}
+              disabled={!cancelConfirmEnabled}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-red-600 px-2.5 text-[11px] font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Ban size={13} aria-hidden />
+              Confirm cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(null)}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
       {state.status === "success" ? (
         <div className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-emerald-900">
           <span>{state.message}</span>
@@ -544,6 +610,9 @@ export function OperatorControlIcon({
   }
   if (action === "refresh") {
     return <RefreshCw size={13} aria-hidden />;
+  }
+  if (action === "cancel") {
+    return <Ban size={13} aria-hidden />;
   }
   return <CheckCircle2 size={13} aria-hidden />;
 }

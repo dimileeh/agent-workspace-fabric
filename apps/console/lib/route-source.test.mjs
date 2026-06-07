@@ -43,3 +43,17 @@ test("revalidate operator route delegates to the shared control handler", () => 
     /return handleWorkspaceControlRoute\("revalidate", workspaceId, request\);/,
   );
 });
+
+test("cancel operator route delegates to the shared control handler", () => {
+  const source = readFileSync(
+    new URL("../app/api/operator/workspaces/[workspaceId]/cancel/route.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /export async function POST\(request: Request, context: RouteContext\)/);
+  assert.match(source, /const \{ workspaceId \} = await context\.params;/);
+  assert.match(
+    source,
+    /return handleWorkspaceControlRoute\("cancel", workspaceId, request\);/,
+  );
+});

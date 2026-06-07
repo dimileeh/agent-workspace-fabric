@@ -581,7 +581,7 @@ export interface Operation {
   log_stream_ids: string[];
 }
 
-export type WorkspaceOperatorAction = "remonitor" | "refresh" | "revalidate";
+export type WorkspaceOperatorAction = "remonitor" | "refresh" | "revalidate" | "cancel";
 
 export interface WorkspaceControlWarning {
   warning_code: string;
