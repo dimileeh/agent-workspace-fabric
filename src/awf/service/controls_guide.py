@@ -29,6 +29,7 @@ from awf.service.controls_errors import (
 from awf.service.controls_helpers import (
     _add_control_audit_event,
     _cancel_stale_pr_monitor_recovery_operations,
+    _claim_reset_snapshot,
     _control_response,
     _event_payload,
     _operation_payload,
@@ -155,8 +156,22 @@ async def guide_workspace(
     # monitor while the original loop is still running. Clear stale leases
     # only; a live lease keeps ownership and picks up the directive on its
     # next monitor cycle.
+    #
+    # Exception: a failed workspace has no live worker — any claims belong
+    # to a dead worker and must be force-cleared so claim_monitoring_pr can
+    # acquire the row immediately after the failed→monitoring_pr transition
+    # (mirrors remonitor_workspace, which unconditionally nulls all claims).
     claims_reset = _reset_stale_monitor_execution_claims(workspace, now=utcnow())
     state_reset = await _reset_failed_workspace_for_remonitor(self._session, workspace)
+    if state_reset is not None:
+        remaining = _claim_reset_snapshot(workspace)
+        workspace.monitor_claimed_by = None
+        workspace.monitor_claim_expires_at = None
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+        for key, val in remaining.items():
+            if val is not None:
+                claims_reset[key] = val
     if state_reset is None:
         await repo.advance_workspace_version(workspace)
     event_payload: dict[str, object | None] = {

@@ -574,3 +574,52 @@ async def test_guide_failed_workspace_idempotency_replays(
 
     assert response.operation_id == replay.operation_id
     assert len(operations) == 1
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_force_clears_unexpired_claims(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace must null unexpired claims from a dead worker.
+
+    A failed workspace has no live worker; its monitor/execution claims
+    (even if unexpired) are orphaned. If guide only clears *stale* leases,
+    the failed→monitoring_pr transition leaves the row unclaimable until
+    the lease expires — new workers see a live claim and skip it.
+    Unlike guide on a live monitoring_pr workspace (where a real worker
+    holds the lease and picks up the directive on its next cycle), the
+    failed path must force-null all claims so claim_monitoring_pr can
+    acquire immediately (mirrors remonitor_workspace).
+    """
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/92"
+    workspace.pr_number = 92
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    workspace.monitor_claimed_by = "dead-monitor-worker"
+    workspace.monitor_claim_expires_at = future
+    workspace.execution_claimed_by = "dead-execution-worker"
+    workspace.execution_claim_expires_at = future
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="continue after failure",
+        idempotency_key="guide-failed-clear-claims",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # Orphaned claims from the dead worker must be cleared unconditionally.
+    assert workspace.monitor_claimed_by is None
+    assert workspace.monitor_claim_expires_at is None
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
+    # claims_reset must record the force-cleared values for the audit trail.
+    claims_reset = operations[0].result["claims_reset"]
+    assert claims_reset["monitor_claimed_by"] == "dead-monitor-worker"
+    assert claims_reset["execution_claimed_by"] == "dead-execution-worker"
