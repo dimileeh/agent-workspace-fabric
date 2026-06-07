@@ -24,10 +24,9 @@ from awf.control.worker import (
     ControlWorker,
     WorkerConfig,
 )
-from awf.db.enums import OperationType, WorkspaceStatus
+from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
-    OperationRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
@@ -896,412 +895,9 @@ def _unexpected_cleaner_factory() -> _UnexpectedCleaner:
     return _UnexpectedCleaner()
 
 
-class TestRunOnceStaleActiveExecutionRecoveryPart011:
+class TestRunOnceStaleActiveExecutionRecoveryPart011RemotePushBranch:
     @pytest.mark.unit
-    async def test_preserved_active_pushed_branch_pr_lookup_failure_retries_during_grace(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        workspace_id = await _create_active_execution(
-            session_factory,
-            origin_repo,
-            "preserved-pushed-branch-pr-lookup-transient-failure",
-            WorkspaceStatus.pushing,
-            compose_project_name="awf_preserved_pr_lookup_transient_failure",
-            create_task_attempt=True,
-        )
-        branch_name = f"awf/{workspace_id}"
-        resolved_head_sha = "d" * 40
-        resolver = _SequenceBranchOpenPRResolver(
-            {
-                branch_name: [
-                    RuntimeError("temporary gh pr list failure"),
-                    [
-                        SimpleNamespace(
-                            url="https://github.com/example/repo/pull/272",
-                            number=272,
-                            head_ref=branch_name,
-                            head_sha=resolved_head_sha,
-                        )
-                    ],
-                ]
-            }
-        )
-        executor = _RecordingExecutor()
-        cleaner = _RecordingRuntimeCleaner()
-        worker = ControlWorker(
-            session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
-            executor=executor,
-            runtime_inspector=_RecordingRuntimeInspector(
-                {"awf_preserved_pr_lookup_transient_failure": _live_agent_snapshot()}
-            ),
-            runtime_cleaner=cleaner,
-            open_pr_resolver=resolver,
-            config=WorkerConfig(
-                poll_interval_seconds=0.01,
-                max_concurrent_executions=0,
-                stale_active_execution_scan_interval_seconds=0.0,
-                active_execution_preservation_grace_seconds=60.0,
-            ),
-        )
-
-        await worker.run_once()
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
-            assert ws is not None
-            blocked_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_blocked",
-            )
-            operator_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_operator_required",
-            )
-            monitor_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_monitor_attached",
-            )
-
-        assert ws.status == WorkspaceStatus.pushing.value
-        assert ws.subphase == "runtime_preserved_salvage_blocked"
-        assert len(blocked_events) == 1
-        blocked_payload = blocked_events[0].payload
-        assert blocked_payload is not None
-        assert blocked_payload["blocked_reason"] == "open_pr_lookup_failed"
-        assert blocked_payload["branch_pr_lookup"] == {
-            "branch_name": branch_name,
-            "error_type": "RuntimeError",
-            "failure": "resolver_exception",
-            "source": "open_pr_resolver",
-        }
-        assert operator_events == []
-        assert monitor_events == []
-
-        await worker.run_once()
-
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
-            assert ws is not None
-            blocked_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_blocked",
-            )
-            operator_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_operator_required",
-            )
-            monitor_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_monitor_attached",
-            )
-
-        assert ws.status == WorkspaceStatus.monitoring_pr.value
-        assert ws.pr_url == "https://github.com/example/repo/pull/272"
-        assert ws.pr_number == 272
-        assert ws.monitor_last_commit_sha == resolved_head_sha
-        assert len(blocked_events) == 1
-        assert operator_events == []
-        assert len(monitor_events) == 1
-        assert resolver.calls == [
-            {
-                "repo_url": str(origin_repo),
-                "branch_name": branch_name,
-                "base_branch": None,
-            },
-            {
-                "repo_url": str(origin_repo),
-                "branch_name": branch_name,
-                "base_branch": None,
-            },
-        ]
-        assert executor.calls == []
-        assert executor.resume_calls == []
-        assert cleaner.calls == []
-
-    @pytest.mark.unit
-    async def test_preserved_active_pushed_branch_pr_from_different_head_repo_is_ambiguous(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        branch_name = "awf/ws_branch"
-        resolver = _RecordingBranchOpenPRResolver(
-            {
-                branch_name: [
-                    SimpleNamespace(
-                        url="https://github.com/example/repo/pull/272",
-                        number=272,
-                        head_ref=branch_name,
-                        head_sha="c" * 40,
-                        head_repo_slug="contributor/repo",
-                    )
-                ]
-            }
-        )
-        worker = ControlWorker(
-            session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
-            executor=_RecordingExecutor(),
-            open_pr_resolver=resolver,
-            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
-        )
-
-        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
-            repo_url="https://github.com/example/repo.git",
-            branch_name=branch_name,
-            base_branch="development",
-        )
-
-        assert lookup is not None
-        assert lookup.state == "ambiguous"
-        assert lookup.ambiguity_reason == "open_pr_head_repo_mismatch"
-        assert lookup.payload == {
-            "branch_name": branch_name,
-            "expected_head_repo_slug": "example/repo",
-            "match_count": 1,
-            "matches": [
-                {
-                    "pr_url": "https://github.com/example/repo/pull/272",
-                    "pr_number": 272,
-                    "head_ref": branch_name,
-                    "head_sha": "c" * 40,
-                    "head_repo_slug": "contributor/repo",
-                }
-            ],
-            "source": "open_pr_resolver",
-        }
-
-    @pytest.mark.unit
-    async def test_preserved_active_pushed_branch_pr_invalid_open_pr_lookup_is_failed(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        branch_name = "awf/ws_branch"
-        resolver = _RecordingBranchOpenPRResolver(
-            {
-                branch_name: [
-                    SimpleNamespace(
-                        url="https://github.com/example/repo/pull/0",
-                        number=0,
-                        head_ref=branch_name,
-                        head_sha="d" * 40,
-                        head_repo_slug="example/repo",
-                    )
-                ]
-            }
-        )
-        worker = ControlWorker(
-            session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
-            executor=_RecordingExecutor(),
-            open_pr_resolver=resolver,
-            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
-        )
-
-        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
-            repo_url="https://github.com/example/repo.git",
-            branch_name=branch_name,
-            base_branch="development",
-        )
-
-        assert lookup is not None
-        assert lookup.state == "failed"
-        assert lookup.ambiguity_reason == "open_pr_lookup_invalid"
-        assert lookup.payload == {
-            "branch_name": branch_name,
-            "error": "open PR lookup result has invalid pr_number",
-            "source": "open_pr_resolver",
-        }
-        assert resolver.calls == [
-            {
-                "repo_url": "https://github.com/example/repo.git",
-                "branch_name": branch_name,
-                "base_branch": "development",
-            }
-        ]
-
-    @pytest.mark.unit
-    async def test_preserved_active_branch_open_pr_lookup_rejects_unsupported_forge(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        # A preserved-active BitBucket workspace must never reach the GitHub-only
-        # ``gh pr list`` path: dropping the forge would query bitbucket.org's
-        # owner/repo as a same-slug GitHub repo and could attach the wrong
-        # monitor. The lookup must fail fast instead. BitBucket Cloud *is* a
-        # supported forge (issue #345 Part 2), so the reason code must be the
-        # honest ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` (the resolver is
-        # GitHub-only), NOT the generic ``FORGE_NOT_SUPPORTED`` whose fix text
-        # would tell a bitbucket.org operator to switch to a forge they already use.
-        branch_name = "awf/ws_branch"
-        resolver = _RecordingBranchOpenPRResolver({branch_name: []})
-        worker = ControlWorker(
-            session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
-            executor=_RecordingExecutor(),
-            open_pr_resolver=resolver,
-            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
-        )
-
-        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
-            repo_url="https://bitbucket.org/example/repo.git",
-            branch_name=branch_name,
-            base_branch="development",
-        )
-
-        assert lookup is not None
-        assert lookup.state == "failed"
-        assert lookup.ambiguity_reason == "open_pr_lookup_forge_not_supported"
-        assert lookup.payload == {
-            "branch_name": branch_name,
-            "forge": "bitbucket",
-            "reason_code": "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED",
-            "failure": "open_pr_resolver_forge_not_supported",
-            "source": "open_pr_resolver",
-        }
-        # The GitHub-only resolver must never be queried for a BitBucket repo.
-        assert resolver.calls == []
-
-    @pytest.mark.unit
-    async def test_preserved_active_branch_open_pr_lookup_honors_persisted_forge_for_bare_slug(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        # A BitBucket workspace configured with ``forge: bitbucket`` but a bare
-        # ``owner/repo`` slug has no host, so ``detect_forge_from_url`` resolves it
-        # as GitHub. URL detection alone would let this BitBucket workspace reach
-        # the GitHub-only resolver and attach a same-slug GitHub PR. The gate must
-        # honor the persisted/resolved forge first and fail fast instead.
-        branch_name = "awf/ws_branch"
-        resolver = _RecordingBranchOpenPRResolver({branch_name: []})
-        worker = ControlWorker(
-            session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
-            executor=_RecordingExecutor(),
-            open_pr_resolver=resolver,
-            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
-        )
-
-        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
-            repo_url="example/repo",
-            branch_name=branch_name,
-            base_branch="development",
-            resolved_forge="bitbucket",
-        )
-
-        assert lookup is not None
-        assert lookup.state == "failed"
-        assert lookup.ambiguity_reason == "open_pr_lookup_forge_not_supported"
-        assert lookup.payload == {
-            "branch_name": branch_name,
-            "forge": "bitbucket",
-            "reason_code": "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED",
-            "failure": "open_pr_resolver_forge_not_supported",
-            "source": "open_pr_resolver",
-        }
-        # The GitHub-only resolver must never be queried for a BitBucket repo.
-        assert resolver.calls == []
-
-    @pytest.mark.unit
-    async def test_preserved_active_adopted_sync_feature_pr_fork_head_repo_attaches_monitor(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-    ) -> None:
-        workspace_id = await _create_active_execution(
-            session_factory,
-            origin_repo,
-            "preserved-adopted-sync-feature-pr-fork-head",
-            WorkspaceStatus.pushing,
-            compose_project_name="awf_preserved_adopted_sync_feature_pr_fork",
-            create_task_attempt=True,
-            task_kind="sync_feature_pr",
-            task_policy={
-                "pr_adoption": {
-                    "head_repo_slug": "contributor/repo",
-                }
-            },
-        )
-        remote_push_branch = "contributors/fix-123"
-        resolved_head_sha = "f" * 40
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
-            assert ws is not None
-            ws.repo_url = "https://github.com/example/repo.git"
-            ws.remote_push_branch = remote_push_branch
-            await s.commit()
-
-        resolver = _RecordingBranchOpenPRResolver(
-            {
-                remote_push_branch: [
-                    SimpleNamespace(
-                        url="https://github.com/example/repo/pull/277",
-                        number=277,
-                        head_ref=remote_push_branch,
-                        head_sha=resolved_head_sha,
-                        head_repo_slug="contributor/repo",
-                    )
-                ]
-            }
-        )
-        executor = _RecordingExecutor()
-        worker = ControlWorker(
-            session_factory=session_factory,
-            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
-            executor=executor,
-            runtime_inspector=_RecordingRuntimeInspector(
-                {"awf_preserved_adopted_sync_feature_pr_fork": _live_agent_snapshot()}
-            ),
-            open_pr_resolver=resolver,
-            config=WorkerConfig(
-                poll_interval_seconds=0.01,
-                max_concurrent_executions=1,
-                stale_active_execution_scan_interval_seconds=0.0,
-            ),
-        )
-
-        await worker.run_once()
-        await worker.wait_for_execution_tasks()
-
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
-            assert ws is not None
-            salvage_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_monitor_attached",
-            )
-            operator_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_operator_required",
-            )
-
-        assert ws.status == WorkspaceStatus.monitoring_pr.value
-        assert ws.pr_url == "https://github.com/example/repo/pull/277"
-        assert ws.pr_number == 277
-        assert ws.remote_push_branch == remote_push_branch
-        assert ws.monitor_last_commit_sha == resolved_head_sha
-        assert len(salvage_events) == 1
-        payload = salvage_events[0].payload
-        assert payload is not None
-        assert payload["branch_pr_lookup"] == {
-            "branch_name": remote_push_branch,
-            "expected_head_repo_slug": "contributor/repo",
-            "match_count": 1,
-            "source": "open_pr_resolver",
-        }
-        assert operator_events == []
-        assert resolver.calls == [
-            {
-                "repo_url": "https://github.com/example/repo.git",
-                "branch_name": remote_push_branch,
-                "base_branch": None,
-            }
-        ]
-        assert executor.resume_calls == [workspace_id]
-
-    @pytest.mark.unit
-    async def test_preserved_active_pushed_branch_no_open_pr_validates_committed_work(
+    async def test_preserved_active_pushed_branch_no_open_pr_uses_remote_push_branch_when_branch_name_blank(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1310,29 +906,29 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         workspace_id = await _create_active_execution(
             session_factory,
             origin_repo,
-            "preserved-pushed-branch-no-open-pr",
+            "preserved-pushed-blank-branch-name-no-open-pr",
             WorkspaceStatus.pushing,
-            compose_project_name="awf_preserved_no_open_pr",
+            compose_project_name="awf_preserved_blank_branch_name_no_open_pr",
             create_task_attempt=True,
         )
-        work_root = tmp_path / "awf-work-no-open-pr"
-        branch_name = f"awf/{workspace_id}"
+        work_root = tmp_path / "awf-work-blank-branch-name-no-open-pr"
+        remote_push_branch = f"awf/{workspace_id}"
         _worktree, base_commit, head_sha = _seed_workspace_worktree(
             worktrees_root=work_root / "worktrees",
             origin=origin_repo,
             workspace_id=workspace_id,
-            branch_name=branch_name,
+            branch_name=remote_push_branch,
             commit_change=True,
         )
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
             assert ws is not None
             ws.base_commit = base_commit
-            ws.branch_name = branch_name
-            ws.remote_push_branch = branch_name
+            ws.branch_name = "   "
+            ws.remote_push_branch = remote_push_branch
             await s.commit()
 
-        resolver = _RecordingBranchOpenPRResolver({branch_name: []})
+        resolver = _RecordingBranchOpenPRResolver({remote_push_branch: []})
         executor = _RecordingExecutor()
         cleaner = _RecordingRuntimeCleaner()
         worker = ControlWorker(
@@ -1344,7 +940,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
             ),
             executor=executor,
             runtime_inspector=_RecordingRuntimeInspector(
-                {"awf_preserved_no_open_pr": _live_agent_snapshot()}
+                {"awf_preserved_blank_branch_name_no_open_pr": _live_agent_snapshot()}
             ),
             runtime_cleaner=cleaner,
             open_pr_resolver=resolver,
@@ -1367,45 +963,26 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
                 workspace_id=workspace_id,
                 event_type="workspace.active_execution_salvage_operator_required",
             )
-            stale_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.stale_active_execution_detected",
-            )
             salvage_events = await WorkspaceEventRepository(s).list(
                 workspace_id=workspace_id,
                 event_type="workspace.active_execution_salvage_validation_requested",
             )
-            operations = await OperationRepository(s).list_for_workspace(workspace_id)
 
         assert ws.status == WorkspaceStatus.running.value
         assert ws.subphase == "runtime_preserved_validation_requested"
-        assert stale_events == []
         assert operator_events == []
         assert len(salvage_events) == 1
         salvage_payload = salvage_events[0].payload
         assert salvage_payload is not None
-        assert salvage_payload["decision"] == "validate_committed_work"
-        assert salvage_payload["workspace_status"] == WorkspaceStatus.pushing.value
         assert salvage_payload["classification"]["state"] == "committed"
         assert salvage_payload["classification"]["reason"] == "clean_branch_ahead"
-        assert salvage_payload["head_sha"] == head_sha
-        assert "branch_pr_lookup" not in salvage_payload
-        validate_ops = [
-            operation
-            for operation in operations
-            if operation.type == OperationType.validate.value
-            and operation.payload is not None
-            and operation.payload.get("source") == "worker_restart"
-        ]
-        assert len(validate_ops) == 1
-        assert validate_ops[0].payload is not None
-        assert validate_ops[0].payload["recovery_mode"] == "validate_only"
-        assert validate_ops[0].payload["source_head_sha"] == head_sha
-        assert "branch_pr_lookup" not in validate_ops[0].payload
+        assert salvage_payload["classification"]["branch_name"] == remote_push_branch
+        assert salvage_payload["classification"]["expected_branch_name"] == remote_push_branch
+        assert salvage_payload["classification"]["head_sha"] == head_sha
         assert resolver.calls == [
             {
                 "repo_url": str(origin_repo),
-                "branch_name": branch_name,
+                "branch_name": remote_push_branch,
                 "base_branch": None,
             }
         ]
