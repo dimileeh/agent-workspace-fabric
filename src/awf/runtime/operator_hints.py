@@ -39,7 +39,7 @@ def operator_hint_from_threads(threads_addressed: dict[str, str]) -> OperatorHin
         status = "pending"
     return OperatorHint(
         reason=reason,
-        directive=_optional_string(payload.get("directive")),
+        directive=_optional_stripped_string(payload.get("directive")),
         operation_id=_optional_string(payload.get("operation_id")),
         requested_at=_optional_string(payload.get("requested_at")),
         reason_code=_optional_string(payload.get("reason_code")) or "OPERATOR_REMONITOR",
@@ -243,3 +243,15 @@ def utcnow() -> datetime:
 
 def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _optional_stripped_string(value: object) -> str | None:
+    """Like ``_optional_string`` but treats whitespace-only values as absent.
+
+    The prompt path prefers ``directive`` over ``reason``, so a malformed or
+    legacy payload carrying a blank directive (e.g. ``"   "``) must fall back to
+    ``reason`` rather than instruct the agent with an empty string."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None

@@ -72,6 +72,29 @@ def test_persist_without_directive_is_byte_identical_to_remonitor_today() -> Non
 
 
 @pytest.mark.unit
+def test_whitespace_only_directive_is_treated_as_absent() -> None:
+    # A malformed/legacy payload could persist a blank directive. Since the
+    # prompt path prefers directive over reason, a whitespace-only directive
+    # must be read back as absent so the agent falls back to reason.
+    threads = {
+        OPERATOR_HINT_STATE_KEY: json.dumps(
+            {
+                "reason": "operator guidance recorded",
+                "directive": "   ",
+                "operation_id": "op_blank",
+                "status": "pending",
+            }
+        )
+    }
+
+    restored = operator_hint_from_threads(threads)
+
+    assert restored is not None
+    assert restored.directive is None
+    assert restored.reason == "operator guidance recorded"
+
+
+@pytest.mark.unit
 def test_build_pending_payload_includes_directive_only_when_set() -> None:
     with_directive = build_pending_operator_hint_payload(
         OperatorHint(reason="audit", directive="do the thing", operation_id="op1")
