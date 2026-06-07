@@ -519,7 +519,7 @@ async def _execute(
             requested_action="rerun_failed_ci",
             reason=(
                 "CI failure logs matched transient infrastructure signatures; "
-                "rerunning failed GitHub jobs before invoking an agent."
+                "rerunning failed CI jobs before invoking an agent."
             ),
             reason_code=_CI_TRANSIENT_RERUN_REASON,
             pr_number=pr_number,
@@ -610,8 +610,8 @@ async def _execute(
                     action="ci_transient_rerun_wait",
                     requested_action="wait_for_rerun_rollup",
                     reason=(
-                        "GitHub accepted at least one failed-job rerun; "
-                        "waiting before the next PR status poll so the "
+                        "The CI provider accepted at least one failed-job "
+                        "rerun; waiting before the next PR status poll so the "
                         "rollup can leave its stale failure snapshot."
                     ),
                     reason_code=_CI_TRANSIENT_RERUN_REASON,
@@ -702,9 +702,9 @@ async def _execute(
             action="ci_transient_rerun_wait",
             requested_action="wait_for_rerun_rollup",
             reason=(
-                "GitHub accepted the failed-job rerun; waiting before the "
-                "next PR status poll so the rollup can leave its stale "
-                "failure snapshot."
+                "The CI provider accepted the failed-job rerun; waiting "
+                "before the next PR status poll so the rollup can leave its "
+                "stale failure snapshot."
             ),
             reason_code=_CI_TRANSIENT_RERUN_REASON,
             pr_number=pr_number,
