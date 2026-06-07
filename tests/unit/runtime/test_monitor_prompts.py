@@ -550,8 +550,7 @@ class TestOperatorHintPrompt:
         )
 
         assert (
-            "An operator manually requested re-monitoring this PR with the following hint:"
-            in prompt
+            "An operator manually provided guidance for this PR with the following hint:" in prompt
         )
         assert "Address what the hint says, commit any code changes locally" in prompt
         assert "push a fix commit" not in prompt
@@ -559,7 +558,7 @@ class TestOperatorHintPrompt:
         assert "op_rehint" in prompt
         assert "Workspace runtime context" in prompt
         assert "UNTRUSTED EXTERNAL EVIDENCE" in prompt
-        assert "source_kind: operator_remonitor_hint" in prompt
+        assert "source_kind: operator_hint" in prompt
         assert (
             "AWF-EVIDENCE> the docs CTA URL 404s; correct URL is https://example.test/docs"
         ) in prompt

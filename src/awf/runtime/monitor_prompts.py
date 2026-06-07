@@ -245,8 +245,8 @@ def operator_hint_prompt(
     effective = directive or reason
     evidence = render_untrusted_evidence(
         UntrustedEvidence(
-            source_kind="operator_remonitor_hint",
-            source_name="AWF operator remonitor hint",
+            source_kind="operator_hint",
+            source_name="AWF operator hint",
             source_id=operation_id,
             location=f"{repo_slug}#{pr_number}",
             metadata=(
@@ -258,7 +258,7 @@ def operator_hint_prompt(
         )
     )
     return (
-        f"An operator manually requested re-monitoring this PR with the following hint:\n\n"
+        "An operator manually provided guidance for this PR with the following hint:\n\n"
         f"{evidence}\n\n"
         f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         f"{_SAFETY_POLICY}\n"
