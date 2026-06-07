@@ -199,34 +199,41 @@ def merge_state_status_for(*, merged: bool, closed: bool) -> MergeStateStatus:
     return MergeStateStatus.CLEAN
 
 
-# BitBucket build-status states per the commit-statuses endpoint.
+# BitBucket build-status states per the commit-statuses endpoint. Known
+# in-progress states (INPROGRESS/PENDING) need no allow-list of their own: any
+# state that is neither FAILED nor explicitly SUCCESSFUL is treated as not-yet-
+# green, which also covers unrecognized/new BitBucket states conservatively.
 _BB_STATUS_FAILED = {"FAILED", "STOPPED"}
-_BB_STATUS_PENDING = {"INPROGRESS", "PENDING"}
 _BB_STATUS_SUCCESS = {"SUCCESSFUL"}
 
 
 def parse_check_state(statuses: list[dict[str, Any]]) -> CheckState:
     """Reduce BitBucket commit build-statuses to a neutral aggregate ``CheckState``.
 
-    No statuses reported → PENDING; any FAILED/STOPPED → FAILURE; else any
-    INPROGRESS/PENDING → PENDING; else (all SUCCESSFUL) → SUCCESS.
+    No statuses reported → PENDING; any FAILED/STOPPED → FAILURE; else
+    SUCCESS only when *every* status is explicitly SUCCESSFUL; otherwise
+    PENDING.
 
     An empty status page is treated as PENDING rather than SUCCESS: a freshly
     pushed PR has no commit status until Pipelines posts one, and reporting
     SUCCESS there would let ``decide()`` skip the WaitForCI gate and merge
     before any check completed. This mirrors the GitHub path, which defaults a
     missing rollup to PENDING (see ``github_client`` ``fetch_pr_status``).
+
+    SUCCESS requires an allow-list match (``_BB_STATUS_SUCCESS``): an
+    unrecognized or newly introduced BitBucket state is treated as
+    not-yet-green (PENDING) rather than silently passing the WaitForCI gate.
     """
     if not statuses:
         return CheckState.PENDING
-    saw_pending = False
+    saw_unfinished = False
     for status in statuses:
         state = str(status.get("state") or "").upper()
         if state in _BB_STATUS_FAILED:
             return CheckState.FAILURE
-        if state in _BB_STATUS_PENDING:
-            saw_pending = True
-    if saw_pending:
+        if state not in _BB_STATUS_SUCCESS:
+            saw_unfinished = True
+    if saw_unfinished:
         return CheckState.PENDING
     return CheckState.SUCCESS
 

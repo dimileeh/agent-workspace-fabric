@@ -110,6 +110,12 @@ def test_bb_merge_strategy_for_method(method: str, expected: str | None) -> None
         ([{"state": "INPROGRESS"}], CheckState.PENDING),
         ([{"state": "FAILED"}, {"state": "SUCCESSFUL"}], CheckState.FAILURE),
         ([{"state": "STOPPED"}], CheckState.FAILURE),
+        # Unrecognized / new status values must not be read as green: they map
+        # to PENDING so decide() keeps waiting instead of skipping WaitForCI.
+        ([{"state": "WHATEVER"}], CheckState.PENDING),
+        ([{"state": ""}], CheckState.PENDING),
+        ([{"state": "SUCCESSFUL"}, {"state": "WHATEVER"}], CheckState.PENDING),
+        ([{"state": "FAILED"}, {"state": "WHATEVER"}], CheckState.FAILURE),
     ],
 )
 def test_parse_check_state(states: list[dict], expected: CheckState) -> None:
