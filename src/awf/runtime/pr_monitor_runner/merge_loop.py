@@ -386,15 +386,21 @@ async def _attempt_merge_method(
         # contradicting the eventual completion. Unlike GitHub, BitBucket has a
         # transient blocker that later succeeds, so this case is unique to it.
         if exc.reason_code != BITBUCKET_MERGE_IN_PROGRESS:
+            # Forward ``exc.reason_code`` as the primary audit field rather than a
+            # flat ``BITBUCKET_MERGE_FAILED`` so the specific diagnostic code
+            # (e.g. ``BITBUCKET_MERGE_METHOD_UNSUPPORTED`` from an unmappable merge
+            # method) survives end-to-end in the operation record and audit event.
+            # An operator inspecting events sees the real cause without parsing the
+            # prose ``error_message``.
             await self._finish_monitor_operation(
                 merge_operation,
                 status=OperationStatus.failed,
                 result={
                     "status": "failed",
                     "outcome": "bitbucket_merge_failed",
-                    "reason_code": "BITBUCKET_MERGE_FAILED",
+                    "reason_code": exc.reason_code,
                 },
-                error_code="BITBUCKET_MERGE_FAILED",
+                error_code=exc.reason_code,
                 error_message=str(exc),
             )
             await self._record_pr_monitor_audit_event(
@@ -402,7 +408,7 @@ async def _attempt_merge_method(
                 event_type=_AUDIT_MERGE_RESULT_EVENT,
                 action="merge",
                 outcome="failed",
-                reason_code="BITBUCKET_MERGE_FAILED",
+                reason_code=exc.reason_code,
                 pr_number=pr_number,
                 status=merge_status,
                 base_branch=base_branch,

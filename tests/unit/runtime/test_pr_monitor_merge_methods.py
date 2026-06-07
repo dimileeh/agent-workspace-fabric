@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.audit import redact_audit_text
 from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_IN_PROGRESS,
+    BITBUCKET_MERGE_METHOD_UNSUPPORTED,
     BITBUCKET_RATE_LIMITED,
     BitBucketClientError,
 )
@@ -1098,6 +1099,65 @@ async def test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling(
     assert sleep_fn.calls == [60]
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_deterministic_bitbucket_merge_failure_forwards_specific_reason_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The failed merge operation forwards ``exc.reason_code`` end-to-end.
+
+    A specific code such as ``BITBUCKET_MERGE_METHOD_UNSUPPORTED`` (raised when a
+    merge method maps to no BitBucket strategy) must surface in the operation
+    record and audit event rather than being flattened to a generic
+    ``BITBUCKET_MERGE_FAILED`` — otherwise an operator inspecting events has to
+    read the prose ``error_message`` to recover the real cause.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="merge_pr",
+                status=None,
+                body="unsupported merge method for BitBucket: 'rebase'",
+                reason_code=BITBUCKET_MERGE_METHOD_UNSUPPORTED,
+            )
+        ],
+    )
+
+    terminal, _state, _sleep_fn, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    async with factory() as session:
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.monitor_state,
+        )
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+    failed_ops = [op for op in operations if op.status == OperationStatus.failed.value]
+    assert failed_ops, "expected a failed merge operation to be recorded"
+    assert all(op.error_code == BITBUCKET_MERGE_METHOD_UNSUPPORTED for op in failed_ops)
+    assert not any(op.error_code == "BITBUCKET_MERGE_FAILED" for op in failed_ops)
+
+    merge_failed_events = [
+        event
+        for event in events
+        if isinstance(event.payload, dict)
+        and event.payload.get("action") == "merge"
+        and event.payload.get("outcome") == "failed"
+    ]
+    assert merge_failed_events, "expected a failed merge audit event"
+    assert all(
+        event.payload.get("reason_code") == BITBUCKET_MERGE_METHOD_UNSUPPORTED
+        for event in merge_failed_events
     )
 
 
