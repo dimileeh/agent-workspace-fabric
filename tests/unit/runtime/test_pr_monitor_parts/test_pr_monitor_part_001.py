@@ -727,6 +727,37 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_compact_cached_pull_then_test_timeout_at_window_reports_ci_failure(
+        self,
+    ) -> None:
+        """A compact *cached* ``docker pull`` (``Status: Image is up to date``)
+        followed by a real Go test ``context deadline exceeded`` sitting exactly
+        ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines below the bare ``docker pull``
+        echo must still reach the repair agent. The timeout is anchored on Docker
+        pull-*failure* wording, not the bare echo, and a cached pull emits no such
+        failure line — so there is no Docker evidence to license a rerun."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "Status: Image is up to date for postgres:16\n"
+                "    payments_test.go:91: context deadline exceeded\n"
+                "--- FAIL: TestPaymentsIntegration (30.01s)"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
         """A failure whose log matches neither transient nor registry-timeout
         markers falls through to the repair agent."""
