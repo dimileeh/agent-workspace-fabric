@@ -7,10 +7,13 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, TaskAttemptRepository
+from awf.db.models import MergeCandidate
+from awf.db.repositories import MergeCandidateRepository, OperationRepository, TaskAttemptRepository
+from awf.runtime.monitor_state_keys import _non_check_reviewer_settle_done_key
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_STATE_KEY,
     operator_hint_from_threads,
@@ -623,3 +626,67 @@ async def test_guide_failed_workspace_force_clears_unexpired_claims(
     claims_reset = operations[0].result["claims_reset"]
     assert claims_reset["monitor_claimed_by"] == "dead-monitor-worker"
     assert claims_reset["execution_claimed_by"] == "dead-execution-worker"
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_uses_workspace_sha_when_past_settle(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace uses workspace monitor_last_commit_sha when settle elapsed.
+
+    When the reviewer-settle window has elapsed for the workspace's head SHA and
+    the workspace was updated more recently than the (still-open) candidate, guide
+    must reopen the merge candidate with workspace.monitor_last_commit_sha — not
+    the stale candidate.head_sha.  This mirrors remonitor_workspace's
+    _remonitor_current_head_sha logic, which guide omitted before this fix
+    (thread PRRT_kwDOSJAM6s6Hr-2z).
+
+    The candidate must be open for the settle preference to fire; a closed
+    candidate falls back to latest.head_sha in both remonitor and guide.
+    """
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.failed,
+        title="guide settle head sha",
+    )
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "monitor crashed"
+    workspace.monitor_iter_count = 3
+    # Advance the workspace to a newer head SHA while the open candidate still
+    # holds the older one — this is the state after the monitor pushed a new
+    # commit but failed before it could update the candidate row.
+    workspace_sha = "w" * 40
+    candidate_sha = "c" * 40
+    workspace.monitor_last_commit_sha = workspace_sha
+    candidate.head_sha = candidate_sha
+    # Keep the candidate open so _remonitor_current_head_sha can compare the two SHAs.
+    candidate.status = "open"
+    await session.flush()
+    # workspace.updated_at must be > candidate.updated_at for the settle preference
+    # to activate; backdate the candidate to guarantee the ordering.
+    await session.execute(
+        sa_update(MergeCandidate)
+        .where(MergeCandidate.id == candidate.id)
+        .values(updated_at=workspace.updated_at - timedelta(minutes=5))
+    )
+    await session.flush()
+    # Mark the reviewer-settle window as elapsed for the workspace's head SHA.
+    settle_key = _non_check_reviewer_settle_done_key(
+        pr_number=workspace.pr_number, head_sha=workspace_sha
+    )
+    workspace.monitor_threads_addressed = {settle_key: "elapsed"}
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="continue after failure",
+        idempotency_key="guide-settle-sha",
+        expected_version=workspace.version,
+    )
+    refreshed = await MergeCandidateRepository(session).get_by_attempt_id(candidate.attempt_id)
+
+    assert refreshed is not None
+    assert refreshed.status == "open"
+    # Guide must use the workspace's post-settle SHA, not the stale candidate SHA.
+    assert refreshed.head_sha == workspace_sha

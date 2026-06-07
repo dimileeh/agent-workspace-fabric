@@ -13,7 +13,7 @@ from typing import Any, cast
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import MergeCandidateRepository, OperationRepository, WorkspaceRepository
 from awf.runtime.operator_hints import (
     build_pending_operator_hint_payload,
     persist_operator_hint,
@@ -34,6 +34,7 @@ from awf.service.controls_helpers import (
     _event_payload,
     _operation_payload,
     _operator_operation_payload,
+    _remonitor_current_head_sha,
     _reset_failed_workspace_for_remonitor,
     _reset_stale_monitor_execution_claims,
     _workspace_pr_operation_context,
@@ -163,7 +164,20 @@ async def guide_workspace(
     # acquire the row immediately after the failed→monitoring_pr transition
     # (mirrors remonitor_workspace, which unconditionally nulls all claims).
     claims_reset = _reset_stale_monitor_execution_claims(workspace, now=utcnow())
-    state_reset = await _reset_failed_workspace_for_remonitor(self._session, workspace)
+    # For failed→monitoring_pr resets, resolve the effective head SHA using the
+    # same logic as remonitor_workspace so the reopened merge candidate gets the
+    # post-settle workspace SHA instead of the potentially stale candidate.head_sha.
+    candidate_head_sha: str | None = None
+    if current == WorkspaceStatus.failed:
+        candidate_repo = MergeCandidateRepository(self._session)
+        open_candidate = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace_id)
+        candidate_head_sha = _remonitor_current_head_sha(workspace, open_candidate, monitor_state)
+        if candidate_head_sha is None:
+            latest = await candidate_repo.get_latest_for_workspace_with_merge_inputs(workspace_id)
+            candidate_head_sha = latest.head_sha if latest is not None and latest.head_sha else None
+    state_reset = await _reset_failed_workspace_for_remonitor(
+        self._session, workspace, candidate_head_sha=candidate_head_sha
+    )
     if state_reset is not None:
         remaining = _claim_reset_snapshot(workspace)
         workspace.monitor_claimed_by = None
