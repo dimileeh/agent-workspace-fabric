@@ -13,6 +13,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
     BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_MERGE_METHOD_UNSUPPORTED,
+    BITBUCKET_MERGE_TASK_TIMEOUT,
     BitBucketClientError,
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
@@ -325,6 +326,43 @@ async def test_merge_pr_409_conflict_body_stays_deterministic() -> None:
     assert excinfo.value.status == 409
 
 
+async def test_merge_pr_409_unrelated_in_progress_body_stays_deterministic() -> None:
+    # A bare "in progress" substring is too broad: BitBucket overloads 409 on the
+    # merge POST for other concurrent-modification conflicts whose bodies read e.g.
+    # "another action is in progress". That is not a merge already in flight, so it
+    # must stay deterministic (BITBUCKET_API_ERROR) — classifying it transient would
+    # poll forever instead of surfacing the conflict and notifying a human.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "POST",
+        f"{_PR}/merge",
+        status=409,
+        json={"error": {"message": "Another action is already in progress."}},
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert excinfo.value.reason_code == BITBUCKET_API_ERROR
+    assert excinfo.value.status == 409
+
+
+async def test_merge_pr_409_merge_in_progress_phrasing_maps_to_transient() -> None:
+    # The merge-specific in-progress phrasing (the genuine recoverable case) still
+    # maps to the transient reason even though the bare "in progress" substring was
+    # removed: the body mentions both "merge" and "in progress".
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "POST",
+        f"{_PR}/merge",
+        status=409,
+        json={"error": {"message": "A merge for this pull request is already in progress."}},
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert excinfo.value.reason_code == BITBUCKET_MERGE_IN_PROGRESS
+
+
 async def test_merge_pr_non_409_conflict_keeps_api_error_reason() -> None:
     # Other 4xx faults on the merge POST stay deterministic (BITBUCKET_API_ERROR)
     # so they fail fast rather than being mistaken for an in-flight merge.
@@ -424,6 +462,11 @@ async def test_merge_pr_async_202_poll_budget_exhausted_raises() -> None:
     # be indistinguishable from a 202 Accepted and from a non-success terminal task.
     assert excinfo.value.status is None
     assert "status=202" not in str(excinfo.value)
+    # A still-PENDING task at budget exhaustion does not mean the merge failed —
+    # BitBucket may still complete it. The distinct reason code lets the monitor
+    # treat the timeout as an in-flight merge (cancel + re-poll) instead of a hard
+    # deterministic failure (which would post a spurious "merge rejected" comment).
+    assert excinfo.value.reason_code == BITBUCKET_MERGE_TASK_TIMEOUT
 
 
 async def test_merge_pr_async_202_non_dict_poll_body_keeps_polling() -> None:

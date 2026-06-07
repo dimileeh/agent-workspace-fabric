@@ -13,6 +13,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
     BITBUCKET_AUTH_FAILED,
     BITBUCKET_MERGE_IN_PROGRESS,
+    BITBUCKET_MERGE_TASK_TIMEOUT,
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TRANSPORT_ERROR,
     BitBucketClientError,
@@ -760,6 +761,13 @@ def test_is_transient_bitbucket_client_error_classifies_recoverable_blips() -> N
     # in-flight merge that may still be completing.
     assert _is_transient_bitbucket_client_error(
         err(status=409, reason_code=BITBUCKET_MERGE_IN_PROGRESS)
+    )
+    # An exhausted async-merge poll budget (still-PENDING task) is recoverable the
+    # same way: BitBucket may still complete the merge server-side, so the monitor
+    # must wait and re-poll rather than post a spurious "merge rejected" — even
+    # though it carries ``status=None`` like the deterministic safety aborts.
+    assert _is_transient_bitbucket_client_error(
+        err(status=None, reason_code=BITBUCKET_MERGE_TASK_TIMEOUT)
     )
 
     # Deterministic: auth failure, 4xx client error, JSON parse (2xx body), and

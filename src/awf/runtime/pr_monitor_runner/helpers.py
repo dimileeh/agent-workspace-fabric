@@ -19,6 +19,7 @@ from typing import Any
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
     BITBUCKET_MERGE_IN_PROGRESS,
+    BITBUCKET_MERGE_TASK_TIMEOUT,
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TRANSPORT_ERROR,
     BitBucketClientError,
@@ -626,7 +627,9 @@ def _is_transient_bitbucket_client_error(exc: BitBucketClientError) -> bool:
     internal ``Retry-After`` backoff, transport-level faults (connection
     reset/refused, timeout, DNS — surfaced as ``BITBUCKET_TRANSPORT_ERROR``),
     a 409 on the merge POST signalling an already-in-flight merge
-    (``BITBUCKET_MERGE_IN_PROGRESS``), and 5xx server faults. Deterministic
+    (``BITBUCKET_MERGE_IN_PROGRESS``), an exhausted async-merge poll budget while
+    the merge task was still PENDING (``BITBUCKET_MERGE_TASK_TIMEOUT`` — BitBucket
+    may still complete it server-side), and 5xx server faults. Deterministic
     faults — auth, other 4xx, JSON parse, and
     the pagination/SSRF safety aborts (which also carry ``status=None`` but
     map to ``BITBUCKET_API_ERROR``) — must fail fast.
@@ -636,6 +639,7 @@ def _is_transient_bitbucket_client_error(exc: BitBucketClientError) -> bool:
         BITBUCKET_RATE_LIMITED,
         BITBUCKET_TRANSPORT_ERROR,
         BITBUCKET_MERGE_IN_PROGRESS,
+        BITBUCKET_MERGE_TASK_TIMEOUT,
     ):
         return True
     if exc.reason_code != BITBUCKET_API_ERROR:

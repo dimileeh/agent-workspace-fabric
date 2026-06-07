@@ -523,6 +523,48 @@ def test_thread_line_falls_back_to_from() -> None:
     assert threads[0].line == 5
 
 
+def test_thread_same_timestamp_replies_ordered_numerically() -> None:
+    # Two replies posted in the same second whose ids span a power-of-ten boundary
+    # (9 and 10) must order numerically: the secondary sort key is the integer id,
+    # not ``str(id)`` (which would sort "10" < "9" and surface the wrong comment as
+    # the thread's first external comment).
+    repo_ref = RepoRef(owner="ws", name="repo", forge="bitbucket")
+    root = {
+        "id": 1,
+        "content": {"raw": "root"},
+        "user": {"account_id": "viewer"},
+        "created_on": "2024-01-01T00:00:00Z",
+        "inline": {"path": "a.py", "to": 5},
+    }
+    reply_ten = {
+        "id": 10,
+        "parent": {"id": 1},
+        "content": {"raw": "ten"},
+        "user": {"account_id": "ext"},
+        "created_on": "2024-01-01T00:00:05Z",
+        "inline": {"path": "a.py", "to": 5},
+    }
+    reply_nine = {
+        "id": 9,
+        "parent": {"id": 1},
+        "content": {"raw": "nine"},
+        "user": {"account_id": "ext"},
+        "created_on": "2024-01-01T00:00:05Z",
+        "inline": {"path": "a.py", "to": 5},
+    }
+    # Feed them in id-descending order so a stable sort cannot mask the tiebreak.
+    threads = build_review_threads(
+        [root, reply_ten, reply_nine],
+        repo=repo_ref,
+        pr_number=1,
+        account_id="viewer",
+    )
+    assert len(threads) == 1
+    # The viewer-authored root is dropped; the first external comment is reply 9.
+    assert threads[0].body_excerpt == "nine"
+    assert tuple(c.body for c in threads[0].comments) == ("nine", "ten")
+
+
 def test_general_comments_skip_inline_deleted_and_empty() -> None:
     comments = [
         {"id": 1, "inline": {"path": "a.py"}, "content": {"raw": "inline"}},  # inline → skip

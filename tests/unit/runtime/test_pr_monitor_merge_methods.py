@@ -12,6 +12,7 @@ from awf.common.audit import redact_audit_text
 from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_MERGE_METHOD_UNSUPPORTED,
+    BITBUCKET_MERGE_TASK_TIMEOUT,
     BITBUCKET_RATE_LIMITED,
     BitBucketClientError,
 )
@@ -1269,4 +1270,73 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     audit_payload = in_progress_events[0].payload
     assert isinstance(audit_payload, dict)
     assert audit_payload["action"] == "merge"
+    assert audit_payload["outcome"] == "cancelled"
+
+
+async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An exhausted async-merge poll budget cancels (never fails) the operation.
+
+    ``BitBucketClient`` raises ``BITBUCKET_MERGE_TASK_TIMEOUT`` when the bounded
+    poll budget is exhausted while the merge task is still PENDING. The merge may
+    still complete server-side, so this is treated exactly like
+    ``BITBUCKET_MERGE_IN_PROGRESS``: the attempt operation is cancelled (not
+    failed), no "merge rejected" comment is posted, and the monitor waits and
+    re-polls. Misclassifying it as deterministic would post a spurious notification
+    and leave a permanently-failed operation for a merge that succeeds.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="bitbucket merge_pr (task-status)",
+                status=None,
+                body="BitBucket merge task did not complete within 30 polls",
+                reason_code=BITBUCKET_MERGE_TASK_TIMEOUT,
+            )
+        ],
+    )
+
+    terminal, _state, sleep_fn, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    # No "merge rejected" notification while the async merge may still be running.
+    assert gh.comments == []
+    assert sleep_fn.calls == [60]
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.monitor_state,
+        )
+        audit_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.merge_result",
+            limit=20,
+        )
+    assert not any(op.status == OperationStatus.failed.value for op in operations)
+    merge_ops = [
+        op
+        for op in operations
+        if isinstance(op.payload, dict) and op.payload.get("reason_code") == "MERGE"
+    ]
+    assert merge_ops, "expected a merge-attempt operation to be recorded"
+    assert all(op.status == OperationStatus.cancelled.value for op in merge_ops)
+    assert not any(op.status == OperationStatus.running.value for op in operations)
+    # The cancellation breadcrumb carries the timeout reason code so operators can
+    # tell it apart from the 409 already-in-flight case.
+    timeout_events = [
+        event for event in audit_events if event.reason_code == BITBUCKET_MERGE_TASK_TIMEOUT
+    ]
+    assert len(timeout_events) == 1
+    audit_payload = timeout_events[0].payload
+    assert isinstance(audit_payload, dict)
     assert audit_payload["outcome"] == "cancelled"

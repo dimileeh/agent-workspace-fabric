@@ -132,11 +132,21 @@ BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
 # ``BITBUCKET_API_ERROR`` instead of polling forever — see
 # ``_is_bitbucket_merge_in_progress_body``.
 BITBUCKET_MERGE_IN_PROGRESS = "BITBUCKET_MERGE_IN_PROGRESS"
+# The bounded async-merge poll budget was exhausted while the merge task was still
+# PENDING. This does *not* mean the merge failed — BitBucket may still complete it
+# server-side — so it is recoverable in exactly the same way as
+# ``BITBUCKET_MERGE_IN_PROGRESS``: the monitor must wait and re-poll
+# ``fetch_pr_status`` (observing the eventual MERGED state) rather than mark the
+# operation failed and post a spurious "merge rejected" notification. Distinct from
+# ``BITBUCKET_API_ERROR`` (which also carries ``status=None`` but is deterministic)
+# so ``_is_transient_bitbucket_client_error`` and ``_attempt_merge_method`` can
+# treat the timeout as an in-flight merge instead of a hard failure.
+BITBUCKET_MERGE_TASK_TIMEOUT = "BITBUCKET_MERGE_TASK_TIMEOUT"
 # Lowercase substrings that mark a 409 merge-POST body as the recoverable
-# in-flight/already-merged case rather than a non-recoverable conflict or merge-check
-# rejection. Matched case-insensitively against the (redacted) response body.
+# already-merged case rather than a non-recoverable conflict or merge-check
+# rejection. Each is merge-specific. Matched case-insensitively against the
+# (redacted) response body.
 _BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS = (
-    "in progress",
     "being merged",
     "already merged",
     "already been merged",
@@ -150,9 +160,19 @@ def _is_bitbucket_merge_in_progress_body(body: str) -> bool:
     non-recoverable failures (conflicts, unmet merge checks). Only the first two are
     transient; the last must stay deterministic so the monitor notifies a human
     instead of polling indefinitely.
+
+    A bare ``"in progress"`` substring is too broad: BitBucket overloads 409 on the
+    merge POST for other concurrent-modification conflicts whose bodies read e.g.
+    "another action is in progress" or "operation already in progress", and matching
+    those would treat a deterministic conflict as transient and poll forever. Require
+    the phrase to be about the *merge* itself ("a merge is already in progress") so a
+    genuine in-flight async merge is recovered while unrelated concurrency conflicts
+    stay deterministic.
     """
     lowered = body.lower()
-    return any(signal in lowered for signal in _BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS)
+    if any(signal in lowered for signal in _BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS):
+        return True
+    return "in progress" in lowered and "merge" in lowered
 
 
 class BitBucketClientError(Exception):
@@ -825,6 +845,7 @@ class BitBucketClient:
             operation=operation,
             status=None,
             body=f"BitBucket merge task did not complete within {self._max_merge_polls} polls",
+            reason_code=BITBUCKET_MERGE_TASK_TIMEOUT,
         )
 
     def _merge_task_poll_url(

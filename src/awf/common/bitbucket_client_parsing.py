@@ -347,7 +347,11 @@ def build_review_threads(
             members,
             key=lambda member: (
                 parse_bb_datetime(member.get("created_on")) or datetime.min.replace(tzinfo=UTC),
-                str(member["id"]),
+                # Numeric tiebreak for replies sharing a ``created_on`` timestamp:
+                # BitBucket comment ids are integers, so a ``str(id)`` key would sort
+                # them lexicographically ("10" < "9") and could mis-order which
+                # comment surfaces as the thread's first external comment.
+                int(member["id"]),
             ),
         )
         all_comments = tuple(_thread_comment(member, account_id=account_id) for member in ordered)

@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_IN_PROGRESS,
+    BITBUCKET_MERGE_TASK_TIMEOUT,
     BitBucketClientError,
 )
 from awf.common.github_client import GitHubClientError, RepoRef
@@ -58,6 +59,15 @@ from awf.service.merge_queue import MergeQueueBlocker
 _MERGE_METHOD_PREFERENCE = ("squash", "merge", "rebase")
 _KNOWN_MERGE_METHODS = frozenset(_MERGE_METHOD_PREFERENCE)
 _MERGE_METHOD_MISMATCH_REASON = "MERGE_METHOD_MISMATCH"
+
+# BitBucket reason codes whose merge attempt is still in flight server-side rather
+# than a deterministic failure: the 409 already-in-progress signal and the exhausted
+# async-merge poll budget. Both are cancelled (never failed) so a later
+# ``fetch_pr_status`` observing the eventual MERGED state can complete the workspace
+# without contradicting a permanently-failed operation or a spurious notification.
+_BITBUCKET_IN_FLIGHT_MERGE_REASON_CODES = frozenset(
+    {BITBUCKET_MERGE_IN_PROGRESS, BITBUCKET_MERGE_TASK_TIMEOUT}
+)
 
 
 class _MergeAttemptOutcome(StrEnum):
@@ -372,14 +382,16 @@ async def _attempt_merge_method(
         # per-method rejection signal to retry alternative methods against, so
         # every fault is a generic blocker.
         #
-        # ``BITBUCKET_MERGE_IN_PROGRESS`` (the 409 raised when a prior async merge
-        # is already in flight) is the exception: it is transient, so the
-        # merge-blocker arm's ``_wait_after_transient_bitbucket_error`` keeps the
-        # monitor polling and ``fetch_pr_status`` later observes the original
+        # The in-flight reason codes (``BITBUCKET_MERGE_IN_PROGRESS`` — the 409
+        # raised when a prior async merge is already running — and
+        # ``BITBUCKET_MERGE_TASK_TIMEOUT`` — the async-merge poll budget exhausted
+        # while the task was still PENDING) are the exception: both are transient,
+        # so the merge-blocker arm's ``_wait_after_transient_bitbucket_error`` keeps
+        # the monitor polling and ``fetch_pr_status`` later observes the original
         # merge's MERGED state, terminating the workspace *successfully*. Recording
         # a permanent ``failed`` operation here would leave an inconsistent audit
-        # trail (operation "merge failed" vs. workspace "completed"), so for this
-        # reason code we do not fail the operation. We must still drive it to a
+        # trail (operation "merge failed" vs. workspace "completed"), so for these
+        # reason codes we do not fail the operation. We must still drive it to a
         # terminal state, though: ``_attempt_merge_method`` already created a
         # *running* monitor-state operation for this attempt, and if the in-flight
         # merge completes before the next loop re-enters ``Merge`` the monitor
@@ -387,10 +399,10 @@ async def _attempt_merge_method(
         # operation and never finishes this one. Leaving it ``running`` would
         # orphan it indefinitely and pollute active-operation/recovery state.
         # Cancel it instead (neither failed nor succeeded — this attempt was
-        # superseded by the already-in-flight merge) so it is terminal without
+        # superseded by the still-running merge) so it is terminal without
         # contradicting the eventual completion. Unlike GitHub, BitBucket has a
         # transient blocker that later succeeds, so this case is unique to it.
-        if exc.reason_code != BITBUCKET_MERGE_IN_PROGRESS:
+        if exc.reason_code not in _BITBUCKET_IN_FLIGHT_MERGE_REASON_CODES:
             # Forward ``exc.reason_code`` as the primary audit field rather than a
             # flat ``BITBUCKET_MERGE_FAILED`` so the specific diagnostic code
             # (e.g. ``BITBUCKET_MERGE_METHOD_UNSUPPORTED`` from an unmappable merge
@@ -434,7 +446,7 @@ async def _attempt_merge_method(
                 result={
                     "status": "cancelled",
                     "outcome": "bitbucket_merge_in_progress",
-                    "reason_code": BITBUCKET_MERGE_IN_PROGRESS,
+                    "reason_code": exc.reason_code,
                 },
             )
             # Record an audit breadcrumb for the cancellation. Every other merge
@@ -442,15 +454,16 @@ async def _attempt_merge_method(
             # emits a ``merge_result`` event; without one here a long-running
             # async merge that spans several poll cycles produces a chain of
             # silently cancelled operations, leaving operators unable to tell
-            # "superseded by an already-in-flight merge" from an unexplained
-            # cancellation. The ``cancelled`` outcome + ``BITBUCKET_MERGE_IN_PROGRESS``
-            # reason code keep that distinction in the audit trail.
+            # "superseded by a still-running merge" from an unexplained
+            # cancellation. The ``cancelled`` outcome + the in-flight reason code
+            # (``BITBUCKET_MERGE_IN_PROGRESS`` or ``BITBUCKET_MERGE_TASK_TIMEOUT``)
+            # keep that distinction in the audit trail.
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_MERGE_RESULT_EVENT,
                 action="merge",
                 outcome="cancelled",
-                reason_code=BITBUCKET_MERGE_IN_PROGRESS,
+                reason_code=exc.reason_code,
                 pr_number=pr_number,
                 status=merge_status,
                 base_branch=base_branch,
