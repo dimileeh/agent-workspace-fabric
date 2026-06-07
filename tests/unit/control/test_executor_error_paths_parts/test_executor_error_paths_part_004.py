@@ -788,7 +788,7 @@ class TestPullRequestUnexpectedErrorPart002:
             assert runs[0].workspace_head_sha == "pre-pr-validation-head"
 
     @pytest.mark.unit
-    async def test_new_pr_on_bitbucket_fails_fast_before_gh_pr_create(
+    async def test_new_pr_on_bitbucket_fails_fast_before_agent_run(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
@@ -796,9 +796,13 @@ class TestPullRequestUnexpectedErrorPart002:
     ) -> None:
         # BitBucket is a supported forge for monitoring an existing PR, so it clears
         # the executor forge gate — but opening a *new* PR shells `gh pr create`
-        # (GitHub-only). A BitBucket feature workspace without an existing PR must
-        # fail fast at the push step with PR_CREATE_FORGE_NOT_SUPPORTED instead of
-        # mis-routing to `gh`/github.com, so `push_and_open` must never run.
+        # (GitHub-only). The new-PR condition (BitBucket forge + no existing PR) is
+        # fully known once the resolved profile is synced, so a BitBucket feature
+        # workspace without an existing PR must fail fast with
+        # PR_CREATE_FORGE_NOT_SUPPORTED *before* spending a full agent/validation
+        # attempt and leaving a committed workspace. The agent must never run and
+        # `push_and_open` must never be reached: no command is queued, so any
+        # agent/validation/commit/push step would raise on the empty fake queue.
         class _AssertNotCalledPrCreator:
             def __init__(self) -> None:
                 self.called = False
@@ -814,17 +818,6 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws is not None
             ws.repo_url = "git@bitbucket.org:workspace/repo.git"
             await s.commit()
-
-        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
-        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
-        fake.queue_result(returncode=0)  # git add
-        fake.queue_result(returncode=0, stdout="")  # cached diff empty; agent committed
-        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
-        fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        fake.queue_result(returncode=0, stdout="pre-pr-validation-head\n")  # rev-parse HEAD
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation
-        fake.queue_result(returncode=0, stdout="src/awf/x.py\n")  # plan-only committed diff
-        fake.queue_result(returncode=0, stdout="M\0src/awf/x.py\0")  # protected committed diff
 
         pr_creator = _AssertNotCalledPrCreator()
         compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
@@ -852,6 +845,10 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws.failure_reason == "infrastructure_failure"
             assert "gh pr create" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "PR_CREATE_FORGE_NOT_SUPPORTED"
+            # No agent/validation attempt was spent: the gate fired before the
+            # validation run that the late-push placement would have recorded.
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert runs == []
 
     @pytest.mark.unit
     async def test_validation_target_sha_update_failure_keeps_open_pr(

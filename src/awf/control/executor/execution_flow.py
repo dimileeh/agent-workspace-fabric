@@ -312,6 +312,26 @@ async def execute(
                     reason_code=resolved_forge_error.reason_code,
                 )
                 return
+        # New-PR forge gate — opening a *new* PR shells ``gh pr create``
+        # (GitHub-only) via ``push_and_open``. BitBucket clears the forge gate
+        # above (it is supported for monitoring an existing PR), but new-PR
+        # creation is not forge-neutral yet. The resolved forge and ``ws.pr_url``
+        # are both fully known here, so fail fast — before profile setup, the
+        # agent run, validation, the post-agent commit, and ``gh pr create`` —
+        # rather than spend a full agent/validation attempt and leave a committed
+        # workspace only to reject new-PR creation at the push step. Existing-PR
+        # flows (recovery / sync, ``ws.pr_url`` set) reuse their PR without
+        # ``gh pr create`` and are never gated.
+        new_pr_forge_error = new_pr_unsupported_forge_error(ws)
+        if new_pr_forge_error is not None:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=new_pr_forge_error.message,
+                reason_code=new_pr_forge_error.reason_code,
+            )
+            return
         if not await repair_agent_runtime_ownership(
             logger=_log,
             workspace_id=workspace_id,
@@ -1179,24 +1199,11 @@ async def execute(
         )
         return
 
-    # Opening a *new* PR shells ``gh pr create`` (GitHub-only) via
-    # ``push_and_open``. BitBucket cleared the executor forge gate (it is supported
-    # for monitoring an existing PR), but new-PR creation is not forge-neutral yet,
-    # so fail fast here with an honest reason code rather than mis-route to
-    # ``gh``/github.com. Existing-PR flows (recovery / sync) carry ``ws.pr_url`` and
-    # reuse their PR through ``push_and_open`` without ``gh pr create``, so they are
-    # never gated here. The forge is fully resolved by now, so this catches both a
-    # detected and an explicit BitBucket forge.
-    new_pr_forge_error = new_pr_unsupported_forge_error(ws)
-    if new_pr_forge_error is not None:
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=WorkspaceStatus.validating,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=new_pr_forge_error.message,
-            reason_code=new_pr_forge_error.reason_code,
-        )
-        return
+    # The new-PR forge gate (BitBucket without an existing PR fails fast because
+    # ``gh pr create`` is GitHub-only) runs right after the resolved profile is
+    # synced — before the agent run, validation, and the post-agent commit — so a
+    # BitBucket feature workspace never reaches this push step. See the
+    # ``new_pr_unsupported_forge_error`` gate near the resolved-forge re-check above.
 
     # ── Step 3: push + open PR ──────────────────────────────────────────
     if not await self._transition_if_current(
