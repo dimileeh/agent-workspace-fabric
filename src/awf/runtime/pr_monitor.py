@@ -647,11 +647,15 @@ _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS = (
 # by an unrelated test timeout looks identical to a real registry timeout. Only
 # Docker pull-*failure* wording — a daemon error response or an explicit
 # pull-failed message — actually evidences that a pull (not the job's real work)
-# is what timed out.
+# is what timed out. The marker must stay Docker-specific: a bare ``failed to
+# pull`` phrase also appears in real application errors (e.g. ``failed to pull
+# records: context deadline exceeded``) that carry no Docker/daemon/image wording
+# and must reach the repair agent, so we anchor on ``failed to pull image`` —
+# the Docker/containerd image-pull failure phrasing — not the generic verb.
 _CI_DOCKER_PULL_FAILURE_MARKERS = (
     "error response from daemon",
     "docker pull failed",
-    "failed to pull",
+    "failed to pull image",
 )
 
 # ``gh run view --log-failed`` emits the whole failed step, so a real
