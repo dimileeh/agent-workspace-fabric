@@ -511,6 +511,12 @@ async def _run_fix_cycle(
                 context="resolve_thread",
                 monitor_log=monitor_log,
             ):
+                # Transient fault: clear the addressed marker so the next poll
+                # re-attempts the resolve. ``bbtask:`` reviewer tasks clear the same
+                # way as comment threads — the task is still UNRESOLVED on BitBucket
+                # and re-surfaces, so it re-routes through AddressComments and the
+                # agent re-addresses already-handled content (redundant but harmless;
+                # the permanent path below special-cases tasks to needs_human).
                 _clear_addressed_state_by_id(state, tid)
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,

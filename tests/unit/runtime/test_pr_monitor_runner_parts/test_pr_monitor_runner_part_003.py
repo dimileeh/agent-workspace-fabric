@@ -22,7 +22,7 @@ from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.bitbucket_client import BitBucketAuth, BitBucketClient
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.common.github_client import GitHubClientError, RepoRef
+from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.enums import (
     AgentRuntime,
     WorkspaceStatus,
@@ -1114,3 +1114,28 @@ async def test_github_feedback_resolution_records_github_provenance_unchanged(
 
     assert len(rows) == 1
     assert rows[0].pull_request_url == "https://github.com/dimileeh/aira-web/pull/42"
+
+
+@pytest.mark.unit
+def test_forge_scm_provider_maps_known_forges_and_rejects_unknown() -> None:
+    """``_forge_scm_provider`` maps each forge to its key and fails loudly otherwise.
+
+    Regression for the #454 review note: an unknown forge client must NOT silently
+    fall back to ``"github"`` (which would alias a third forge's feedback rows under
+    the GitHub provider key). It raises ``NotImplementedError`` so a newly wired
+    forge is forced to declare its own provider key.
+    """
+    from types import SimpleNamespace
+
+    from awf.runtime.pr_monitor_runner import feedback_state
+
+    cmd = FakeCommandRunner()
+    github_self = SimpleNamespace(_deps=SimpleNamespace(gh=GitHubClient(cmd)))
+    bitbucket_self = SimpleNamespace(_deps=SimpleNamespace(gh=_bitbucket_forge_client()))
+
+    assert feedback_state._forge_scm_provider(github_self) == "github"
+    assert feedback_state._forge_scm_provider(bitbucket_self) == "bitbucket"
+
+    unknown_self = SimpleNamespace(_deps=SimpleNamespace(gh=object()))
+    with pytest.raises(NotImplementedError, match="unknown forge client type: object"):
+        feedback_state._forge_scm_provider(unknown_self)
