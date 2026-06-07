@@ -57,9 +57,11 @@ const cancellableStatuses = new Set([
 ]);
 
 const terminalOperationStatuses = new Set(["succeeded", "failed", "cancelled", "canceled"]);
+const cancellationOperationTypes = new Set(["cancel", "stop"]);
 
 export function getWorkspaceOperatorControls(context: WorkspaceOperatorContext): WorkspaceOperatorControl[] {
   const active = hasActiveOperation(context);
+  const cancelling = hasActiveCancellationOperation(context);
   const controls = [
     remonitorControl(context),
     refreshControl(context),
@@ -73,9 +75,10 @@ export function getWorkspaceOperatorControls(context: WorkspaceOperatorContext):
 
   return controls.map((control) => ({
     ...control,
-    enabled: false,
+    enabled: control.action === "cancel" ? (cancelling ? false : control.enabled) : false,
     visible: control.visible || eligibleEnoughForActiveReason(control.action, context),
-    reason: "active operation",
+    reason:
+      control.action === "cancel" ? (cancelling ? "cancel/stop already active" : control.reason) : "active operation",
   }));
 }
 
@@ -181,6 +184,29 @@ function hasActiveOperation(context: WorkspaceOperatorContext): boolean {
     return true;
   }
   return (context.operations ?? []).some((operation) => !terminalOperationStatuses.has(operation.status));
+}
+
+function hasActiveCancellationOperation(context: WorkspaceOperatorContext): boolean {
+  const cancellationOperations = (context.operations ?? []).filter((operation) =>
+    cancellationOperationTypes.has(operation.type),
+  );
+
+  const recoveryOperation = context.workspace?.recovery?.current_operation ?? context.overview.recovery?.current_operation ?? null;
+  if (recoveryOperation) {
+    if (cancellationOperationTypes.has(recoveryOperation.type) && !terminalOperationStatuses.has(recoveryOperation.status)) {
+      return true;
+    }
+  }
+  if (cancellationOperations.some((operation) => !terminalOperationStatuses.has(operation.status))) {
+    return true;
+  }
+  if (cancellationOperations.length > 0) {
+    return false;
+  }
+  if (context.overview.active_operation === "cancel" || context.overview.active_operation === "stop") {
+    return true;
+  }
+  return false;
 }
 
 function eligibleEnoughForActiveReason(action: WorkspaceOperatorAction, context: WorkspaceOperatorContext): boolean {

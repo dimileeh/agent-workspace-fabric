@@ -485,8 +485,8 @@ export function OperatorControlsBlock({
   const cancelConfirmEnabled = cancelControl !== undefined && cancelControl.enabled && !busy;
 
   // Drop a pending cancel confirmation as soon as it no longer applies — the
-  // operator switched workspaces, cancel became disabled, or another operation
-  // started — so Confirm cancel can never act on a stale or guarded selection.
+  // cancel became disabled or is no longer available, so Confirm cancel can never
+  // act on a stale or guarded selection.
   useEffect(() => {
     if (confirming === "cancel" && !cancelConfirmEnabled) {
       setConfirming(null);
@@ -514,24 +514,37 @@ export function OperatorControlsBlock({
           const disabled = busy || !control.enabled || confirming !== null;
           const reason = busy && !submitting ? "operation active" : control.reason;
           const destructive = control.action === "cancel";
+          const tooltip = reason ? `${control.label}: ${reason}` : null;
           const buttonClassName = destructive
             ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-white px-2.5 text-[11px] font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
             : "inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
           return (
-            <div key={control.action} className="flex min-w-0 items-center gap-1.5">
+            <div
+              key={control.action}
+              tabIndex={disabled && reason ? 0 : undefined}
+              aria-describedby={disabled && reason ? `operator-control-tip-${workspaceId}-${control.action}` : undefined}
+              className="group relative flex min-w-0 items-center gap-1.5"
+            >
               <button
                 type="button"
                 onClick={() =>
                   destructive ? setConfirming(control.action) : onAction(control.action, control.requestedTier)
                 }
                 disabled={disabled}
-                title={reason ? `${control.label}: ${reason}` : control.label}
                 className={buttonClassName}
               >
                 <OperatorControlIcon action={control.action} spinning={submitting} />
                 {control.label}
               </button>
-              {reason ? <span className="max-w-32 truncate text-[11px] text-slate-500">{reason}</span> : null}
+              {reason ? (
+                <span
+                  id={`operator-control-tip-${workspaceId}-${control.action}`}
+                  role="tooltip"
+                  className="pointer-events-none absolute left-0 top-[calc(100%+6px)] z-20 sr-only max-w-56 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] font-medium text-white shadow-lg group-focus-within:not-sr-only group-hover:not-sr-only"
+                >
+                  {tooltip}
+                </span>
+              ) : null}
             </div>
           );
         })}

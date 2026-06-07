@@ -53,6 +53,26 @@ test("operator controls block renders success warnings", () => {
   assert.match(blockSource, /warning\.message \|\| warning\.warning_code/);
 });
 
+test("operator controls block keeps inactive reasons in hover tooltips", () => {
+  const blockSource = extractFunctionSource("OperatorControlsBlock");
+
+  assert.match(blockSource, /const tooltip = reason \? `\$\{control\.label\}: \${reason}` : null;/);
+  assert.match(blockSource, /role="tooltip"/);
+  assert.match(blockSource, /group-hover:not-sr-only/);
+  assert.match(blockSource, /group-focus-within:not-sr-only/);
+  assert.doesNotMatch(blockSource, />\{reason\}<\/span>/);
+});
+
+test("operator control tooltip-describedby target follows disabled focus state", () => {
+  const blockSource = extractFunctionSource("OperatorControlsBlock");
+
+  assert.match(blockSource, /tabIndex=\{disabled && reason \? 0 : undefined\}/);
+  assert.match(
+    blockSource,
+    /aria-describedby=\{disabled && reason \? `operator-control-tip-\$\{workspaceId\}-\$\{control\.action\}` : undefined\}/,
+  );
+});
+
 test("operator action state is guarded by current workspace selection", () => {
   const dashboard = dashboardSource.dashboard;
 

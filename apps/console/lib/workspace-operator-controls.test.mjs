@@ -149,14 +149,14 @@ test("cancel control is hidden and disabled for terminal and destroy statuses", 
   }
 });
 
-test("active operation disables cancel but keeps it visible for active statuses", () => {
+test("active operation keeps cancel enabled for active statuses", () => {
   const control = getWorkspaceOperatorControls({
     overview: overview({ status: "running", pr_url: null, active_operation: "op_active" }),
   }).find((item) => item.action === "cancel");
   assert.ok(control, "missing cancel control");
-  assert.equal(control.enabled, false);
+  assert.equal(control.enabled, true);
   assert.equal(control.visible, true);
-  assert.equal(control.reason, "active operation");
+  assert.equal(control.reason, null);
 });
 
 test("cancel success and failure summaries format the Cancel label", () => {
@@ -196,6 +196,86 @@ test("cancel success and failure summaries format the Cancel label", () => {
   );
 });
 
+test("terminal cancellation details no longer block cancel action when stop/cancel operations are terminal", () => {
+  const terminalStatuses = ["succeeded", "failed", "cancelled", "canceled"];
+  for (const activeOperation of ["cancel", "stop"]) {
+    for (const status of terminalStatuses) {
+      const control = getWorkspaceOperatorControls({
+        overview: overview({
+          status: "running",
+          active_operation: activeOperation,
+        }),
+        operations: [operation({ type: activeOperation, status })],
+      }).find((item) => item.action === "cancel");
+      assert.ok(control, `missing cancel control for ${activeOperation}/${status}`);
+      assert.equal(control.enabled, true, `${activeOperation} should become enabled once cancellation operation is terminal`);
+      assert.equal(control.reason, null);
+      assert.equal(control.visible, true);
+    }
+  }
+});
+
+test("cancel remains disabled for stale overview cancel/stop flags without in-flight operations", () => {
+  for (const activeOperation of ["cancel", "stop"]) {
+    const control = getWorkspaceOperatorControls({
+      overview: overview({
+        status: "running",
+        active_operation: activeOperation,
+      }),
+    }).find((item) => item.action === "cancel");
+    assert.ok(control, `missing cancel control for ${activeOperation}`);
+    assert.equal(control.enabled, false, `cancel should stay disabled while overview is ${activeOperation} but no operations are available`);
+    assert.equal(control.reason, "cancel/stop already active");
+    assert.equal(control.visible, true);
+  }
+});
+
+test("cancel remains disabled for stale overview cancel/stop flags while operations list is default empty", () => {
+  for (const activeOperation of ["cancel", "stop"]) {
+    const control = getWorkspaceOperatorControls({
+      overview: overview({
+        status: "running",
+        active_operation: activeOperation,
+      }),
+      operations: [],
+    }).find((item) => item.action === "cancel");
+    assert.ok(control, `missing cancel control for ${activeOperation} with empty operations`);
+    assert.equal(control.enabled, false, `cancel should stay disabled while overview is ${activeOperation} and operations list is empty`);
+    assert.equal(control.reason, "cancel/stop already active");
+    assert.equal(control.visible, true);
+  }
+});
+
+test("cancel stays disabled while a running cancel operation exists even if recovery cancel is terminal", () => {
+  const control = getWorkspaceOperatorControls({
+    overview: overview({
+      status: "running",
+      active_operation: "running",
+    }),
+    workspace: workspace({
+      recovery: {
+        current_operation: operation({
+          id: "op-recovery",
+          type: "cancel",
+          status: "succeeded",
+        }),
+      },
+    }),
+    operations: [
+      operation({
+        id: "op-cancel",
+        type: "cancel",
+        status: "running",
+      }),
+    ],
+  }).find((item) => item.action === "cancel");
+
+  assert.ok(control, "missing cancel control for running operations scenario");
+  assert.equal(control.enabled, false, "cancel should stay disabled when a non-terminal cancel operation is running");
+  assert.equal(control.reason, "cancel/stop already active");
+  assert.equal(control.visible, true);
+});
+
 test("active monitoring workspace exposes the full operator action set", () => {
   const actions = new Set(
     getWorkspaceOperatorControls({
@@ -206,7 +286,7 @@ test("active monitoring workspace exposes the full operator action set", () => {
   assert.deepEqual(actions, new Set(["remonitor", "refresh", "revalidate", "cancel"]));
 });
 
-test("active operation disables all operator controls", () => {
+test("active operation disables non-cancel operator controls", () => {
   const eligible = {
     overview: overview({
       status: "monitoring_pr",
@@ -216,8 +296,13 @@ test("active operation disables all operator controls", () => {
     mergeQueueItem: mergeQueueItem({ required_next_action: "validate" }),
   };
   for (const control of getWorkspaceOperatorControls(eligible)) {
-    assert.equal(control.enabled, false);
-    assert.equal(control.reason, "active operation");
+    if (control.action === "cancel") {
+      assert.equal(control.enabled, true);
+      assert.equal(control.reason, null);
+    } else {
+      assert.equal(control.enabled, false);
+      assert.equal(control.reason, "active operation");
+    }
   }
 
   assertControl(
