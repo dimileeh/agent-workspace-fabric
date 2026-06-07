@@ -79,13 +79,6 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_issue_tracker_disabled](#bitbucket_issue_tracker_disabled)
 
-### BITBUCKET_MERGE_FAILED
-**Problem:** BitBucket rejected the pull-request merge the PR monitor attempted, so the merge operation finished as failed.
-**Likely Cause:** BitBucket returned a non-transient merge error (such as a merge conflict, failed merge check, or insufficient permissions) that AWF could not safely retry.
-**Operator Fix:** Resolve the merge blocker on the PR (conflicts, required checks, or branch permissions) in BitBucket, then remonitor the workspace.
-**Related Command:** `awf workspace logs <workspace_id>`
-**Docs Link:** [docs/REASON_CATALOG.md#bitbucket_merge_failed](#bitbucket_merge_failed)
-
 ### BITBUCKET_PIPELINE_FULL_RERUN
 **Problem:** AWF re-ran the entire BitBucket pipeline because BitBucket Cloud has no failed-only rerun API (that action is UI-only).
 **Likely Cause:** BitBucket Cloud exposes only a whole-pipeline trigger over REST, so a transient-failure rerun necessarily reruns every step, not just the failed ones.

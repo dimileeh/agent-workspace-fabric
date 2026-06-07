@@ -122,7 +122,7 @@ BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
 # rather than mapped to ``BITBUCKET_API_ERROR``. BitBucket also overloads 409 for
 # non-recoverable merge failures (merge conflicts, unmet merge checks); those carry
 # no in-progress/already-merged signal and must stay deterministic so they surface
-# ``BITBUCKET_MERGE_FAILED`` instead of polling forever — see
+# ``BITBUCKET_API_ERROR`` instead of polling forever — see
 # ``_is_bitbucket_merge_in_progress_body``.
 BITBUCKET_MERGE_IN_PROGRESS = "BITBUCKET_MERGE_IN_PROGRESS"
 # Lowercase substrings that mark a 409 merge-POST body as the recoverable
@@ -748,7 +748,7 @@ class BitBucketClient:
                 # completing. BitBucket overloads 409 for non-recoverable failures
                 # too (conflicts, unmet merge checks); those lack the in-progress
                 # signal and fall through to the deterministic ``raise`` below so
-                # they surface ``BITBUCKET_MERGE_FAILED`` and notify a human rather
+                # they surface ``BITBUCKET_API_ERROR`` and notify a human rather
                 # than polling forever.
                 raise BitBucketClientError(
                     operation="bitbucket merge_pr",
