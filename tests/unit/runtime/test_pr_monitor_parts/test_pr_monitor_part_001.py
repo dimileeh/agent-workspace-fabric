@@ -924,6 +924,33 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_registry_timeout_at_exact_window_boundary_dispatches_rerun(self) -> None:
+        """A timeout marker exactly ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` (2)
+        lines from the pull-failure anchor must still trigger rerun, confirming
+        the boundary condition ``abs(index - evidence_index) <= window`` is
+        inclusive at the limit. Pins the window so an accidental tightening to 1
+        would fail here rather than slip through the closer positive tests."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Docker pull failed with exit code 1\n"  # evidence index 0
+                "Retrying pull…\n"  # index 1
+                "context deadline exceeded"  # index 2 — distance == 2
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_docker_pull_with_structured_test_evidence_reports_ci_failure(self) -> None:
         failure = CheckFailure(
             name="python-coverage-shards (2)",
