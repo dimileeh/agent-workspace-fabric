@@ -198,3 +198,50 @@ class TestPullRequestMonitorAdoptionForgeGate:
             "field": "repo_url",
         }
         assert fetcher.calls == []
+
+    @pytest.mark.unit
+    async def test_bitbucket_request_does_not_attach_to_same_slug_github_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Regression (PRRT_kwDOSJAM6s6Hopec): the adoption idempotency key and
+        # history lookup are keyed on the forge-agnostic ``owner/repo`` slug, so a
+        # ``bitbucket.org`` request for the SAME slug/PR as an existing GitHub
+        # adoption would attach to that GitHub workspace *before* ``_fetch_metadata``
+        # (and the GitHub-only default-fetcher gate) ever runs. The forge-identity
+        # guard must reject it instead of silently inheriting the GitHub monitor.
+        github_fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            github = await PullRequestMonitorAdoptionService(
+                session, metadata_fetcher=github_fetcher
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            await session.commit()
+
+        bitbucket_fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=bitbucket_fetcher)
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_url="https://bitbucket.org/dimileeh/aira-web",
+                        pr_number=277,
+                    )
+                )
+            # No second (Bitbucket) workspace was created; the GitHub adoption stands.
+            assert await _count(session, Workspace) == 1
+
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": github.workspace_id,
+            "repo_slug": "dimileeh/aira-web",
+            "requested_forge": "bitbucket",
+            "existing_forge": "github",
+        }
+        # The Bitbucket request never reached metadata fetch — it was rejected
+        # before ``_fetch_metadata``.
+        assert bitbucket_fetcher.calls == []

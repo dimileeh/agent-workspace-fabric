@@ -155,11 +155,13 @@ class PullRequestMonitorAdoptionService:
         )
         live_adoption = _select_live_adoption_workspace(adoption_history)
         if live_adoption is not None:
+            _raise_if_adoption_forge_mismatch(live_adoption, repo=repo)
             _raise_if_policy_conflicts(live_adoption, request, repo=repo)
             return await self._response(live_adoption, attached_existing=True)
 
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
+            _raise_if_adoption_forge_mismatch(existing, repo=repo)
             _raise_if_existing_workspace_is_not_requested_adoption(
                 existing,
                 repo=repo,
@@ -1031,6 +1033,50 @@ def _workspace_status_for_response(status: str) -> WorkspaceStatus | str:
         return WorkspaceStatus(status)
     except ValueError:
         return status
+
+
+def _adoption_workspace_forge(workspace: Workspace) -> str | None:
+    """Recover the forge of an adopted workspace from its persisted repo URL.
+
+    ``_adoption_repo_url`` always persists a parseable URL (the request URL or
+    ``repo.ssh_url()``), so ``RepoRef.from_url`` recovers the forge. Return
+    ``None`` for an unparseable legacy URL so the caller falls back to the prior
+    forge-agnostic behavior rather than rejecting a resumable adoption.
+    """
+    try:
+        return RepoRef.from_url(workspace.repo_url).forge
+    except ValueError:
+        return None
+
+
+def _raise_if_adoption_forge_mismatch(workspace: Workspace, *, repo: RepoRef) -> None:
+    """Reject attaching a request to an adoption on a different forge.
+
+    Repo identity is ``(forge, owner, name)``, but the adoption idempotency key
+    and history lookup are keyed on the forge-agnostic ``owner/repo`` slug. After
+    issue #345 flipped bitbucket into the supported-forge set, a ``bitbucket.org``
+    request for the same slug/PR would otherwise attach to an existing GitHub
+    adoption *before* ``_fetch_metadata`` (and the GitHub-only default-fetcher
+    gate) ever runs. Fail closed here so a same-slug/different-forge request never
+    silently inherits a different repository's monitor. (Letting same-slug
+    different-forge adoptions coexist would require forge-qualified identity keys
+    — follow-up work.)
+    """
+    existing_forge = _adoption_workspace_forge(workspace)
+    if existing_forge is not None and existing_forge != repo.forge:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message=(
+                "Canonical PR adoption idempotency key is already owned by a "
+                "workspace on a different forge."
+            ),
+            detail={
+                "workspace_id": workspace.id,
+                "repo_slug": repo.slug(),
+                "requested_forge": repo.forge,
+                "existing_forge": existing_forge,
+            },
+        )
 
 
 def _raise_if_existing_workspace_is_not_requested_adoption(
