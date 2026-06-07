@@ -14,8 +14,10 @@ import httpx
 import pytest
 
 from awf.common.bitbucket_client import (
+    BITBUCKET_API_ERROR,
     BITBUCKET_AUTH_FAILED,
     BITBUCKET_AUTH_NOT_CONFIGURED,
+    BITBUCKET_RATE_LIMITED,
     BitBucketAuth,
     BitBucketClient,
     BitBucketClientError,
@@ -138,6 +140,19 @@ async def test_429_exhausts_retries_and_raises() -> None:
     assert len(sleep.delays) == 2  # two retries, then give up
 
 
+async def test_429_exhaustion_maps_to_rate_limited_reason() -> None:
+    # A persistent 429 must surface as BITBUCKET_RATE_LIMITED, not the generic
+    # BITBUCKET_API_ERROR, so operators/policy can tell quota exhaustion apart
+    # from a server fault.
+    fake = FakeBitBucket()
+    fake.enqueue("POST", _pr_collection_path(), status=429)
+    client = make_client(fake, sleep=RecordingSleep(), max_retries=1)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await _create_pr(client)
+    assert excinfo.value.status == 429
+    assert excinfo.value.reason_code == BITBUCKET_RATE_LIMITED
+
+
 # ── Near-limit proactive slow-down (D2) ───────────────────────────────────────
 
 
@@ -203,6 +218,55 @@ async def test_paginate_follows_next_links() -> None:
         values=[{"id": 1}],
         next_url="https://api.bitbucket.org/items?page=2",
     )
+    fake.page("GET", "/items", values=[{"id": 2}])
+    client = make_client(fake)
+    values = await client._paginate("/items", operation="op")
+    assert [v["id"] for v in values] == [1, 2]
+
+
+async def test_paginate_aborts_after_max_pages() -> None:
+    # A degraded endpoint that always advertises a same-host ``next`` link would
+    # loop forever without a cap; the cap turns that into a bounded, diagnosable
+    # BITBUCKET_API_ERROR rather than a hung monitor task.
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        "/items",
+        values=[{"id": 1}],
+        next_url="https://api.bitbucket.org/items?cursor=loop",
+    )
+    client = make_client(fake, max_pages=3)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client._paginate("/items", operation="op")
+    assert excinfo.value.reason_code == BITBUCKET_API_ERROR
+    assert "page" in str(excinfo.value).lower()
+    assert len(fake.calls("GET")) == 3  # capped, did not loop indefinitely
+
+
+async def test_paginate_rejects_next_url_pointing_at_foreign_host() -> None:
+    # BitBucket's cursor ``next`` is an absolute URL; httpx would honor a foreign
+    # host as-is and forward the Authorization header (SSRF). The origin check
+    # must reject it *before* any request is issued to the unintended host.
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        "/items",
+        values=[{"id": 1}],
+        next_url="https://169.254.169.254/latest/meta-data",
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client._paginate("/items", operation="op")
+    assert excinfo.value.reason_code == BITBUCKET_API_ERROR
+    assert "169.254.169.254" in str(excinfo.value)
+    assert len(fake.calls("GET")) == 1  # never reached the foreign host
+
+
+async def test_paginate_allows_relative_next_url() -> None:
+    # A relative ``next`` is resolved against the safe base_url by httpx, so the
+    # origin guard must let it through.
+    fake = FakeBitBucket()
+    fake.page("GET", "/items", values=[{"id": 1}], next_url="/items?page=2")
     fake.page("GET", "/items", values=[{"id": 2}])
     client = make_client(fake)
     values = await client._paginate("/items", operation="op")

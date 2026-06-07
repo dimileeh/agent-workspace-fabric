@@ -37,7 +37,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -73,11 +73,16 @@ _DEFAULT_BACKOFF_BASE_SECONDS = 1.0
 _DEFAULT_NEAR_LIMIT_DELAY_SECONDS = 1.0
 _DEFAULT_ETAG_CACHE_SIZE = 128
 _ERROR_BODY_LIMIT = 2000
+# BB Cloud returns at most 100 items/page and the endpoints we paginate (comments,
+# statuses, diffstat, pipeline steps) have small real-world counts, so 50 pages is
+# never reached in practice — it only bounds a runaway/adversarial ``next`` chain.
+_DEFAULT_MAX_PAGES = 50
 
 # Reason codes (flow end-to-end: exception → log field → event → policy).
 BITBUCKET_AUTH_NOT_CONFIGURED = "BITBUCKET_AUTH_NOT_CONFIGURED"
 BITBUCKET_AUTH_FAILED = "BITBUCKET_AUTH_FAILED"
 BITBUCKET_API_ERROR = "BITBUCKET_API_ERROR"
+BITBUCKET_RATE_LIMITED = "BITBUCKET_RATE_LIMITED"
 BITBUCKET_PIPELINE_FULL_RERUN = "BITBUCKET_PIPELINE_FULL_RERUN"
 BITBUCKET_PIPELINE_NOT_RERUNNABLE = "BITBUCKET_PIPELINE_NOT_RERUNNABLE"
 BITBUCKET_ISSUE_TRACKER_DISABLED = "BITBUCKET_ISSUE_TRACKER_DISABLED"
@@ -208,12 +213,14 @@ class BitBucketClient:
         backoff_base_seconds: float = _DEFAULT_BACKOFF_BASE_SECONDS,
         near_limit_delay_seconds: float = _DEFAULT_NEAR_LIMIT_DELAY_SECONDS,
         etag_cache_size: int = _DEFAULT_ETAG_CACHE_SIZE,
+        max_pages: int = _DEFAULT_MAX_PAGES,
     ) -> None:
         """Store the injected HTTP client, auth, and retry/cache policy."""
         self._client = client
         self._auth = auth
         self._secret_values = auth.secret_values()
         self._max_retries = max_retries
+        self._max_pages = max_pages
         self._backoff_base_seconds = backoff_base_seconds
         self._near_limit_delay_seconds = near_limit_delay_seconds
         self._etag_cache_size = etag_cache_size
@@ -841,11 +848,17 @@ class BitBucketClient:
         params: Mapping[str, str] | None = None,
         cache: bool = False,
     ) -> list[dict[str, Any]]:
-        """Follow BitBucket ``next`` cursor links, collecting all ``values``."""
+        """Follow BitBucket ``next`` cursor links, collecting all ``values``.
+
+        The traversal is bounded two ways so a misbehaving or adversarial response
+        cannot hang or redirect the monitor: a hard page cap (``max_pages``) and an
+        origin check on each absolute ``next`` URL (see :meth:`_validate_next_url`).
+        """
         values: list[dict[str, Any]] = []
         page = await self._request_json(
             "GET", path, operation=operation, params=params, cache=cache
         )
+        pages = 1
         while isinstance(page, dict):
             for value in page.get("values") or []:
                 if isinstance(value, dict):
@@ -853,8 +866,43 @@ class BitBucketClient:
             next_url = page.get("next")
             if not isinstance(next_url, str) or not next_url:
                 break
+            if pages >= self._max_pages:
+                raise BitBucketClientError(
+                    operation=operation,
+                    status=None,
+                    body=(
+                        f"BitBucket pagination exceeded the {self._max_pages}-page cap; "
+                        "aborting a likely runaway 'next' chain"
+                    ),
+                    reason_code=BITBUCKET_API_ERROR,
+                )
+            self._validate_next_url(next_url, operation)
+            pages += 1
             page = await self._request_json("GET", next_url, operation=operation)
         return values
+
+    def _validate_next_url(self, next_url: str, operation: str) -> None:
+        """Reject a cursor ``next`` link that points off the configured forge host.
+
+        BitBucket's ``next`` is an absolute URL that httpx honors verbatim, bypassing
+        ``base_url`` — so a compromised response could steer an authenticated request
+        (carrying the ``Authorization`` header) at an internal service (SSRF). A
+        relative ``next`` is resolved against the safe ``base_url`` and is allowed.
+        """
+        parsed = urlsplit(next_url)
+        if not parsed.netloc:
+            return
+        base = self._client.base_url
+        if parsed.hostname != base.host or (parsed.scheme and parsed.scheme != base.scheme):
+            raise BitBucketClientError(
+                operation=operation,
+                status=None,
+                body=(
+                    f"BitBucket pagination 'next' pointed at unexpected origin "
+                    f"{parsed.scheme}://{parsed.hostname}; expected host {base.host}"
+                ),
+                reason_code=BITBUCKET_API_ERROR,
+            )
 
     async def _request_text(
         self,
@@ -948,10 +996,18 @@ class BitBucketClient:
             ) from exc
 
     def _error_for(self, response: httpx.Response, operation: str) -> BitBucketClientError:
-        """Build a redacted ``BitBucketClientError`` for a non-2xx response."""
-        reason = (
-            BITBUCKET_AUTH_FAILED if response.status_code in {401, 403} else BITBUCKET_API_ERROR
-        )
+        """Build a redacted ``BitBucketClientError`` for a non-2xx response.
+
+        A 429 that survives retry exhaustion is mapped to the dedicated
+        ``BITBUCKET_RATE_LIMITED`` reason code so quota exhaustion is diagnosably
+        distinct from a generic API fault in logs and policy.
+        """
+        if response.status_code in {401, 403}:
+            reason = BITBUCKET_AUTH_FAILED
+        elif response.status_code == 429:
+            reason = BITBUCKET_RATE_LIMITED
+        else:
+            reason = BITBUCKET_API_ERROR
         return BitBucketClientError(
             operation=operation,
             status=response.status_code,
