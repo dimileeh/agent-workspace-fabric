@@ -590,6 +590,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `gh pr view`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_not_found](#pr_not_found)
 
+### RELEASE_SYNC_FORGE_NOT_SUPPORTED
+**Problem:** AWF could not run release-PR sync because the release-PR sync path only supports GitHub.
+**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. BitBucket Cloud), but release-PR sync shells `gh pr list` / `gh pr view` and parses github.com PR URLs, so AWF fails fast instead of mis-routing to a same-slug GitHub repository.
+**Operator Fix:** No repository change is needed — the forge is supported. Run release-PR sync against a GitHub repository, or remonitor once a forge-neutral release sync lands.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#release_sync_forge_not_supported](#release_sync_forge_not_supported)
+
 ### SERVICE_STATUS_COLLECTION_FAILED
 **Problem:** AWF service status checks could not be collected.
 **Likely Cause:** Service discovery or database connection failed.

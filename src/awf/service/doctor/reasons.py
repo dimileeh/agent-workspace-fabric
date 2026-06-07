@@ -107,6 +107,25 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf workspace adopt-pr",
         _reason_catalog_link("PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"),
     ),
+    "RELEASE_SYNC_FORGE_NOT_SUPPORTED": _ReasonText(
+        (
+            "AWF could not run release-PR sync because the release-PR sync path "
+            "only supports GitHub."
+        ),
+        (
+            "No repository change is needed — the forge is supported. Run release-PR "
+            "sync against a GitHub repository, or remonitor once a forge-neutral "
+            "release sync lands."
+        ),
+        (
+            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "Cloud), but release-PR sync shells `gh pr list` / `gh pr view` and "
+            "parses github.com PR URLs, so AWF fails fast instead of mis-routing to "
+            "a same-slug GitHub repository."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("RELEASE_SYNC_FORGE_NOT_SUPPORTED"),
+    ),
     "BITBUCKET_AUTH_NOT_CONFIGURED": _ReasonText(
         "AWF could not build BitBucket Cloud credentials from the environment.",
         (
