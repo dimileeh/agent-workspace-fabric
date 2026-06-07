@@ -1026,6 +1026,19 @@ class BitBucketClient:
         """
         self._assert_forge_origin(next_url, operation, what="pagination 'next'")
 
+    def _is_forge_origin(self, url: str) -> bool:
+        """Return whether ``url`` is relative or points at the configured forge host.
+
+        A relative ``url`` is resolved against the safe ``base_url`` and is allowed; an
+        absolute ``url`` is allowed only when its host (and scheme, if present) match the
+        forge ``base_url``.
+        """
+        parsed = urlsplit(url)
+        if not parsed.netloc:
+            return True
+        base = self._client.base_url
+        return parsed.hostname == base.host and (not parsed.scheme or parsed.scheme == base.scheme)
+
     def _assert_forge_origin(self, url: str, operation: str, *, what: str) -> None:
         """Reject an absolute ``url`` that points off the configured forge host.
 
@@ -1035,20 +1048,18 @@ class BitBucketClient:
         origin must be refused *before* the request is issued. A relative ``url`` is
         resolved against the safe ``base_url`` and is allowed.
         """
-        parsed = urlsplit(url)
-        if not parsed.netloc:
+        if self._is_forge_origin(url):
             return
-        base = self._client.base_url
-        if parsed.hostname != base.host or (parsed.scheme and parsed.scheme != base.scheme):
-            raise BitBucketClientError(
-                operation=operation,
-                status=None,
-                body=(
-                    f"BitBucket {what} pointed at unexpected origin "
-                    f"{parsed.scheme}://{parsed.hostname}; expected host {base.host}"
-                ),
-                reason_code=BITBUCKET_API_ERROR,
-            )
+        parsed = urlsplit(url)
+        raise BitBucketClientError(
+            operation=operation,
+            status=None,
+            body=(
+                f"BitBucket {what} pointed at unexpected origin "
+                f"{parsed.scheme}://{parsed.hostname}; expected host {self._client.base_url.host}"
+            ),
+            reason_code=BITBUCKET_API_ERROR,
+        )
 
     async def _request_text(
         self,
@@ -1058,13 +1069,21 @@ class BitBucketClient:
         operation: str,
         extra_headers: Mapping[str, str] | None = None,
     ) -> str:
-        """Fetch a raw text body (logs); returns ``""`` on any error response."""
+        """Fetch a raw text body (logs); returns ``""`` on any error response.
+
+        BitBucket's pipeline step-log endpoint answers a documented 307 redirect to an
+        off-origin signed log-storage URL. The shared redirect path origin-checks every
+        ``Location`` (SSRF guard) and would reject that hop, so log fetches enable
+        ``allow_log_redirect`` to follow it — but the forge ``Authorization`` header is
+        stripped before the off-origin hop, so credentials never reach the storage host.
+        """
         response = await self._request(
             method,
             path,
             operation=operation,
             extra_headers=extra_headers,
             strict=False,
+            allow_log_redirect=True,
         )
         if response.status_code >= 400:
             return ""
@@ -1080,6 +1099,7 @@ class BitBucketClient:
         params: Mapping[str, str] | None = None,
         extra_headers: Mapping[str, str] | None = None,
         strict: bool = True,
+        allow_log_redirect: bool = False,
     ) -> httpx.Response:
         """Single request with 429/Retry-After backoff and near-limit slow-down."""
         headers = {"Accept": "application/json", "Authorization": self._auth.header_value()}
@@ -1126,7 +1146,18 @@ class BitBucketClient:
                     ),
                     reason_code=BITBUCKET_API_ERROR,
                 )
-            self._assert_forge_origin(location, operation, what="redirect Location")
+            if allow_log_redirect and not self._is_forge_origin(location):
+                # BB's step-log endpoint answers a documented 307 to an off-origin
+                # signed storage URL. The redirect comes from an already-authenticated
+                # api.bitbucket.org response, so follow it — but drop the forge
+                # ``Authorization`` header first so the credential never reaches the
+                # storage host (the SSRF guard's core concern). The redirected body is
+                # only read as a redacted, truncated log excerpt and never re-acted on.
+                headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+            else:
+                # All other 3xx hops stay on the forge: each Location is origin-checked
+                # (same SSRF guard as pagination ``next``) before being re-issued.
+                self._assert_forge_origin(location, operation, what="redirect Location")
             redirects += 1
             target = location
             target_params = None

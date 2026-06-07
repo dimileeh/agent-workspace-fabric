@@ -233,6 +233,42 @@ async def test_step_log_404_is_tolerated_as_empty() -> None:
     assert failures[0].log_excerpt == ""
 
 
+async def test_step_log_follows_offorigin_307_redirect_without_forge_auth() -> None:
+    """BB's step-log endpoint answers a documented 307 to off-origin log storage.
+
+    The shared redirect path origin-checks every ``Location`` (SSRF guard) and would
+    reject that hop, raising a non-transient ``BitBucketClientError`` that escapes the
+    "best-effort, never raises" step-log fetch and loses the CI step evidence. The log
+    redirect must instead be followed to the signed storage URL — but with the forge
+    ``Authorization`` header stripped, so credentials never reach the storage host.
+    """
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "FAILED", "name": "Pipeline"}],
+    )
+    fake.page("GET", f"{_REPO}/pipelines/", values=[{"uuid": "p1"}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/p1/steps/",
+        values=[{"uuid": "s1", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/p1/steps/s1/log",
+        status=307,
+        headers={"Location": "https://bbuseruploads.s3.amazonaws.com/log-storage/s1"},
+    )
+    fake.enqueue("GET", "/log-storage/s1", text="E   assert 1 == 2\nFAILED tests/test_x.py")
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert "assert 1 == 2" in failures[0].log_excerpt
+    # The off-origin storage hop must not carry the forge credential.
+    storage_call = next(r for r in fake.calls("GET") if r.url.path == "/log-storage/s1")
+    assert "Authorization" not in storage_call.headers
+
+
 async def test_invalid_retry_after_falls_back_to_backoff() -> None:
     fake = FakeBitBucket()
     fake.enqueue(
