@@ -10,7 +10,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitBucketAuth, BitBucketClient, BitBucketClientError
 from awf.common.bitbucket_client_parsing import (
     _comment_account_id,
     _comment_author,
@@ -267,6 +267,47 @@ async def test_step_log_follows_offorigin_307_redirect_without_forge_auth() -> N
     # The off-origin storage hop must not carry the forge credential.
     storage_call = next(r for r in fake.calls("GET") if r.url.path == "/log-storage/s1")
     assert "Authorization" not in storage_call.headers
+
+
+async def test_step_log_transport_failure_yields_empty_log_not_raise() -> None:
+    """A transport timeout/reset on the step-log endpoint (or its signed storage
+    redirect) must not escape the "best-effort, never raises" log fetch.
+
+    ``_request_text`` already tolerates 4xx/5xx by returning ``""``; a transport-level
+    ``BitBucketClientError`` (reason ``BITBUCKET_TRANSPORT_ERROR``) must be tolerated the
+    same way. Otherwise it propagates through ``fetch_failing_check_logs`` to
+    ``_fetch_status_for_decision``, which treats the whole PR status poll as a transient
+    BitBucket fault and retries forever instead of surfacing the failing CI with an empty
+    log — a persistent log-storage outage would block the monitor from acting.
+    """
+    canned = {
+        ("GET", f"{_REPO}/commit/{_HEAD}/statuses"): httpx.Response(
+            200, json={"values": [{"state": "FAILED", "name": "Pipeline"}]}
+        ),
+        ("GET", f"{_REPO}/pipelines/"): httpx.Response(200, json={"values": [{"uuid": "p1"}]}),
+        ("GET", f"{_REPO}/pipelines/p1/steps/"): httpx.Response(
+            200,
+            json={
+                "values": [{"uuid": "s1", "name": "Test", "state": {"result": {"name": "FAILED"}}}]
+            },
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/steps/s1/log"):
+            raise httpx.ConnectError("connection reset by peer", request=request)
+        return canned[(request.method.upper(), request.url.path)]
+
+    client = BitBucketClient(
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="https://api.bitbucket.org"
+        ),
+        auth=BitBucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
+    )
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    # The CI failure is still surfaced, just with no log evidence — not raised.
+    assert failures[0].conclusion == "FAILURE"
+    assert failures[0].log_excerpt == ""
 
 
 async def test_invalid_retry_after_falls_back_to_backoff() -> None:

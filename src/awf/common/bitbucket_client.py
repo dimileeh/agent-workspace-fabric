@@ -1076,15 +1076,25 @@ class BitBucketClient:
         ``Location`` (SSRF guard) and would reject that hop, so log fetches enable
         ``allow_log_redirect`` to follow it — but the forge ``Authorization`` header is
         stripped before the off-origin hop, so credentials never reach the storage host.
+
+        Log fetching is best-effort: a transport timeout/reset on the step-log endpoint
+        or its signed storage redirect raises ``BitBucketClientError``, which is tolerated
+        the same way a 4xx/5xx response is — by returning ``""``. Without this, the error
+        escapes to ``_fetch_status_for_decision``, which treats the whole PR status poll
+        as a transient BitBucket fault and retries indefinitely; a persistent log-storage
+        outage would then block the monitor from acting on the failing CI.
         """
-        response = await self._request(
-            method,
-            path,
-            operation=operation,
-            extra_headers=extra_headers,
-            strict=False,
-            allow_log_redirect=True,
-        )
+        try:
+            response = await self._request(
+                method,
+                path,
+                operation=operation,
+                extra_headers=extra_headers,
+                strict=False,
+                allow_log_redirect=True,
+            )
+        except BitBucketClientError:
+            return ""
         if response.status_code >= 400:
             return ""
         return response.text
