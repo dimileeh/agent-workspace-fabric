@@ -187,24 +187,14 @@ function hasActiveOperation(context: WorkspaceOperatorContext): boolean {
 }
 
 function hasActiveCancellationOperation(context: WorkspaceOperatorContext): boolean {
-  const hasOperationsData =
-    context.operations !== undefined &&
-    context.operations !== null &&
-    context.operations.length > 0;
   const recoveryOperation = context.workspace?.recovery?.current_operation ?? context.overview.recovery?.current_operation ?? null;
   if (recoveryOperation) {
     if (cancellationOperationTypes.has(recoveryOperation.type) && !terminalOperationStatuses.has(recoveryOperation.status)) {
       return true;
     }
   }
-  const cancellationOperations = (hasOperationsData ? context.operations : []).filter((operation) =>
-    cancellationOperationTypes.has(operation.type),
-  );
-  if (cancellationOperations.some((operation) => !terminalOperationStatuses.has(operation.status))) {
+  if ((context.operations ?? []).some((operation) => cancellationOperationTypes.has(operation.type) && !terminalOperationStatuses.has(operation.status))) {
     return true;
-  }
-  if (hasOperationsData) {
-    return false;
   }
   return context.overview.active_operation === "cancel" || context.overview.active_operation === "stop";
 }
