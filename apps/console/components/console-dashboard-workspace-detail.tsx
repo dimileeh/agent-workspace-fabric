@@ -522,6 +522,7 @@ export function OperatorControlsBlock({
             <div
               key={control.action}
               tabIndex={reason ? 0 : undefined}
+              aria-describedby={disabled && reason ? `operator-control-tip-${workspaceId}-${control.action}` : undefined}
               className="group relative flex min-w-0 items-center gap-1.5"
             >
               <button
@@ -530,7 +531,7 @@ export function OperatorControlsBlock({
                   destructive ? setConfirming(control.action) : onAction(control.action, control.requestedTier)
                 }
                 disabled={disabled}
-                aria-describedby={reason ? `operator-control-tip-${workspaceId}-${control.action}` : undefined}
+                aria-describedby={!disabled && reason ? `operator-control-tip-${workspaceId}-${control.action}` : undefined}
                 className={buttonClassName}
               >
                 <OperatorControlIcon action={control.action} spinning={submitting} />
