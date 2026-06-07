@@ -119,9 +119,8 @@ test.describe("Operator cancel control", () => {
     expect(cancelPosts).toBe(1);
   });
 
-  test("auto-dismisses an open confirmation when cancel becomes disabled", async ({ page }) => {
+  test("keeps cancel enabled while a workspace operation is active", async ({ page }) => {
     let cancelPosts = 0;
-    let activeOperation: string | null = null;
     await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
       cancelPosts += 1;
       await route.fulfill({
@@ -142,7 +141,7 @@ test.describe("Operator cancel control", () => {
       base_branch: "main",
       agent: "test-agent",
       status: "running",
-      active_operation: activeOperation,
+      active_operation: "op_background",
       version: 7,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -165,19 +164,266 @@ test.describe("Operator cancel control", () => {
     const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
     await expect(cancelButton).toBeVisible();
     await expect(cancelButton).toBeEnabled();
+    await expect(cancelButton.locator("..")).not.toContainText("active operation");
+    await expect(page.getByText("active operation", { exact: true })).toHaveCount(0);
 
-    // Open the cancel confirmation while cancel is still available.
+    // A background AWF operation must not disable the emergency cancel path.
     await cancelButton.click();
     const confirmation = page.getByTestId("operator-cancel-confirm");
     await expect(confirmation).toBeVisible();
 
-    // A background operation begins while the confirmation is open, so the
-    // cancel control becomes disabled. The still-open confirmation must drop
-    // itself and Confirm cancel must never POST against the guarded workspace.
-    activeOperation = "op_busy";
+    await page.getByRole("button", { name: "Confirm cancel", exact: true }).click();
+    await expect(page.getByText("Cancel succeeded:")).toBeVisible();
+    expect(cancelPosts).toBe(1);
+  });
 
-    await expect(cancelButton).toBeDisabled({ timeout: 15000 });
-    await expect(confirmation).not.toBeVisible();
+  test("disables cancel while a cancel operation is active", async ({ page }) => {
+    let cancelPosts = 0;
+    await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
+      cancelPosts += 1;
+      await route.fulfill({
+        json: {
+          workspace_id: WORKSPACE_ID,
+          operation_id: "op_cancel123",
+          operation_status: "running",
+          status: "running",
+          message: "cancel requested",
+        },
+      });
+    });
+
+    const workspacePayload = () => ({
+      workspace_id: WORKSPACE_ID,
+      title: "Mock Workspace",
+      repo_url: "https://github.com/test/repo",
+      base_branch: "main",
+      agent: "test-agent",
+      status: "running",
+      active_operation: "cancel",
+      version: 7,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    });
+
+    await page.route("/api/awf/workspaces/overview*", async (route) => {
+      await route.fulfill({ json: { items: [workspacePayload()], has_more: false } });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}`, async (route) => {
+      await route.fulfill({ json: workspacePayload() });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}/operations*`, async (route) => {
+      await route.fulfill({
+        json: {
+          items: [
+            {
+              id: "op_cancel456",
+              workspace_id: WORKSPACE_ID,
+              type: "cancel",
+              status: "running",
+              error_code: null,
+              error_message: null,
+              payload: null,
+              result: null,
+              idempotency_key: null,
+              created_at: new Date().toISOString(),
+              started_at: new Date().toISOString(),
+              finished_at: null,
+              owner: null,
+              source: null,
+              action: null,
+              pr_number: null,
+              pr_url: null,
+              source_head_sha: null,
+              source_base_sha: null,
+              reason: null,
+              reason_code: null,
+              failure_code: null,
+              failure_message: null,
+              log_stream_refs: {},
+              log_stream_ids: [],
+            },
+          ],
+          has_more: false,
+        },
+      });
+    });
+
+    await page.goto(`/?workspaceId=${WORKSPACE_ID}`);
+
+    const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
+    await expect(cancelButton).toBeVisible();
+    await expect(cancelButton).toBeDisabled();
+    await expect(page.getByText("Cancel succeeded:")).not.toBeVisible();
+    await expect(page.getByText("active operation", { exact: true })).toHaveCount(0);
+    await page.waitForTimeout(200);
+    expect(cancelPosts).toBe(0);
+  });
+
+  test("keeps cancel disabled when overview reports cancel and details contain non-cancel operations", async ({ page }) => {
+    let cancelPosts = 0;
+    await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
+      cancelPosts += 1;
+      await route.fulfill({
+        json: {
+          workspace_id: WORKSPACE_ID,
+          operation_id: "op_cancel123",
+          operation_status: "running",
+          status: "running",
+          message: "cancel requested",
+        },
+      });
+    });
+
+    const workspacePayload = () => ({
+      workspace_id: WORKSPACE_ID,
+      title: "Mock Workspace",
+      repo_url: "https://github.com/test/repo",
+      base_branch: "main",
+      agent: "test-agent",
+      status: "running",
+      active_operation: "cancel",
+      version: 7,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    });
+
+    await page.route("/api/awf/workspaces/overview*", async (route) => {
+      await route.fulfill({ json: { items: [workspacePayload()], has_more: false } });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}`, async (route) => {
+      await route.fulfill({ json: workspacePayload() });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}/operations*`, async (route) => {
+      await route.fulfill({
+        json: {
+          items: [
+            {
+              id: "op_provision456",
+              workspace_id: WORKSPACE_ID,
+              type: "provision",
+              status: "running",
+              error_code: null,
+              error_message: null,
+              payload: null,
+              result: null,
+              idempotency_key: null,
+              created_at: new Date().toISOString(),
+              started_at: new Date().toISOString(),
+              finished_at: null,
+              owner: null,
+              source: null,
+              action: null,
+              pr_number: null,
+              pr_url: null,
+              source_head_sha: null,
+              source_base_sha: null,
+              reason: null,
+              reason_code: null,
+              failure_code: null,
+              failure_message: null,
+              log_stream_refs: {},
+              log_stream_ids: [],
+            },
+          ],
+          has_more: false,
+        },
+      });
+    });
+
+    await page.goto(`/?workspaceId=${WORKSPACE_ID}`);
+
+    const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
+    await expect(cancelButton).toBeVisible();
+    await expect(cancelButton).toBeDisabled();
+    await page.waitForTimeout(200);
+    expect(cancelPosts).toBe(0);
+  });
+
+  test("keeps cancel enabled when only terminal cancel rows are in details", async ({ page }) => {
+    let cancelPosts = 0;
+    await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
+      cancelPosts += 1;
+      await route.fulfill({
+        json: {
+          workspace_id: WORKSPACE_ID,
+          operation_id: "op_cancel123",
+          operation_status: "succeeded",
+          status: "cancelled",
+          message: "cancel requested",
+        },
+      });
+    });
+
+    const workspacePayload = () => ({
+      workspace_id: WORKSPACE_ID,
+      title: "Mock Workspace",
+      repo_url: "https://github.com/test/repo",
+      base_branch: "main",
+      agent: "test-agent",
+      status: "running",
+      active_operation: "cancel",
+      version: 7,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    });
+
+    await page.route("/api/awf/workspaces/overview*", async (route) => {
+      await route.fulfill({ json: { items: [workspacePayload()], has_more: false } });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}`, async (route) => {
+      await route.fulfill({ json: workspacePayload() });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}/operations*`, async (route) => {
+      await route.fulfill({
+        json: {
+          items: [
+            {
+              id: "op_cancel456",
+              workspace_id: WORKSPACE_ID,
+              type: "cancel",
+              status: "canceled",
+              error_code: null,
+              error_message: null,
+              payload: null,
+              result: null,
+              idempotency_key: null,
+              created_at: new Date().toISOString(),
+              started_at: new Date().toISOString(),
+              finished_at: new Date().toISOString(),
+              owner: null,
+              source: null,
+              action: null,
+              pr_number: null,
+              pr_url: null,
+              source_head_sha: null,
+              source_base_sha: null,
+              reason: null,
+              reason_code: null,
+              failure_code: null,
+              failure_message: null,
+              log_stream_refs: {},
+              log_stream_ids: [],
+            },
+          ],
+          has_more: false,
+        },
+      });
+    });
+
+    await page.goto(`/?workspaceId=${WORKSPACE_ID}`);
+
+    const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
+    await expect(cancelButton).toBeVisible();
+    await expect(cancelButton).toBeEnabled();
     await page.waitForTimeout(200);
     expect(cancelPosts).toBe(0);
   });
