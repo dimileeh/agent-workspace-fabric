@@ -27,9 +27,8 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.forge import (
-    ForgeNotSupportedError,
-    detect_forge_from_url,
-    ensure_forge_supported,
+    OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
+    concrete_forge_for_repo,
 )
 from awf.common.git_identity import (
     git_safe_directory_config_args,
@@ -495,6 +494,7 @@ async def _resolve_preserved_active_branch_open_pr(
     branch_name: str | None,
     base_branch: str | None,
     expected_head_repo_slug: str | None = None,
+    resolved_forge: object = None,
 ) -> _BranchOpenPRLookup | None:
     if self._open_pr_resolver is None:
         return None
@@ -505,41 +505,57 @@ async def _resolve_preserved_active_branch_open_pr(
 
     lookup_branch = branch_name.strip()
 
-    # Gate detected-but-unsupported forges BEFORE the GitHub-only ``gh pr list``
-    # path. ``BranchOpenPullRequestResolver`` parses ``repo_url`` into a
-    # ``RepoRef`` and shells ``gh pr list --repo owner/repo`` (GitHub), dropping
-    # the forge host — so a preserved-active BitBucket workspace would otherwise
-    # be queried as a *same-slug GitHub* repo and could attach the wrong monitor
-    # instead of failing fast. The executor forge gate does not cover this worker
-    # recovery path, so reject here. ``ensure_forge_supported`` is the single
-    # source of truth for supported forges (the same gate the executor uses), so
-    # detection and dispatch cannot drift. Undetectable URLs (``None``) fall
-    # through to the GitHub resolver unchanged — existing GitHub workspaces never
-    # trip this.
-    detected_forge = detect_forge_from_url(repo_url)
-    if detected_forge is not None:
-        try:
-            ensure_forge_supported(detected_forge)
-        except ForgeNotSupportedError as exc:
-            _log.warning(
-                "worker.preserved_active_open_pr_lookup_forge_not_supported",
-                branch_name=lookup_branch,
-                base_branch=base_branch,
-                forge=detected_forge,
-                reason_code=exc.reason_code,
-            )
-            return _BranchOpenPRLookup(
-                branch_name=lookup_branch,
-                state="failed",
-                ambiguity_reason="open_pr_lookup_forge_not_supported",
-                payload={
-                    "branch_name": lookup_branch,
-                    "forge": detected_forge,
-                    "reason_code": exc.reason_code,
-                    "failure": "forge_not_supported",
-                    "source": "open_pr_resolver",
-                },
-            )
+    # Gate any non-GitHub forge BEFORE the GitHub-only ``gh pr list`` path.
+    # ``BranchOpenPullRequestResolver`` parses ``repo_url`` into a ``RepoRef`` and
+    # shells ``gh pr list --repo owner/repo`` (GitHub), dropping the forge host —
+    # so a preserved-active BitBucket workspace would otherwise be queried as a
+    # *same-slug GitHub* repo and could attach the wrong monitor instead of
+    # failing fast. The executor forge gate does not cover this worker recovery
+    # path, so reject here.
+    #
+    # Resolve the gate forge via ``concrete_forge_for_repo`` (persisted/resolved
+    # forge > repo-URL host > github), mirroring the executor forge gate, NOT plain
+    # URL detection. A bare ``owner/repo`` slug carries no host, so URL detection
+    # alone resolves it as GitHub (``RepoRef.from_url`` defaults bare slugs to
+    # github) — a BitBucket workspace configured with ``forge: bitbucket`` but a
+    # bare-slug ``repo_url`` would then slip past this gate into the GitHub
+    # resolver. Honoring the persisted forge first closes that gap.
+    #
+    # Issue #345 Part 2 note: this gate is GitHub-ONLY on purpose, deliberately
+    # NOT the shared ``ensure_forge_supported`` set. BitBucket Cloud is now a
+    # supported forge generally (Part 2 ships ``BitBucketClient``), but the
+    # forge-NEUTRAL open-PR resolver is explicitly out of scope, so this still-
+    # GitHub-only path must keep rejecting bitbucket (and any future forge) until
+    # a forge-neutral resolver exists. Undetectable URLs (``None``) fall through
+    # to the GitHub resolver unchanged — existing GitHub workspaces never trip
+    # this.
+    #
+    # The reason code is ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED``, NOT the generic
+    # ``FORGE_NOT_SUPPORTED``: BitBucket Cloud *is* a supported forge now, so the
+    # generic code (and its "use a supported forge" fix text) would contradict the
+    # real failure for a bitbucket.org operator. The honest reason is that the
+    # open-PR resolver itself is GitHub-only.
+    gate_forge = concrete_forge_for_repo(resolved_forge, repo_url)
+    if gate_forge != "github":
+        _log.warning(
+            "worker.preserved_active_open_pr_lookup_forge_not_supported",
+            branch_name=lookup_branch,
+            base_branch=base_branch,
+            forge=gate_forge,
+            reason_code=OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
+        )
+        return _BranchOpenPRLookup(
+            branch_name=lookup_branch,
+            state="failed",
+            ambiguity_reason="open_pr_lookup_forge_not_supported",
+            payload={
+                "branch_name": lookup_branch,
+                "forge": gate_forge,
+                "reason_code": OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE,
+                "failure": "open_pr_resolver_forge_not_supported",
+                "source": "open_pr_resolver",
+            },
+        )
 
     try:
         matches = await self._open_pr_resolver.resolve(

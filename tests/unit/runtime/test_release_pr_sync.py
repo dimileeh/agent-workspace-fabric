@@ -251,6 +251,39 @@ class TestFindOrCreateReleasePr:
         assert exc.value.reason_code == "RELEASE_SYNC_PR_URL_INVALID"
 
     @pytest.mark.unit
+    async def test_non_github_forge_fails_closed_before_any_gh_call(self) -> None:
+        # BitBucket Cloud is a supported forge (issue #345 Part 2), so it clears
+        # the executor forge gate and reaches here — but the open-PR lookup
+        # (``gh pr list``), adoption metadata (``gh pr view``), and github.com-only
+        # URL parse are all GitHub-only. Fail closed with an honest reason code
+        # before any ``gh`` call instead of mis-routing to github.com for the same
+        # slug or rejecting the bitbucket.org create URL.
+        fake = FakeCommandRunner()
+        bitbucket_repo = RepoRef(owner="o", name="r", forge="bitbucket")
+        gh = GitHubClient(fake)
+
+        with pytest.raises(ReleasePrSyncError) as exc:
+            await find_or_create_release_pr(
+                runner=fake,
+                gh=gh,
+                repo=bitbucket_repo,
+                source_branch="development",
+                target_branch="main",
+                title="t",
+                body="b",
+            )
+
+        assert exc.value.reason_code == "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
+        assert exc.value.detail == {
+            "repo_slug": "o/r",
+            "forge": "bitbucket",
+            "source_branch": "development",
+            "target_branch": "main",
+        }
+        # No git/gh subprocess was invoked — the guard fires first.
+        assert fake.calls == []
+
+    @pytest.mark.unit
     async def test_ignores_fork_pr_and_creates_in_repo(self) -> None:
         # gh pr list can return a fork PR sharing the head branch name; it must
         # not be adopted — a same-repo PR is created instead.

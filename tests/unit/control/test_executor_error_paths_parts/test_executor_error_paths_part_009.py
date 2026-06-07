@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.forge import ForgeNotSupportedError
 from awf.control.executor import monitor_handoff as executor_monitor_handoff
@@ -279,6 +280,46 @@ class TestExecutorCoverageEdgesPart003:
             assert ws.events[-1].reason_code == "FORGE_NOT_SUPPORTED"
             assert "monitor recovery" in (ws.failure_message or "")
             assert "BitBucket forge support is not yet implemented" in (ws.failure_message or "")
+            # Must not be flattened into the generic build-failed reason/message.
+            assert "failed to build PR monitor" not in (ws.failure_message or "")
+            assert not [
+                event for event in ws.events if event.reason_code == "MONITOR_RECOVERY_FAILED"
+            ]
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_preserves_bitbucket_auth_reason_code(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A BitBucket workspace missing credentials raises ``BitBucketClientError``
+        (e.g. ``BITBUCKET_AUTH_NOT_CONFIGURED``) when the monitor factory builds its
+        forge client. The resume path must preserve that actionable auth reason code
+        instead of flattening it into the generic ``MONITOR_RECOVERY_FAILED`` —
+        mirroring the initial handoff path's ``BitBucketClientError`` catch.
+        """
+        ws_id = await _seed_monitoring_pr(factory)
+
+        def _factory(*_args: Any) -> object:
+            raise BitBucketClientError(
+                operation="bitbucket_client_from_env",
+                status=None,
+                body="BITBUCKET_API_TOKEN/BITBUCKET_EMAIL not configured",
+                reason_code="BITBUCKET_AUTH_NOT_CONFIGURED",
+            )
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.events[-1].reason_code == "BITBUCKET_AUTH_NOT_CONFIGURED"
+            assert "monitor recovery" in (ws.failure_message or "")
             # Must not be flattened into the generic build-failed reason/message.
             assert "failed to build PR monitor" not in (ws.failure_message or "")
             assert not [

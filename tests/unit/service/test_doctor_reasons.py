@@ -28,6 +28,19 @@ def test_protected_scope_terminal_reasons_have_doctor_guidance() -> None:
 
 
 @pytest.mark.unit
+def test_release_sync_forge_not_supported_has_doctor_guidance() -> None:
+    """Verify the GitHub-only release-PR sync forge gate maps to operator guidance."""
+    code = "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
+    reason = _REASON_TEXT[code]
+
+    assert reason.message
+    assert reason.likely_cause
+    assert reason.action
+    assert reason.related_command
+    assert reason.docs_link == f"docs/REASON_CATALOG.md#{code.lower()}"
+
+
+@pytest.mark.unit
 def test_grok_runtime_cli_missing_has_doctor_guidance() -> None:
     """Verify Grok runtime CLI preflight failures map to operator guidance."""
     reason = _REASON_TEXT["GROK_RUNTIME_CLI_NOT_FOUND"]

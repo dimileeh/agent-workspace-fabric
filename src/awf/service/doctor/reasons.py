@@ -52,23 +52,181 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "FORGE_NOT_SUPPORTED": _ReasonText(
         (
-            "AWF detected a code forge it does not yet support. Only GitHub is "
-            "implemented; BitBucket is detected but not yet available."
+            "AWF detected a code forge it does not support. GitHub and BitBucket "
+            "Cloud are implemented; any other forge fails fast."
         ),
         (
-            "Use a GitHub-hosted repository for now, or track BitBucket support in "
-            "issue #345 (Phase 1 adds detection only). Recreate the workspace "
-            "against a github.com remote."
+            "Use a GitHub or BitBucket Cloud repository, or track support for the "
+            "detected forge upstream. Recreate the workspace against a supported "
+            "remote (github.com or bitbucket.org)."
         ),
         (
-            "The workspace repository URL resolved to a non-GitHub forge (for "
-            "example bitbucket.org), or the workspace profile set `forge: "
-            "bitbucket`. Phase 1 of issue #345 adds forge detection without a "
-            "BitBucket client, so the workspace fails fast instead of mis-routing "
+            "The workspace repository URL resolved to an unsupported forge (a host "
+            "other than github.com or bitbucket.org), or the workspace profile set "
+            "an unsupported `forge:` value. AWF fails fast instead of mis-routing "
             "to GitHub."
         ),
         "awf workspace create",
         _reason_catalog_link("FORGE_NOT_SUPPORTED"),
+    ),
+    "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED": _ReasonText(
+        (
+            "AWF could not recover the open PR for a preserved workspace because "
+            "the open-PR resolver only supports GitHub."
+        ),
+        (
+            "No repository change is needed — the forge is supported. Adopt the PR "
+            "monitor explicitly with `awf workspace adopt-pr`, or remonitor once a "
+            "forge-neutral open-PR resolver lands."
+        ),
+        (
+            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "Cloud), but the GitHub-only open-PR resolver cannot look up its open "
+            "PR by branch yet, so worker recovery fails fast instead of querying "
+            "the branch as a same-slug GitHub repo."
+        ),
+        "awf workspace adopt-pr",
+        _reason_catalog_link("OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED"),
+    ),
+    "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY": _ReasonText(
+        (
+            "AWF could not adopt the PR because the default adoption metadata "
+            "fetcher only supports GitHub."
+        ),
+        (
+            "No repository change is needed — the forge is supported. Inject a "
+            "BitBucket-aware adoption metadata fetcher, or adopt a GitHub PR until "
+            "the forge-neutral fetcher lands."
+        ),
+        (
+            "The repository is on a supported non-GitHub forge (e.g. BitBucket "
+            "Cloud), but the default adoption metadata fetcher shells `gh pr view`, "
+            "which is GitHub-only — so AWF fails fast instead of querying GitHub for "
+            "the same owner/repo slug."
+        ),
+        "awf workspace adopt-pr",
+        _reason_catalog_link("PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"),
+    ),
+    "PR_CREATE_FORGE_NOT_SUPPORTED": _ReasonText(
+        ("AWF could not open a new pull request because new-PR creation only supports GitHub."),
+        (
+            "No repository change is needed — the forge is supported for monitoring "
+            "an existing PR. Open the pull request manually first (AWF will then "
+            "monitor it), use a GitHub repository, or remonitor once forge-neutral "
+            "PR creation lands."
+        ),
+        (
+            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "Cloud), but opening a new PR shells `gh pr create` and parses "
+            "github.com PR URLs, so AWF fails fast at the push step instead of "
+            "mis-routing to a same-slug GitHub repository."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("PR_CREATE_FORGE_NOT_SUPPORTED"),
+    ),
+    "RELEASE_SYNC_FORGE_NOT_SUPPORTED": _ReasonText(
+        (
+            "AWF could not run release-PR sync because the release-PR sync path "
+            "only supports GitHub."
+        ),
+        (
+            "No repository change is needed — the forge is supported. Run release-PR "
+            "sync against a GitHub repository, or remonitor once a forge-neutral "
+            "release sync lands."
+        ),
+        (
+            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "Cloud), but release-PR sync shells `gh pr list` / `gh pr view` and "
+            "parses github.com PR URLs, so AWF fails fast instead of mis-routing to "
+            "a same-slug GitHub repository."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("RELEASE_SYNC_FORGE_NOT_SUPPORTED"),
+    ),
+    "BITBUCKET_AUTH_NOT_CONFIGURED": _ReasonText(
+        "AWF could not build BitBucket Cloud credentials from the environment.",
+        (
+            "Set BITBUCKET_AUTH_MODE (basic|bearer) and BITBUCKET_API_TOKEN (plus "
+            "BITBUCKET_EMAIL for basic mode) in the AWF service environment, then "
+            "remonitor the workspace."
+        ),
+        (
+            "The BitBucket auth mode, API token, or email is missing or malformed. "
+            "App passwords are not supported; use an Atlassian API token."
+        ),
+        "awf service doctor",
+        _reason_catalog_link("BITBUCKET_AUTH_NOT_CONFIGURED"),
+    ),
+    "BITBUCKET_PIPELINE_FULL_RERUN": _ReasonText(
+        (
+            "AWF re-ran the entire BitBucket pipeline because BitBucket Cloud has "
+            "no failed-only rerun API (that action is UI-only)."
+        ),
+        (
+            "No action required. The full pipeline was retriggered for the PR; "
+            "inspect the monitor log if reruns keep recurring."
+        ),
+        (
+            "BitBucket Cloud exposes only a whole-pipeline trigger over REST, so a "
+            "transient-failure rerun necessarily reruns every step, not just the "
+            "failed ones."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("BITBUCKET_PIPELINE_FULL_RERUN"),
+    ),
+    "BITBUCKET_PIPELINE_NOT_RERUNNABLE": _ReasonText(
+        (
+            "AWF refused to rerun a BitBucket pipeline because the pull-request "
+            "pipeline target could not be safely reconstructed."
+        ),
+        (
+            "Re-run the pipeline from the BitBucket UI, or verify the PR pipeline "
+            "configuration (custom/manual pipelines and required variables are not "
+            "auto-rerunnable), then remonitor the workspace."
+        ),
+        (
+            "The failing pipeline was custom/manual, required variables, or lacked "
+            "the source/destination commit metadata AWF needs to retrigger the "
+            "correct PR pipeline — so AWF declined rather than trigger a wrong run."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("BITBUCKET_PIPELINE_NOT_RERUNNABLE"),
+    ),
+    "BITBUCKET_ISSUE_TRACKER_DISABLED": _ReasonText(
+        (
+            "The BitBucket repository issue tracker is disabled, so AWF posted the "
+            "tracking note as a pull-request comment instead of opening an issue."
+        ),
+        (
+            "Enable the BitBucket repository issue tracker if durable issues are "
+            "wanted; otherwise no action is required — the note was captured on the "
+            "PR."
+        ),
+        (
+            "BitBucket returned 404 for the issues endpoint because the repository "
+            "issue tracker is turned off."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("BITBUCKET_ISSUE_TRACKER_DISABLED"),
+    ),
+    "BITBUCKET_ISSUE_CAPTURE_FAILED": _ReasonText(
+        (
+            "AWF could not durably capture a deferred review note: the BitBucket "
+            "issue tracker is disabled and there was no PR context to fall back "
+            "to, so neither an issue nor a PR comment was recorded."
+        ),
+        (
+            "Treat the deferred follow-up as uncaptured — the thread stays "
+            "unresolved and the merge is blocked. Enable the BitBucket repository "
+            "issue tracker (or ensure PR context is available) and remonitor so "
+            "the note can be captured."
+        ),
+        (
+            "BitBucket returned 404 for the issues endpoint (tracker disabled) and "
+            "AWF had not yet remembered the PR, leaving no comment fallback target."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("BITBUCKET_ISSUE_CAPTURE_FAILED"),
     ),
     "AWF_SETUP_PLACEHOLDER": _ReasonText(
         "`awf setup` is registered but the first-run setup implementation is not active yet.",

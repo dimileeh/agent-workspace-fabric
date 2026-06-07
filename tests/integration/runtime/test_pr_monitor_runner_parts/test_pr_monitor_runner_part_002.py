@@ -18,12 +18,14 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
+    WorkspaceEventRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
@@ -263,12 +265,13 @@ def _make_runner(
     auto_merge: bool = True,
     max_outer_iterations: int = 20,
     initial_review_grace_period_seconds: float = 0,
+    gh: object | None = None,
 ) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
         session_factory=factory,
         runner=cmd,
         adapter=adapter,
-        gh=DefaultMergeMethodGitHubClient(cmd),
+        gh=gh if gh is not None else DefaultMergeMethodGitHubClient(cmd),
         monitor_config=MonitorConfig(
             auto_merge=auto_merge,
             poll_interval_seconds=60,
@@ -706,6 +709,148 @@ class TestGitHubApiError:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert "github error" in (ws.failure_message or "")
+
+
+class _BitBucketErrorForgeClient:
+    """Forge client stub whose ``fetch_pr_status`` raises like a real
+    ``BitBucketClient`` does on an API/transport failure."""
+
+    def __init__(self, exc: BitBucketClientError) -> None:
+        self._exc = exc
+        self.closed = False
+
+    async def fetch_pr_status(self, **_kwargs: object) -> object:
+        raise self._exc
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _SequencedBitBucketForgeClient:
+    """Forge stub whose ``fetch_pr_status`` raises a queued sequence of
+    ``BitBucketClientError``s, one per poll, to drive multi-iteration paths."""
+
+    def __init__(self, excs: list[BitBucketClientError]) -> None:
+        self._excs = list(excs)
+        self.calls = 0
+        self.closed = False
+
+    async def fetch_pr_status(self, **_kwargs: object) -> object:
+        self.calls += 1
+        raise self._excs.pop(0)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class TestBitBucketApiError:
+    @pytest.mark.unit
+    async def test_bitbucket_api_error_terminates_with_failure(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """A *deterministic* ``BitBucketClientError`` from ``fetch_pr_status``
+        must terminate the workspace failed with the exception's reason code
+        preserved — not escape ``run()`` and crash the background monitor task
+        (PR #443 review). Recoverable blips (rate-limit/transport/5xx) instead
+        wait and re-poll; see ``test_bitbucket_transient_error_retries_then``."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        gh = _BitBucketErrorForgeClient(
+            BitBucketClientError(
+                operation="bitbucket fetch_pr_status",
+                status=404,
+                body="boom",
+                reason_code="BITBUCKET_API_ERROR",
+            )
+        )
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            gh=gh,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "bitbucket error" in (ws.failure_message or "")
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+        assert any(e.reason_code == "BITBUCKET_API_ERROR" for e in events)
+        # The single-use forge client is closed on the terminal exit.
+        assert gh.closed is True
+
+    @pytest.mark.unit
+    async def test_bitbucket_transient_error_retries_then_terminates_on_deterministic(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """A recoverable BitBucket blip (5xx) must wait and re-poll like the
+        GitHub path, rather than terminating immediately (PR #443 review). Here
+        the first poll hits a transient 503 (retry) and the second hits a
+        deterministic 404 (terminate), exercising both branches."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        # Two poll iterations, each fetching base + base-behind before the PR.
+        for _ in range(2):
+            cmd.queue_result(returncode=0)  # git fetch origin <base>
+            cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        gh = _SequencedBitBucketForgeClient(
+            [
+                BitBucketClientError(
+                    operation="bitbucket fetch_pr_status",
+                    status=503,
+                    body="Service Unavailable",
+                    reason_code="BITBUCKET_API_ERROR",
+                ),
+                BitBucketClientError(
+                    operation="bitbucket fetch_pr_status",
+                    status=404,
+                    body="not found",
+                    reason_code="BITBUCKET_API_ERROR",
+                ),
+            ]
+        )
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            gh=gh,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # The transient 503 made the monitor wait one poll interval and re-poll.
+        assert sleep_fn.calls == [60]
+        assert gh.calls == 2
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "bitbucket error" in (ws.failure_message or "")
+            events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+        assert any(e.event_type == "monitor.bitbucket_transient_error_retrying" for e in events)
+        assert any(e.reason_code == "BITBUCKET_TRANSIENT_RETRY" for e in events)
+        assert gh.closed is True
 
 
 class TestAgentRunErrorResilience:

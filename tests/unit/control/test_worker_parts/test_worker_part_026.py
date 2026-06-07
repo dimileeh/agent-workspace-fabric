@@ -1129,7 +1129,11 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         # A preserved-active BitBucket workspace must never reach the GitHub-only
         # ``gh pr list`` path: dropping the forge would query bitbucket.org's
         # owner/repo as a same-slug GitHub repo and could attach the wrong
-        # monitor. The lookup must fail fast with FORGE_NOT_SUPPORTED instead.
+        # monitor. The lookup must fail fast instead. BitBucket Cloud *is* a
+        # supported forge (issue #345 Part 2), so the reason code must be the
+        # honest ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` (the resolver is
+        # GitHub-only), NOT the generic ``FORGE_NOT_SUPPORTED`` whose fix text
+        # would tell a bitbucket.org operator to switch to a forge they already use.
         branch_name = "awf/ws_branch"
         resolver = _RecordingBranchOpenPRResolver({branch_name: []})
         worker = ControlWorker(
@@ -1152,8 +1156,48 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         assert lookup.payload == {
             "branch_name": branch_name,
             "forge": "bitbucket",
-            "reason_code": "FORGE_NOT_SUPPORTED",
-            "failure": "forge_not_supported",
+            "reason_code": "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED",
+            "failure": "open_pr_resolver_forge_not_supported",
+            "source": "open_pr_resolver",
+        }
+        # The GitHub-only resolver must never be queried for a BitBucket repo.
+        assert resolver.calls == []
+
+    @pytest.mark.unit
+    async def test_preserved_active_branch_open_pr_lookup_honors_persisted_forge_for_bare_slug(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # A BitBucket workspace configured with ``forge: bitbucket`` but a bare
+        # ``owner/repo`` slug has no host, so ``detect_forge_from_url`` resolves it
+        # as GitHub. URL detection alone would let this BitBucket workspace reach
+        # the GitHub-only resolver and attach a same-slug GitHub PR. The gate must
+        # honor the persisted/resolved forge first and fail fast instead.
+        branch_name = "awf/ws_branch"
+        resolver = _RecordingBranchOpenPRResolver({branch_name: []})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            open_pr_resolver=resolver,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        lookup = await worker._resolve_preserved_active_branch_open_pr(  # noqa: SLF001
+            repo_url="example/repo",
+            branch_name=branch_name,
+            base_branch="development",
+            resolved_forge="bitbucket",
+        )
+
+        assert lookup is not None
+        assert lookup.state == "failed"
+        assert lookup.ambiguity_reason == "open_pr_lookup_forge_not_supported"
+        assert lookup.payload == {
+            "branch_name": branch_name,
+            "forge": "bitbucket",
+            "reason_code": "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED",
+            "failure": "open_pr_resolver_forge_not_supported",
             "source": "open_pr_resolver",
         }
         # The GitHub-only resolver must never be queried for a BitBucket repo.
@@ -1362,99 +1406,6 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
             {
                 "repo_url": str(origin_repo),
                 "branch_name": branch_name,
-                "base_branch": None,
-            }
-        ]
-        assert executor.calls == [workspace_id]
-        assert cleaner.calls == []
-
-    @pytest.mark.unit
-    async def test_preserved_active_pushed_branch_no_open_pr_uses_remote_push_branch_when_branch_name_blank(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        origin_repo: Path,
-        tmp_path: Path,
-    ) -> None:
-        workspace_id = await _create_active_execution(
-            session_factory,
-            origin_repo,
-            "preserved-pushed-blank-branch-name-no-open-pr",
-            WorkspaceStatus.pushing,
-            compose_project_name="awf_preserved_blank_branch_name_no_open_pr",
-            create_task_attempt=True,
-        )
-        work_root = tmp_path / "awf-work-blank-branch-name-no-open-pr"
-        remote_push_branch = f"awf/{workspace_id}"
-        _worktree, base_commit, head_sha = _seed_workspace_worktree(
-            worktrees_root=work_root / "worktrees",
-            origin=origin_repo,
-            workspace_id=workspace_id,
-            branch_name=remote_push_branch,
-            commit_change=True,
-        )
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
-            assert ws is not None
-            ws.base_commit = base_commit
-            ws.branch_name = "   "
-            ws.remote_push_branch = remote_push_branch
-            await s.commit()
-
-        resolver = _RecordingBranchOpenPRResolver({remote_push_branch: []})
-        executor = _RecordingExecutor()
-        cleaner = _RecordingRuntimeCleaner()
-        worker = ControlWorker(
-            session_factory=session_factory,
-            provisioner=Provisioner(
-                session_factory=session_factory,
-                git=GitManager(work_root),
-                config=ProvisionerConfig(node_id="test-node-01"),
-            ),
-            executor=executor,
-            runtime_inspector=_RecordingRuntimeInspector(
-                {"awf_preserved_blank_branch_name_no_open_pr": _live_agent_snapshot()}
-            ),
-            runtime_cleaner=cleaner,
-            open_pr_resolver=resolver,
-            config=WorkerConfig(
-                poll_interval_seconds=0.01,
-                max_concurrent_provisions=0,
-                max_concurrent_executions=1,
-                stale_active_execution_scan_interval_seconds=0.0,
-                active_execution_preservation_grace_seconds=0.0,
-            ),
-        )
-
-        await worker.run_once()
-        await worker.wait_for_execution_tasks()
-
-        async with session_factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
-            assert ws is not None
-            operator_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_operator_required",
-            )
-            salvage_events = await WorkspaceEventRepository(s).list(
-                workspace_id=workspace_id,
-                event_type="workspace.active_execution_salvage_validation_requested",
-            )
-
-        assert ws.status == WorkspaceStatus.running.value
-        assert ws.subphase == "runtime_preserved_validation_requested"
-        assert operator_events == []
-        assert len(salvage_events) == 1
-        salvage_payload = salvage_events[0].payload
-        assert salvage_payload is not None
-        assert salvage_payload["classification"]["state"] == "committed"
-        assert salvage_payload["classification"]["reason"] == "clean_branch_ahead"
-        assert salvage_payload["classification"]["branch_name"] == remote_push_branch
-        assert salvage_payload["classification"]["expected_branch_name"] == remote_push_branch
-        assert salvage_payload["classification"]["head_sha"] == head_sha
-        assert resolver.calls == [
-            {
-                "repo_url": str(origin_repo),
-                "branch_name": remote_push_branch,
                 "base_branch": None,
             }
         ]

@@ -279,6 +279,7 @@ async def _recover_preserved_active_execution(
                 str | None,
                 str | None,
                 str | None,
+                str | None,
             ]
             | None
         ) = None
@@ -290,6 +291,7 @@ async def _recover_preserved_active_execution(
                 ws.remote_push_branch,
                 ws.base_commit,
                 _pr_adoption_expected_head_repo_slug(ws),
+                (ws.resolved_profile or {}).get("forge"),
             )
         await session.commit()
 
@@ -310,12 +312,16 @@ async def _recover_preserved_active_execution(
         remote_push_branch,
         base_commit,
         expected_head_repo_slug,
+        resolved_forge,
     ) = branch_recovery_context
     lookup_branch_name = _nonempty_str(remote_push_branch) or _nonempty_str(branch_name)
     branch_lookup = await self._resolve_preserved_active_branch_open_pr(
         repo_url=repo_url,
         branch_name=lookup_branch_name,
         expected_head_repo_slug=expected_head_repo_slug,
+        # Honor the persisted/resolved forge so a bare-slug BitBucket workspace
+        # fails fast instead of slipping into the GitHub-only resolver.
+        resolved_forge=resolved_forge,
         # A preserved branch PR may have been retargeted after creation.
         # Recover by head branch and let match/ambiguity checks below guard safety.
         base_branch=None,

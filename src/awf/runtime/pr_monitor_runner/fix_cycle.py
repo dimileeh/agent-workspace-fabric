@@ -14,6 +14,7 @@ import time as time
 from pathlib import Path
 from typing import Any, cast
 
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
@@ -36,6 +37,7 @@ from awf.runtime.pr_monitor_runner.comments import (
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
     _AUDIT_GIT_PUSH_EVENT,
+    _BITBUCKET_TRANSIENT_RETRY_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
 )
@@ -43,7 +45,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _defer_reason_state_key,
     _mark_review_comment_addressed,
-    _redact_and_truncate_github_error,
+    _redact_and_truncate_forge_error,
     _review_comment_needs_attention,
     _sync_needs_human_reason,
 )
@@ -334,6 +336,24 @@ async def _run_fix_cycle(
             ):
                 break
             raise
+        except BitBucketClientError as exc:
+            # BitBucket workspaces re-poll the PR through ``BitBucketClient``,
+            # whose ``fetch_pr_status`` raises ``BitBucketClientError`` (not
+            # ``GitHubClientError``). Without this arm a transient blip during the
+            # settle re-poll escapes to the runner's outer ``_execute`` handler,
+            # which continues the monitor instead of breaking settle and proceeding
+            # to push — so locally committed fixes may not be pushed after a
+            # recoverable Bitbucket fault. Mirror the GitHub arm: transient blips
+            # wait then break settle (proceed to push); permanent faults re-raise.
+            if await self._wait_after_transient_bitbucket_error(
+                exc,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="fix_cycle_settle_fetch_pr_status",
+                monitor_log=monitor_log,
+            ):
+                break
+            raise
         new_threads = [
             t for t in status.unresolved_inline_threads if _review_thread_needs_attention(state, t)
         ]
@@ -541,6 +561,81 @@ async def _run_fix_cycle(
                     "error_message": str(exc),
                 },
             )
+        except BitBucketClientError as exc:
+            # BitBucket workspaces resolve threads through ``BitBucketClient``,
+            # whose ``resolve_thread`` raises ``BitBucketClientError`` (not
+            # ``GitHubClientError``) on API/transport faults. Without this arm the
+            # error escapes ``_execute`` and the runner's generic BitBucket handler
+            # *terminates the workspace* on a permanent fault instead of keeping the
+            # poll loop alive — and the addressed-state rollback below never runs,
+            # so ``decide()`` would treat the still-open thread as handled forever
+            # and let auto-merge bypass live feedback (the #305 mode). Mirror the
+            # GitHub arm so the forge-neutral resolve behaviour holds: transient
+            # blips wait and requeue (``continue``); permanent faults clear the
+            # addressed marker and record ``COMMENT_RESOLUTION_FAILED`` without
+            # dropping out of the monitor.
+            if await self._wait_after_transient_bitbucket_error(
+                exc,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="resolve_thread",
+                monitor_log=monitor_log,
+            ):
+                _clear_addressed_state_by_id(state, tid)
+                await self._record_pr_monitor_audit_event(
+                    workspace_id=workspace_id,
+                    event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                    action="resolve_thread",
+                    outcome="requeued",
+                    reason_code=_BITBUCKET_TRANSIENT_RETRY_REASON,
+                    pr_number=pr_number,
+                    status=None,
+                    base_branch=base_branch or "",
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                    source_head_sha=pushed_head_sha,
+                    evidence={
+                        "thread_ids": [tid],
+                        "resolved_thread_count": 0,
+                        "requeued_thread_count": 1,
+                        "error_message": str(exc),
+                    },
+                )
+                continue
+            # ``BitBucketClientError`` has no ``stderr`` field and its ``str()``
+            # already carries a redacted body; log that instead of ``exc.stderr``.
+            _log.warning(
+                "monitor.resolve_thread_failed",
+                thread_id=tid,
+                stderr=str(exc),
+            )
+            # Same rationale as the GitHub arm: do NOT drop out of the monitor, and
+            # clear the addressed marker so the next poll re-addresses the still-open
+            # thread rather than treating an open BitBucket thread as handled forever.
+            _clear_addressed_state_by_id(state, tid)
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                action="resolve_thread",
+                outcome="failed",
+                reason_code="COMMENT_RESOLUTION_FAILED",
+                pr_number=pr_number,
+                status=None,
+                base_branch=base_branch or "",
+                remote_branch=remote_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                source_head_sha=pushed_head_sha,
+                evidence={
+                    "thread_ids": [tid],
+                    "resolved_thread_count": 0,
+                    "failed_thread_count": 1,
+                    "error_message": str(exc),
+                },
+            )
         else:
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
@@ -704,11 +799,72 @@ async def _capture_deferred_review_thread(
             return None
         # Permanent failure (e.g. token missing the issues scope). Redact before
         # logging/persisting: gh CLI errors can echo tokens or credentialed URLs.
-        redacted_error = _redact_and_truncate_github_error(str(exc))
+        redacted_error = _redact_and_truncate_forge_error(str(exc))
         _log.warning(
             "monitor.deferred_capture_failed",
             thread_id=thread.thread_id,
-            stderr=_redact_and_truncate_github_error(exc.stderr),
+            stderr=_redact_and_truncate_forge_error(exc.stderr),
+        )
+        await self._record_pr_monitor_audit_event(
+            workspace_id=workspace_id,
+            event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+            action="capture_deferred_thread",
+            outcome="failed",
+            reason_code="DEFERRED_CAPTURE_FAILED",
+            pr_number=pr_number,
+            status=None,
+            base_branch=base_branch or "",
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            evidence={"thread_ids": [thread.thread_id], "error_message": redacted_error},
+        )
+        return False
+    except BitBucketClientError as exc:
+        # BitBucket workspaces reach this same capture path, but ``create_issue``
+        # raises ``BitBucketClientError`` (e.g. a 403 when the token lacks the
+        # issues-create scope — a non-404 the client cannot fall back to a
+        # comment). Without this arm the error would escape to the runner's
+        # generic BitBucket handler and *terminate the monitor* rather than
+        # downgrading to ``needs_human`` the way the GitHub path does. Mirror the
+        # GitHub handling so the forge-neutral downgrade behaviour holds:
+        # transient blips clear the verdict to re-attempt next poll (``None``),
+        # permanent faults downgrade to ``needs_human`` (``False``) so the merge
+        # gate keeps blocking and the operator is notified.
+        if await self._wait_after_transient_bitbucket_error(
+            exc,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context="capture_deferred_thread",
+            monitor_log=monitor_log,
+        ):
+            _clear_addressed_state_by_id(state, thread.thread_id)
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                action="capture_deferred_thread",
+                outcome="requeued",
+                reason_code=_BITBUCKET_TRANSIENT_RETRY_REASON,
+                pr_number=pr_number,
+                status=None,
+                base_branch=base_branch or "",
+                remote_branch=remote_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                evidence={"thread_ids": [thread.thread_id]},
+            )
+            return None
+        # Permanent failure (e.g. token missing the issues scope). ``str(exc)``
+        # carries an already-redacted body; redact again defensively before
+        # logging/persisting. ``BitBucketClientError`` has no ``stderr`` field, so
+        # log the redacted message instead.
+        redacted_error = _redact_and_truncate_forge_error(str(exc))
+        _log.warning(
+            "monitor.deferred_capture_failed",
+            thread_id=thread.thread_id,
+            stderr=redacted_error,
         )
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
@@ -745,7 +901,22 @@ async def _capture_deferred_review_thread(
             "monitor.deferred_capture_comment_failed",
             thread_id=thread.thread_id,
             issue_url=issue_url,
-            stderr=_redact_and_truncate_github_error(exc.stderr),
+            stderr=_redact_and_truncate_forge_error(exc.stderr),
+        )
+    except BitBucketClientError as exc:
+        # BitBucket workspaces raise ``BitBucketClientError`` (not
+        # ``GitHubClientError``) when the courtesy ``post_comment`` fails. Without
+        # this arm the error would escape and terminate the monitor even though
+        # the tracking issue is already filed and recorded — the durable capture
+        # is done, so this comment is best-effort and its failure must be
+        # swallowed exactly like the GitHub case. ``BitBucketClientError`` has no
+        # ``stderr`` field; ``str(exc)`` carries an already-redacted body, redact
+        # again defensively before logging.
+        _log.warning(
+            "monitor.deferred_capture_comment_failed",
+            thread_id=thread.thread_id,
+            issue_url=issue_url,
+            stderr=_redact_and_truncate_forge_error(str(exc)),
         )
     await self._record_pr_monitor_audit_event(
         workspace_id=workspace_id,
