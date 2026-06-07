@@ -612,6 +612,11 @@ def _claim_lease_is_live(
         return False
     if expires_at.tzinfo is None and now.tzinfo is not None:
         now = now.replace(tzinfo=None)
+    elif expires_at.tzinfo is not None and now.tzinfo is None:
+        # Symmetric guard: callers pass an aware ``utcnow()`` today, but a naive
+        # ``now`` paired with an aware ``expires_at`` would raise ``TypeError`` at
+        # the comparison below. Compare naively rather than crashing.
+        expires_at = expires_at.replace(tzinfo=None)
     return expires_at > now
 
 
@@ -632,6 +637,11 @@ def _reset_stale_monitor_execution_claims(
     stale/expired leases are cleared. Returns a snapshot of the claims actually
     reset (preserved leases report ``None``).
     """
+    # Each key holds the *old* claim value when the claim was actually cleared
+    # (stale/expired/unset) and stays ``None`` when a live lease was preserved.
+    # Note this makes "live lease kept" indistinguishable from "was never
+    # claimed" in ``claims_reset`` alone — a post-call auditor that needs that
+    # distinction must read ``workspace.monitor_claimed_by`` directly.
     reset: dict[str, str | None] = {
         "monitor_claimed_by": None,
         "monitor_claim_expires_at": None,

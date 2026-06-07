@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from awf.db.enums import OperationType
@@ -10,6 +12,7 @@ from awf.node.cleanup import WorkspaceCleanupResult, WorkspaceCleanupStepResult
 from awf.service import controls_helpers
 from awf.service.controls_errors import WorkspaceStackStopError
 from awf.service.controls_helpers import (
+    _claim_lease_is_live,
     _cleanup_failure_message,
     _cleanup_optional_string,
     _cleanup_reason_code,
@@ -523,3 +526,25 @@ def test_payload_matches_identity_skips_keys_absent_from_identity() -> None:
         identity={"reason_code": "OPERATOR_REBASE"},
         identity_keys=frozenset({"reason_code", "absent_key"}),
     )
+
+
+def test_claim_lease_is_live_false_for_missing_owner_or_expiry() -> None:
+    now = datetime.now(UTC)
+    assert not _claim_lease_is_live(None, now + timedelta(minutes=5), now=now)
+    assert not _claim_lease_is_live("worker", None, now=now)
+
+
+def test_claim_lease_is_live_naive_expiry_against_aware_now() -> None:
+    # Naive stored expiry + aware ``now`` (the realistic path) compares naively.
+    now = datetime.now(UTC)
+    naive_future = now.replace(tzinfo=None) + timedelta(minutes=5)
+    assert _claim_lease_is_live("worker", naive_future, now=now)
+
+
+def test_claim_lease_is_live_aware_expiry_against_naive_now() -> None:
+    # Symmetric guard: an aware expiry paired with a naive ``now`` must compare
+    # naively rather than raising ``TypeError`` on a mixed-awareness comparison.
+    aware_now = datetime.now(UTC)
+    naive_now = aware_now.replace(tzinfo=None)
+    assert _claim_lease_is_live("worker", aware_now + timedelta(minutes=5), now=naive_now)
+    assert not _claim_lease_is_live("worker", aware_now - timedelta(minutes=5), now=naive_now)
