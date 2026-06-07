@@ -1483,6 +1483,123 @@ async def test_pre_merge_recheck_transient_github_error_retries_later(
 
 
 @pytest.mark.unit
+async def test_pre_merge_recheck_transient_bitbucket_error_retries_later(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """A transient BitBucket fault during the pre-merge recheck must wait and keep
+    polling, symmetric to the GitHub arm — not escape uncaught or terminate."""
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=2,
+    )
+    mocker.patch.object(
+        runner,
+        "_fetch_status_for_decision",
+        mocker.AsyncMock(
+            side_effect=BitBucketClientError(
+                operation="bitbucket fetch_pr_status",
+                status=503,
+                body="service unavailable",
+                reason_code=BITBUCKET_API_ERROR,
+            )
+        ),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [2, 60]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.failure_message is None
+        retry_events = _bitbucket_retry_events(ws)
+        assert len(retry_events) == 1
+        assert retry_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY"
+        assert retry_events[0].payload["context"] == "pre_merge_recheck"
+        assert retry_events[0].payload["wait_seconds"] == 60
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_bitbucket_error_fails_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    """A deterministic BitBucket fault during the pre-merge recheck terminates the
+    workspace with the actionable reason code preserved end-to-end."""
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=2,
+    )
+    mocker.patch.object(
+        runner,
+        "_fetch_status_for_decision",
+        mocker.AsyncMock(
+            side_effect=BitBucketClientError(
+                operation="bitbucket fetch_pr_status",
+                status=403,
+                body="forbidden",
+                reason_code=BITBUCKET_AUTH_FAILED,
+            )
+        ),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert sleep_fn.calls == [2]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert "bitbucket error during pre-merge recheck" in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == BITBUCKET_AUTH_FAILED
+        assert _bitbucket_retry_events(ws) == []
+
+
+@pytest.mark.unit
 async def test_pre_merge_recheck_unknown_status_after_retry_never_uses_old_green_snapshot(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

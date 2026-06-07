@@ -634,6 +634,7 @@ async def handle_merge_action(
         merge_method_preflight_error: GitHubClientError | None = None
         merge_method_notification_reason: str | None = None
         recheck_error: GitHubClientError | None = None
+        recheck_bitbucket_error: BitBucketClientError | None = None
         recheck_base_error: BaseFetchError | None = None
         recheck_behind_error: BaseBehindCountError | None = None
         merge_status = status
@@ -737,6 +738,14 @@ async def handle_merge_action(
                     )
                 except GitHubClientError as exc:
                     recheck_error = exc
+                except BitBucketClientError as exc:
+                    # BitBucket workspaces poll status via ``BitBucketClient``,
+                    # which raises ``BitBucketClientError`` (not
+                    # ``GitHubClientError``) on API/transport faults. Capture it
+                    # here so the post-lock handling can retry transient blips
+                    # symmetrically to the GitHub arm instead of letting the
+                    # error escape the merge critical section uncaught.
+                    recheck_bitbucket_error = exc
                 except BaseFetchError as exc:
                     recheck_base_error = exc
                 except BaseBehindCountError as exc:
@@ -796,6 +805,7 @@ async def handle_merge_action(
 
             if (
                 recheck_error is None
+                and recheck_bitbucket_error is None
                 and recheck_base_error is None
                 and recheck_behind_error is None
                 and fresh_action is None
@@ -810,6 +820,7 @@ async def handle_merge_action(
 
             if (
                 recheck_error is None
+                and recheck_bitbucket_error is None
                 and recheck_base_error is None
                 and recheck_behind_error is None
                 and fresh_action is None
@@ -820,6 +831,7 @@ async def handle_merge_action(
 
             if (
                 recheck_error is None
+                and recheck_bitbucket_error is None
                 and recheck_base_error is None
                 and recheck_behind_error is None
                 and fresh_action is None
@@ -1107,6 +1119,28 @@ async def handle_merge_action(
             await self._terminate_failed(
                 workspace_id,
                 message=(f"monitor: github error during pre-merge recheck: {recheck_error}")[:2000],
+            )
+            return True
+
+        if recheck_bitbucket_error is not None:
+            # Symmetric to the GitHub arm above: a transient BitBucket blip
+            # (rate-limit/transport/5xx) waits and keeps polling; only a
+            # deterministic fault terminates the workspace. Preserve the
+            # actionable ``reason_code`` end-to-end.
+            if await self._wait_after_transient_bitbucket_error(
+                recheck_bitbucket_error,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="pre_merge_recheck",
+                monitor_log=monitor_log,
+            ):
+                return False
+            await self._terminate_failed(
+                workspace_id,
+                message=(
+                    f"monitor: bitbucket error during pre-merge recheck: {recheck_bitbucket_error}"
+                )[:2000],
+                reason_code=recheck_bitbucket_error.reason_code,
             )
             return True
 
