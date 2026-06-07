@@ -449,6 +449,52 @@ async def test_merge_pr_async_202_non_success_terminal_status_raises() -> None:
     assert "status=202" not in str(excinfo.value)
 
 
+async def test_merge_pr_async_202_error_envelope_raises_immediately() -> None:
+    # A failed async merge (conflict, unmet merge checks) makes the task-status
+    # endpoint answer with an error envelope instead of a ``task_status`` value.
+    # That payload must be treated as an immediate terminal non-success so the
+    # actionable merge-failure message surfaces, rather than leaving ``task_status``
+    # empty and polling until the budget trips into a generic timeout.
+    fake = FakeBitBucket()
+    poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-err"
+    fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
+    fake.enqueue(
+        "GET",
+        f"{_PR}/merge/task-status/task-err",
+        json={"type": "error", "error": {"message": "merge checks have not passed"}},
+    )
+    # A high poll budget proves the error short-circuits rather than exhausting it:
+    # only one GET is enqueued, so a non-terminal read would fail to dequeue.
+    client = make_client(fake, max_merge_polls=10, merge_poll_delay_seconds=0)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert "merge checks have not passed" in str(excinfo.value)
+    # Not a timeout: the real reason must not be masked by the generic poll-budget
+    # message, and the HTTP status is omitted (the poll GET was 200, not the failure).
+    assert "did not complete" not in str(excinfo.value)
+    assert excinfo.value.status is None
+    assert excinfo.value.reason_code != BITBUCKET_MERGE_TASK_TIMEOUT
+
+
+async def test_merge_pr_async_202_error_envelope_without_message_raises() -> None:
+    # A bare error envelope (no nested message) still terminates immediately with a
+    # distinct-from-timeout error rather than polling to budget exhaustion.
+    fake = FakeBitBucket()
+    poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-err2"
+    fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
+    fake.enqueue(
+        "GET",
+        f"{_PR}/merge/task-status/task-err2",
+        json={"error": {"detail": "no message field here"}},
+    )
+    client = make_client(fake, max_merge_polls=10, merge_poll_delay_seconds=0)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert "reported an error" in str(excinfo.value)
+    assert "did not complete" not in str(excinfo.value)
+    assert excinfo.value.status is None
+
+
 async def test_merge_pr_async_202_poll_budget_exhausted_raises() -> None:
     fake = FakeBitBucket()
     poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-4"

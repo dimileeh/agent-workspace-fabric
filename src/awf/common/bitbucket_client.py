@@ -804,9 +804,10 @@ class BitBucketClient:
         """Poll an async (202) merge task until it reaches a terminal status.
 
         Returns the ``merge_result`` PR object on ``SUCCESS``; raises a
-        ``BitBucketClientError`` if the task reports a non-success terminal status
-        or does not complete within the bounded poll budget. The poll loop is
-        bounded so a stuck task cannot hang the monitor.
+        ``BitBucketClientError`` if the task reports a non-success terminal status,
+        answers with an error envelope (a failed merge — conflict, unmet merge
+        checks), or does not complete within the bounded poll budget. The poll loop
+        is bounded so a stuck task cannot hang the monitor.
         """
         operation = "bitbucket merge_pr (task-status)"
         poll_url = self._merge_task_poll_url(response, merge_path, operation)
@@ -819,11 +820,35 @@ class BitBucketClient:
             )
             task_status = ""
             merge_result: Any = None
+            error_envelope: Any = None
             if isinstance(status, dict):
                 task_status = str(status.get("task_status") or "").upper()
                 merge_result = status.get("merge_result")
+                error_envelope = status.get("error")
+                if not isinstance(error_envelope, dict) and (
+                    str(status.get("type") or "").lower() == "error"
+                ):
+                    error_envelope = status
             if task_status == "SUCCESS":
                 return merge_result
+            if not task_status and isinstance(error_envelope, dict):
+                # A failed BitBucket async merge (conflict, unmet merge checks)
+                # answers the task-status endpoint with an error envelope instead of
+                # a ``task_status`` value (per Atlassian's task-status contract). An
+                # HTTP-level error would already have raised in ``_request``; a 200
+                # carrying an error body would otherwise leave ``task_status`` empty,
+                # poll to budget exhaustion, and surface a generic timeout that masks
+                # the actionable merge-failure reason. Treat it as an immediate
+                # terminal non-success so operators see the real message. The HTTP
+                # status is omitted (the poll GET was 200, not the failure) for the
+                # same reason as the non-success and timeout branches below.
+                message = _clean_optional_str(error_envelope.get("message"))
+                detail = f": {message}" if message else ""
+                raise BitBucketClientError(
+                    operation=operation,
+                    status=None,
+                    body=f"BitBucket merge task reported an error{detail}",
+                )
             if task_status and task_status != "PENDING":
                 # ``response`` is the original 202 POST; the poll GET that surfaced
                 # this terminal status carried its own (200) status, so reusing
