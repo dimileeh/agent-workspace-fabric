@@ -130,7 +130,10 @@ _ACTIVE_EXECUTION_SALVAGE_REPLACED_SUBPHASE = "runtime_preserved_replaced"
 
 _ACTIVE_EXECUTION_SALVAGE_BLOCKED_SUBPHASE = "runtime_preserved_salvage_blocked"
 
-_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?=[/?#]|$)")
+# Forge-neutral PR-number extraction. GitHub PR URLs use ``/pull/<n>``;
+# BitBucket uses ``/pull-requests/<n>``. The optional ``-requests`` segment
+# accepts both so recovery can re-derive pr_number from a BitBucket pr_url.
+_PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")
 
 _PRESERVED_ACTIVE_REPLACEMENT_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
     {
