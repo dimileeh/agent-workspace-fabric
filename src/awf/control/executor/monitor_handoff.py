@@ -1180,12 +1180,16 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
     except BitBucketClientError as exc:
-        # ``make_forge_client("bitbucket")`` builds the client via
-        # ``BitBucketClient.from_env()``, which raises ``BitBucketClientError``
-        # (e.g. BITBUCKET_AUTH_NOT_CONFIGURED) when credentials are missing. Map
-        # it to a reason-coded failure here — like ForgeNotSupportedError above —
-        # so the auth error doesn't escape uncaught and strand the workspace in
-        # ``running``.
+        # Defense-in-depth: ``ensure_release_sync_forge_supported`` above raises
+        # ``ReleasePrSyncError`` for every non-GitHub forge, so today
+        # ``client_forge`` is always ``"github"`` here and ``make_forge_client``
+        # only ever builds a ``GitHubClient`` — this handler is currently
+        # unreachable. It is kept deliberately, mirroring the
+        # ForgeNotSupportedError handler above: if that release-sync gate is later
+        # widened to allow BitBucket, ``BitBucketClient.from_env()`` (e.g.
+        # BITBUCKET_AUTH_NOT_CONFIGURED on missing credentials) must map to a
+        # reason-coded failure here instead of escaping uncaught and stranding the
+        # workspace in ``running``.
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
