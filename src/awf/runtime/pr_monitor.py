@@ -907,6 +907,15 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     ``--log-failed`` step as a real application/integration test timeout that must
     reach the repair agent. The ``docker pull`` echo only *corroborates* an
     explicit ``failed to pull image`` line — it never anchors on its own.
+
+    The timeout phrase must also belong to the pull it is attributed to. A timeout
+    on an *uncorroborated* ``failed to pull image`` line is that
+    kubelet/containerd application-image event's own error (a real deploy bug) —
+    not the transient pull's — so it must not satisfy this check by sitting within
+    the window of an unrelated Docker pull-failure evidence line (e.g. a service-
+    container ``docker pull failed``). Such lines were already excluded from the
+    evidence set; excluding them as timeout *sources* too keeps a real
+    application-image bug from being silently rerun by mere line proximity.
     """
 
     lines = log_text.lower().splitlines()
@@ -925,8 +934,10 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     ]
     if not evidence_line_indexes:
         return False
+    evidence_line_set = set(evidence_line_indexes)
     return any(
         any(marker in line for marker in _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS)
+        and not (_CI_DOCKER_IMAGE_PULL_FAILURE_MARKER in line and index not in evidence_line_set)
         and any(
             abs(index - evidence_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
             for evidence_index in evidence_line_indexes

@@ -1123,6 +1123,36 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure(
+        self,
+    ) -> None:
+        """A transient service-container ``Docker pull failed`` line (a self-evident
+        pull-failure anchor) sitting within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW``
+        lines of an *uncorroborated* kubelet ``Failed to pull image "app"`` event
+        must not lend its proximity to that event's ``context deadline exceeded``.
+        The timeout belongs to the real application-image/deploy bug, not the
+        transient pull, so the failure must reach the repair agent rather than be
+        silently rerun as transient CI."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Docker pull failed with exit code 1\n"
+                'Failed to pull image "app": context deadline exceeded'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
         """A failure whose log matches neither transient nor registry-timeout
         markers falls through to the repair agent."""
