@@ -1019,6 +1019,39 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_uncorroborated_summary_does_not_suppress_self_evident_daemon_timeout(
+        self,
+    ) -> None:
+        """An *uncorroborated* ``Failed to pull image "app"`` summary (no same-ref
+        ``docker pull`` echo to corroborate it) sitting immediately before a daemon
+        registry-timeout line must not drag the daemon line out of the transient set.
+        The daemon line — ``Error response from daemon: Get
+        "https://registry-1.docker.io/v2/": context deadline exceeded`` — is *itself*
+        self-evident registry-timeout evidence (daemon marker + ``/v2/`` request form +
+        timeout marker), so the uncorroborated-event proximity guard must exempt
+        timeout lines that are their own pull-failure evidence. Otherwise a real
+        registry flake reaches the repair agent instead of being rerun."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                'Failed to pull image "app"\n'  # uncorroborated index 0, no timeout
+                'Error response from daemon: Get "https://registry-1.docker.io/v2/": '
+                "context deadline exceeded"  # index 1 — self-evident daemon timeout
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
         """A failure whose log matches neither transient nor registry-timeout
         markers falls through to the repair agent."""

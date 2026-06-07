@@ -243,3 +243,28 @@ repair agent.
   `test_registry_timeout_at_exact_window_boundary_dispatches_rerun` (no
   uncorroborated `failed to pull image` line present → still `RerunTransientCI`)
   locks in that the new exclusion does not over-fire on genuine transient pulls.
+
+## Follow-up — uncorroborated guard must exempt self-evident daemon timeouts (PRRT_kwDOSJAM6s6Hqr2g)
+
+The wrapped-error fix above excludes *any* timeout marker within
+`_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` lines of an uncorroborated `failed to pull
+image` line. That over-reached: when the timeout line is *itself* a Docker
+pull-*failure* evidence line — a self-evident daemon registry timeout such as
+`Error response from daemon: Get "https://registry-1.docker.io/v2/": context
+deadline exceeded` — an uncorroborated `Failed to pull image "app"` summary
+printed immediately before it (no double-quoted ref to corroborate, or a wrapped
+summary) dragged the genuine timeout out of the transient set, so a real registry
+flake reached the repair agent instead of being rerun. The guard now exempts
+timeout lines whose own index is in `evidence_line_set` (they are clear registry
+evidence on their own), keeping the uncorroborated exclusion only for timeout
+phrases that are *not* themselves pull-failure evidence (the wrapped-kubelet case).
+
+- Covered by
+  `test_uncorroborated_summary_does_not_suppress_self_evident_daemon_timeout`
+  (uncorroborated summary immediately before a self-evident daemon registry
+  timeout → `RerunTransientCI`).
+- The existing wrapped/same-line guards
+  (`test_wrapped_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure`,
+  `test_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure`)
+  still pass — their timeout lines are bare kubelet phrases, not daemon evidence
+  lines, so they remain excluded and reach the repair agent.

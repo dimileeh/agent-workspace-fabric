@@ -1001,6 +1001,16 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     lines of an uncorroborated ``failed to pull image`` line is therefore excluded
     as a timeout *source*, keeping a real application-image bug from being silently
     rerun by mere line proximity.
+
+    That uncorroborated-proximity exclusion does *not* apply to a timeout line that
+    is itself one of the Docker pull-*failure* evidence lines. A self-evident daemon
+    registry timeout (``Error response from daemon: Get
+    "https://registry-1.docker.io/v2/": context deadline exceeded``) is clear
+    registry-flake evidence on its own, and an uncorroborated ``failed to pull
+    image`` summary printed immediately before it (no double-quoted ref to
+    corroborate, or a wrapped summary) must not drag that genuine timeout out of the
+    transient set — otherwise a real registry flake would reach the repair agent
+    instead of being rerun. Such an evidence line is exempt from the exclusion.
     """
 
     lines = log_text.lower().splitlines()
@@ -1027,9 +1037,12 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     ]
     return any(
         any(marker in line for marker in _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS)
-        and not any(
-            abs(index - uncorroborated_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
-            for uncorroborated_index in uncorroborated_image_pull_indexes
+        and (
+            index in evidence_line_set
+            or not any(
+                abs(index - uncorroborated_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
+                for uncorroborated_index in uncorroborated_image_pull_indexes
+            )
         )
         and any(
             abs(index - evidence_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
