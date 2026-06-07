@@ -1182,6 +1182,37 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_daemon_registry_request_denial_does_not_anchor_adjacent_timeout(
+        self,
+    ) -> None:
+        """A permanent daemon error can quote the ``/v2/`` registry *request* form yet
+        still be a synchronous auth denial, not a timeout — ``Error response from
+        daemon: Head "https://ghcr.io/v2/org/app/manifests/latest": denied``. The
+        ``/v2/`` request form alone must not anchor an *adjacent unrelated* ``context
+        deadline exceeded``; only a daemon line carrying the registry-timeout marker
+        itself is transient infra, so this real auth bug must reach the repair
+        agent rather than be silently rerun."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: Head "
+                '"https://ghcr.io/v2/org/app/manifests/latest": denied\n'
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_bare_daemon_error_does_not_anchor_failed_to_pull_image(self) -> None:
         """A bare ``Error response from daemon: context deadline exceeded`` line —
         no registry/image-pull context — must not corroborate a nearby

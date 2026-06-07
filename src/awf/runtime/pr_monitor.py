@@ -665,8 +665,9 @@ _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER = "docker pull failed"
 # pulls. A bare ``Error response from daemon: context deadline exceeded`` from an
 # ordinary build/test step is a real Docker daemon timeout the repair agent must
 # see, not flaky registry infra. So a daemon-error line only anchors a registry
-# timeout when the *same line* also carries evidence of an outbound registry
-# *request* — i.e. the daemon was reaching the registry when it timed out.
+# timeout when the *same line* also carries both evidence of an outbound registry
+# *request* and a registry timeout marker — i.e. the daemon was reaching the
+# registry when it timed out, not failing it permanently.
 #
 # That evidence must be a registry *request* form, **not** merely a registry host:
 # a bare image-reference host (``ghcr.io``, ``gcr.io``, ``quay.io``,
@@ -691,6 +692,13 @@ _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER = "docker pull failed"
 #     request-form marker on its own.
 # A generic phrase such as ``pulling from`` is likewise excluded: it would match
 # unrelated daemon operations (e.g. ``failed while pulling from local volume``).
+# The registry timeout marker is required on that line because the request form
+# alone does not separate a timed-out pull from a *permanent* registry denial that
+# also quotes the ``/v2/`` request — ``Error response from daemon: Head
+# "https://ghcr.io/v2/org/app/manifests/latest": denied`` (or ``: unauthorized``) is a
+# synchronous 401/403, not a timeout. Without the timeout-marker requirement such a
+# permanent auth error would anchor an *adjacent unrelated* ``context deadline
+# exceeded`` and silently rerun a real auth bug as transient infra.
 _CI_DOCKER_DAEMON_ERROR_MARKER = "error response from daemon"
 _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "/v2/",
@@ -850,14 +858,19 @@ def _is_docker_pull_failure_line(
     from daemon`` line is not such context: the daemon emits it for any operation,
     so a generic daemon timeout next to a kubelet ``failed to pull image`` event
     must not corroborate it. The daemon wrapper anchors only as its own evidence
-    line, and only when that same line also carries a registry *request* form
+    line, and only when that same line also carries *both* a registry *request* form
     (``_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS`` — a ``/v2/`` distribution-API path
-    or the ``auth.docker.io`` token host). A bare image-reference host such as
+    or the ``auth.docker.io`` token host) *and* a registry timeout marker
+    (``_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS``). A bare image-reference host such as
     ``ghcr.io`` is **not** such evidence: it also sits on the image ref of permanent
     daemon errors (``pull access denied for ghcr.io/org/app``, ``No such image:
     ghcr.io/org/app``), so accepting it would let a real auth/image bug anchor an
-    adjacent unrelated timeout. A bare daemon timeout from a ``docker run`` test
-    step is likewise a real failure, not flaky registry infra.
+    adjacent unrelated timeout. The request form alone is not enough either: a
+    *permanent* denial can quote the ``/v2/`` request (``Error response from daemon:
+    Head "https://ghcr.io/v2/org/app/manifests/latest": denied`` / ``: unauthorized``)
+    without timing out, so requiring the timeout marker on the same line keeps such an
+    auth bug from anchoring an adjacent unrelated timeout. A bare daemon timeout from
+    a ``docker run`` test step is likewise a real failure, not flaky registry infra.
     """
 
     if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in line:
@@ -866,8 +879,10 @@ def _is_docker_pull_failure_line(
         index, line, lines, docker_pull_command_indexes
     ):
         return True
-    return _CI_DOCKER_DAEMON_ERROR_MARKER in line and any(
-        marker in line for marker in _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS
+    return (
+        _CI_DOCKER_DAEMON_ERROR_MARKER in line
+        and any(marker in line for marker in _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS)
+        and any(marker in line for marker in _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS)
     )
 
 
