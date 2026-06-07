@@ -213,6 +213,21 @@ test("cancel remains enabled when terminal cancellation operations complete", ()
   }
 });
 
+test("cancel remains enabled for stale overview cancel/stop flags without in-flight operations", () => {
+  for (const activeOperation of ["cancel", "stop"]) {
+    const control = getWorkspaceOperatorControls({
+      overview: overview({
+        status: "running",
+        active_operation: activeOperation,
+      }),
+    }).find((item) => item.action === "cancel");
+    assert.ok(control, `missing cancel control for ${activeOperation}`);
+    assert.equal(control.enabled, true, `cancel should stay enabled after ${activeOperation} metadata is stale`);
+    assert.equal(control.visible, true);
+    assert.equal(control.reason, null);
+  }
+});
+
 test("active monitoring workspace exposes the full operator action set", () => {
   const actions = new Set(
     getWorkspaceOperatorControls({
