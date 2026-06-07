@@ -106,10 +106,37 @@ BITBUCKET_ISSUE_TRACKER_DISABLED = "BITBUCKET_ISSUE_TRACKER_DISABLED"
 BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
 # BitBucket answers 409 Conflict on the merge POST when a merge for this PR is
 # already in flight (typically a prior 202 async merge whose task-status poll was
-# interrupted by a transient fault and re-issued by the monitor). It is recoverable
-# — re-polling ``fetch_pr_status`` observes the original merge's eventual MERGED
-# state — so it is classified transient rather than mapped to ``BITBUCKET_API_ERROR``.
+# interrupted by a transient fault and re-issued by the monitor) or when the PR has
+# already been merged. Both are recoverable — re-polling ``fetch_pr_status`` observes
+# the original merge's eventual MERGED state — so they are classified transient
+# rather than mapped to ``BITBUCKET_API_ERROR``. BitBucket also overloads 409 for
+# non-recoverable merge failures (merge conflicts, unmet merge checks); those carry
+# no in-progress/already-merged signal and must stay deterministic so they surface
+# ``BITBUCKET_MERGE_FAILED`` instead of polling forever — see
+# ``_is_bitbucket_merge_in_progress_body``.
 BITBUCKET_MERGE_IN_PROGRESS = "BITBUCKET_MERGE_IN_PROGRESS"
+# Lowercase substrings that mark a 409 merge-POST body as the recoverable
+# in-flight/already-merged case rather than a non-recoverable conflict or merge-check
+# rejection. Matched case-insensitively against the (redacted) response body.
+_BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS = (
+    "in progress",
+    "being merged",
+    "already merged",
+    "already been merged",
+)
+
+
+def _is_bitbucket_merge_in_progress_body(body: str) -> bool:
+    """Return whether a 409 merge-POST body indicates a recoverable in-flight merge.
+
+    BitBucket reuses 409 for an in-progress async merge, an already-merged PR, and
+    non-recoverable failures (conflicts, unmet merge checks). Only the first two are
+    transient; the last must stay deterministic so the monitor notifies a human
+    instead of polling indefinitely.
+    """
+    lowered = body.lower()
+    return any(signal in lowered for signal in _BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS)
+
 
 _FrozenParams = tuple[tuple[str, str], ...]
 
@@ -653,15 +680,20 @@ class BitBucketClient:
                 json_body={"merge_strategy": strategy, "close_source_branch": delete_branch},
             )
         except BitBucketClientError as exc:
-            if exc.status == 409:
-                # A 409 means BitBucket already has a merge in flight for this PR.
-                # This happens when a prior 202 async merge's task-status poll was
-                # interrupted by a transient fault and the monitor re-entered the
-                # loop and re-issued the merge. Re-raise with the transient
+            if exc.status == 409 and _is_bitbucket_merge_in_progress_body(exc.body):
+                # A 409 whose body marks an in-flight merge means BitBucket already
+                # has a merge running for this PR — typically a prior 202 async
+                # merge whose task-status poll was interrupted by a transient fault
+                # and re-issued when the monitor re-entered the loop — or that the PR
+                # has already been merged. Re-raise with the transient
                 # ``BITBUCKET_MERGE_IN_PROGRESS`` reason so the monitor waits and
-                # re-polls ``fetch_pr_status`` — observing the original merge's
-                # eventual MERGED state — instead of terminating the workspace on a
-                # merge that may still be completing.
+                # re-polls ``fetch_pr_status`` — observing the eventual MERGED state
+                # — instead of terminating the workspace on a merge that may still be
+                # completing. BitBucket overloads 409 for non-recoverable failures
+                # too (conflicts, unmet merge checks); those lack the in-progress
+                # signal and fall through to the deterministic ``raise`` below so
+                # they surface ``BITBUCKET_MERGE_FAILED`` and notify a human rather
+                # than polling forever.
                 raise BitBucketClientError(
                     operation="bitbucket merge_pr",
                     status=exc.status,

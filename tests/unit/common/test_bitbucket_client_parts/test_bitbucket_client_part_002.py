@@ -268,13 +268,12 @@ async def test_merge_pr_missing_commit_hash_raises() -> None:
     assert "merge_commit.hash" in str(excinfo.value)
 
 
-async def test_merge_pr_409_maps_to_transient_in_progress_reason() -> None:
-    # A 409 on the merge POST means BitBucket already has a merge in flight for
-    # this PR (e.g. a prior 202 async merge whose poll was interrupted by a
-    # transient fault and re-issued by the monitor). It must map to the transient
-    # BITBUCKET_MERGE_IN_PROGRESS reason — not the deterministic BITBUCKET_API_ERROR
-    # — so the monitor re-polls fetch_pr_status instead of terminating the
-    # workspace on a merge that may still be completing.
+async def test_merge_pr_409_in_progress_body_maps_to_transient_reason() -> None:
+    # A 409 whose body says a merge is already in flight (e.g. a prior 202 async
+    # merge whose poll was interrupted by a transient fault and re-issued by the
+    # monitor) maps to the transient BITBUCKET_MERGE_IN_PROGRESS reason — not the
+    # deterministic BITBUCKET_API_ERROR — so the monitor re-polls fetch_pr_status
+    # instead of terminating the workspace on a merge that may still be completing.
     fake = FakeBitBucket()
     fake.enqueue(
         "POST",
@@ -286,6 +285,43 @@ async def test_merge_pr_409_maps_to_transient_in_progress_reason() -> None:
     with pytest.raises(BitBucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert excinfo.value.reason_code == BITBUCKET_MERGE_IN_PROGRESS
+    assert excinfo.value.status == 409
+
+
+async def test_merge_pr_409_already_merged_body_maps_to_transient_reason() -> None:
+    # BitBucket also answers 409 when the PR "has already been merged" — a re-poll
+    # of fetch_pr_status observes the terminal MERGED state, so this is recoverable
+    # and must stay transient rather than being misreported as a merge failure.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "POST",
+        f"{_PR}/merge",
+        status=409,
+        json={"error": {"message": "This pull request has already been merged."}},
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert excinfo.value.reason_code == BITBUCKET_MERGE_IN_PROGRESS
+
+
+async def test_merge_pr_409_conflict_body_stays_deterministic() -> None:
+    # BitBucket overloads 409 for non-recoverable merge failures too (merge
+    # conflicts, unmet merge checks). Those carry no "in progress"/"already
+    # merged" signal, so they must stay deterministic (BITBUCKET_API_ERROR) — a
+    # blanket transient remap would poll forever instead of surfacing
+    # BITBUCKET_MERGE_FAILED and notifying a human.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "POST",
+        f"{_PR}/merge",
+        status=409,
+        json={"error": {"message": "The pull request has merge conflicts."}},
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert excinfo.value.reason_code == BITBUCKET_API_ERROR
     assert excinfo.value.status == 409
 
 
