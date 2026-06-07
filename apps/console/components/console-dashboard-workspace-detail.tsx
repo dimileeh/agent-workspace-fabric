@@ -519,7 +519,11 @@ export function OperatorControlsBlock({
             ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-white px-2.5 text-[11px] font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
             : "inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
           return (
-            <div key={control.action} className="group relative flex min-w-0 items-center gap-1.5">
+            <div
+              key={control.action}
+              tabIndex={reason ? 0 : undefined}
+              className="group relative flex min-w-0 items-center gap-1.5"
+            >
               <button
                 type="button"
                 onClick={() =>
