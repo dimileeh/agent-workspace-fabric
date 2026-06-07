@@ -595,6 +595,66 @@ def _claim_reset_snapshot(workspace: Workspace) -> dict[str, str | None]:
     }
 
 
+def _claim_lease_is_live(
+    claimed_by: str | None,
+    expires_at: datetime | None,
+    *,
+    now: datetime,
+) -> bool:
+    """Return ``True`` when a claim is a live lease (owner set, future expiry).
+
+    A claim with no owner or no expiry is treated as stale/claimable, matching
+    ``claim_monitoring_pr`` which adopts a row whose ``*_claim_expires_at`` is
+    NULL. Naive expiries are compared naively (some storage paths persist
+    tz-naive datetimes), mirroring the worker's staleness helpers.
+    """
+    if claimed_by is None or expires_at is None:
+        return False
+    if expires_at.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    return expires_at > now
+
+
+def _reset_stale_monitor_execution_claims(
+    workspace: Workspace,
+    *,
+    now: datetime,
+) -> dict[str, str | None]:
+    """Clear only *stale* monitor/execution leases, preserving live ones.
+
+    Operator re-arming controls (``guide``) persist a pending directive without
+    changing workspace status. Nulling an unexpired lease here would make the
+    row immediately re-claimable (``claim_monitoring_pr`` treats a NULL expiry
+    as claimable), letting a second worker start a duplicate monitor while the
+    original loop is still running — the monitor heartbeat only stops on
+    claim-loss, it never aborts the in-flight run. So a live lease is left
+    untouched and the directive is picked up on the next monitor cycle; only
+    stale/expired leases are cleared. Returns a snapshot of the claims actually
+    reset (preserved leases report ``None``).
+    """
+    reset: dict[str, str | None] = {
+        "monitor_claimed_by": None,
+        "monitor_claim_expires_at": None,
+        "execution_claimed_by": None,
+        "execution_claim_expires_at": None,
+    }
+    if not _claim_lease_is_live(
+        workspace.monitor_claimed_by, workspace.monitor_claim_expires_at, now=now
+    ):
+        reset["monitor_claimed_by"] = workspace.monitor_claimed_by
+        reset["monitor_claim_expires_at"] = _json_datetime(workspace.monitor_claim_expires_at)
+        workspace.monitor_claimed_by = None
+        workspace.monitor_claim_expires_at = None
+    if not _claim_lease_is_live(
+        workspace.execution_claimed_by, workspace.execution_claim_expires_at, now=now
+    ):
+        reset["execution_claimed_by"] = workspace.execution_claimed_by
+        reset["execution_claim_expires_at"] = _json_datetime(workspace.execution_claim_expires_at)
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+    return reset
+
+
 def _json_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None

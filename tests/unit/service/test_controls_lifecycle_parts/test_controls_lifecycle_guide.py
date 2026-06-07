@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,6 +140,56 @@ async def test_guide_resets_claims_and_replays_exact_key(
     assert workspace.monitor_claimed_by is None
     assert workspace.execution_claimed_by is None
     assert operations[0].result["claims_reset"]["monitor_claimed_by"] == "monitor-worker"
+
+
+@pytest.mark.unit
+async def test_guide_preserves_unexpired_monitor_and_execution_leases(
+    session: AsyncSession,
+) -> None:
+    """Guide only re-arms a pending directive; it must not evict a *live* lease.
+
+    ``claim_monitoring_pr`` treats a NULL ``monitor_claim_expires_at`` as
+    immediately claimable, so nulling an unexpired lease would let a second
+    worker start a duplicate monitor while the original loop is still running
+    (the monitor heartbeat only stops on claim-loss, it never aborts the run).
+    Unexpired leases are preserved and excluded from ``claims_reset``.
+    """
+    workspace = await _monitoring_workspace(session)
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    workspace.monitor_claimed_by = "monitor-worker"
+    workspace.monitor_claim_expires_at = future
+    workspace.execution_claimed_by = "execution-worker"
+    workspace.execution_claim_expires_at = future
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="implement, do not defer",
+        idempotency_key="guide-preserve-live-lease",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+
+    # The live leases survive so the in-flight monitor keeps exclusive ownership.
+    assert workspace.monitor_claimed_by == "monitor-worker"
+    assert workspace.monitor_claim_expires_at == future
+    assert workspace.execution_claimed_by == "execution-worker"
+    assert workspace.execution_claim_expires_at == future
+    assert response.status == WorkspaceStatus.monitoring_pr
+    # claims_reset reports only claims actually cleared (none here).
+    claims_reset = operations[0].result["claims_reset"]
+    assert claims_reset == {
+        "monitor_claimed_by": None,
+        "monitor_claim_expires_at": None,
+        "execution_claimed_by": None,
+        "execution_claim_expires_at": None,
+    }
+    # The directive is still persisted for the next monitor cycle to pick up.
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    persisted = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+    assert persisted["directive"] == "implement, do not defer"
+    assert persisted["status"] == "pending"
 
 
 @pytest.mark.unit

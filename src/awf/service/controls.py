@@ -685,7 +685,6 @@ class WorkspaceControlService:
         persist_operator_hint(monitor_state, hint)
         workspace.monitor_threads_addressed = monitor_state
         pending_operator_hint = build_pending_operator_hint_payload(hint)
-        claims_reset = _claim_reset_snapshot(workspace)
         # Re-engaging the monitor with a fresh directive must pre-empt any
         # in-flight PR-monitor validate_only/rebase_only recovery op (same guard
         # remonitor applies); otherwise the stale recovery cycle keeps running
@@ -696,10 +695,13 @@ class WorkspaceControlService:
             reason_code=_OPERATOR_GUIDE_REASON_CODE,
             requested_action=OperationType.guide.value,
         )
-        workspace.monitor_claimed_by = None
-        workspace.monitor_claim_expires_at = None
-        workspace.execution_claimed_by = None
-        workspace.execution_claim_expires_at = None
+        # guide only persists a pending directive; it must not evict a *live*
+        # monitor/execution lease. Nulling an unexpired lease would make the row
+        # immediately re-claimable and let a second worker start a duplicate
+        # monitor while the original loop is still running. Clear stale leases
+        # only; a live lease keeps ownership and picks up the directive on its
+        # next monitor cycle.
+        claims_reset = _reset_stale_monitor_execution_claims(workspace, now=utcnow())
         await repo.advance_workspace_version(workspace)
         event_payload: dict[str, object | None] = {
             "reason": reason,
@@ -1547,6 +1549,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _operator_operation_payload,
     _payload_matches_idempotency_identity,
     _reset_failed_workspace_for_remonitor,
+    _reset_stale_monitor_execution_claims,
     _with_secret_lease_evidence,
     _with_secret_lease_result,
     _workspace_pr_operation_context,
