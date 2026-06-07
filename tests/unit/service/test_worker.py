@@ -1154,6 +1154,9 @@ def test_service_git_environment_wires_bitbucket_helper_without_leaking_token(
     assert "credential.https://bitbucket.org.helper" in entries
     assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
     assert entries["url.https://github.com/.insteadOf"] == "git@github.com:"
+    # SSH-form bitbucket remotes are rewritten to HTTPS so the token is used
+    # (parity with the GitHub insteadOf rewrite above).
+    assert entries["url.https://bitbucket.org/.insteadOf"] == "git@bitbucket.org:"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     # The Atlassian token never lands in any git env value.
     assert all(secret_token not in value for value in env.values())
