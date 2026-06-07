@@ -196,24 +196,26 @@ test("cancel success and failure summaries format the Cancel label", () => {
   );
 });
 
-test("cancel remains enabled when terminal cancellation operations complete", () => {
+test("terminal cancellation details re-enable cancel action for overview stop/cancel flags", () => {
   const terminalStatuses = ["succeeded", "failed", "cancelled", "canceled"];
-  for (const status of terminalStatuses) {
-    const control = getWorkspaceOperatorControls({
-      overview: overview({
-        status: "running",
-        active_operation: "cancel",
-      }),
-      operations: [operation({ type: "cancel", status })],
-    }).find((item) => item.action === "cancel");
-    assert.ok(control, `missing cancel control for ${status}`);
-    assert.equal(control.enabled, true, `cancel should be enabled after terminal ${status}`);
-    assert.equal(control.visible, true);
-    assert.equal(control.reason, null);
+  for (const activeOperation of ["cancel", "stop"]) {
+    for (const status of terminalStatuses) {
+      const control = getWorkspaceOperatorControls({
+        overview: overview({
+          status: "running",
+          active_operation: activeOperation,
+        }),
+        operations: [operation({ type: activeOperation, status })],
+      }).find((item) => item.action === "cancel");
+      assert.ok(control, `missing cancel control for ${activeOperation}/${status}`);
+      assert.equal(control.enabled, true, `${activeOperation} should be re-enabled after terminal ${status}`);
+      assert.equal(control.visible, true);
+      assert.equal(control.reason, null);
+    }
   }
 });
 
-test("cancel remains enabled for stale overview cancel/stop flags without in-flight operations", () => {
+test("cancel remains disabled for stale overview cancel/stop flags without in-flight operations", () => {
   for (const activeOperation of ["cancel", "stop"]) {
     const control = getWorkspaceOperatorControls({
       overview: overview({
@@ -222,9 +224,9 @@ test("cancel remains enabled for stale overview cancel/stop flags without in-fli
       }),
     }).find((item) => item.action === "cancel");
     assert.ok(control, `missing cancel control for ${activeOperation}`);
-    assert.equal(control.enabled, true, `cancel should stay enabled after ${activeOperation} metadata is stale`);
+    assert.equal(control.enabled, false, `cancel should stay disabled while ${activeOperation} is in-flight`);
+    assert.equal(control.reason, "cancel/stop already active");
     assert.equal(control.visible, true);
-    assert.equal(control.reason, null);
   }
 });
 

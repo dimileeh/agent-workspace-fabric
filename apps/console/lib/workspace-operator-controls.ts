@@ -188,26 +188,18 @@ function hasActiveOperation(context: WorkspaceOperatorContext): boolean {
 
 function hasActiveCancellationOperation(context: WorkspaceOperatorContext): boolean {
   const recoveryOperation = context.workspace?.recovery?.current_operation ?? context.overview.recovery?.current_operation ?? null;
-  if (isActiveCancellationOperation(recoveryOperation?.type, recoveryOperation?.status)) {
-    return true;
+  if (recoveryOperation) {
+    if (cancellationOperationTypes.has(recoveryOperation.type)) {
+      return !terminalOperationStatuses.has(recoveryOperation.status);
+    }
   }
-  return (context.operations ?? []).some((operation) =>
-    isActiveCancellationOperation(operation.type, operation.status),
+  const cancellationOperations = (context.operations ?? []).filter((operation) =>
+    cancellationOperationTypes.has(operation.type),
   );
-}
-
-function isActiveCancellationOperation(
-  operationType: string | null | undefined,
-  operationStatus: string | null | undefined,
-): boolean {
-  return (
-    operationType !== null &&
-    operationType !== undefined &&
-    cancellationOperationTypes.has(operationType) &&
-    operationStatus !== null &&
-    operationStatus !== undefined &&
-    !terminalOperationStatuses.has(operationStatus)
-  );
+  if (cancellationOperations.length > 0) {
+    return cancellationOperations.some((operation) => !terminalOperationStatuses.has(operation.status));
+  }
+  return context.overview.active_operation === "cancel" || context.overview.active_operation === "stop";
 }
 
 function eligibleEnoughForActiveReason(action: WorkspaceOperatorAction, context: WorkspaceOperatorContext): boolean {
