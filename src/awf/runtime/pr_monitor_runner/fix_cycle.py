@@ -45,7 +45,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _defer_reason_state_key,
     _mark_review_comment_addressed,
-    _redact_and_truncate_github_error,
+    _redact_and_truncate_forge_error,
     _review_comment_needs_attention,
     _sync_needs_human_reason,
 )
@@ -799,11 +799,11 @@ async def _capture_deferred_review_thread(
             return None
         # Permanent failure (e.g. token missing the issues scope). Redact before
         # logging/persisting: gh CLI errors can echo tokens or credentialed URLs.
-        redacted_error = _redact_and_truncate_github_error(str(exc))
+        redacted_error = _redact_and_truncate_forge_error(str(exc))
         _log.warning(
             "monitor.deferred_capture_failed",
             thread_id=thread.thread_id,
-            stderr=_redact_and_truncate_github_error(exc.stderr),
+            stderr=_redact_and_truncate_forge_error(exc.stderr),
         )
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
@@ -860,7 +860,7 @@ async def _capture_deferred_review_thread(
         # carries an already-redacted body; redact again defensively before
         # logging/persisting. ``BitBucketClientError`` has no ``stderr`` field, so
         # log the redacted message instead.
-        redacted_error = _redact_and_truncate_github_error(str(exc))
+        redacted_error = _redact_and_truncate_forge_error(str(exc))
         _log.warning(
             "monitor.deferred_capture_failed",
             thread_id=thread.thread_id,
@@ -901,7 +901,7 @@ async def _capture_deferred_review_thread(
             "monitor.deferred_capture_comment_failed",
             thread_id=thread.thread_id,
             issue_url=issue_url,
-            stderr=_redact_and_truncate_github_error(exc.stderr),
+            stderr=_redact_and_truncate_forge_error(exc.stderr),
         )
     except BitBucketClientError as exc:
         # BitBucket workspaces raise ``BitBucketClientError`` (not
@@ -916,7 +916,7 @@ async def _capture_deferred_review_thread(
             "monitor.deferred_capture_comment_failed",
             thread_id=thread.thread_id,
             issue_url=issue_url,
-            stderr=_redact_and_truncate_github_error(str(exc)),
+            stderr=_redact_and_truncate_forge_error(str(exc)),
         )
     await self._record_pr_monitor_audit_event(
         workspace_id=workspace_id,

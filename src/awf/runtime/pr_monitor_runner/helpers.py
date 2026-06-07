@@ -522,7 +522,7 @@ def _first_needs_human_reason(status: PRStatus, state: MonitorState) -> str | No
 
 
 def _merge_rejection_reason(stderr: str) -> str:
-    detail = " ".join(_redact_and_truncate_github_error(stderr).split())[:240]
+    detail = " ".join(_redact_and_truncate_forge_error(stderr).split())[:240]
     if detail:
         return f"GitHub rejected the merge attempt: {detail}"
     return "GitHub rejected the merge attempt"
@@ -553,8 +553,8 @@ def _transient_github_retry_payload(
         "returncode": exc.returncode,
         "pr_number": pr_number,
         "wait_seconds": wait_seconds,
-        "message": _redact_and_truncate_github_error(str(exc)),
-        "stderr": _redact_and_truncate_github_error(exc.stderr),
+        "message": _redact_and_truncate_forge_error(str(exc)),
+        "stderr": _redact_and_truncate_forge_error(exc.stderr),
     }
 
 
@@ -594,11 +594,11 @@ def _transient_base_fetch_retry_payload(
         "retry_number": retry_number,
         "max_retries": max_retries,
         "wait_seconds": wait_seconds,
-        "message": _redact_and_truncate_github_error(str(exc)),
+        "message": _redact_and_truncate_forge_error(str(exc)),
     }
 
 
-def _redact_and_truncate_github_error(value: str, *, limit: int = 400) -> str:
+def _redact_and_truncate_forge_error(value: str, *, limit: int = 400) -> str:
     redacted = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", value)
     redacted = _AUTHORIZATION_BEARER_RE.sub(r"\1<redacted>", redacted)
     redacted = _TOKEN_RE.sub(_REDACTION, redacted).strip()

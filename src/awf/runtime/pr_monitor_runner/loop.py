@@ -63,7 +63,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_wait_operation_context,
     _notify_human_reason,
     _pending_review_feedback_count,
-    _redact_and_truncate_github_error,
+    _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -108,7 +108,7 @@ async def _post_workflow_scope_notification_best_effort(
             workspace_id=workspace_id,
             pr_number=pr_number,
             head_sha=status.head_sha[:10],
-            error=_redact_and_truncate_github_error(str(exc)),
+            error=_redact_and_truncate_forge_error(str(exc)),
         )
 
 
@@ -567,7 +567,7 @@ async def _execute(
                     raise
                 accepted_run_ids.append(run_id)
         except (GitHubClientError, BitBucketClientError) as exc:
-            error_message = _redact_and_truncate_github_error(str(exc))
+            error_message = _redact_and_truncate_forge_error(str(exc))
             if accepted_run_ids:
                 partial_event_payload = {
                     **event_payload,

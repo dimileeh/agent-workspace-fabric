@@ -35,7 +35,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _is_transient_base_fetch_error,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
-    _redact_and_truncate_github_error,
+    _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
@@ -674,7 +674,7 @@ def test_github_error_redaction_covers_app_jwt_and_bearer_tokens() -> None:
     app_token = "gha_11AA22BB33CC44DD"
     jwt_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
     bearer_token = "opaqueBearerToken123"
-    redacted = _redact_and_truncate_github_error(
+    redacted = _redact_and_truncate_forge_error(
         f"HTTP 503 {app_token} jwt={jwt_token} Authorization: Bearer {bearer_token}"
     )
 

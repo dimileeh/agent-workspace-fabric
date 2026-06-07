@@ -46,7 +46,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_decision,
     _non_check_reviewer_settle_wait_operation_context,
     _pending_review_feedback_count,
-    _redact_and_truncate_github_error,
+    _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.types import (
@@ -173,7 +173,7 @@ def _merge_method_mismatch_message(
 
 def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
     """Build an operator-facing reason for merge-method policy preflight failures."""
-    detail = " ".join(_redact_and_truncate_github_error(exc.stderr).split())[:240]
+    detail = " ".join(_redact_and_truncate_forge_error(exc.stderr).split())[:240]
     if detail:
         return f"GitHub rejected merge-method preflight: {detail}"
     return "GitHub rejected merge-method preflight"
@@ -338,8 +338,7 @@ async def _attempt_merge_method(
                 base_branch=base_branch,
                 attempted_method=merge_method,
                 effective_methods=effective_methods,
-                detail=" ".join(_redact_and_truncate_github_error(exc.stderr).split())[:240]
-                or None,
+                detail=" ".join(_redact_and_truncate_forge_error(exc.stderr).split())[:240] or None,
             )
             state.mark_addressed(
                 _merge_method_blocked_key(
@@ -1191,7 +1190,7 @@ async def handle_merge_action(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 base_branch=base_branch,
-                stderr=_redact_and_truncate_github_error(merge_method_preflight_error.stderr),
+                stderr=_redact_and_truncate_forge_error(merge_method_preflight_error.stderr),
             )
             notification_reason = _merge_method_preflight_rejection_reason(
                 merge_method_preflight_error
@@ -1293,7 +1292,7 @@ async def handle_merge_action(
                     monitor_log=monitor_log,
                 ):
                     return False
-                blocker_detail = _redact_and_truncate_github_error(merge_blocker.stderr)
+                blocker_detail = _redact_and_truncate_forge_error(merge_blocker.stderr)
                 blocker_reason = _merge_rejection_reason(merge_blocker.stderr)
             # Branch protection / restrictions often block merges; fall back to
             # the release-PR notify flow rather than failing the workspace.
