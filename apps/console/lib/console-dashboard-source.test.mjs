@@ -63,6 +63,20 @@ test("operator controls block keeps inactive reasons in hover tooltips", () => {
   assert.doesNotMatch(blockSource, />\{reason\}<\/span>/);
 });
 
+test("operator control tooltip-describedby target follows disabled focus state", () => {
+  const blockSource = extractFunctionSource("OperatorControlsBlock");
+
+  assert.match(blockSource, /tabIndex=\{disabled && reason \? 0 : undefined\}/);
+  assert.match(
+    blockSource,
+    /aria-describedby=\{disabled && reason \? `operator-control-tip-\$\{workspaceId\}-\$\{control\.action\}` : undefined\}/,
+  );
+  assert.match(
+    blockSource,
+    /aria-describedby=\{!disabled && reason \? `operator-control-tip-\$\{workspaceId\}-\$\{control\.action\}` : undefined\}/,
+  );
+});
+
 test("operator action state is guarded by current workspace selection", () => {
   const dashboard = dashboardSource.dashboard;
 
