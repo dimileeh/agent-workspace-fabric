@@ -549,6 +549,51 @@ async def test_fetch_repo_merge_methods_without_context_is_empty() -> None:
     assert methods == ()
 
 
+async def test_fetch_repo_merge_methods_falls_back_to_default_when_strategies_absent() -> None:
+    fake = FakeBitBucket()
+    # PR payload exposes only the default strategy; ``merge_strategies`` is omitted.
+    _seed_fetch_status(fake, pr=pr_payload(default_merge_strategy="squash"))
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    methods = await client.fetch_repo_merge_methods(repo=repo())
+    assert methods == ("squash",)
+
+
+async def test_fetch_repo_merge_methods_falls_back_to_default_when_strategies_empty() -> None:
+    fake = FakeBitBucket()
+    # Empty ``merge_strategies`` with only the default present must not block merges.
+    _seed_fetch_status(
+        fake, pr=pr_payload(merge_strategies=[], default_merge_strategy="merge_commit")
+    )
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    methods = await client.fetch_repo_merge_methods(repo=repo())
+    assert methods == ("merge",)
+
+
+async def test_fetch_repo_merge_methods_prefers_explicit_strategies_over_default() -> None:
+    fake = FakeBitBucket()
+    _seed_fetch_status(
+        fake,
+        pr=pr_payload(merge_strategies=["squash"], default_merge_strategy="merge_commit"),
+    )
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    methods = await client.fetch_repo_merge_methods(repo=repo())
+    assert methods == ("squash",)
+
+
+async def test_fetch_branch_merge_methods_falls_back_to_default_when_strategies_absent() -> None:
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake, pr=pr_payload(default_merge_strategy="fast_forward"))
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    methods = await client.fetch_branch_pull_request_allowed_merge_methods(
+        repo=repo(), branch="development"
+    )
+    assert methods == ("fast_forward",)
+
+
 async def test_fetch_branch_merge_methods_fast_forward_only() -> None:
     fake = FakeBitBucket()
     _seed_fetch_status(fake, pr=pr_payload(merge_strategies=["fast_forward"]))

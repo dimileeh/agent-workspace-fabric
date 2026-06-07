@@ -645,13 +645,31 @@ class BitBucketClient:
         # has no guaranteed link to the specific issue).
         return html_href(data) or self._issue_url_from_id(data, repo) or self._issues_page_url(repo)
 
+    @staticmethod
+    def _effective_merge_strategies(ctx: _PRContext) -> list[str] | None:
+        """Resolve the destination branch's merge strategies, defaulting if needed.
+
+        BitBucket may expose only ``destination.branch.default_merge_strategy`` while
+        omitting or leaving ``merge_strategies`` empty. The default strategy is by
+        definition an enabled one, so treat it as the sole allowed strategy in that
+        case rather than reporting an empty policy that would wedge the merge gate.
+        Returns ``None`` when neither field is present (genuinely unconstrained).
+        """
+        if ctx.merge_strategies:
+            return ctx.merge_strategies
+        if ctx.default_merge_strategy is not None:
+            return [ctx.default_merge_strategy]
+        return None
+
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return enabled merge methods from the remembered PR destination branch.
 
         The BitBucket repo object does not expose merge settings, so these come from
         the PR's ``destination.branch.merge_strategies`` captured by
-        ``fetch_pr_status``. Without that context (no prior status fetch), returns an
-        empty tuple so the merge gate fails conservatively rather than mis-merging.
+        ``fetch_pr_status``, falling back to ``default_merge_strategy`` when the
+        explicit list is absent or empty. Without any PR context (no prior status
+        fetch), returns an empty tuple so the merge gate fails conservatively rather
+        than mis-merging.
         """
         ctx = self._pr_context.get(repo.slug())
         if ctx is None:
@@ -660,7 +678,7 @@ class BitBucketClient:
                 repo=repo.slug(),
             )
             return ()
-        return map_bb_merge_methods(ctx.merge_strategies)
+        return map_bb_merge_methods(self._effective_merge_strategies(ctx))
 
     async def fetch_branch_pull_request_allowed_merge_methods(
         self,
@@ -671,12 +689,17 @@ class BitBucketClient:
         """Return base-branch merge-method constraints, or ``None`` when unconstrained.
 
         BitBucket models this as the destination branch's ``merge_strategies`` (NOT
-        branch-restrictions, which are permissions/merge-checks). Absent → ``None``.
+        branch-restrictions, which are permissions/merge-checks), falling back to
+        ``default_merge_strategy`` when that list is absent or empty. Absent both →
+        ``None``.
         """
         ctx = self._pr_context.get(repo.slug())
-        if ctx is None or ctx.merge_strategies is None:
+        if ctx is None:
             return None
-        return map_bb_merge_methods(ctx.merge_strategies)
+        strategies = self._effective_merge_strategies(ctx)
+        if strategies is None:
+            return None
+        return map_bb_merge_methods(strategies)
 
     async def merge_pr(
         self,
