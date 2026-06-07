@@ -611,9 +611,10 @@ class BitBucketClient:
         If the repository issue tracker is disabled (404), fall back to posting the
         content as a PR comment (using remembered PR context), returning that comment
         URL and emitting ``BITBUCKET_ISSUE_TRACKER_DISABLED``. If that fallback POST
-        also fails (e.g. a 403 lacking comment permission), the ``BitBucketClientError``
-        propagates rather than returning a PR-page URL: nothing durable was captured, so
-        the deferred-capture caller must treat it as a failure and downgrade to human
+        also fails (e.g. a 403 lacking comment permission), or there is no remembered
+        PR context to comment on, the ``BitBucketClientError`` propagates rather than
+        returning a PR- or issues-page URL: nothing durable was captured, so the
+        deferred-capture caller must treat it as a failure and downgrade to human
         attention instead of resolving the thread (fail safe, mirroring the GitHub path).
         """
         try:
@@ -925,8 +926,21 @@ class BitBucketClient:
             has_pr_context=ctx is not None,
         )
         if ctx is None:
-            # No PR context to comment on; return a usable URL without crashing.
-            return self._issues_page_url(repo)
+            # No PR context to comment on, and the tracker is disabled: nothing
+            # durable can be captured (no issue filed, no comment posted).
+            # Returning a repo issues-page URL here would let the deferred-capture
+            # call site in fix_cycle.py record a capture that never happened and
+            # resolve the reviewer's thread, dropping the follow-up. Raise instead
+            # so create_issue propagates and the call site's BitBucketClientError
+            # handler downgrades to needs_human (this fault is non-transient, so it
+            # blocks the merge), matching create_issue's documented fail-safe
+            # contract — same reasoning as the comment-POST-failure path below.
+            raise BitBucketClientError(
+                operation="bitbucket create_issue comment-fallback",
+                status=404,
+                body="issue tracker disabled and no PR context to comment on",
+                reason_code=BITBUCKET_ISSUE_TRACKER_DISABLED,
+            )
         comment_body = f"{title}\n\n{body}"
         try:
             data = await self._request_json(
