@@ -72,7 +72,7 @@ async def _run_operator_hint_cycle(
         verdict = await self._invoke_cli_for_verdict_result(
             workspace_id=workspace_id,
             prompt=prompt,
-            commit_message="fix: address operator remonitor hint",
+            commit_message="fix: address operator hint",
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,

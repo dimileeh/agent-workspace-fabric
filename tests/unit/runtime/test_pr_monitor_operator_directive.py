@@ -129,3 +129,6 @@ async def test_operator_hint_cycle_prompt_uses_directive_over_reason(
     assert isinstance(prompt, str)
     assert "implement the forge-neutral fix, do not defer" in prompt
     assert "operator guidance recorded" not in prompt
+    # The commit message must stay control-neutral: the same cycle handles both
+    # remonitor and guide hints, so it must not hardcode "remonitor".
+    assert captured["commit_message"] == "fix: address operator hint"
