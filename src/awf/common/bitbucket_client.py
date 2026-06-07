@@ -46,6 +46,7 @@ from awf.common.bitbucket_client_parsing import (
     _clean_optional_str,
     _tail,
     bb_merge_strategy_for_method,
+    build_blocking_reviews,
     build_general_review_comments,
     build_review_threads,
     decode_thread_id,
@@ -385,6 +386,7 @@ class BitBucketClient:
             unresolved_review_comments=build_general_review_comments(
                 comments, account_id=account_id
             ),
+            blocking_reviews=build_blocking_reviews(pr, account_id=account_id),
             base_behind_count=base_behind_count,
             merge_state_status=merge_state_status_for(merged=merged, closed=closed),
             ci_failures=(),  # populated by fetch_failing_check_logs when needed

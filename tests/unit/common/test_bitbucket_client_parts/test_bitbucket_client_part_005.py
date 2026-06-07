@@ -15,6 +15,7 @@ from awf.common.bitbucket_client_parsing import (
     _comment_account_id,
     _comment_author,
     _tail,
+    build_blocking_reviews,
     build_general_review_comments,
     build_review_threads,
     extract_diffstat_paths,
@@ -411,6 +412,52 @@ def test_general_comments_skip_inline_deleted_and_empty() -> None:
     ]
     reviews = build_general_review_comments(comments, account_id="me")  # id 4 is viewer
     assert reviews == ()
+
+
+def test_build_blocking_reviews_flags_changes_requested_participant() -> None:
+    pr = {
+        "participants": [
+            {"state": "approved", "user": {"account_id": "a", "display_name": "Approver"}},
+            {
+                "state": "changes_requested",
+                "approved": False,
+                "user": {"account_id": "b", "display_name": "Blocker"},
+            },
+        ]
+    }
+    blockers = build_blocking_reviews(pr, account_id="me")
+    assert len(blockers) == 1
+    blocker = blockers[0]
+    assert blocker.blocks_merge is True
+    assert blocker.state == "CHANGES_REQUESTED"
+    assert blocker.author == "Blocker"
+    assert blocker.comment_id == "bbreview:b"
+
+
+def test_build_blocking_reviews_excludes_viewer_and_dedupes() -> None:
+    pr = {
+        "participants": [
+            # Viewer's own requested-changes state must never block AWF.
+            {"state": "changes_requested", "user": {"account_id": "me"}},
+            # Two payloads for the same reviewer collapse to one blocker.
+            {"state": "CHANGES_REQUESTED", "user": {"account_id": "b"}},
+            {"state": "changes_requested", "user": {"account_id": "b"}},
+        ]
+    }
+    blockers = build_blocking_reviews(pr, account_id="me")
+    assert [b.comment_id for b in blockers] == ["bbreview:b"]
+
+
+@pytest.mark.parametrize(
+    "pr",
+    [
+        {},  # no participants key
+        {"participants": "nope"},  # non-list
+        {"participants": ["x", {"state": None}, {"state": "approved"}]},  # no blockers
+    ],
+)
+def test_build_blocking_reviews_returns_empty_without_blockers(pr: dict) -> None:
+    assert build_blocking_reviews(pr, account_id=None) == ()
 
 
 def test_extract_diffstat_paths_ignores_non_dict_sides() -> None:

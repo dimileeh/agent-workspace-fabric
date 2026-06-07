@@ -413,6 +413,54 @@ def build_general_review_comments(
     return tuple(reviews)
 
 
+def build_blocking_reviews(
+    pr: dict[str, Any],
+    *,
+    account_id: str | None,
+) -> tuple[ReviewComment, ...]:
+    """Map BitBucket "Request changes" reviewers to merge-blocking reviews.
+
+    BitBucket Cloud records a reviewer's *Request changes* decision on the PR
+    ``participants`` entry (``state == "changes_requested"``), not in the
+    ``/comments`` list — so a reviewer can block a PR without leaving an
+    unresolved comment. ``decide()``'s review-blocker gate consults
+    ``PRStatus.blocking_reviews``; without this the BitBucket path would proceed
+    to merge despite an active requested-changes review. Viewer-authored states
+    are excluded so AWF never blocks on its own account, mirroring the GitHub
+    ``_effective_blocking_reviews`` contract (latest state per reviewer).
+    """
+    participants = pr.get("participants")
+    if not isinstance(participants, list):
+        return ()
+    blockers: list[ReviewComment] = []
+    seen: set[str] = set()
+    for participant in participants:
+        if not isinstance(participant, dict):
+            continue
+        if str(participant.get("state") or "").strip().lower() != "changes_requested":
+            continue
+        if _is_viewer(participant, account_id):
+            continue
+        reviewer_id = _comment_account_id(participant)
+        key = reviewer_id or _comment_author(participant) or f"__participant_{len(blockers)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        blockers.append(
+            ReviewComment(
+                comment_id=f"bbreview:{key}",
+                body_excerpt="Reviewer requested changes",
+                author=_comment_author(participant),
+                is_resolved=False,
+                blocks_merge=True,
+                state="CHANGES_REQUESTED",
+                source_kind="review",
+                viewer_did_author=False,
+            )
+        )
+    return tuple(blockers)
+
+
 def extract_diffstat_paths(entries: list[dict[str, Any]]) -> tuple[str, ...]:
     """Collect changed file paths from BitBucket PR diffstat entries."""
     paths: list[str] = []
