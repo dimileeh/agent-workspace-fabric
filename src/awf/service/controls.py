@@ -37,6 +37,7 @@ from awf.runtime.operator_hints import (
 )
 from awf.runtime.pr_monitor import OperatorHint
 from awf.service.controls_errors import (
+    _GUIDE_ELIGIBLE_STATUSES,
     ActiveWorkspaceDestroyError,
     IdempotencyConflictError,
     VersionConflictError,
@@ -87,10 +88,8 @@ _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
 )
-# guide is a no-state-transition control: it injects a directive into a *live*
-# monitoring workspace, so only ``monitoring_pr`` is eligible. Re-engaging a
-# ``failed`` workspace stays remonitor's job (issue #447).
-_GUIDE_ELIGIBLE_STATUSES = (WorkspaceStatus.monitoring_pr,)
+# _GUIDE_ELIGIBLE_STATUSES is the single source of truth in controls_errors.py
+# (imported above) so the gating check here and the error detail there cannot drift.
 _VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _VALIDATE_REPLAY_STATUSES = frozenset(
     {
