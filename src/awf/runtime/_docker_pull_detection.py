@@ -265,7 +265,7 @@ def _image_pull_failure_is_corroborated(
         return False
     image_ref = match.group(1)
     return any(
-        abs(index - context_index) <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
+        0 < index - context_index <= _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW
         and image_ref in lines[context_index].split()
         and not _docker_pull_command_succeeded(image_ref, context_index, index, lines)
         for context_index in docker_pull_command_indexes
@@ -400,16 +400,37 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             ):
                 back_start = k
                 break
+        # Extract the image ref from the most-recent preceding pull echo so the
+        # forward daemon probe can confirm the daemon error is for the same image.
+        # When the preceding echo is known, a daemon error for a *different* image
+        # that appears after the summary belongs to a different pull operation and
+        # must not make this summary permanent (PRRT_kwDOSJAM6s6Hr82p).
+        preceding_pull_image: str | None = None
+        if (
+            _CI_DOCKER_PULL_COMMAND_MARKER in lines[back_start]
+            and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[back_start]
+        ):
+            pull_tokens = lines[back_start].split()
+            try:
+                pull_idx = next(i for i, t in enumerate(pull_tokens) if t == "pull")
+                if pull_idx + 1 < len(pull_tokens):
+                    preceding_pull_image = pull_tokens[pull_idx + 1]
+            except StopIteration:
+                pass
         # Forward daemon probe: some log streams emit the summary before the
         # daemon error line (opposite of the typical CLI ordering). A daemon
         # permanent error appearing after the summary and before any new pull
-        # echo belongs to this pull and makes it non-retryable.
+        # echo belongs to this pull and makes it non-retryable.  When a
+        # preceding pull echo is known, require the daemon error to carry the
+        # same image ref — an error for a different image must not be attributed
+        # to this summary (PRRT_kwDOSJAM6s6Hr82p).
         if any(
             _CI_DOCKER_DAEMON_ERROR_MARKER in lines[probe_index]
             and any(
                 marker in re.sub(r'"[^"]*"', "", lines[probe_index])
                 for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS
             )
+            and (preceding_pull_image is None or preceding_pull_image in lines[probe_index].split())
             and not any(
                 _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
                 and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]

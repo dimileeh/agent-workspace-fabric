@@ -603,3 +603,31 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_later_pull_echo_does_not_retroactively_corroborate_earlier_failure(
+        self,
+    ) -> None:
+        """A ``docker pull <ref>`` echo that appears *after* a kubelet ``failed to
+        pull image "<ref>"`` event must not corroborate that failure.  Only pull
+        echoes that precede the failure line are valid evidence; a later echo would
+        turn a real deploy bug into RerunTransientCI (PRRT_kwDOSJAM6s6HsnA_)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                'Failed to pull image "app:v99": manifest unknown\n'
+                "/usr/bin/docker pull app:v99\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
