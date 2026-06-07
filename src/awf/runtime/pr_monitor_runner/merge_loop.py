@@ -1208,8 +1208,11 @@ async def handle_merge_action(
         if recheck_forge_error is not None:
             # A transient blip on either forge (rate-limit/transport/5xx) waits and
             # keeps polling; only a deterministic fault terminates the workspace.
-            # GitHub keeps its historical ``MONITOR_ABORT`` default; BitBucket
-            # preserves its actionable ``reason_code`` end-to-end.
+            # Mirror the ``fetch_pr_status``/``_execute`` catches in ``runner.py``:
+            # forward the forge's ``reason_code`` for both forges so the same GitHub
+            # fault class persists ``GITHUB_API_ERROR`` here as it does there, rather
+            # than this branch decaying GitHub to the ``MONITOR_ABORT`` default while
+            # the other paths preserve it. BitBucket carries its specific code.
             if await self._wait_after_transient_forge_error(
                 recheck_forge_error,
                 workspace_id=workspace_id,
@@ -1218,21 +1221,16 @@ async def handle_merge_action(
                 monitor_log=monitor_log,
             ):
                 return False
-            if isinstance(recheck_forge_error, BitBucketClientError):
-                await self._terminate_failed(
-                    workspace_id,
-                    message=(
-                        f"monitor: bitbucket error during pre-merge recheck: {recheck_forge_error}"
-                    )[:2000],
-                    reason_code=recheck_forge_error.reason_code,
-                )
-            else:
-                await self._terminate_failed(
-                    workspace_id,
-                    message=(
-                        f"monitor: github error during pre-merge recheck: {recheck_forge_error}"
-                    )[:2000],
-                )
+            forge_label = (
+                "bitbucket" if isinstance(recheck_forge_error, BitBucketClientError) else "github"
+            )
+            await self._terminate_failed(
+                workspace_id,
+                message=(
+                    f"monitor: {forge_label} error during pre-merge recheck: {recheck_forge_error}"
+                )[:2000],
+                reason_code=recheck_forge_error.reason_code,
+            )
             return True
 
         if merge_method_preflight_error is not None:
