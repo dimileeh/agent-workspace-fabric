@@ -514,7 +514,7 @@ export function OperatorControlsBlock({
           const disabled = busy || !control.enabled || confirming !== null;
           const reason = busy && !submitting ? "operation active" : control.reason;
           const destructive = control.action === "cancel";
-          const tooltip = reason ? `${control.label}: ${reason}` : control.label;
+          const tooltip = control.label + ": " + reason;
           const buttonClassName = destructive
             ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-white px-2.5 text-[11px] font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
             : "inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
