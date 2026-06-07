@@ -395,6 +395,12 @@ def build_general_review_comments(
             continue
         if _is_viewer(comment, account_id):
             continue
+        # Mirror the inline-thread path: a top-level BitBucket comment the author
+        # already resolved is settled feedback. Downstream gates treat every
+        # ``unresolved_review_comment`` as pending work, so emitting a resolved one
+        # would drive needless comment cycles or block the merge. Drop it.
+        if _comment_is_resolved(comment):
+            continue
         raw = comment.get("content")
         body = raw.get("raw") if isinstance(raw, dict) else None
         if not body or not body.strip():

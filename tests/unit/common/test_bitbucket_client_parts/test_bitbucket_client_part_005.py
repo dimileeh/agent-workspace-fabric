@@ -529,6 +529,17 @@ def test_general_comments_skip_inline_deleted_and_empty() -> None:
     assert reviews == ()
 
 
+def test_general_comments_skip_resolved_top_level() -> None:
+    comments = [
+        # resolved top-level comment → skip (mirrors the inline-thread resolution check)
+        {"id": 1, "content": {"raw": "settled"}, "resolution": {"type": "resolved"}},
+        # unresolved top-level comment → kept
+        {"id": 2, "content": {"raw": "pending"}},
+    ]
+    reviews = build_general_review_comments(comments, account_id=None)
+    assert [c.comment_id for c in reviews] == ["bbcomment:2"]
+
+
 def test_latest_external_review_activity_picks_newest_external() -> None:
     comments = [
         # viewer-authored → ignored even though newest.
