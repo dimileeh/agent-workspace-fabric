@@ -16,6 +16,7 @@ from awf.runtime.pr_monitor import (
     MonitorConfig,
     MonitorState,
     PRStatus,
+    ReportCiFailure,
     RerunTransientCI,
     ReviewComment,
     ReviewThread,
@@ -124,7 +125,7 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, RerunTransientCI)
+        assert isinstance(action, RerunTransientCI), action
         assert action.failures == (failure,)
 
     @pytest.mark.unit
@@ -144,6 +145,94 @@ class TestCiFailure:
                 "/usr/bin/docker pull postgres:16\n"
                 "Docker pull failed with exit code 1\n"
                 "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_permanent_pull_detail_after_summary_dispatches_report_ci_failure(
+        self,
+    ) -> None:
+        """A permanent 'failed to pull image' detail that follows the 'Docker pull
+        failed' summary must prevent the summary from anchoring a transient rerun.
+        Docker sometimes emits the summary before the containerd/kubelet detail, so
+        a manifest-unknown / not-found detail within the forward window of a summary
+        means the same pull is permanent (PRRT_kwDOSJAM6s6HsKWl)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull myapp:v99\n"
+                "Docker pull failed with exit code 1\n"
+                'Failed to pull image "myapp:v99": manifest unknown\n'
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_permanent_pull_detail_after_summary_not_found_dispatches_report_ci_failure(
+        self,
+    ) -> None:
+        """Variant of the forward-probe regression: 'not found' on the detail line
+        after a 'Docker pull failed' summary must also be classified permanent
+        (PRRT_kwDOSJAM6s6HsKWl)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull myapp:v99\n"
+                "Docker pull failed with exit code 1\n"
+                'Failed to pull image "myapp:v99": not found\n'
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_permanent_pull_detail_after_summary_new_command_echo_dispatches_rerun(
+        self,
+    ) -> None:
+        """A permanent 'failed to pull image' detail separated from the 'Docker pull
+        failed' summary by a new 'docker pull' command echo belongs to a different
+        pull operation and must not block RerunTransientCI for the summary
+        (PRRT_kwDOSJAM6s6HsKWl)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull myapp:v99\n"
+                "context deadline exceeded\n"
+                "Docker pull failed with exit code 1\n"
+                "/usr/bin/docker pull broken:missing\n"
+                'Failed to pull image "broken:missing": manifest unknown'
             ),
             run_id="27091023772",
         )
