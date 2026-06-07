@@ -370,7 +370,23 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         context="execute_action",
                         monitor_log=monitor_log,
                     ):
-                        await self._persist_state(workspace_id, state)
+                        # Do NOT persist ``state`` here. ``_execute`` mutates it
+                        # in-memory as it works (e.g. the fix cycle marks a thread
+                        # addressed *before* the forge ``resolve_thread`` call).
+                        # When a ``BitBucketClientError`` escapes ``_execute`` the
+                        # GitHubClientError-only fix-cycle arms never ran their
+                        # roll-back (``_clear_addressed_state_by_id``), so the
+                        # in-memory ``state`` carries unconfirmed addressed markers
+                        # for threads whose API call actually failed. Persisting
+                        # them would leave a thread marked-addressed-but-open, and
+                        # ``decide()`` filters addressed IDs — so it would treat
+                        # the still-open thread as handled forever and let
+                        # auto-merge bypass live feedback (the #305 mode). Mirror
+                        # the status-fetch transient arms (bare ``continue``): the
+                        # next outer iteration reloads clean state from the DB, and
+                        # threads genuinely resolved on the forge are not re-listed
+                        # while a failed resolve is re-addressed. Pre-``_execute``
+                        # mutations already persisted themselves above.
                         continue
                     await self._write_monitor_log(
                         monitor_log,

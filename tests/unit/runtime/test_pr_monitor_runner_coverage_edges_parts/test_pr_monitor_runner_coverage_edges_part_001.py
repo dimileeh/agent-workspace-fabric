@@ -560,6 +560,79 @@ async def test_monitor_run_retries_transient_bitbucket_execute_error(
 
 
 @pytest.mark.unit
+async def test_transient_bitbucket_execute_error_discards_unconfirmed_addressed_state(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A transient ``BitBucketClientError`` escaping ``_execute`` must not persist
+    the in-flight addressed markers it mutated.
+
+    Regression for PRRT_kwDOSJAM6s6HntiJ. The fix cycle marks a thread addressed
+    in-memory *before* the forge ``resolve_thread`` call. For a BitBucket
+    workspace that call raises ``BitBucketClientError`` — which the
+    ``GitHubClientError``-only fix-cycle arm neither catches nor rolls back — so
+    it escapes to ``run()``. On a recoverable blip the runner must discard those
+    unconfirmed mutations and re-poll from clean DB state, mirroring the
+    status-fetch transient arms. Persisting them would leave the thread
+    marked-addressed-but-open, and ``decide()`` would skip it forever, letting
+    auto-merge bypass live feedback (the #305 failure mode).
+    """
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    # Two outer iterations, three status-fetch commands each.
+    for _ in range(2):
+        cmd.queue_result(returncode=0)  # poll: git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # poll: base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # poll: mergeable PR
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=DefaultMergeMethodGitHubClient(cmd),
+    )
+
+    calls = {"n": 0}
+
+    async def fake_execute(*, state: MonitorState, **_kwargs: object) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Mirror the fix cycle marking a thread addressed before the forge
+            # resolve_thread call, then a transient BitBucket fault on resolve.
+            state.threads_addressed_ids["T_inflight"] = "fix_committed"
+            raise BitBucketClientError(
+                operation="bitbucket resolve_thread",
+                status=503,
+                body="service unavailable",
+                reason_code=BITBUCKET_API_ERROR,
+            )
+        return True  # terminal: end the monitor loop cleanly
+
+    runner._execute = fake_execute  # type: ignore[method-assign]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert calls["n"] == 2
+    assert sleep_fn.calls == [60]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # The unconfirmed addressed marker from the failed _execute must NOT be
+        # persisted — otherwise decide() would treat the still-open thread as
+        # handled on the next poll.
+        assert "T_inflight" not in (ws.monitor_threads_addressed or {})
+        retry_events = _bitbucket_retry_events(ws)
+        assert len(retry_events) == 1
+        assert retry_events[0].payload["context"] == "execute_action"
+
+
+@pytest.mark.unit
 async def test_monitor_run_transient_status_fetch_preserves_state_operations_and_lifecycle(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
