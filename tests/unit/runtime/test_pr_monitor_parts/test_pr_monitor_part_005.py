@@ -245,3 +245,32 @@ class TestCiFailure:
 
         assert isinstance(action, RerunTransientCI)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_permanent_daemon_error_before_daemon_timeout_different_image_dispatches_rerun(
+        self,
+    ) -> None:
+        """A permanent daemon error for one image must not make a daemon registry
+        timeout for a *different* image permanent.  The backward probe must be
+        limited to 'docker pull failed' summary lines so that a preceding
+        manifest-unknown / not-found daemon error does not misattribute a genuine
+        registry timeout (PRRT_kwDOSJAM6s6HsNGM)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: manifest for broken-app:missing not found: manifest unknown\n"
+                'Error response from daemon: Get "https://registry-1.docker.io/v2/library/postgres/manifests/16":'
+                " context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)

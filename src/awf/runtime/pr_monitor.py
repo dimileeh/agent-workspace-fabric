@@ -1050,7 +1050,10 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     start = max(0, index - _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW)
     # Backward probe: daemon error always precedes the "docker pull failed"
     # summary; a daemon error after the summary is from a different pull.
-    if any(
+    # Restrict to "docker pull failed" summary lines only — when the evidence
+    # line is itself a daemon-error timeout, a preceding daemon error for a
+    # *different* image must not make it permanent (PRRT_kwDOSJAM6s6HsNGM).
+    if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in lines[index] and any(
         _CI_DOCKER_DAEMON_ERROR_MARKER in lines[probe_index]
         and any(
             marker in re.sub(r'"[^"]*"', "", lines[probe_index])
