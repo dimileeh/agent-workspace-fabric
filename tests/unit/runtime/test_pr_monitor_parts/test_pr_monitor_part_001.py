@@ -642,6 +642,31 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_context_deadline_exceeded_without_docker_pull_reports_ci_failure(self) -> None:
+        """A bare Go ``context deadline exceeded`` timeout (gRPC / k8s / HTTP
+        client) with no Docker pull evidence and no pytest output is a real
+        application regression and must reach the repair agent, not be silently
+        rerun as transient CI."""
+        failure = CheckFailure(
+            name="integration-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "calling downstream grpc service\n"
+                "rpc error: code = DeadlineExceeded desc = context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_unrecognized_failure_log_reports_ci_failure(self) -> None:
         """A failure whose log matches neither transient nor registry-timeout
         markers falls through to the repair agent."""
