@@ -196,6 +196,23 @@ test("cancel success and failure summaries format the Cancel label", () => {
   );
 });
 
+test("cancel remains enabled when terminal cancellation operations complete", () => {
+  const terminalStatuses = ["succeeded", "failed", "cancelled", "canceled"];
+  for (const status of terminalStatuses) {
+    const control = getWorkspaceOperatorControls({
+      overview: overview({
+        status: "running",
+        active_operation: "cancel",
+      }),
+      operations: [operation({ type: "cancel", status })],
+    }).find((item) => item.action === "cancel");
+    assert.ok(control, `missing cancel control for ${status}`);
+    assert.equal(control.enabled, true, `cancel should be enabled after terminal ${status}`);
+    assert.equal(control.visible, true);
+    assert.equal(control.reason, null);
+  }
+});
+
 test("active monitoring workspace exposes the full operator action set", () => {
   const actions = new Set(
     getWorkspaceOperatorControls({
