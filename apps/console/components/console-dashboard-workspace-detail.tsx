@@ -12,6 +12,7 @@ RefreshCw,
 X
 } from "lucide-react";
 import {
+useEffect,
 useLayoutEffect,
 useState
 } from "react";
@@ -473,12 +474,24 @@ export function OperatorControlsBlock({
 }) {
   const [confirming, setConfirming] = useState<WorkspaceOperatorAction | null>(null);
   const visibleControls = controls.filter((control) => control.visible);
-  if (visibleControls.length === 0) {
-    return null;
-  }
 
   const submittingAction = state.status === "submitting" ? state.action : null;
   const busy = submittingAction !== null;
+  const cancelControl = visibleControls.find((control) => control.action === "cancel");
+  const cancelConfirmEnabled = cancelControl !== undefined && cancelControl.enabled && !busy;
+
+  // Drop a pending cancel confirmation as soon as it no longer applies — the
+  // operator switched workspaces, cancel became disabled, or another operation
+  // started — so Confirm cancel can never act on a stale or guarded selection.
+  useEffect(() => {
+    if (confirming === "cancel" && !cancelConfirmEnabled) {
+      setConfirming(null);
+    }
+  }, [confirming, cancelConfirmEnabled]);
+
+  if (visibleControls.length === 0) {
+    return null;
+  }
 
   return (
     <div className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
@@ -516,7 +529,7 @@ export function OperatorControlsBlock({
           );
         })}
       </div>
-      {confirming === "cancel" ? (
+      {confirming === "cancel" && cancelConfirmEnabled ? (
         <div
           data-testid="operator-cancel-confirm"
           className="grid gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-red-900"
@@ -528,10 +541,14 @@ export function OperatorControlsBlock({
             <button
               type="button"
               onClick={() => {
+                if (!cancelConfirmEnabled) {
+                  return;
+                }
                 onAction("cancel");
                 setConfirming(null);
               }}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-red-600 px-2.5 text-[11px] font-medium text-white transition hover:bg-red-700"
+              disabled={!cancelConfirmEnabled}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-red-600 px-2.5 text-[11px] font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Ban size={13} aria-hidden />
               Confirm cancel

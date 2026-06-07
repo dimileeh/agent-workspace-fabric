@@ -114,4 +114,67 @@ test.describe("Operator cancel control", () => {
     await expect(page.getByText("Cancel succeeded:")).toBeVisible();
     expect(cancelPosts).toBe(1);
   });
+
+  test("auto-dismisses an open confirmation when cancel becomes disabled", async ({ page }) => {
+    let cancelPosts = 0;
+    let activeOperation: string | null = null;
+    await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
+      cancelPosts += 1;
+      await route.fulfill({
+        json: {
+          workspace_id: WORKSPACE_ID,
+          operation_id: "op_cancel123",
+          operation_status: "succeeded",
+          status: "cancelled",
+          message: "cancelled",
+        },
+      });
+    });
+
+    const workspacePayload = () => ({
+      workspace_id: WORKSPACE_ID,
+      title: "Mock Workspace",
+      repo_url: "https://github.com/test/repo",
+      base_branch: "main",
+      agent: "test-agent",
+      status: "running",
+      active_operation: activeOperation,
+      version: 7,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    });
+
+    // Re-register the overview/detail routes so they reflect the mutable
+    // active-operation state instead of the static bootstrap payload.
+    await page.route("/api/awf/workspaces/overview*", async (route) => {
+      await route.fulfill({ json: { items: [workspacePayload()], has_more: false } });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}`, async (route) => {
+      await route.fulfill({ json: workspacePayload() });
+    });
+
+    await page.goto(`/?workspaceId=${WORKSPACE_ID}`);
+
+    const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
+    await expect(cancelButton).toBeVisible();
+    await expect(cancelButton).toBeEnabled();
+
+    // Open the cancel confirmation while cancel is still available.
+    await cancelButton.click();
+    const confirmation = page.getByTestId("operator-cancel-confirm");
+    await expect(confirmation).toBeVisible();
+
+    // A background operation begins while the confirmation is open, so the
+    // cancel control becomes disabled. The still-open confirmation must drop
+    // itself and Confirm cancel must never POST against the guarded workspace.
+    activeOperation = "op_busy";
+
+    await expect(cancelButton).toBeDisabled({ timeout: 15000 });
+    await expect(confirmation).not.toBeVisible();
+    await page.waitForTimeout(200);
+    expect(cancelPosts).toBe(0);
+  });
 });
