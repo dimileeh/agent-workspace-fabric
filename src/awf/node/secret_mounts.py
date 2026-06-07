@@ -23,13 +23,25 @@ SECRET_LEASE_WRITABLE_UNSUPPORTED = "SECRET_LEASE_WRITABLE_UNSUPPORTED"
 
 _ENV_PROVIDERS = frozenset(("env",))
 _GITHUB_PROVIDERS = frozenset(("github",))
+_BITBUCKET_PROVIDERS = frozenset(("bitbucket",))
 _LOCAL_FILE_PROVIDERS = frozenset(("local-file", "host-file"))
 _LOCAL_AUTH_PROVIDERS = frozenset(("local-auth", "auth"))
 _SUPPORTED_PROVIDERS = (
-    _ENV_PROVIDERS | _GITHUB_PROVIDERS | _LOCAL_FILE_PROVIDERS | _LOCAL_AUTH_PROVIDERS
+    _ENV_PROVIDERS
+    | _GITHUB_PROVIDERS
+    | _BITBUCKET_PROVIDERS
+    | _LOCAL_FILE_PROVIDERS
+    | _LOCAL_AUTH_PROVIDERS
 )
 _GITHUB_TOKEN_SOURCE_NAMES = ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
 _GITHUB_TOKEN_TARGET_NAMES = frozenset(("GH_TOKEN", "GITHUB_TOKEN"))
+# BitBucket Cloud git/REST credentials (issue #461). Each declared target maps
+# to the source env var(s) it may be filled from; the resolver emits a Compose
+# ``${VAR}`` placeholder, never the secret value itself.
+_BITBUCKET_TARGET_SOURCE_NAMES: dict[str, tuple[str, ...]] = {
+    "BITBUCKET_API_TOKEN": ("BITBUCKET_API_TOKEN",),
+    "BITBUCKET_EMAIL": ("BITBUCKET_EMAIL",),
+}
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HOME_ROOT_RE = re.compile(r"^/(?:home|Users)/[^/]+/?$")
 
@@ -163,6 +175,20 @@ class LocalSecretLeaseMountResolver:
                 satisfied_legacy_providers.add("github")
                 continue
 
+            if provider in _BITBUCKET_PROVIDERS:
+                pair = self._resolve_bitbucket_secret(
+                    secret,
+                    source_env=source_env,
+                    provider=provider,
+                    omitted_optional=omitted_optional,
+                )
+                if pair is None:
+                    continue
+                _append_env_pair(env, pair)
+                _append_unique(providers, provider)
+                _append_unique(targets, pair[0])
+                continue
+
             if provider in _LOCAL_FILE_PROVIDERS:
                 mount = self._resolve_local_file_secret(
                     secret,
@@ -250,6 +276,25 @@ class LocalSecretLeaseMountResolver:
             return ()
         placeholder = f"${{{source_name}}}"
         return (("GH_TOKEN", placeholder), ("GITHUB_TOKEN", placeholder))
+
+    def _resolve_bitbucket_secret(
+        self,
+        secret: ProfileSecret,
+        *,
+        source_env: Mapping[str, str],
+        provider: str,
+        omitted_optional: list[dict[str, str]],
+    ) -> tuple[str, str] | None:
+        if secret.kind != "env":
+            self._raise(SECRET_LEASE_TARGET_KIND_MISMATCH, secret, provider=provider)
+        source_names = _BITBUCKET_TARGET_SOURCE_NAMES.get(secret.target)
+        if source_names is None:
+            self._raise(SECRET_LEASE_TARGET_MISMATCH, secret, provider=provider)
+        source_name = next((name for name in source_names if source_env.get(name)), None)
+        if source_name is None:
+            self._missing(secret, provider=provider, omitted_optional=omitted_optional)
+            return None
+        return (secret.target, f"${{{source_name}}}")
 
     def _resolve_local_file_secret(
         self,

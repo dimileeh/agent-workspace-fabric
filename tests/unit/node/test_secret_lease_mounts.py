@@ -639,6 +639,135 @@ def test_invalid_local_lease_shapes_raise_structured_errors(
 
 
 @pytest.mark.unit
+def test_bitbucket_provider_exposes_token_and_email_placeholders(tmp_path: Path) -> None:
+    raw_token = "ATATT-do-not-render"
+    raw_email = "agent@example.com"
+    resolver = _resolver(
+        tmp_path,
+        host_env={"BITBUCKET_API_TOKEN": raw_token, "BITBUCKET_EMAIL": raw_email},
+    )
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "bitbucket-token",
+                "kind": "env",
+                "target": "BITBUCKET_API_TOKEN",
+                "provider": "bitbucket",
+                "ref": "token",
+            },
+            {
+                "name": "bitbucket-email",
+                "kind": "env",
+                "target": "BITBUCKET_EMAIL",
+                "provider": "bitbucket",
+                "ref": "email",
+            },
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == (
+        ("BITBUCKET_API_TOKEN", "${BITBUCKET_API_TOKEN}"),
+        ("BITBUCKET_EMAIL", "${BITBUCKET_EMAIL}"),
+    )
+    rendered = json.dumps(
+        {"resolution": repr(resolution), "metadata": resolution.metadata},
+        default=str,
+    )
+    assert raw_token not in rendered
+    assert resolution.metadata["providers"] == ["bitbucket"]
+    assert resolution.metadata["targets"] == ["BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL"]
+
+
+@pytest.mark.unit
+def test_bitbucket_provider_rejects_unrelated_target(tmp_path: Path) -> None:
+    raw_token = "ATATT-do-not-render"
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": raw_token})
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "bitbucket",
+                    "kind": "env",
+                    "target": "GH_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_TARGET_MISMATCH"
+    assert raw_token not in str(raised.value)
+
+
+@pytest.mark.unit
+def test_bitbucket_provider_rejects_non_env_kind(tmp_path: Path) -> None:
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-x"})
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "bitbucket",
+                    "kind": "mount",
+                    "target": "BITBUCKET_API_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_TARGET_KIND_MISMATCH"
+
+
+@pytest.mark.unit
+def test_bitbucket_provider_required_missing_source_raises(tmp_path: Path) -> None:
+    resolver = _resolver(tmp_path, host_env={})
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "bitbucket",
+                    "kind": "env",
+                    "target": "BITBUCKET_API_TOKEN",
+                    "provider": "bitbucket",
+                    "ref": "token",
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_SOURCE_MISSING"
+
+
+@pytest.mark.unit
+def test_bitbucket_provider_optional_missing_source_is_omitted(tmp_path: Path) -> None:
+    resolver = _resolver(tmp_path, host_env={})
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "bitbucket",
+                "kind": "env",
+                "target": "BITBUCKET_API_TOKEN",
+                "provider": "bitbucket",
+                "ref": "token",
+                "required": False,
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == ()
+    assert resolution.metadata["omitted_optional_count"] == 1
+
+
+@pytest.mark.unit
 def test_optional_missing_github_and_mount_sources_are_omitted(
     tmp_path: Path,
 ) -> None:
