@@ -750,6 +750,15 @@ def _ci_transient_rerun_count_for_key(state: MonitorState, key: str) -> int:
 
 
 def _looks_like_transient_ci_failure(failure: CheckFailure) -> bool:
+    """Whether a failing check is infrastructure flake worth a silent rerun.
+
+    Returns ``True`` only when the failure carries no structured or textual
+    evidence of a genuine code failure and either matches a generic transient
+    marker, is an empty-log timed-out run, or is a Docker registry/pull timeout
+    (see ``_log_shows_docker_registry_timeout``). Anything that looks like a real
+    code failure short-circuits to ``False`` so it reaches the repair agent.
+    """
+
     log_text = failure.log_excerpt.lower()
     if _has_structured_code_failure_evidence(failure):
         return False
