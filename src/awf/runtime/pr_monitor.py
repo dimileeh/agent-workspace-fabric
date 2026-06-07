@@ -1022,23 +1022,42 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     """Whether a Docker pull-failure evidence line represents a permanent error.
 
     Returns True when the evidence line itself OR any adjacent line within
-    ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` that also carries the daemon-error
-    marker contains a permanent pull-error phrase (access-denied, no-such-image,
-    manifest-unknown, etc.).  Permanent errors cannot succeed on a retry, so their
-    evidence lines must not anchor transient-timeout attribution.
+    ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` *before* the evidence line that also
+    carries the daemon-error marker contains a permanent pull-error phrase
+    (access-denied, no-such-image, manifest-unknown, etc.).  Permanent errors
+    cannot succeed on a retry, so their evidence lines must not anchor
+    transient-timeout attribution.
+
+    Only daemon-error lines appearing *before* the evidence line are probed:
+    Docker CLI always emits the daemon error before the ``docker pull failed``
+    summary for the same pull, so a daemon-error line appearing after the summary
+    belongs to a different pull operation and must not influence permanence
+    classification for this evidence line.  Additionally, if a ``docker pull``
+    command echo (not itself a failure summary) appears between the probe and the
+    evidence line, that echo marks a new pull invocation, so the probe is for a
+    different image and is excluded.
     """
     clean_current = re.sub(r'"[^"]*"', "", lines[index])
     if any(marker in clean_current for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS):
         return True
     start = max(0, index - _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW)
-    end = min(len(lines), index + _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW + 1)
+    # Probe only backward (probe_index < index): the daemon error always precedes
+    # the "docker pull failed" summary for the same pull; a daemon error after the
+    # summary is from a different pull and must be excluded.  Also reject any probe
+    # that has an intervening ``docker pull`` command echo (not a failure summary)
+    # between itself and the evidence line — that echo signals a new pull invocation.
     return any(
         _CI_DOCKER_DAEMON_ERROR_MARKER in lines[probe_index]
         and any(
             marker in re.sub(r'"[^"]*"', "", lines[probe_index])
             for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS
         )
-        for probe_index in range(start, end)
+        and not any(
+            _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
+            and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
+            for k in range(probe_index + 1, index)
+        )
+        for probe_index in range(start, index)
     )
 
 

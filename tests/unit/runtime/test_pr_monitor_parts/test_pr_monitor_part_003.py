@@ -1483,3 +1483,64 @@ class TestCiFailure:
 
         assert isinstance(action, RerunTransientCI)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_unrelated_permanent_daemon_error_after_transient_pull_dispatches_rerun(
+        self,
+    ) -> None:
+        """An unrelated permanent daemon error appearing immediately *after* a
+        transient pull-failure summary must not cause the transient pull to be
+        classified as permanent.  The daemon error belongs to a different image pull
+        that begins after the transient failure; the backward-only probe restriction
+        prevents it from being attributed to the earlier evidence line
+        (PRRT_kwDOSJAM6s6Hr82p)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "context deadline exceeded\n"
+                "Docker pull failed with exit code 1\n"
+                "Error response from daemon: manifest for broken-app:missing not found: manifest unknown"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_unrelated_permanent_daemon_error_before_transient_pull_with_new_command_dispatches_rerun(
+        self,
+    ) -> None:
+        """An unrelated permanent daemon error appearing *before* a transient pull
+        but separated from it by a new ``docker pull`` command echo must not block
+        RerunTransientCI.  The intervening command echo signals a new pull invocation,
+        so the permanent daemon error belongs to the earlier image, not to the later
+        transient pull (PRRT_kwDOSJAM6s6Hr82p)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "Error response from daemon: No such image: broken-app:missing\n"
+                "/usr/bin/docker pull postgres:16\n"
+                "Docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
