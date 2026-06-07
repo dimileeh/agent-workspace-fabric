@@ -10,6 +10,8 @@ from __future__ import annotations
 import pytest
 
 from awf.common.bitbucket_client import (
+    BITBUCKET_API_ERROR,
+    BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_MERGE_METHOD_UNSUPPORTED,
     BitBucketClientError,
 )
@@ -229,6 +231,43 @@ async def test_merge_pr_missing_commit_hash_raises() -> None:
     with pytest.raises(BitBucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "merge_commit.hash" in str(excinfo.value)
+
+
+async def test_merge_pr_409_maps_to_transient_in_progress_reason() -> None:
+    # A 409 on the merge POST means BitBucket already has a merge in flight for
+    # this PR (e.g. a prior 202 async merge whose poll was interrupted by a
+    # transient fault and re-issued by the monitor). It must map to the transient
+    # BITBUCKET_MERGE_IN_PROGRESS reason — not the deterministic BITBUCKET_API_ERROR
+    # — so the monitor re-polls fetch_pr_status instead of terminating the
+    # workspace on a merge that may still be completing.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "POST",
+        f"{_PR}/merge",
+        status=409,
+        json={"error": {"message": "merge already in progress"}},
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert excinfo.value.reason_code == BITBUCKET_MERGE_IN_PROGRESS
+    assert excinfo.value.status == 409
+
+
+async def test_merge_pr_non_409_conflict_keeps_api_error_reason() -> None:
+    # Other 4xx faults on the merge POST stay deterministic (BITBUCKET_API_ERROR)
+    # so they fail fast rather than being mistaken for an in-flight merge.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "POST",
+        f"{_PR}/merge",
+        status=400,
+        json={"error": {"message": "bad request"}},
+    )
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert excinfo.value.reason_code == BITBUCKET_API_ERROR
 
 
 # ── merge_pr async (202 Accepted) task polling ───────────────────────────────

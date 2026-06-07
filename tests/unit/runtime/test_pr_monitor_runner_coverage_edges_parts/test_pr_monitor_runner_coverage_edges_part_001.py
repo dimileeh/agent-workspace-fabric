@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
     BITBUCKET_AUTH_FAILED,
+    BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TRANSPORT_ERROR,
     BitBucketClientError,
@@ -942,6 +943,12 @@ def test_is_transient_bitbucket_client_error_classifies_recoverable_blips() -> N
         assert _is_transient_bitbucket_client_error(
             err(status=status, reason_code=BITBUCKET_API_ERROR)
         )
+    # A 409 on the merge POST is re-raised as BITBUCKET_MERGE_IN_PROGRESS so the
+    # monitor re-polls fetch_pr_status instead of terminating on an already
+    # in-flight merge that may still be completing.
+    assert _is_transient_bitbucket_client_error(
+        err(status=409, reason_code=BITBUCKET_MERGE_IN_PROGRESS)
+    )
 
     # Deterministic: auth failure, 4xx client error, JSON parse (2xx body), and
     # the pagination/SSRF safety aborts — which also carry ``status=None`` but
