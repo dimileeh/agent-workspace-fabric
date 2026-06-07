@@ -58,8 +58,8 @@ test("operator controls block keeps inactive reasons in hover tooltips", () => {
 
   assert.match(blockSource, /const tooltip = reason \? `\$\{control\.label\}: \${reason}` : null;/);
   assert.match(blockSource, /role="tooltip"/);
-  assert.match(blockSource, /group-hover:block/);
-  assert.match(blockSource, /group-focus-within:block/);
+  assert.match(blockSource, /group-hover:not-sr-only/);
+  assert.match(blockSource, /group-focus-within:not-sr-only/);
   assert.doesNotMatch(blockSource, />\{reason\}<\/span>/);
 });
 
