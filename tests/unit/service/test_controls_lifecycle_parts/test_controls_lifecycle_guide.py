@@ -143,6 +143,40 @@ async def test_guide_resets_claims_and_replays_exact_key(
 
 
 @pytest.mark.unit
+async def test_guide_idempotency_identity_ignores_reason_whitespace(
+    session: AsyncSession,
+) -> None:
+    """A whitespace-only variant of ``reason`` must replay, not conflict.
+
+    The idempotency payload hashes the *stripped* reason so it matches the
+    persisted hint (which stores ``reason_text``). A direct Python/MCP caller
+    retrying with " operator note " after "operator note" under the same key
+    therefore hits the cached operation instead of an idempotency conflict.
+    """
+    workspace = await _monitoring_workspace(session)
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="do the thing",
+        reason="operator note",
+        idempotency_key="guide-reason-whitespace",
+        expected_version=workspace.version,
+    )
+    replay = await service.guide_workspace(
+        workspace.id,
+        directive="do the thing",
+        reason="  operator note  ",
+        idempotency_key="guide-reason-whitespace",
+        expected_version=workspace.version - 1,
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert response.operation_id == replay.operation_id
+    assert len(operations) == 1
+
+
+@pytest.mark.unit
 async def test_guide_preserves_unexpired_monitor_and_execution_leases(
     session: AsyncSession,
 ) -> None:

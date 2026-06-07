@@ -70,7 +70,12 @@ async def guide_workspace(
     reason_text = (reason or "").strip()
     workspace_for_payload = await self._require_workspace(repo, workspace_id)
     payload = _operator_operation_payload(
-        reason=reason,
+        # Hash the *stripped* reason so the idempotency identity matches the
+        # persisted hint (which stores ``reason_text``). REST strips at the
+        # schema boundary, but a direct Python/MCP caller retrying with a
+        # whitespace-only variant (" foo " then "foo") would otherwise hash
+        # differently and conflict instead of replaying the cached operation.
+        reason=reason_text or None,
         reason_code=_OPERATOR_GUIDE_REASON_CODE,
         requested_action=OperationType.guide.value,
         extra={
