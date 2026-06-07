@@ -12,6 +12,7 @@ from dataclasses import (
 from pathlib import Path
 from typing import Any, cast
 
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
@@ -547,11 +548,19 @@ async def _execute(
             for run_id in run_ids:
                 try:
                     await self._deps.gh.rerun_failed_workflow_jobs(repo=repo, run_id=run_id)
-                except GitHubClientError:
+                except (GitHubClientError, BitBucketClientError):
+                    # A BitBucket forge raises ``BitBucketClientError`` here (e.g.
+                    # ``BITBUCKET_PIPELINE_NOT_RERUNNABLE`` for a custom/manual
+                    # pipeline target it cannot reconstruct). Catch it alongside
+                    # the GitHub error so it is recorded as a failed transient
+                    # rerun below instead of escaping ``_execute`` to the runner's
+                    # non-transient handler, which would ``_terminate_failed`` the
+                    # workspace permanently rather than logging the limitation and
+                    # continuing to poll.
                     failed_run_id = run_id
                     raise
                 accepted_run_ids.append(run_id)
-        except GitHubClientError as exc:
+        except (GitHubClientError, BitBucketClientError) as exc:
             error_message = _redact_and_truncate_github_error(str(exc))
             if accepted_run_ids:
                 partial_event_payload = {

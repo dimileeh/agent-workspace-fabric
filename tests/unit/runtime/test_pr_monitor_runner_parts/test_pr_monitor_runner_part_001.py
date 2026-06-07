@@ -19,6 +19,10 @@ import pytest_mock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.bitbucket_client import (
+    BITBUCKET_PIPELINE_NOT_RERUNNABLE,
+    BitBucketClientError,
+)
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.control.protected_file_diffs import git_show_text
@@ -61,6 +65,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
 )
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -886,6 +891,103 @@ async def test_rerun_transient_ci_action_records_failed_rerun_request(
         assert events[0].payload is not None
         assert events[0].payload["run_ids"] == ["25655330295"]
         assert "workflow scope required" in events[0].payload["error"]
+        operations = list((await session.execute(select(Operation))).scalars())
+        rerun_operations = [
+            op for op in operations if (op.payload or {}).get("action") == "ci_transient_rerun"
+        ]
+        assert len(rerun_operations) == 1
+        assert rerun_operations[0].status == OperationStatus.failed.value
+        assert rerun_operations[0].error_code == "CI_TRANSIENT_RERUN_FAILED"
+
+
+@pytest.mark.unit
+async def test_rerun_transient_ci_records_failed_request_on_bitbucket_not_rerunnable(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A BitBucket non-rerunnable pipeline logs a failed rerun, not a terminate.
+
+    Regression for issue:4640573294: on BitBucket ``rerun_failed_workflow_jobs``
+    raises ``BitBucketClientError(BITBUCKET_PIPELINE_NOT_RERUNNABLE)`` when it
+    cannot reconstruct a custom/manual pipeline target. The transient-rerun call
+    site previously caught only ``GitHubClientError``, so the BitBucket error
+    escaped ``_execute`` and the runner's non-transient handler permanently
+    terminated the workspace. It must instead be recorded as a failed transient
+    rerun and the workspace must keep monitoring.
+    """
+
+    class NotRerunnableBitBucketGh(DefaultMergeMethodGitHubClient):
+        async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:
+            del repo, run_id
+            raise BitBucketClientError(
+                operation="bitbucket rerun_failed_workflow_jobs",
+                status=None,
+                body="BitBucket PR pipeline target could not be reconstructed.",
+                reason_code=BITBUCKET_PIPELINE_NOT_RERUNNABLE,
+            )
+
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=NotRerunnableBitBucketGh(cmd),
+    )
+    failure = CheckFailure(
+        name="pipeline",
+        conclusion="FAILURE",
+        log_excerpt="HTTP status server error (502 Bad Gateway)",
+        run_id="bb-pipeline-uuid",
+    )
+    status = _status(
+        check_state=CheckState.FAILURE,
+        ci_failures=(failure,),
+        head_sha="abc1234567890def",
+    )
+    state_key = _ci_transient_rerun_state_key(status.head_sha, status.ci_failures)
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=RerunTransientCI(failures=(failure,)),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    # The non-rerunnable pipeline is recorded as a failed rerun and the monitor
+    # keeps polling (terminal is False) rather than terminating the workspace.
+    assert terminal is False
+    assert adapter.calls == []
+    assert state.iter_count == 1
+    assert state.threads_addressed_ids[state_key] == "1"
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        # The workspace must remain in monitoring_pr, not be terminated.
+        assert workspace.status == WorkspaceStatus.monitoring_pr.value
+        events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.monitor_ci_transient_rerun_failed"
+        ]
+        assert len(events) == 1
+        assert events[0].reason_code == "CI_TRANSIENT_RERUN_FAILED"
+        assert events[0].payload is not None
+        assert events[0].payload["run_ids"] == ["bb-pipeline-uuid"]
+        assert "could not be reconstructed" in events[0].payload["error"]
         operations = list((await session.execute(select(Operation))).scalars())
         rerun_operations = [
             op for op in operations if (op.payload or {}).get("action") == "ci_transient_rerun"
