@@ -8172,6 +8172,7 @@
           "directive": {
             "maxLength": 1024,
             "minLength": 1,
+            "pattern": "\\S",
             "title": "Directive",
             "type": "string"
           },

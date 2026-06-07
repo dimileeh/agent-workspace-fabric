@@ -147,7 +147,12 @@ class WorkspaceGuideRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    directive: Annotated[str, Field(min_length=1, max_length=1024)]
+    # ``pattern`` requires at least one non-whitespace character so the OpenAPI
+    # schema mirrors the runtime contract: ``str_strip_whitespace`` + ``min_length``
+    # already reject whitespace-only directives, but without the pattern generated
+    # clients/docs would advertise ``"   "`` as valid. ``\S`` (not a lookahead) is
+    # used because pydantic-core's regex engine does not support lookarounds.
+    directive: Annotated[str, Field(min_length=1, max_length=1024, pattern=r"\S")]
     reason: Annotated[str | None, Field(default=None, max_length=1024)]
 
 

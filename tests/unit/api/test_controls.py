@@ -201,3 +201,13 @@ def test_guide_request_requires_non_empty_directive() -> None:
     request = WorkspaceGuideRequest(directive="implement, do not defer")
     assert request.directive == "implement, do not defer"
     assert request.reason is None
+
+
+@pytest.mark.unit
+def test_guide_request_directive_schema_rejects_whitespace_only() -> None:
+    # The OpenAPI/JSON schema must mirror the runtime contract: a non-whitespace
+    # pattern so generated clients/docs do not advertise whitespace-only directives
+    # as valid (str_strip_whitespace only enforces this at validation time).
+    directive_schema = WorkspaceGuideRequest.model_json_schema()["properties"]["directive"]
+    assert directive_schema["minLength"] == 1
+    assert directive_schema["pattern"] == r"\S"
