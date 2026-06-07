@@ -1139,3 +1139,35 @@ def test_forge_scm_provider_maps_known_forges_and_rejects_unknown() -> None:
     unknown_self = SimpleNamespace(_deps=SimpleNamespace(gh=object()))
     with pytest.raises(NotImplementedError, match="unknown forge client type: object"):
         feedback_state._forge_scm_provider(unknown_self)
+
+
+@pytest.mark.unit
+def test_forge_pr_url_maps_known_forges_and_rejects_unknown() -> None:
+    """``_forge_pr_url`` builds the forge-correct URL and fails loudly otherwise.
+
+    Regression for the #454 review note: an unknown forge client must NOT silently
+    fall back to a github.com URL (which would persist a nonexistent link in
+    provenance rows). It raises ``NotImplementedError``, mirroring
+    ``_forge_scm_provider`` so a newly wired forge is forced to declare its URL shape.
+    """
+    from types import SimpleNamespace
+
+    from awf.runtime.pr_monitor_runner import feedback_state
+
+    cmd = FakeCommandRunner()
+    repo = RepoRef(owner="acme", name="widget")
+    github_self = SimpleNamespace(_deps=SimpleNamespace(gh=GitHubClient(cmd)))
+    bitbucket_self = SimpleNamespace(_deps=SimpleNamespace(gh=_bitbucket_forge_client()))
+
+    assert (
+        feedback_state._forge_pr_url(github_self, repo, 7)
+        == "https://github.com/acme/widget/pull/7"
+    )
+    assert (
+        feedback_state._forge_pr_url(bitbucket_self, repo, 7)
+        == "https://bitbucket.org/acme/widget/pull-requests/7"
+    )
+
+    unknown_self = SimpleNamespace(_deps=SimpleNamespace(gh=object()))
+    with pytest.raises(NotImplementedError, match="unknown forge client type: object"):
+        feedback_state._forge_pr_url(unknown_self, repo, 7)

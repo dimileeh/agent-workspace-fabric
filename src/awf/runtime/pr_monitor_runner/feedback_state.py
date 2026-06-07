@@ -63,10 +63,15 @@ def _forge_pr_url(self: Any, repo: RepoRef, pr_number: int) -> str:
 
     A hardcoded github.com URL would poison BitBucket provenance/replay state with a
     nonexistent github.com link; derive the host/path shape from the resolved forge.
+    Mirrors ``_forge_scm_provider``: fail loudly on an unknown client so a newly wired
+    forge is forced to declare its URL shape here, rather than silently persisting a
+    nonexistent github.com link in provenance rows.
     """
     if isinstance(self._deps.gh, BitBucketClient):
         return f"https://bitbucket.org/{repo.slug()}/pull-requests/{pr_number}"
-    return f"https://github.com/{repo.slug()}/pull/{pr_number}"
+    if isinstance(self._deps.gh, GitHubClient):
+        return f"https://github.com/{repo.slug()}/pull/{pr_number}"
+    raise NotImplementedError(f"unknown forge client type: {type(self._deps.gh).__name__}")
 
 
 async def _record_pr_feedback_resolution(
