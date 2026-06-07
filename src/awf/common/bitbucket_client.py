@@ -30,7 +30,6 @@ repo/PR/comment from the neutral ``thread_id`` string those statuses encode.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 from collections import OrderedDict
@@ -41,7 +40,24 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from awf.common.audit import redact_audit_text
+from awf.common.bitbucket_client_errors import (
+    BITBUCKET_API_ERROR,
+    BITBUCKET_AUTH_FAILED,
+    BITBUCKET_AUTH_NOT_CONFIGURED,
+    BITBUCKET_ISSUE_CAPTURE_FAILED,
+    BITBUCKET_ISSUE_TRACKER_DISABLED,
+    BITBUCKET_MERGE_IN_PROGRESS,
+    BITBUCKET_MERGE_METHOD_UNSUPPORTED,
+    BITBUCKET_MERGE_TASK_TIMEOUT,
+    BITBUCKET_PIPELINE_FULL_RERUN,
+    BITBUCKET_PIPELINE_NOT_RERUNNABLE,
+    BITBUCKET_RATE_LIMITED,
+    BITBUCKET_TASK_RESOLVE_FORBIDDEN,
+    BITBUCKET_TRANSPORT_ERROR,
+    BitBucketAuth,
+    BitBucketClientError,
+    _is_bitbucket_merge_in_progress_body,
+)
 from awf.common.bitbucket_client_parsing import (
     _as_dict,
     _clean_optional_str,
@@ -51,11 +67,14 @@ from awf.common.bitbucket_client_parsing import (
     build_blocking_reviews,
     build_general_review_comments,
     build_review_threads,
+    build_unresolved_task_threads,
+    decode_task_id,
     decode_thread_id,
     extract_diffstat_paths,
     freeze_params,
     html_href,
     is_pipeline_owned_status,
+    is_task_thread_id,
     latest_external_review_activity,
     map_bb_merge_methods,
     merge_state_status_for,
@@ -76,6 +95,29 @@ from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_
 from awf.runtime.pr_monitor import CheckFailure, PRStatus
 
 _log = get_logger(__name__)
+
+# Public surface. ``BitBucketClientError``, ``BitBucketAuth``, and the reason codes
+# now live in ``bitbucket_client_errors`` (file-size guardrail); re-export them here so
+# ``from awf.common.bitbucket_client import …`` keeps working and mypy treats them as
+# explicit exports.
+__all__ = [
+    "BITBUCKET_API_ERROR",
+    "BITBUCKET_AUTH_FAILED",
+    "BITBUCKET_AUTH_NOT_CONFIGURED",
+    "BITBUCKET_ISSUE_CAPTURE_FAILED",
+    "BITBUCKET_ISSUE_TRACKER_DISABLED",
+    "BITBUCKET_MERGE_IN_PROGRESS",
+    "BITBUCKET_MERGE_METHOD_UNSUPPORTED",
+    "BITBUCKET_MERGE_TASK_TIMEOUT",
+    "BITBUCKET_PIPELINE_FULL_RERUN",
+    "BITBUCKET_PIPELINE_NOT_RERUNNABLE",
+    "BITBUCKET_RATE_LIMITED",
+    "BITBUCKET_TASK_RESOLVE_FORBIDDEN",
+    "BITBUCKET_TRANSPORT_ERROR",
+    "BitBucketAuth",
+    "BitBucketClient",
+    "BitBucketClientError",
+]
 
 _DEFAULT_BASE_URL = "https://api.bitbucket.org"
 _DEFAULT_TIMEOUT = 30.0
@@ -99,164 +141,6 @@ _DEFAULT_MAX_REDIRECTS = 5
 # that poll loop so a stuck task cannot hang the monitor.
 _DEFAULT_MAX_MERGE_POLLS = 30
 _DEFAULT_MERGE_POLL_DELAY_SECONDS = 2.0
-
-# Reason codes (flow end-to-end: exception → log field → event → policy).
-BITBUCKET_AUTH_NOT_CONFIGURED = "BITBUCKET_AUTH_NOT_CONFIGURED"
-BITBUCKET_AUTH_FAILED = "BITBUCKET_AUTH_FAILED"
-BITBUCKET_API_ERROR = "BITBUCKET_API_ERROR"
-# Transport-level failure (connection reset/refused, timeout, DNS) with no HTTP
-# status. Distinct from ``BITBUCKET_API_ERROR`` so the PR monitor can tell a
-# recoverable network blip apart from a deterministic abort (pagination cap,
-# SSRF origin guard) — those also carry ``status=None`` but must fail fast.
-BITBUCKET_TRANSPORT_ERROR = "BITBUCKET_TRANSPORT_ERROR"
-BITBUCKET_RATE_LIMITED = "BITBUCKET_RATE_LIMITED"
-BITBUCKET_PIPELINE_FULL_RERUN = "BITBUCKET_PIPELINE_FULL_RERUN"
-BITBUCKET_PIPELINE_NOT_RERUNNABLE = "BITBUCKET_PIPELINE_NOT_RERUNNABLE"
-BITBUCKET_ISSUE_TRACKER_DISABLED = "BITBUCKET_ISSUE_TRACKER_DISABLED"
-# Distinct from ``BITBUCKET_ISSUE_TRACKER_DISABLED`` (which the catalog documents as
-# "note captured on the PR — no action required"). This code means deferred capture
-# failed *entirely*: the issue tracker is disabled AND there was no remembered PR
-# context to fall back to, so neither an issue nor a PR comment was recorded. Using
-# the tracker-disabled code here would mislead operators into thinking the note was
-# captured when nothing durable was written.
-BITBUCKET_ISSUE_CAPTURE_FAILED = "BITBUCKET_ISSUE_CAPTURE_FAILED"
-BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
-# BitBucket answers 409 Conflict on the merge POST when a merge for this PR is
-# already in flight (typically a prior 202 async merge whose task-status poll was
-# interrupted by a transient fault and re-issued by the monitor) or when the PR has
-# already been merged. Both are recoverable — re-polling ``fetch_pr_status`` observes
-# the original merge's eventual MERGED state — so they are classified transient
-# rather than mapped to ``BITBUCKET_API_ERROR``. BitBucket also overloads 409 for
-# non-recoverable merge failures (merge conflicts, unmet merge checks); those carry
-# no in-progress/already-merged signal and must stay deterministic so they surface
-# ``BITBUCKET_API_ERROR`` instead of polling forever — see
-# ``_is_bitbucket_merge_in_progress_body``.
-BITBUCKET_MERGE_IN_PROGRESS = "BITBUCKET_MERGE_IN_PROGRESS"
-# The bounded async-merge poll budget was exhausted while the merge task was still
-# PENDING. This does *not* mean the merge failed — BitBucket may still complete it
-# server-side — so it is recoverable in exactly the same way as
-# ``BITBUCKET_MERGE_IN_PROGRESS``: the monitor must wait and re-poll
-# ``fetch_pr_status`` (observing the eventual MERGED state) rather than mark the
-# operation failed and post a spurious "merge rejected" notification. Distinct from
-# ``BITBUCKET_API_ERROR`` (which also carries ``status=None`` but is deterministic)
-# so ``_is_transient_bitbucket_client_error`` and ``_attempt_merge_method`` can
-# treat the timeout as an in-flight merge instead of a hard failure.
-BITBUCKET_MERGE_TASK_TIMEOUT = "BITBUCKET_MERGE_TASK_TIMEOUT"
-# Lowercase substrings that mark a 409 merge-POST body as the recoverable
-# already-merged case rather than a non-recoverable conflict or merge-check
-# rejection. Each is merge-specific. Matched case-insensitively against the
-# (redacted) response body.
-_BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS = (
-    "being merged",
-    "already merged",
-    "already been merged",
-)
-
-
-def _is_bitbucket_merge_in_progress_body(body: str) -> bool:
-    """Return whether a 409 merge-POST body indicates a recoverable in-flight merge.
-
-    BitBucket reuses 409 for an in-progress async merge, an already-merged PR, and
-    non-recoverable failures (conflicts, unmet merge checks). Only the first two are
-    transient; the last must stay deterministic so the monitor notifies a human
-    instead of polling indefinitely.
-
-    A bare ``"in progress"`` substring is too broad: BitBucket overloads 409 on the
-    merge POST for other concurrent-modification conflicts whose bodies read e.g.
-    "another action is in progress" or "operation already in progress", and matching
-    those would treat a deterministic conflict as transient and poll forever. Require
-    the phrase to be about the *merge* itself ("a merge is already in progress") so a
-    genuine in-flight async merge is recovered while unrelated concurrency conflicts
-    stay deterministic.
-    """
-    lowered = body.lower()
-    if any(signal in lowered for signal in _BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS):
-        return True
-    return "in progress" in lowered and "merge" in lowered
-
-
-class BitBucketClientError(Exception):
-    """Raised when BitBucket Cloud returns an error or an unusable payload.
-
-    Mirrors ``GitHubClientError``: it carries a redacted body, the failing
-    operation, the HTTP status (``None`` for transport errors), and a stable
-    ``reason_code`` so the failure flows end-to-end. Catch this specifically,
-    never bare ``Exception``.
-    """
-
-    def __init__(
-        self,
-        *,
-        operation: str,
-        status: int | None,
-        body: str,
-        reason_code: str = BITBUCKET_API_ERROR,
-    ) -> None:
-        """Store redacted failure context for monitor diagnostics."""
-        self.operation = operation
-        self.status = status
-        self.reason_code = reason_code
-        self.body = redact_audit_text(body)
-        status_label = "n/a" if status is None else str(status)
-        super().__init__(
-            f"{operation} failed (status={status_label}): {self.body.strip() or '<no output>'}"
-        )
-
-
-@dataclass(frozen=True)
-class BitBucketAuth:
-    """Explicit BitBucket Cloud credential mode (issue #345 decision D6)."""
-
-    mode: str
-    api_token: str
-    email: str | None = None
-
-    def header_value(self) -> str:
-        """Return the ``Authorization`` header value for this credential mode."""
-        if self.mode == "basic":
-            raw = f"{self.email}:{self.api_token}".encode()
-            return "Basic " + base64.b64encode(raw).decode("ascii")
-        return f"Bearer {self.api_token}"
-
-    def secret_values(self) -> tuple[str, ...]:
-        """Return secret strings that must be redacted from any logged text."""
-        secrets = [self.api_token]
-        if self.mode == "basic" and self.email:
-            encoded = base64.b64encode(f"{self.email}:{self.api_token}".encode()).decode("ascii")
-            secrets.append(encoded)
-        return tuple(secret for secret in secrets if secret)
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str]) -> BitBucketAuth:
-        """Build auth from the env contract, failing with a reason code if invalid."""
-        mode = (env.get("BITBUCKET_AUTH_MODE") or "basic").strip().lower()
-        token = (env.get("BITBUCKET_API_TOKEN") or "").strip()
-        email = (env.get("BITBUCKET_EMAIL") or "").strip() or None
-        if mode not in {"basic", "bearer"}:
-            raise BitBucketClientError(
-                operation="bitbucket auth",
-                status=None,
-                body=(
-                    f"BITBUCKET_AUTH_MODE must be 'basic' or 'bearer', got {mode!r}. "
-                    "App passwords are not supported."
-                ),
-                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
-            )
-        if not token:
-            raise BitBucketClientError(
-                operation="bitbucket auth",
-                status=None,
-                body="BITBUCKET_API_TOKEN is required.",
-                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
-            )
-        if mode == "basic" and email is None:
-            raise BitBucketClientError(
-                operation="bitbucket auth",
-                status=None,
-                body="BITBUCKET_EMAIL is required for basic auth mode.",
-                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
-            )
-        return cls(mode=mode, api_token=token, email=email)
 
 
 @dataclass(frozen=True)
@@ -434,10 +318,18 @@ class BitBucketClient:
             f"{self._pr_path(repo, pr_number)}/diffstat",
             operation="bitbucket fetch_pr_status diffstat",
         )
+        # Reviewer tasks are exposed separately from comments; a PR with open tasks
+        # but no comments would otherwise assemble empty feedback and reach Merge
+        # (issue #445). Cache like comments (it is conditional-request friendly).
+        tasks = await self._paginate(
+            f"{self._pr_path(repo, pr_number)}/tasks",
+            operation="bitbucket fetch_pr_status tasks",
+            cache=True,
+        )
         account_id = await self._current_account_id()
         merged, closed, merge_commit_sha = parse_pr_terminal_state(pr)
         latest_review_at, latest_review_source = latest_external_review_activity(
-            comments, account_id=account_id
+            comments, account_id=account_id, tasks=tasks
         )
         quiet_anchor_at, quiet_anchor_source = _quiet_period_anchor(
             latest_external_review_activity_at=latest_review_at,
@@ -451,8 +343,15 @@ class BitBucketClient:
             head_sha=head_sha,
             mergeable=mergeable_state_for(merged=merged, closed=closed),
             check_state=parse_check_state(statuses),
+            # Reviewer tasks join the inline-thread feed (not the comment feed): that
+            # gate routes every item to AddressComments regardless of author and
+            # resolves through ``resolve_thread`` — which dispatches the ``bbtask:``
+            # id to the task PUT. This makes open tasks block merge until addressed.
             unresolved_inline_threads=build_review_threads(
                 comments, repo=repo, pr_number=pr_number, account_id=account_id
+            )
+            + build_unresolved_task_threads(
+                tasks, repo=repo, pr_number=pr_number, account_id=account_id
             ),
             unresolved_review_comments=build_general_review_comments(
                 comments, account_id=account_id
@@ -612,7 +511,19 @@ class BitBucketClient:
         )
 
     async def resolve_thread(self, *, thread_id: str) -> None:
-        """Resolve a review thread (POST resolves; DELETE would REOPEN — never used)."""
+        """Resolve a review thread or reviewer task from its neutral id.
+
+        Forge-neutral dispatch: a ``bbtask:`` id is a reviewer *task*, resolved with
+        ``PUT .../tasks/{id}`` ``{"state": "RESOLVED"}``; a ``bb:`` id is an inline
+        comment thread, resolved with ``POST .../comments/{id}/resolve`` (DELETE would
+        REOPEN — never used). The PUT only commits the resolution *after* the agent has
+        addressed the task content (the fix-cycle calls this only for a resolvable
+        verdict), and a failed PUT raises so the addressed-state is rolled back and the
+        task re-surfaces as still-blocking next poll.
+        """
+        if is_task_thread_id(thread_id):
+            await self._resolve_task(thread_id)
+            return
         try:
             owner, name, pr_number, comment_id = decode_thread_id(thread_id)
         except ValueError as exc:
@@ -626,6 +537,42 @@ class BitBucketClient:
             f"/pullrequests/{pr_number}/comments/{comment_id}/resolve"
         )
         await self._request_json("POST", path, operation="bitbucket resolve_thread")
+
+    async def _resolve_task(self, thread_id: str) -> None:
+        """Mark a reviewer task RESOLVED via ``PUT .../tasks/{id}``.
+
+        A 403 (the token lacks task-resolution permission) is re-raised with the stable
+        ``BITBUCKET_TASK_RESOLVE_FORBIDDEN`` reason code — distinct from the generic API
+        error so the escalation is diagnosable — because the agent re-addressing the task
+        cannot grant a missing scope. Any other failure propagates with its native reason
+        code. Either way the PUT raised, so the task stays UNRESOLVED and keeps blocking
+        merge. The fix-cycle requeues only transient blips; every *permanent* task-resolve
+        failure (403 or otherwise) is downgraded to ``needs_human`` and kept addressed so
+        it does NOT re-route to the agent (tasks live in the inline-thread feed, so
+        clearing the addressed marker would re-fire ``AddressComments`` against a fault
+        the agent cannot fix — a retry storm), while ``decide()`` escalates to NotifyHuman.
+        """
+        owner, name, pr_number, task_id = decode_task_id(thread_id)
+        path = (
+            f"/2.0/repositories/{quote(owner, safe='')}/{quote(name, safe='')}"
+            f"/pullrequests/{pr_number}/tasks/{quote(task_id, safe='')}"
+        )
+        try:
+            await self._request_json(
+                "PUT",
+                path,
+                operation="bitbucket resolve_task",
+                json_body={"state": "RESOLVED"},
+            )
+        except BitBucketClientError as exc:
+            if exc.status == 403:
+                raise BitBucketClientError(
+                    operation="bitbucket resolve_task",
+                    status=exc.status,
+                    body=exc.body,
+                    reason_code=BITBUCKET_TASK_RESOLVE_FORBIDDEN,
+                ) from exc
+            raise
 
     async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
         """Post a top-level PR comment."""

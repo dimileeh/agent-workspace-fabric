@@ -47,6 +47,7 @@ def _seed_fetch_status(fake: FakeBitBucket, *, account_body: object = None) -> N
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue(
         "GET", "/2.0/user", json=account_body if account_body is not None else {"account_id": "v"}
     )
@@ -74,6 +75,7 @@ async def test_fetch_pr_status_changed_paths_via_redirected_diffstat() -> None:
         f"{_REPO}/diffstat/{_HEAD}..d",
         values=[{"new": {"path": "src/changed.py"}}],
     )
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={"account_id": "v"})
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -97,10 +99,11 @@ async def test_account_id_is_cached_across_status_fetches() -> None:
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    assert len(fake.calls("GET")) == 9  # only one /2.0/user across both fetches
+    assert len(fake.calls("GET")) == 11  # only one /2.0/user across both fetches
     assert sum(1 for r in fake.requests if r.url.path == "/2.0/user") == 1
 
 
@@ -126,6 +129,7 @@ async def test_fetch_pr_status_populates_review_activity_anchor() -> None:
         ],
     )
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -133,6 +137,40 @@ async def test_fetch_pr_status_populates_review_activity_anchor() -> None:
     assert status.latest_external_review_activity_source == "issue_comment"
     assert status.quiet_period_anchor_at == datetime(2024, 5, 2, tzinfo=UTC)
     assert status.quiet_period_anchor_source == "issue_comment"
+
+
+async def test_fetch_pr_status_anchors_on_resolved_reviewer_task() -> None:
+    # A task-only PR whose task the agent already resolved: no pending comments/threads,
+    # but the resolved reviewer task must still populate the review-activity anchor so the
+    # non-check-reviewer settle window is honored instead of merging immediately.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page(
+        "GET",
+        f"{_PR}/tasks",
+        values=[
+            {
+                "id": 7,
+                "state": "RESOLVED",
+                "content": {"raw": "please fix"},
+                "creator": {"account_id": "rev"},
+                "created_on": "2024-05-01T00:00:00Z",
+                "updated_on": "2024-05-03T00:00:00Z",
+            }
+        ],
+    )
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    # Resolved task does not block merge but does anchor the quiet window.
+    assert status.unresolved_inline_threads == ()
+    assert status.latest_external_review_activity_at == datetime(2024, 5, 3, tzinfo=UTC)
+    assert status.latest_external_review_activity_source == "review_task"
+    assert status.quiet_period_anchor_at == datetime(2024, 5, 3, tzinfo=UTC)
+    assert status.quiet_period_anchor_source == "review_task"
 
 
 async def test_fetch_pr_status_without_activity_leaves_anchor_unset() -> None:
@@ -156,6 +194,7 @@ async def test_account_id_fetch_error_propagates() -> None:
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})
     client = make_client(fake)
     with pytest.raises(BitBucketClientError) as excinfo:
@@ -185,6 +224,7 @@ async def test_account_id_failure_is_not_cached_then_succeeds() -> None:
         ],
     )
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})  # first poll fails
     fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})  # second poll succeeds
     client = make_client(fake)
@@ -227,6 +267,7 @@ async def test_account_id_malformed_body_is_not_cached_then_succeeds() -> None:
         ],
     )
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={})  # first poll: 200 but no account_id/uuid
     fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})  # second poll succeeds
     client = make_client(fake)
@@ -632,6 +673,44 @@ def test_latest_external_review_activity_inline_source_and_empty() -> None:
     assert source == "review_thread_comment"
 
 
+def test_latest_external_review_activity_includes_resolved_task() -> None:
+    # A PR whose only feedback is a reviewer task: once the agent resolves it the task
+    # no longer blocks merge, but its review activity must still anchor the quiet window
+    # (resolved tasks included) so the settle gate does not decay to PR-creation and let
+    # the PR merge immediately after task resolution.
+    tasks = [
+        {
+            "id": 1,
+            "state": "RESOLVED",
+            "creator": {"account_id": "rev"},
+            "created_on": "2024-03-01T00:00:00Z",
+            "updated_on": "2024-03-05T00:00:00Z",  # newest → wins over the comment
+        }
+    ]
+    comments = [
+        {"id": 9, "user": {"account_id": "rev"}, "updated_on": "2024-03-02T00:00:00Z"},
+    ]
+    at, source = latest_external_review_activity(comments, account_id="me", tasks=tasks)
+    assert at == datetime(2024, 3, 5, tzinfo=UTC)
+    assert source == "review_task"
+
+
+def test_latest_external_review_activity_ignores_viewer_and_untimed_tasks() -> None:
+    tasks = [
+        # viewer-authored → ignored even though newest.
+        {"id": 1, "creator": {"account_id": "me"}, "updated_on": "2024-09-01T00:00:00Z"},
+        # viewer-authored via uuid-only creator (mirrors comment identity) → ignored.
+        {"id": 2, "creator": {"uuid": "me"}, "updated_on": "2024-09-02T00:00:00Z"},
+        {"creator": {"account_id": "rev"}, "updated_on": "2024-08-01T00:00:00Z"},  # no id
+        {"id": 3, "creator": {"account_id": "rev"}},  # no parseable timestamp → skipped
+        # external task falls back to created_on when updated_on is absent.
+        {"id": 4, "creator": {"account_id": "rev"}, "created_on": "2024-01-01T00:00:00Z"},
+    ]
+    at, source = latest_external_review_activity([], account_id="me", tasks=tasks)
+    assert at == datetime(2024, 1, 1, tzinfo=UTC)
+    assert source == "review_task"
+
+
 def test_build_blocking_reviews_flags_changes_requested_participant() -> None:
     pr = {
         "participants": [
@@ -704,6 +783,7 @@ async def test_paginate_skips_non_dict_value_and_handles_empty_body() -> None:
     )
     fake.page("GET", f"{_PR}/comments", values=[])
     fake.enqueue("GET", f"{_PR}/diffstat")  # empty body → page is None → no pagination
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={"account_id": "v"})
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)

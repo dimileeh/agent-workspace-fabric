@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.bitbucket_client import BITBUCKET_RATE_LIMITED, BitBucketClientError
+from awf.common.bitbucket_client import (
+    BITBUCKET_AUTH_FAILED,
+    BITBUCKET_RATE_LIMITED,
+    BITBUCKET_TASK_RESOLVE_FORBIDDEN,
+    BitBucketClientError,
+)
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import OperationStatus, WorkspaceStatus
@@ -753,9 +758,10 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     tmp_path: Path,
 ) -> None:
     # A permanent BitBucket fault (403, token lacks the scope) during resolve_thread
-    # must record COMMENT_RESOLUTION_FAILED and clear the addressed marker WITHOUT
-    # escaping the fix cycle — mirroring the GitHub arm's "do NOT drop out of the
-    # monitor" behaviour rather than terminating the workspace.
+    # must forward the forge-native reason code (BITBUCKET_AUTH_FAILED here) and clear
+    # the addressed marker WITHOUT escaping the fix cycle — mirroring the GitHub arm's
+    # "do NOT drop out of the monitor" behaviour rather than terminating the workspace,
+    # and keeping the fault diagnosable instead of collapsing it to a generic placeholder.
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
@@ -776,6 +782,7 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
                 operation="bitbucket resolve_thread",
                 status=403,
                 body="forbidden: missing scope",
+                reason_code=BITBUCKET_AUTH_FAILED,
             ),
         ),
     )
@@ -826,7 +833,7 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     assert resolution_events[0].payload is not None
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "failed"
-    assert resolution_events[0].payload["reason_code"] == "COMMENT_RESOLUTION_FAILED"
+    assert resolution_events[0].payload["reason_code"] == BITBUCKET_AUTH_FAILED
     assert resolution_events[0].payload["evidence"] == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,
@@ -1219,3 +1226,95 @@ async def test_fix_cycle_clears_addressed_thread_state_on_policy_blocked_thread(
     assert "Supply-chain policy blocked" in result.stderr
     assert "T_fixed" not in state.threads_addressed_ids
     assert _review_thread_body_state_key("T_fixed") not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A BitBucket reviewer task whose resolution PUT is forbidden (403) must
+    downgrade to ``needs_human`` rather than clear the addressed marker (#445).
+
+    Clearing it like a comment thread would re-route the task to AddressComments
+    next poll and re-run the agent forever against a fault it cannot fix (a retry
+    storm). Instead the verdict becomes ``needs_human``: the task stays addressed so
+    it does NOT re-route to the agent, the still-open task keeps blocking merge, and
+    decide() escalates to NotifyHuman. The task-resolution reason code is preserved.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="newsha\n")
+    task_thread_id = "bbtask:dimileeh/aira-web#42:7"
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketResolveThreadClient(
+            cmd,
+            BitBucketClientError(
+                operation="bitbucket resolve_task",
+                status=403,
+                body="no task-resolution scope",
+                reason_code=BITBUCKET_TASK_RESOLVE_FORBIDDEN,
+            ),
+        ),
+    )
+    task_thread = ReviewThread(
+        thread_id=task_thread_id,
+        path=None,
+        line=None,
+        body_excerpt="please add a regression test",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(task_thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The task is downgraded to needs_human (kept addressed → no re-address storm),
+    # NOT cleared.
+    assert state.threads_addressed_ids.get(task_thread_id) == "needs_human"
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # Not terminated: the forbidden task-resolve is handled in-loop as a blocker.
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        retry_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.bitbucket_transient_error_retrying"
+        ]
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    # A deterministic 403 fault must not record transient retry events.
+    assert retry_events == []
+    assert len(resolution_events) == 1
+    payload = resolution_events[0].payload
+    assert payload is not None
+    assert payload["action"] == "resolve_thread"
+    assert payload["outcome"] == "needs_human"
+    assert resolution_events[0].reason_code == BITBUCKET_TASK_RESOLVE_FORBIDDEN
+    assert payload["evidence"]["needs_human_thread_count"] == 1
+    # Task body_excerpt should not leak into event payloads.
+    assert "please add a regression test" not in repr(resolution_events[0].payload)

@@ -18,8 +18,8 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
+from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import (
-    GitHubClientError,
     RepoRef,
 )
 from awf.db.enums import (
@@ -96,7 +96,7 @@ async def _post_workflow_scope_notification_best_effort(
             state=state,
             blocker_reason=blocker_reason,
         )
-    except (GitHubClientError, BitBucketClientError) as exc:
+    except ForgeClientError as exc:
         # A BitBucket workspace posts the human hint through ``BitBucketClient``,
         # whose ``post_comment`` raises ``BitBucketClientError`` (not
         # ``GitHubClientError``). Catch it alongside the GitHub error so a
@@ -554,7 +554,7 @@ async def _execute(
             for run_id in run_ids:
                 try:
                     await self._deps.gh.rerun_failed_workflow_jobs(repo=repo, run_id=run_id)
-                except (GitHubClientError, BitBucketClientError):
+                except ForgeClientError:
                     # A BitBucket forge raises ``BitBucketClientError`` here (e.g.
                     # ``BITBUCKET_PIPELINE_NOT_RERUNNABLE`` for a custom/manual
                     # pipeline target it cannot reconstruct). Catch it alongside
@@ -566,7 +566,7 @@ async def _execute(
                     failed_run_id = run_id
                     raise
                 accepted_run_ids.append(run_id)
-        except (GitHubClientError, BitBucketClientError) as exc:
+        except ForgeClientError as exc:
             error_message = _redact_and_truncate_forge_error(str(exc))
             if accepted_run_ids:
                 partial_event_payload = {
@@ -1350,46 +1350,23 @@ async def _execute(
                 state=state,
                 blocker_reason=action.message,
             )
-        except GitHubClientError as exc:
-            if await self._wait_after_transient_github_error(
-                exc,
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                context="post_human_notification",
-                monitor_log=monitor_log,
-            ):
-                await self._finish_monitor_operation(
-                    operation,
-                    status=OperationStatus.failed,
-                    result={
-                        "status": "failed",
-                        "outcome": "transient_github_error",
-                        "reason_code": "GITHUB_TRANSIENT_ERROR",
-                    },
-                    error_code="GITHUB_TRANSIENT_ERROR",
-                    error_message=str(exc),
-                )
-                return False
-            await self._finish_monitor_operation(
-                operation,
-                status=OperationStatus.failed,
-                result={
-                    "status": "failed",
-                    "outcome": "github_error",
-                    "reason_code": "GITHUB_ERROR",
-                },
-                error_code="GITHUB_ERROR",
-                error_message=str(exc),
+        except ForgeClientError as exc:
+            # Both forges post the human notification through ``self._deps.gh``;
+            # either raises a ``ForgeClientError`` subclass. Catching the shared base
+            # keeps a BitBucket fault from escaping ``_execute`` uncaught. A transient
+            # blip waits then keeps polling; a permanent fault finishes the operation
+            # as failed and re-raises. The operation outcome/error-code strings stay
+            # forge-specific (catalogued reason codes) via the selection below.
+            is_bitbucket = isinstance(exc, BitBucketClientError)
+            transient_outcome = (
+                "transient_bitbucket_error" if is_bitbucket else "transient_github_error"
             )
-            raise
-        except BitBucketClientError as exc:
-            # A BitBucket workspace posts the human notification through
-            # ``BitBucketClient``, whose ``post_comment`` raises
-            # ``BitBucketClientError`` (not ``GitHubClientError``). Mirror the
-            # GitHub arm: a transient blip waits then keeps polling; a permanent
-            # fault finishes the operation as failed and re-raises. Without this
-            # arm a comment failure would escape ``_execute`` uncaught.
-            if await self._wait_after_transient_bitbucket_error(
+            transient_code = (
+                "BITBUCKET_TRANSIENT_ERROR" if is_bitbucket else "GITHUB_TRANSIENT_ERROR"
+            )
+            failed_outcome = "bitbucket_error" if is_bitbucket else "github_error"
+            failed_code = "BITBUCKET_ERROR" if is_bitbucket else "GITHUB_ERROR"
+            if await self._wait_after_transient_forge_error(
                 exc,
                 workspace_id=workspace_id,
                 pr_number=pr_number,
@@ -1401,10 +1378,10 @@ async def _execute(
                     status=OperationStatus.failed,
                     result={
                         "status": "failed",
-                        "outcome": "transient_bitbucket_error",
-                        "reason_code": "BITBUCKET_TRANSIENT_ERROR",
+                        "outcome": transient_outcome,
+                        "reason_code": transient_code,
                     },
-                    error_code="BITBUCKET_TRANSIENT_ERROR",
+                    error_code=transient_code,
                     error_message=str(exc),
                 )
                 return False
@@ -1413,10 +1390,10 @@ async def _execute(
                 status=OperationStatus.failed,
                 result={
                     "status": "failed",
-                    "outcome": "bitbucket_error",
-                    "reason_code": "BITBUCKET_ERROR",
+                    "outcome": failed_outcome,
+                    "reason_code": failed_code,
                 },
-                error_code="BITBUCKET_ERROR",
+                error_code=failed_code,
                 error_message=str(exc),
             )
             raise

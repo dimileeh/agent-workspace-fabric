@@ -447,6 +447,10 @@ async def test_pre_merge_recheck_github_error_fails_workspace(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert "pre-merge recheck" in (ws.failure_message or "")
+        # The GitHub fault preserves ``GITHUB_API_ERROR`` end-to-end, matching the
+        # ``fetch_pr_status``/``_execute`` termination paths rather than decaying to
+        # the ``MONITOR_ABORT`` default.
+        assert ws.events[-1].reason_code == "GITHUB_API_ERROR"
 
 
 @pytest.mark.unit

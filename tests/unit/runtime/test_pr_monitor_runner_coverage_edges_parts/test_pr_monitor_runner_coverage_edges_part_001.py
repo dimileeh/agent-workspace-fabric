@@ -19,7 +19,7 @@ from awf.common.bitbucket_client import (
     BitBucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClientError, RepoRef
+from awf.common.github_client import GITHUB_API_ERROR, GitHubClientError, RepoRef
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -230,6 +230,11 @@ async def test_monitor_run_terminates_on_github_status_error(
         assert ws.status == WorkspaceStatus.failed.value
         assert "github error" in (ws.failure_message or "")
         assert "gh auth failed" in (ws.failure_message or "")
+        # The fetch_pr_status GitHub termination records the forge reason_code
+        # (GITHUB_API_ERROR), matching the _execute path so both GitHub
+        # termination paths write identical DB state rather than the
+        # MONITOR_ABORT default.
+        assert ws.events[-1].reason_code == GITHUB_API_ERROR
         assert _retry_events(ws) == []
 
 

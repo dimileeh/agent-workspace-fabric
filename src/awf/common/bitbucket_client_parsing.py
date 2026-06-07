@@ -89,6 +89,42 @@ def decode_thread_id(thread_id: str) -> tuple[str, str, int, str]:
     )
 
 
+# Neutral task-id encoding: ``bbtask:<owner>/<name>#<pr>:<task_id>``. Distinct prefix
+# from the ``bb:`` comment-thread encoding so the forge-neutral ``resolve_thread``
+# dispatch can tell a reviewer *task* (resolved via ``PUT .../tasks/{id}``) apart from
+# an inline comment thread (resolved via ``POST .../comments/{id}/resolve``). ``bb:``
+# never matches a ``bbtask:`` id (the colon after ``bb`` differs), so the two parsers
+# never collide.
+_TASK_ID_RE = re.compile(r"^bbtask:(?P<owner>[^/]+)/(?P<name>[^#]+)#(?P<pr>\d+):(?P<task>\d+)$")
+
+
+def encode_task_id(*, repo: RepoRef, pr_number: int, task_id: int | str) -> str:
+    """Encode repo/PR/task context into the neutral task-discriminated thread id."""
+    return f"bbtask:{repo.owner}/{repo.name}#{pr_number}:{task_id}"
+
+
+def decode_task_id(thread_id: str) -> tuple[str, str, int, str]:
+    """Decode a task thread id into ``(owner, name, pr_number, task_id)``.
+
+    Raises ``ValueError`` for an id that was not produced by :func:`encode_task_id`
+    so the resolve dispatch fails loudly rather than ``PUT``-ing to a guessed task.
+    """
+    match = _TASK_ID_RE.match(thread_id)
+    if match is None:
+        raise ValueError(f"Not a BitBucket task id: {thread_id!r}")
+    return (
+        match.group("owner"),
+        match.group("name"),
+        int(match.group("pr")),
+        match.group("task"),
+    )
+
+
+def is_task_thread_id(thread_id: str) -> bool:
+    """Return whether ``thread_id`` encodes a BitBucket reviewer task (not a comment)."""
+    return _TASK_ID_RE.match(thread_id) is not None
+
+
 def map_bb_merge_methods(strategies: Any) -> tuple[str, ...]:
     """Map BitBucket merge-strategy values to AWF method names, preserving order."""
     methods: list[str] = []
@@ -388,6 +424,99 @@ def build_review_threads(
     return tuple(threads)
 
 
+def _task_is_resolved(task: dict[str, Any]) -> bool:
+    """Return whether a BitBucket PR task is in a resolved state.
+
+    BitBucket task ``state`` is ``RESOLVED`` or ``UNRESOLVED``; anything that is not
+    explicitly ``UNRESOLVED`` is treated as not-blocking so a resolved (or
+    unrecognized terminal) task never wedges the merge gate.
+    """
+    return str(task.get("state") or "").upper() != "UNRESOLVED"
+
+
+def _task_creator(task: dict[str, Any]) -> dict[str, Any]:
+    """Return the task ``creator`` user object as a dict (empty when absent)."""
+    creator = task.get("creator")
+    return creator if isinstance(creator, dict) else {}
+
+
+def _task_creator_id(task: dict[str, Any]) -> str | None:
+    """Return the BitBucket identity of a task creator, if present.
+
+    Mirrors ``_comment_account_id``: BitBucket may return a creator carrying only
+    ``uuid`` (no ``account_id``), and the viewer identity itself falls back to
+    ``uuid``. Comparing ``account_id`` alone would fail to recognize a self-authored
+    task in that shape, leaking AWF's own task into reviewer feedback and driving the
+    monitor to address/re-anchor on its own task.
+    """
+    creator = _task_creator(task)
+    return _clean_optional_str(creator.get("account_id") or creator.get("uuid"))
+
+
+def build_unresolved_task_threads(
+    tasks: list[dict[str, Any]],
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    account_id: str | None,
+) -> tuple[ReviewThread, ...]:
+    """Map UNRESOLVED BitBucket reviewer tasks to neutral inline review threads.
+
+    BitBucket exposes reviewer *tasks* separately from comments (the ``/tasks``
+    endpoint). A PR with open tasks but no comments would otherwise assemble empty
+    feedback and reach ``Merge`` (issue #445). Mapping each unresolved task to a
+    ``ReviewThread`` routes it through the existing address-comments gate (so the
+    agent addresses the task content and the monitor blocks merge until it is
+    resolved) and through ``resolve_thread`` (so auto-resolve mirrors comment-thread
+    resolution). The neutral ``thread_id`` carries a ``bbtask:`` discriminator so the
+    resolve dispatch issues a task ``PUT`` instead of a comment ``POST``.
+
+    Resolved tasks and tasks the viewer (AWF) authored are dropped — mirroring the
+    comment/thread filtering — so settled or self-authored tasks never block merge.
+    Tasks carry no diff anchor, so the thread is path/line-less (tolerated downstream).
+    """
+    threads: list[ReviewThread] = []
+    for task in tasks:
+        if task.get("id") is None or _task_is_resolved(task):
+            continue
+        if account_id is not None and _task_creator_id(task) == account_id:
+            continue
+        raw = task.get("content")
+        body = raw.get("raw") if isinstance(raw, dict) else None
+        if not body or not body.strip():
+            continue
+        task_id = str(task["id"])
+        creator = _task_creator(task)
+        author = _clean_optional_str(creator.get("display_name") or creator.get("nickname"))
+        created_at = parse_bb_datetime(task.get("created_on"))
+        updated_at = parse_bb_datetime(task.get("updated_on"))
+        url = html_href(task)
+        threads.append(
+            ReviewThread(
+                thread_id=encode_task_id(repo=repo, pr_number=pr_number, task_id=task_id),
+                path=None,
+                line=None,
+                body_excerpt=body[:400],
+                author=author,
+                is_resolved=False,
+                comments=(
+                    ReviewThreadComment(
+                        comment_id=task_id,
+                        body=body,
+                        author=author,
+                        created_at=created_at,
+                        updated_at=updated_at,
+                        url=url,
+                        viewer_did_author=False,
+                    ),
+                ),
+                url=url,
+                is_outdated=False,
+            )
+        )
+    return tuple(threads)
+
+
 def build_general_review_comments(
     comments: list[dict[str, Any]],
     *,
@@ -437,14 +566,22 @@ def latest_external_review_activity(
     comments: list[dict[str, Any]],
     *,
     account_id: str | None,
+    tasks: list[dict[str, Any]] | None = None,
 ) -> tuple[datetime | None, str | None]:
-    """Return the newest external (non-viewer) comment activity timestamp + source.
+    """Return the newest external (non-viewer) review activity timestamp + source.
 
     Mirrors the GitHub status path's ``_latest_activity_from_thread_comments``: every
     non-deleted comment the viewer did not author counts as review activity — inline
     *and* top-level, resolved threads included — so the non-check-reviewer quiet window
     re-anchors on a late Bitbucket reviewer comment instead of decaying to the
     head-only fallback (which would let a fresh comment be merged past immediately).
+
+    Reviewer *tasks* (the ``/tasks`` feed) count too, **including resolved ones**: a PR
+    whose only feedback is a task would otherwise contribute nothing here, so once the
+    agent resolves that task the anchor would decay to PR creation and the settle window
+    would be skipped — letting the PR merge immediately after task resolution instead of
+    waiting out the quiet period after that review activity (issue #445 extension). Each
+    non-viewer task's newest timestamp is considered with the ``review_task`` source.
     """
     latest_at: datetime | None = None
     latest_source: str | None = None
@@ -461,6 +598,18 @@ def latest_external_review_activity(
         source = "review_thread_comment" if _comment_is_inline(comment) else "issue_comment"
         if latest_at is None or candidate > latest_at:
             latest_at, latest_source = candidate, source
+    for task in tasks or ():
+        if task.get("id") is None:
+            continue
+        if account_id is not None and _task_creator_id(task) == account_id:
+            continue
+        candidate = parse_bb_datetime(task.get("updated_on")) or parse_bb_datetime(
+            task.get("created_on")
+        )
+        if candidate is None:
+            continue
+        if latest_at is None or candidate > latest_at:
+            latest_at, latest_source = candidate, "review_task"
     return latest_at, latest_source
 
 
