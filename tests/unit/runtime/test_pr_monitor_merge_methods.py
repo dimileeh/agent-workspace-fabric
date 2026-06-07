@@ -9,10 +9,14 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_text
-from awf.common.bitbucket_client import BITBUCKET_RATE_LIMITED, BitBucketClientError
+from awf.common.bitbucket_client import (
+    BITBUCKET_MERGE_IN_PROGRESS,
+    BITBUCKET_RATE_LIMITED,
+    BitBucketClientError,
+)
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
-from awf.db.enums import OperationStatus
+from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
@@ -1126,3 +1130,50 @@ async def test_transient_bitbucket_merge_failure_waits_without_notify(
     assert gh.merge_calls == ["squash"]
     assert gh.comments == []
     assert sleep_fn.calls == [60]
+
+
+@pytest.mark.unit
+async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A 409 ``BITBUCKET_MERGE_IN_PROGRESS`` must not finalise a failed operation.
+
+    The reason code is transient: ``_wait_after_transient_bitbucket_error`` keeps
+    the monitor polling and a later ``fetch_pr_status`` observes the in-flight
+    merge's MERGED state, completing the workspace successfully. Recording a
+    permanent ``BITBUCKET_MERGE_FAILED`` operation here would leave an inconsistent
+    audit trail (operation "failed" while the workspace completes), so the failure
+    record is omitted for this reason code while still waiting and re-polling.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="merge_pr",
+                status=409,
+                body="merge already in progress",
+                reason_code=BITBUCKET_MERGE_IN_PROGRESS,
+            )
+        ],
+    )
+
+    terminal, _state, sleep_fn, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert gh.comments == []
+    assert sleep_fn.calls == [60]
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.monitor_state,
+        )
+    assert not any(op.error_code == "BITBUCKET_MERGE_FAILED" for op in operations)
+    assert not any(op.status == OperationStatus.failed.value for op in operations)

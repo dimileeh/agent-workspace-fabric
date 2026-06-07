@@ -8,7 +8,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import (
+    BITBUCKET_MERGE_IN_PROGRESS,
+    BitBucketClientError,
+)
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
     OperationStatus,
@@ -364,36 +367,49 @@ async def _attempt_merge_method(
         # and otherwise notifies-and-keeps-polling. BitBucket carries no
         # per-method rejection signal to retry alternative methods against, so
         # every fault is a generic blocker.
-        await self._finish_monitor_operation(
-            merge_operation,
-            status=OperationStatus.failed,
-            result={
-                "status": "failed",
-                "outcome": "bitbucket_merge_failed",
-                "reason_code": "BITBUCKET_MERGE_FAILED",
-            },
-            error_code="BITBUCKET_MERGE_FAILED",
-            error_message=str(exc),
-        )
-        await self._record_pr_monitor_audit_event(
-            workspace_id=workspace_id,
-            event_type=_AUDIT_MERGE_RESULT_EVENT,
-            action="merge",
-            outcome="failed",
-            reason_code="BITBUCKET_MERGE_FAILED",
-            pr_number=pr_number,
-            status=merge_status,
-            base_branch=base_branch,
-            remote_branch=remote_branch,
-            operation_id=operation_id,
-            operation_type=OperationType.monitor_state.value,
-            monitor_log=monitor_log,
-            evidence={
-                "operation": "merge_pr",
-                "merge_method": merge_method,
-                "error_message": str(exc),
-            },
-        )
+        #
+        # ``BITBUCKET_MERGE_IN_PROGRESS`` (the 409 raised when a prior async merge
+        # is already in flight) is the exception: it is transient, so the
+        # merge-blocker arm's ``_wait_after_transient_bitbucket_error`` keeps the
+        # monitor polling and ``fetch_pr_status`` later observes the original
+        # merge's MERGED state, terminating the workspace *successfully*. Recording
+        # a permanent ``failed`` operation here would leave an inconsistent audit
+        # trail (operation "merge failed" vs. workspace "completed"), so for this
+        # reason code we skip the failure record and let the eventual outcome —
+        # the still-open merge operation finished by the succeeding re-poll, or the
+        # short-circuit completion — speak for itself. Unlike GitHub, BitBucket has
+        # a transient blocker that later succeeds, so this case is unique to it.
+        if exc.reason_code != BITBUCKET_MERGE_IN_PROGRESS:
+            await self._finish_monitor_operation(
+                merge_operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "outcome": "bitbucket_merge_failed",
+                    "reason_code": "BITBUCKET_MERGE_FAILED",
+                },
+                error_code="BITBUCKET_MERGE_FAILED",
+                error_message=str(exc),
+            )
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_MERGE_RESULT_EVENT,
+                action="merge",
+                outcome="failed",
+                reason_code="BITBUCKET_MERGE_FAILED",
+                pr_number=pr_number,
+                status=merge_status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                operation_id=operation_id,
+                operation_type=OperationType.monitor_state.value,
+                monitor_log=monitor_log,
+                evidence={
+                    "operation": "merge_pr",
+                    "merge_method": merge_method,
+                    "error_message": str(exc),
+                },
+            )
         return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
 
     merge_marker = _merge_completion_marker(
