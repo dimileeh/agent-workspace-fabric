@@ -10,6 +10,7 @@ import structlog
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.bitbucket_client import BITBUCKET_RATE_LIMITED, BitBucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClientError, RepoRef
@@ -55,6 +56,7 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 from awf.service.merge_queue import MergeQueueBlocker
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -62,6 +64,24 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     pr_payload,
     seed_monitoring_workspace,
 )
+
+
+class _BitBucketResolveThreadClient(DefaultMergeMethodGitHubClient):
+    """Command-based gh double whose ``resolve_thread`` raises a BitBucket error.
+
+    A BitBucket workspace's ``self._deps.gh`` is a ``BitBucketClient`` that raises
+    ``BitBucketClientError`` (not ``GitHubClientError``) from ``resolve_thread``.
+    Overriding only that method keeps the push/settle-poll flow command-based while
+    exercising the fix cycle's forge-neutral BitBucket resolve arm.
+    """
+
+    def __init__(self, runner: FakeCommandRunner, exc: BitBucketClientError) -> None:
+        super().__init__(runner)
+        self._resolve_exc = exc
+
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        del thread_id
+        raise self._resolve_exc
 
 
 @pytest.fixture
@@ -675,6 +695,186 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
         "resolved_thread_count": 0,
         "requeued_thread_count": 1,
         "error_message": "gh api graphql failed (exit=1): HTTP 502 Bad Gateway",
+    }
+    assert "please adjust this" not in repr(resolution_events[0].payload)
+
+
+@pytest.mark.unit
+async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # BitBucket workspaces resolve threads via BitBucketClient, which raises
+    # BitBucketClientError (not GitHubClientError). A transient blip (rate limit)
+    # must requeue the thread and keep the monitor polling — without the BitBucket
+    # resolve arm the error escapes the fix cycle and the runner terminates the
+    # workspace instead of re-addressing the still-open thread.
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="newsha\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketResolveThreadClient(
+            cmd,
+            BitBucketClientError(
+                operation="bitbucket resolve_thread",
+                status=429,
+                body="rate limited",
+                reason_code=BITBUCKET_RATE_LIMITED,
+            ),
+        ),
+    )
+    thread = ReviewThread(
+        thread_id="T_resolve",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The addressed marker is rolled back so the next poll re-addresses the
+    # still-open thread; the push bookkeeping is unaffected.
+    assert "T_resolve" not in state.threads_addressed_ids
+    assert state.last_push_sha == "newsha"
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # Not terminated: the BitBucket resolve fault is handled in-loop.
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        retry_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.bitbucket_transient_error_retrying"
+        ]
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    assert len(retry_events) == 1
+    assert retry_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY"
+    assert retry_events[0].payload["context"] == "resolve_thread"
+    assert len(resolution_events) == 1
+    assert resolution_events[0].payload is not None
+    assert resolution_events[0].payload["action"] == "resolve_thread"
+    assert resolution_events[0].payload["outcome"] == "requeued"
+    assert resolution_events[0].payload["evidence"] == {
+        "thread_ids": ["T_resolve"],
+        "resolved_thread_count": 0,
+        "requeued_thread_count": 1,
+        "error_message": "bitbucket resolve_thread failed (status=429): rate limited",
+    }
+    assert "please adjust this" not in repr(resolution_events[0].payload)
+
+
+@pytest.mark.unit
+async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A permanent BitBucket fault (403, token lacks the scope) during resolve_thread
+    # must record COMMENT_RESOLUTION_FAILED and clear the addressed marker WITHOUT
+    # escaping the fix cycle — mirroring the GitHub arm's "do NOT drop out of the
+    # monitor" behaviour rather than terminating the workspace.
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="newsha\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketResolveThreadClient(
+            cmd,
+            BitBucketClientError(
+                operation="bitbucket resolve_thread",
+                status=403,
+                body="forbidden: missing scope",
+            ),
+        ),
+    )
+    thread = ReviewThread(
+        thread_id="T_resolve",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    # No raise: the BitBucket resolve fault is caught and handled in-loop.
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # decide() filters addressed IDs, so a failed resolve must not leave the marker
+    # behind (it would treat the open thread as handled forever).
+    assert "T_resolve" not in state.threads_addressed_ids
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # Not terminated: the workspace keeps polling.
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        retry_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.bitbucket_transient_error_retrying"
+        ]
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    # A deterministic fault does not record a transient-retry event.
+    assert retry_events == []
+    assert len(resolution_events) == 1
+    assert resolution_events[0].payload is not None
+    assert resolution_events[0].payload["action"] == "resolve_thread"
+    assert resolution_events[0].payload["outcome"] == "failed"
+    assert resolution_events[0].payload["reason_code"] == "COMMENT_RESOLUTION_FAILED"
+    assert resolution_events[0].payload["evidence"] == {
+        "thread_ids": ["T_resolve"],
+        "resolved_thread_count": 0,
+        "failed_thread_count": 1,
+        "error_message": "bitbucket resolve_thread failed (status=403): forbidden: missing scope",
     }
     assert "please adjust this" not in repr(resolution_events[0].payload)
 

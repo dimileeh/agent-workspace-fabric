@@ -543,6 +543,81 @@ async def _run_fix_cycle(
                     "error_message": str(exc),
                 },
             )
+        except BitBucketClientError as exc:
+            # BitBucket workspaces resolve threads through ``BitBucketClient``,
+            # whose ``resolve_thread`` raises ``BitBucketClientError`` (not
+            # ``GitHubClientError``) on API/transport faults. Without this arm the
+            # error escapes ``_execute`` and the runner's generic BitBucket handler
+            # *terminates the workspace* on a permanent fault instead of keeping the
+            # poll loop alive — and the addressed-state rollback below never runs,
+            # so ``decide()`` would treat the still-open thread as handled forever
+            # and let auto-merge bypass live feedback (the #305 mode). Mirror the
+            # GitHub arm so the forge-neutral resolve behaviour holds: transient
+            # blips wait and requeue (``continue``); permanent faults clear the
+            # addressed marker and record ``COMMENT_RESOLUTION_FAILED`` without
+            # dropping out of the monitor.
+            if await self._wait_after_transient_bitbucket_error(
+                exc,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="resolve_thread",
+                monitor_log=monitor_log,
+            ):
+                _clear_addressed_state_by_id(state, tid)
+                await self._record_pr_monitor_audit_event(
+                    workspace_id=workspace_id,
+                    event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                    action="resolve_thread",
+                    outcome="requeued",
+                    reason_code=_BITBUCKET_TRANSIENT_RETRY_REASON,
+                    pr_number=pr_number,
+                    status=None,
+                    base_branch=base_branch or "",
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                    source_head_sha=pushed_head_sha,
+                    evidence={
+                        "thread_ids": [tid],
+                        "resolved_thread_count": 0,
+                        "requeued_thread_count": 1,
+                        "error_message": str(exc),
+                    },
+                )
+                continue
+            # ``BitBucketClientError`` has no ``stderr`` field and its ``str()``
+            # already carries a redacted body; log that instead of ``exc.stderr``.
+            _log.warning(
+                "monitor.resolve_thread_failed",
+                thread_id=tid,
+                stderr=str(exc),
+            )
+            # Same rationale as the GitHub arm: do NOT drop out of the monitor, and
+            # clear the addressed marker so the next poll re-addresses the still-open
+            # thread rather than treating an open BitBucket thread as handled forever.
+            _clear_addressed_state_by_id(state, tid)
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                action="resolve_thread",
+                outcome="failed",
+                reason_code="COMMENT_RESOLUTION_FAILED",
+                pr_number=pr_number,
+                status=None,
+                base_branch=base_branch or "",
+                remote_branch=remote_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                source_head_sha=pushed_head_sha,
+                evidence={
+                    "thread_ids": [tid],
+                    "resolved_thread_count": 0,
+                    "failed_thread_count": 1,
+                    "error_message": str(exc),
+                },
+            )
         else:
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
