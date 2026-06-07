@@ -34,12 +34,14 @@ def _seed_fetch_status(
     statuses: list[dict] | None = None,
     comments: list[dict] | None = None,
     diffstat: list[dict] | None = None,
+    tasks: list[dict] | None = None,
     account_id: str = "viewer-acct",
 ) -> None:
     fake.enqueue("GET", _PR, json=pr if pr is not None else pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=statuses or [])
     fake.page("GET", f"{_PR}/comments", values=comments or [])
     fake.page("GET", f"{_PR}/diffstat", values=diffstat or [])
+    fake.page("GET", f"{_PR}/tasks", values=tasks or [])
     fake.enqueue("GET", "/2.0/user", json={"account_id": account_id})
 
 
@@ -172,6 +174,7 @@ async def test_fetch_pr_status_paginates_comments() -> None:
     )
     fake.page("GET", f"{_PR}/comments", values=[_general_comment(2, "second")])
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={"account_id": "viewer"})
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)

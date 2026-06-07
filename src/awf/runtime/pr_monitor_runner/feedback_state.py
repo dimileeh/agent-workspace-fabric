@@ -13,7 +13,8 @@ import re as re
 import time as time
 from typing import Any, cast
 
-from awf.common.github_client import RepoRef
+from awf.common.bitbucket_client import BitBucketClient
+from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.repositories import (
     PRFeedbackResolutionRepository,
     pr_feedback_body_hash,
@@ -36,6 +37,43 @@ from awf.runtime.pr_monitor_runner.helpers import (
 )
 
 
+def _forge_scm_provider(self: Any) -> str:
+    """Return the SCM provider key for the runner's resolved forge client.
+
+    The PR-feedback provenance/replay rows are keyed by ``scm_provider`` so a
+    GitHub and a BitBucket PR with the same numeric id never alias. ``self._deps.gh``
+    is the per-workspace resolved ``ForgeClient`` (a ``BitBucketClient`` or a
+    ``GitHubClient``), so it is the authoritative forge signal here — no DB re-read.
+
+    GitHub and BitBucket are the only forges today. A blanket ``else "github"``
+    fallback would silently store (and later query) any future third forge's rows
+    under the GitHub key, aliasing its feedback state against GitHub workspaces on
+    the same repo/PR number. Fail loudly on an unknown client instead, so a newly
+    wired forge is forced to declare its own provider key here.
+    """
+    if isinstance(self._deps.gh, BitBucketClient):
+        return "bitbucket"
+    if isinstance(self._deps.gh, GitHubClient):
+        return "github"
+    raise NotImplementedError(f"unknown forge client type: {type(self._deps.gh).__name__}")
+
+
+def _forge_pr_url(self: Any, repo: RepoRef, pr_number: int) -> str:
+    """Build the forge-correct PR web URL for provenance rows.
+
+    A hardcoded github.com URL would poison BitBucket provenance/replay state with a
+    nonexistent github.com link; derive the host/path shape from the resolved forge.
+    Mirrors ``_forge_scm_provider``: fail loudly on an unknown client so a newly wired
+    forge is forced to declare its URL shape here, rather than silently persisting a
+    nonexistent github.com link in provenance rows.
+    """
+    if isinstance(self._deps.gh, BitBucketClient):
+        return f"https://bitbucket.org/{repo.slug()}/pull-requests/{pr_number}"
+    if isinstance(self._deps.gh, GitHubClient):
+        return f"https://github.com/{repo.slug()}/pull/{pr_number}"
+    raise NotImplementedError(f"unknown forge client type: {type(self._deps.gh).__name__}")
+
+
 async def _record_pr_feedback_resolution(
     self: Any,
     *,
@@ -49,12 +87,18 @@ async def _record_pr_feedback_resolution(
 ) -> None:
     if verdict_result.verdict == "agent_failed":
         return
+    # One-time state loss on upgrade (harmless): before #454 every workspace wrote
+    # ``scm_provider="github"``, so any BitBucket feedback row recorded pre-upgrade
+    # is keyed under "github" and a restarted BitBucket workspace (now querying under
+    # "bitbucket") won't find it. The thread is genuinely resolved on BitBucket, so
+    # ``fetch_pr_status`` won't re-surface it — at worst one redundant verdict gets
+    # re-recorded under the correct provider; no migration is required.
     async with self._deps.session_factory() as s:
         await PRFeedbackResolutionRepository(s).record_resolution(
-            scm_provider="github",
+            scm_provider=_forge_scm_provider(self),
             repository_key=repo.slug(),
             pull_request_key=str(pr_number),
-            pull_request_url=f"https://github.com/{repo.slug()}/pull/{pr_number}",
+            pull_request_url=_forge_pr_url(self, repo, pr_number),
             head_sha=pr_head_sha,
             feedback_kind="review_comment",
             feedback_id=comment.comment_id,
@@ -106,7 +150,7 @@ async def _apply_pr_feedback_resolution_state(
         return False
     async with self._deps.session_factory() as s:
         rows = await PRFeedbackResolutionRepository(s).list_for_pr(
-            scm_provider="github",
+            scm_provider=_forge_scm_provider(self),
             repository_key=repo.slug(),
             pull_request_key=str(pr_number),
         )

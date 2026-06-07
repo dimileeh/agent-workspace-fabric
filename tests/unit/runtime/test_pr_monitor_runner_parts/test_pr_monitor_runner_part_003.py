@@ -13,14 +13,16 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_PROVIDER_CAPACITY_EXHAUSTED
+from awf.common.bitbucket_client import BitBucketAuth, BitBucketClient
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.common.github_client import GitHubClientError, RepoRef
+from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.enums import (
     AgentRuntime,
     WorkspaceStatus,
@@ -1008,3 +1010,164 @@ async def test_run_fails_workspace_when_base_fetch_cannot_be_refreshed(
         assert workspace.failure_reason == "infrastructure_failure"
         assert workspace.failure_message is not None
         assert "could not refresh base branch" in workspace.failure_message
+
+
+def _bitbucket_forge_client() -> BitBucketClient:
+    """A BitBucketClient instance for forge detection (no HTTP calls are made)."""
+    return BitBucketClient(
+        client=httpx.AsyncClient(base_url="https://api.bitbucket.org"),
+        auth=BitBucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
+    )
+
+
+@pytest.mark.unit
+async def test_bitbucket_feedback_resolution_records_bitbucket_provenance(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A BitBucket workspace records feedback provenance under the bitbucket provider.
+
+    Regression for #445: ``feedback_state`` previously hardcoded
+    ``scm_provider="github"`` + a github.com PR URL, so BitBucket feedback poisoned
+    GitHub provenance/replay rows. The provider + URL must derive from the resolved
+    forge client instead.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_bitbucket_forge_client(),
+    )
+
+    await runner._record_pr_feedback_resolution(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="workspace", name="repo", forge="bitbucket"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        comment=ReviewComment(
+            comment_id="bbcomment:99",
+            body_excerpt="please fix",
+            body="please fix",
+            author="reviewer",
+        ),
+        verdict_result=VerdictResult(verdict="false_positive", reason="not a real issue"),
+        operation_id="op-bb",
+    )
+
+    async with factory() as session:
+        bb_rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="bitbucket",
+            repository_key="workspace/repo",
+            pull_request_key="42",
+        )
+        gh_rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="github",
+            repository_key="workspace/repo",
+            pull_request_key="42",
+        )
+
+    assert len(bb_rows) == 1
+    assert bb_rows[0].pull_request_url == "https://bitbucket.org/workspace/repo/pull-requests/42"
+    # Must NOT poison the GitHub provider rows.
+    assert gh_rows == []
+
+
+@pytest.mark.unit
+async def test_github_feedback_resolution_records_github_provenance_unchanged(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A GitHub workspace still records github provenance + a github.com PR URL."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._record_pr_feedback_resolution(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        comment=ReviewComment(
+            comment_id="issue:55",
+            body_excerpt="please fix",
+            body="please fix",
+            author="reviewer",
+        ),
+        verdict_result=VerdictResult(verdict="false_positive", reason="not a real issue"),
+        operation_id="op-gh",
+    )
+
+    async with factory() as session:
+        rows = await PRFeedbackResolutionRepository(session).list_for_pr(
+            scm_provider="github",
+            repository_key="dimileeh/aira-web",
+            pull_request_key="42",
+        )
+
+    assert len(rows) == 1
+    assert rows[0].pull_request_url == "https://github.com/dimileeh/aira-web/pull/42"
+
+
+@pytest.mark.unit
+def test_forge_scm_provider_maps_known_forges_and_rejects_unknown() -> None:
+    """``_forge_scm_provider`` maps each forge to its key and fails loudly otherwise.
+
+    Regression for the #454 review note: an unknown forge client must NOT silently
+    fall back to ``"github"`` (which would alias a third forge's feedback rows under
+    the GitHub provider key). It raises ``NotImplementedError`` so a newly wired
+    forge is forced to declare its own provider key.
+    """
+    from types import SimpleNamespace
+
+    from awf.runtime.pr_monitor_runner import feedback_state
+
+    cmd = FakeCommandRunner()
+    github_self = SimpleNamespace(_deps=SimpleNamespace(gh=GitHubClient(cmd)))
+    bitbucket_self = SimpleNamespace(_deps=SimpleNamespace(gh=_bitbucket_forge_client()))
+
+    assert feedback_state._forge_scm_provider(github_self) == "github"
+    assert feedback_state._forge_scm_provider(bitbucket_self) == "bitbucket"
+
+    unknown_self = SimpleNamespace(_deps=SimpleNamespace(gh=object()))
+    with pytest.raises(NotImplementedError, match="unknown forge client type: object"):
+        feedback_state._forge_scm_provider(unknown_self)
+
+
+@pytest.mark.unit
+def test_forge_pr_url_maps_known_forges_and_rejects_unknown() -> None:
+    """``_forge_pr_url`` builds the forge-correct URL and fails loudly otherwise.
+
+    Regression for the #454 review note: an unknown forge client must NOT silently
+    fall back to a github.com URL (which would persist a nonexistent link in
+    provenance rows). It raises ``NotImplementedError``, mirroring
+    ``_forge_scm_provider`` so a newly wired forge is forced to declare its URL shape.
+    """
+    from types import SimpleNamespace
+
+    from awf.runtime.pr_monitor_runner import feedback_state
+
+    cmd = FakeCommandRunner()
+    repo = RepoRef(owner="acme", name="widget")
+    github_self = SimpleNamespace(_deps=SimpleNamespace(gh=GitHubClient(cmd)))
+    bitbucket_self = SimpleNamespace(_deps=SimpleNamespace(gh=_bitbucket_forge_client()))
+
+    assert (
+        feedback_state._forge_pr_url(github_self, repo, 7)
+        == "https://github.com/acme/widget/pull/7"
+    )
+    assert (
+        feedback_state._forge_pr_url(bitbucket_self, repo, 7)
+        == "https://bitbucket.org/acme/widget/pull-requests/7"
+    )
+
+    unknown_self = SimpleNamespace(_deps=SimpleNamespace(gh=object()))
+    with pytest.raises(NotImplementedError, match="unknown forge client type: object"):
+        feedback_state._forge_pr_url(unknown_self, repo, 7)

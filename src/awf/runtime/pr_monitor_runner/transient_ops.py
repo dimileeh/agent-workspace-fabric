@@ -14,6 +14,7 @@ import time as time
 from typing import Any, cast
 
 from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
@@ -187,6 +188,51 @@ async def _wait_after_transient_bitbucket_error(
     )
     await self._deps.sleep(wait_seconds)
     return True
+
+
+async def _wait_after_transient_forge_error(
+    self: Any,
+    exc: ForgeClientError,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    context: str,
+    monitor_log: WorkspaceLogSink | None,
+) -> bool:
+    """Wait and keep polling on a recoverable forge (GitHub/BitBucket) blip.
+
+    The forge-neutral entry point for the consolidated ``except ForgeClientError``
+    catch arms: it dispatches to the per-forge wait helper so each keeps emitting
+    its own transient-retry event and reason code (behaviour-preserving), while
+    callers no longer need to branch on the concrete forge type. Returns ``True``
+    when the caller should retry, ``False`` when the fault is deterministic.
+    """
+    if isinstance(exc, BitBucketClientError):
+        return await _wait_after_transient_bitbucket_error(
+            self,
+            exc,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=context,
+            monitor_log=monitor_log,
+        )
+    if isinstance(exc, GitHubClientError):
+        return await _wait_after_transient_github_error(
+            self,
+            exc,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=context,
+            monitor_log=monitor_log,
+        )
+    # No per-forge wait helper exists for an unknown subclass, so we cannot emit
+    # a transient-retry event or honour a backoff. Fail loudly rather than
+    # silently classifying a possibly-transient fault as deterministic: a new
+    # forge must extend this dispatch. Mirrors the exhaustiveness raise in
+    # ``loop.py``.
+    raise RuntimeError(  # pragma: no cover - only GitHub/BitBucket subclasses exist
+        f"unknown ForgeClientError subclass: {type(exc).__name__}"
+    )
 
 
 async def _wait_after_transient_base_fetch_error(

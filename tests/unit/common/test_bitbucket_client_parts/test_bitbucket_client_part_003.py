@@ -57,6 +57,7 @@ def _seed_fetch_status(
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=comments)
     fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", json={"account_id": account_id})
 
 

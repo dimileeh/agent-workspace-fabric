@@ -33,6 +33,16 @@ from urllib.parse import quote, urlsplit
 
 from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
+from awf.common.forge_errors import ForgeClientError
+from awf.common.github_graphql import (
+    _GQL_PR_FILES_PAGE,
+    _GQL_PR_ISSUE_COMMENTS_PAGE,
+    _GQL_PR_REVIEW_THREADS_PAGE,
+    _GQL_PR_REVIEWS_PAGE,
+    _GQL_PR_STATE,
+    _GQL_RESOLVE_THREAD,
+    _GQL_REVIEW_THREAD_COMMENTS_PAGE,
+)
 from awf.common.logging import get_logger
 from awf.db.enums import ForgeKind
 from awf.runtime.ci_failure_evidence import extract_ci_failure_evidence, redact_ci_log
@@ -54,17 +64,41 @@ _log = get_logger(__name__)
 _PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 
 
-class GitHubClientError(Exception):
+# GitHub shells ``gh`` and carries no HTTP status, so it has no native per-fault
+# reason code. The shared ``ForgeClientError`` contract requires a stable
+# ``reason_code`` for every forge fault, so GitHub faults default to this code (the
+# PR monitor classifies transient-vs-deterministic from stderr markers, not this
+# code). Defined here, in a client file, so the reason catalog picks it up.
+GITHUB_API_ERROR = "GITHUB_API_ERROR"
+
+
+class GitHubClientError(ForgeClientError):
     """Raised when ``gh`` or GraphQL returns a non-zero exit / error payload."""
 
-    def __init__(self, *, operation: str, returncode: int, stderr: str) -> None:
+    def __init__(
+        self,
+        *,
+        operation: str,
+        returncode: int,
+        stderr: str,
+        reason_code: str = GITHUB_API_ERROR,
+    ) -> None:
         """Store redacted command failure context for monitor diagnostics."""
         self.operation = operation
         self.returncode = returncode
+        self.reason_code = reason_code
         self.stderr = redact_audit_text(stderr)
         super().__init__(
             f"{operation} failed (exit={returncode}): {self.stderr.strip() or '<no output>'}"
         )
+
+    def redacted_detail(self) -> str:
+        """Return the redacted gh stderr — GitHub's human-facing failure detail."""
+        return self.stderr
+
+    def merge_method_stderr(self) -> str:
+        """Return the gh stderr the merge-method-mismatch parser inspects."""
+        return self.stderr
 
 
 class PullRequestMetadataError(Exception):
@@ -93,251 +127,6 @@ class _FetchedReview:
     viewer_did_author: bool
     has_body: bool
     counts_for_required_review: bool
-
-
-# GraphQL: fetch PR state + review threads + review comments in one query.
-# The changed-file list feeds merge policy, so it is paginated below whenever
-# GitHub reports more than the first 100 paths.
-_GQL_PR_STATE = """
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      number
-      createdAt
-      updatedAt
-      headRefOid
-      mergeable
-      mergeStateStatus
-      isDraft
-      closed
-      merged
-      mergeCommit { oid }
-      baseRef { name target { ... on Commit { oid } } }
-      commits(last: 1) {
-        nodes {
-          commit {
-            committedDate
-            statusCheckRollup {
-              state
-              contexts(first: 100) {
-                nodes {
-                  __typename
-                  ... on CheckRun {
-                    name
-                    status
-                    conclusion
-                    startedAt
-                    completedAt
-                    detailsUrl
-                    checkSuite {
-                      app {
-                        slug
-                        name
-                      }
-                      creator {
-                        login
-                      }
-                    }
-                  }
-                  ... on StatusContext {
-                    context
-                    state
-                    targetUrl
-                    creator {
-                      login
-                    }
-                  }
-                }
-                pageInfo { hasNextPage }
-              }
-            }
-          }
-        }
-      }
-      reviewThreads(first: 100) {
-        nodes {
-          id
-          isResolved
-          isOutdated
-          path
-          line
-          comments(first: 50) {
-            nodes {
-              databaseId
-              bodyText
-              author { login }
-              viewerDidAuthor
-              createdAt
-              updatedAt
-              url
-            }
-            pageInfo { hasNextPage endCursor }
-          }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-      reviews(first: 100) {
-        nodes {
-          databaseId
-          body
-          state
-          submittedAt
-          commit { oid }
-          url
-          author { login }
-          authorCanPushToRepository
-          viewerDidAuthor
-          updatedAt
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-      comments(first: 100) {
-        nodes {
-          databaseId
-          body
-          isMinimized
-          viewerDidAuthor
-          createdAt
-          updatedAt
-          url
-          author { login }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-      files(first: 100) {
-        nodes { path }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-""".strip()
-
-
-_GQL_PR_FILES_PAGE = """
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      files(first: 100, after: $cursor) {
-        nodes { path }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-""".strip()
-
-
-_GQL_PR_REVIEW_THREADS_PAGE = """
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviewThreads(first: 100, after: $cursor) {
-        nodes {
-          id
-          isResolved
-          isOutdated
-          path
-          line
-          comments(first: 50) {
-            nodes {
-              databaseId
-              bodyText
-              author { login }
-              viewerDidAuthor
-              createdAt
-              updatedAt
-              url
-            }
-            pageInfo { hasNextPage endCursor }
-          }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-""".strip()
-
-
-_GQL_REVIEW_THREAD_COMMENTS_PAGE = """
-query($threadId: ID!, $cursor: String!) {
-  node(id: $threadId) {
-    ... on PullRequestReviewThread {
-      comments(first: 50, after: $cursor) {
-        nodes {
-          databaseId
-          bodyText
-          author { login }
-          viewerDidAuthor
-          createdAt
-          updatedAt
-          url
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-""".strip()
-
-
-_GQL_PR_REVIEWS_PAGE = """
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      reviews(first: 100, after: $cursor) {
-        nodes {
-          databaseId
-          body
-          state
-          submittedAt
-          commit { oid }
-          url
-          author { login }
-          authorCanPushToRepository
-          viewerDidAuthor
-          updatedAt
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-""".strip()
-
-
-_GQL_PR_ISSUE_COMMENTS_PAGE = """
-query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      comments(first: 100, after: $cursor) {
-        nodes {
-          databaseId
-          body
-          isMinimized
-          viewerDidAuthor
-          createdAt
-          updatedAt
-          url
-          author { login }
-        }
-        pageInfo { hasNextPage endCursor }
-      }
-    }
-  }
-}
-""".strip()
-
-
-# GraphQL: mutation to resolve a review thread by node ID.
-_GQL_RESOLVE_THREAD = """
-mutation($threadId: ID!) {
-  resolveReviewThread(input: {threadId: $threadId}) {
-    thread { id isResolved }
-  }
-}
-""".strip()
 
 
 # Forge → canonical hostname. Used by ``RepoRef`` detection + URL builders so a

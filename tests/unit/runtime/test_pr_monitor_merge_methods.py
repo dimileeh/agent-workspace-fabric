@@ -94,6 +94,38 @@ def test_effective_merge_methods_intersect_repo_and_branch_constraints() -> None
 
 
 @pytest.mark.unit
+def test_effective_merge_methods_resolves_fast_forward_only_repo() -> None:
+    """A fast-forward-only BitBucket repo must resolve to ``fast_forward`` (#448).
+
+    Before #448 ``fast_forward`` was absent from ``_MERGE_METHOD_PREFERENCE`` so the
+    intersection silently dropped it to an empty tuple, wedging every merge on a
+    fast-forward-only repo with a spurious MERGE_METHOD_MISMATCH.
+    """
+    assert _effective_merge_methods(
+        repo_methods=("fast_forward",),
+        branch_methods=None,
+    ) == ("fast_forward",)
+
+
+@pytest.mark.unit
+def test_effective_merge_methods_prefers_squash_over_fast_forward() -> None:
+    """A multi-strategy repo still prefers squash; fast_forward is the last resort."""
+    assert _effective_merge_methods(
+        repo_methods=("merge", "squash", "fast_forward"),
+        branch_methods=None,
+    ) == ("squash", "merge", "fast_forward")
+
+
+@pytest.mark.unit
+def test_effective_merge_methods_github_order_unchanged_by_fast_forward() -> None:
+    """Adding fast_forward as the tail entry must not reorder GitHub precedence."""
+    assert _effective_merge_methods(
+        repo_methods=("rebase", "squash", "merge"),
+        branch_methods=None,
+    ) == ("squash", "merge", "rebase")
+
+
+@pytest.mark.unit
 def test_merge_method_rejection_classifier_is_specific() -> None:
     """Merge-method rejection classification only handles method-specific failures."""
     assert (
@@ -394,6 +426,35 @@ async def test_unconstrained_squash_allowed_base_preserves_squash_default(
 
     assert terminal is True
     assert gh.merge_calls == ["squash"]
+
+
+@pytest.mark.unit
+async def test_fast_forward_only_base_merges_without_method_mismatch(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A fast-forward-only BitBucket repo resolves to fast_forward and merges (#448).
+
+    The repo/branch policy intersection previously dropped ``fast_forward`` to an
+    empty tuple, recording a MERGE_METHOD_MISMATCH blocker and never merging.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("fast_forward",),
+        branch_methods=("fast_forward",),
+    )
+
+    terminal, state, _sleep, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is True
+    assert gh.merge_calls == ["fast_forward"]
+    assert gh.comments == []
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
 
 
 @pytest.mark.unit

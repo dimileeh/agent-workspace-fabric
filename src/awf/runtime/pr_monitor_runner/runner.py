@@ -34,7 +34,8 @@ from awf.adapters.base import AgentAdapter
 from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
-from awf.common.github_client import GitHubClientError, RepoRef
+from awf.common.forge_errors import ForgeClientError
+from awf.common.github_client import RepoRef
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import LogStore
@@ -217,8 +218,18 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         reason_code=_GIT_BASE_BEHIND_FAILED_REASON,
                     )
                     return
-                except GitHubClientError as exc:
-                    if await self._wait_after_transient_github_error(
+                except ForgeClientError as exc:
+                    # Both forges fetch status through ``self._deps.gh``; either
+                    # raises a ``ForgeClientError`` subclass on API/transport
+                    # failure. Catching the shared base keeps a BitBucket fault from
+                    # escaping ``run()`` and crashing the background monitor task.
+                    # Recoverable blips (rate-limit/transport/5xx) wait and re-poll;
+                    # only deterministic faults terminate. GitHub keeps its
+                    # historical ``MONITOR_ABORT`` default (it has no native HTTP
+                    # reason code); BitBucket propagates its specific ``reason_code``
+                    # end-to-end. ``str(exc)`` already redacts, so it is safe to
+                    # log/persist.
+                    if await self._wait_after_transient_forge_error(
                         exc,
                         workspace_id=workspace_id,
                         pr_number=pr_number,
@@ -226,54 +237,25 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         monitor_log=monitor_log,
                     ):
                         continue
+                    # Mirror the ``_execute`` catch below: persist the forge's
+                    # ``reason_code`` for both forges so the two GitHub termination
+                    # paths write identical DB state (``GITHUB_API_ERROR`` for
+                    # GitHub, the specific code for BitBucket) rather than this path
+                    # decaying GitHub to the ``MONITOR_ABORT`` default.
+                    forge_label = "bitbucket" if isinstance(exc, BitBucketClientError) else "github"
                     await self._write_monitor_log(
                         monitor_log,
                         {
                             "event": "monitor.failed",
                             "workspace_id": workspace_id,
-                            "reason": "github_error",
-                            "message": str(exc)[:400],
-                        },
-                    )
-                    await self._terminate_failed(
-                        workspace_id,
-                        message=f"monitor: github error: {exc}"[:2000],
-                    )
-                    return
-                except BitBucketClientError as exc:
-                    # BitBucket workspaces fetch status via ``BitBucketClient``,
-                    # which raises ``BitBucketClientError`` (not
-                    # ``GitHubClientError``) on API/transport failures. Without
-                    # this catch the error would escape ``run()`` and crash the
-                    # background monitor task instead of marking the workspace
-                    # failed. Preserve the actionable ``reason_code`` end-to-end
-                    # — the exception already carries a redacted body, so its
-                    # ``str()`` is safe to log/persist.
-                    #
-                    # Recoverable blips (rate-limit/transport/5xx) wait and
-                    # re-poll, symmetric to the GitHub path above; only
-                    # deterministic faults fall through and terminate.
-                    if await self._wait_after_transient_bitbucket_error(
-                        exc,
-                        workspace_id=workspace_id,
-                        pr_number=pr_number,
-                        context="fetch_pr_status",
-                        monitor_log=monitor_log,
-                    ):
-                        continue
-                    await self._write_monitor_log(
-                        monitor_log,
-                        {
-                            "event": "monitor.failed",
-                            "workspace_id": workspace_id,
-                            "reason": "bitbucket_error",
+                            "reason": f"{forge_label}_error",
                             "reason_code": exc.reason_code,
                             "message": str(exc)[:400],
                         },
                     )
                     await self._terminate_failed(
                         workspace_id,
-                        message=f"monitor: bitbucket error: {exc}"[:2000],
+                        message=f"monitor: {forge_label} error: {exc}"[:2000],
                         reason_code=exc.reason_code,
                     )
                     return
@@ -351,19 +333,17 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         compose_file=compose_file,
                         monitor_log=monitor_log,
                     )
-                except BitBucketClientError as exc:
-                    # The status-fetch path above catches ``BitBucketClientError``,
-                    # but ``_execute`` drives merge, thread-resolve, CI-rerun and
-                    # fix-cycle forge calls whose action arms catch
-                    # ``GitHubClientError`` alone. For a BitBucket workspace
-                    # ``self._deps.gh`` is a ``BitBucketClient`` that raises
-                    # ``BitBucketClientError`` instead — without this catch a
-                    # post-forge-gate-flip BitBucket fault would escape ``run()``
-                    # and crash the background monitor task rather than failing
-                    # the workspace with a reason code. Mirror the status-fetch
-                    # handling: recoverable blips wait and re-poll; deterministic
-                    # faults terminate with the preserved reason code.
-                    if await self._wait_after_transient_bitbucket_error(
+                except ForgeClientError as exc:
+                    # The status-fetch path above catches the same base, but
+                    # ``_execute`` drives merge, thread-resolve, CI-rerun and
+                    # fix-cycle forge calls that can re-raise a ``ForgeClientError``
+                    # subclass (e.g. the notify-permanent re-raise). Catching the
+                    # shared base keeps either forge's fault from escaping ``run()``
+                    # and crashing the background monitor task. Recoverable blips
+                    # wait and re-poll; deterministic faults terminate with the
+                    # preserved reason code. GitHub carries the base default
+                    # (``GITHUB_API_ERROR``); BitBucket its specific code.
+                    if await self._wait_after_transient_forge_error(
                         exc,
                         workspace_id=workspace_id,
                         pr_number=pr_number,
@@ -373,34 +353,35 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         # Do NOT persist ``state`` here. ``_execute`` mutates it
                         # in-memory as it works (e.g. the fix cycle marks a thread
                         # addressed *before* the forge ``resolve_thread`` call).
-                        # When a ``BitBucketClientError`` escapes ``_execute`` the
-                        # GitHubClientError-only fix-cycle arms never ran their
-                        # roll-back (``_clear_addressed_state_by_id``), so the
-                        # in-memory ``state`` carries unconfirmed addressed markers
-                        # for threads whose API call actually failed. Persisting
-                        # them would leave a thread marked-addressed-but-open, and
-                        # ``decide()`` filters addressed IDs — so it would treat
-                        # the still-open thread as handled forever and let
-                        # auto-merge bypass live feedback (the #305 mode). Mirror
-                        # the status-fetch transient arms (bare ``continue``): the
-                        # next outer iteration reloads clean state from the DB, and
+                        # When a ``ForgeClientError`` escapes ``_execute`` the
+                        # fix-cycle arms may not have run their roll-back
+                        # (``_clear_addressed_state_by_id``), so the in-memory
+                        # ``state`` can carry unconfirmed addressed markers for
+                        # threads whose API call actually failed. Persisting them
+                        # would leave a thread marked-addressed-but-open, and
+                        # ``decide()`` filters addressed IDs — so it would treat the
+                        # still-open thread as handled forever and let auto-merge
+                        # bypass live feedback (the #305 mode). Mirror the
+                        # status-fetch transient arms (bare ``continue``): the next
+                        # outer iteration reloads clean state from the DB, and
                         # threads genuinely resolved on the forge are not re-listed
                         # while a failed resolve is re-addressed. Pre-``_execute``
                         # mutations already persisted themselves above.
                         continue
+                    forge_label = "bitbucket" if isinstance(exc, BitBucketClientError) else "github"
                     await self._write_monitor_log(
                         monitor_log,
                         {
                             "event": "monitor.failed",
                             "workspace_id": workspace_id,
-                            "reason": "bitbucket_error",
+                            "reason": f"{forge_label}_error",
                             "reason_code": exc.reason_code,
                             "message": str(exc)[:400],
                         },
                     )
                     await self._terminate_failed(
                         workspace_id,
-                        message=f"monitor: bitbucket error: {exc}"[:2000],
+                        message=f"monitor: {forge_label} error: {exc}"[:2000],
                         reason_code=exc.reason_code,
                     )
                     return
