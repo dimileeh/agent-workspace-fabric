@@ -642,17 +642,23 @@ _CI_DOCKER_REGISTRY_TIMEOUT_MARKERS = (
     "request canceled while waiting for connection",
 )
 
-_CI_DOCKER_PULL_EVIDENCE_MARKERS = (
-    "docker pull",
+# A bare ``docker pull`` *command* echo precedes both successful image pulls and
+# pull failures, so it cannot anchor causation: a successful setup pull followed
+# by an unrelated test timeout looks identical to a real registry timeout. Only
+# Docker pull-*failure* wording — a daemon error response or an explicit
+# pull-failed message — actually evidences that a pull (not the job's real work)
+# is what timed out.
+_CI_DOCKER_PULL_FAILURE_MARKERS = (
     "error response from daemon",
+    "docker pull failed",
+    "failed to pull",
 )
 
-# A bare ``docker pull`` echo precedes both successful image pulls and pull
-# failures, and ``gh run view --log-failed`` emits the whole failed step. So a
-# real integration/Go test that logs ``context deadline exceeded`` can sit in the
-# same excerpt as an unrelated, successful setup pull. A registry-timeout marker
+# ``gh run view --log-failed`` emits the whole failed step, so a real
+# integration/Go test that logs ``context deadline exceeded`` can sit in the same
+# excerpt as an unrelated Docker pull failure. A registry-timeout marker
 # therefore only counts as Docker-caused when it is on (or within this many lines
-# of) a Docker pull / daemon line — not merely somewhere in the same step log.
+# of) a Docker pull-failure line — not merely somewhere in the same step log.
 _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW = 2
 _CI_REQUIRED_ROLLUP_CHECK_NAMES = frozenset(
     {
@@ -731,19 +737,21 @@ def _log_shows_docker_registry_timeout(log_text: str) -> bool:
     """Whether a generic network-timeout phrase is tied to a Docker pull failure.
 
     The phrases in ``_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS`` are only transient
-    when the timeout line is *part of* the Docker pull / daemon failure — on the
-    same line as, or within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of,
-    Docker pull / daemon evidence. A whole-log ``any(...)`` would also fire when
-    an unrelated (often successful) setup ``docker pull`` merely co-exists in the
-    same ``--log-failed`` step as a real application/integration test timeout
-    that must reach the repair agent.
+    when the timeout line is *part of* the Docker pull failure — on the same line
+    as, or within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines of, a Docker
+    pull-*failure* line (a daemon error response or an explicit pull-failed
+    message). Proximity to a bare ``docker pull`` *command* echo is not enough:
+    that echo precedes successful setup pulls too, so anchoring on it would still
+    fire when a successful pull merely co-exists in the same ``--log-failed`` step
+    as a real application/integration test timeout that must reach the repair
+    agent.
     """
 
     lines = log_text.splitlines()
     evidence_line_indexes = [
         index
         for index, line in enumerate(lines)
-        if any(marker in line for marker in _CI_DOCKER_PULL_EVIDENCE_MARKERS)
+        if any(marker in line for marker in _CI_DOCKER_PULL_FAILURE_MARKERS)
     ]
     if not evidence_line_indexes:
         return False

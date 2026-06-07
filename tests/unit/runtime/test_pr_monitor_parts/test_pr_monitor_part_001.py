@@ -575,9 +575,37 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
-    def test_docker_pull_request_canceled_dispatches_rerun(self) -> None:
+    def test_docker_pull_failed_wording_anchors_request_canceled_rerun(self) -> None:
+        """A request-canceled timeout tied to an explicit ``docker pull failed``
+        line (no daemon-error wrapper) is still a registry pull failure → rerun."""
         failure = CheckFailure(
             name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "net/http: request canceled while waiting for connection\n"
+                "Docker pull failed with exit code 1"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_docker_pull_echo_then_bare_request_canceled_reports_ci_failure(self) -> None:
+        """A bare ``docker pull`` *command* echo followed by a request-canceled
+        timeout — with no daemon-error or pull-failed wording tying the timeout to
+        a pull failure — is indistinguishable from a successful setup pull followed
+        by an unrelated test timeout, so it must reach the repair agent."""
+        failure = CheckFailure(
+            name="integration-tests",
             conclusion="FAILURE",
             log_excerpt=(
                 "/usr/bin/docker pull postgres:16\n"
@@ -592,7 +620,7 @@ class TestCiFailure:
             MonitorConfig(),
         )
 
-        assert isinstance(action, RerunTransientCI)
+        assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
 
     @pytest.mark.unit
