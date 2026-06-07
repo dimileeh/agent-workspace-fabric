@@ -6,7 +6,7 @@ A GitHub Actions job for PR #449 (`python-coverage-shards (2)`, run `27091023772
 job `79954557998`) failed **before checkout/tests** while Docker pulled the
 `postgres:16` service-container image. Raw log evidence:
 
-```
+```text
 /usr/bin/docker pull postgres:16
 Error response from daemon: Get "https://registry-1.docker.io/v2/": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
 net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers)
