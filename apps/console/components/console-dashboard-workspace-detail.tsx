@@ -485,8 +485,8 @@ export function OperatorControlsBlock({
   const cancelConfirmEnabled = cancelControl !== undefined && cancelControl.enabled && !busy;
 
   // Drop a pending cancel confirmation as soon as it no longer applies — the
-  // operator switched workspaces, cancel became disabled, or another operation
-  // started — so Confirm cancel can never act on a stale or guarded selection.
+  // cancel became disabled or is no longer available, so Confirm cancel can never
+  // act on a stale or guarded selection.
   useEffect(() => {
     if (confirming === "cancel" && !cancelConfirmEnabled) {
       setConfirming(null);
