@@ -440,6 +440,19 @@ def _task_creator(task: dict[str, Any]) -> dict[str, Any]:
     return creator if isinstance(creator, dict) else {}
 
 
+def _task_creator_id(task: dict[str, Any]) -> str | None:
+    """Return the BitBucket identity of a task creator, if present.
+
+    Mirrors ``_comment_account_id``: BitBucket may return a creator carrying only
+    ``uuid`` (no ``account_id``), and the viewer identity itself falls back to
+    ``uuid``. Comparing ``account_id`` alone would fail to recognize a self-authored
+    task in that shape, leaking AWF's own task into reviewer feedback and driving the
+    monitor to address/re-anchor on its own task.
+    """
+    creator = _task_creator(task)
+    return _clean_optional_str(creator.get("account_id") or creator.get("uuid"))
+
+
 def build_unresolved_task_threads(
     tasks: list[dict[str, Any]],
     *,
@@ -466,14 +479,14 @@ def build_unresolved_task_threads(
     for task in tasks:
         if task.get("id") is None or _task_is_resolved(task):
             continue
-        creator = _task_creator(task)
-        if account_id is not None and _clean_optional_str(creator.get("account_id")) == account_id:
+        if account_id is not None and _task_creator_id(task) == account_id:
             continue
         raw = task.get("content")
         body = raw.get("raw") if isinstance(raw, dict) else None
         if not body or not body.strip():
             continue
         task_id = str(task["id"])
+        creator = _task_creator(task)
         author = _clean_optional_str(creator.get("display_name") or creator.get("nickname"))
         created_at = parse_bb_datetime(task.get("created_on"))
         updated_at = parse_bb_datetime(task.get("updated_on"))
@@ -588,8 +601,7 @@ def latest_external_review_activity(
     for task in tasks or ():
         if task.get("id") is None:
             continue
-        creator = _task_creator(task)
-        if account_id is not None and _clean_optional_str(creator.get("account_id")) == account_id:
+        if account_id is not None and _task_creator_id(task) == account_id:
             continue
         candidate = parse_bb_datetime(task.get("updated_on")) or parse_bb_datetime(
             task.get("created_on")

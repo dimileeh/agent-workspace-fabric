@@ -125,6 +125,28 @@ def test_viewer_authored_task_is_dropped() -> None:
     )
 
 
+def test_viewer_authored_task_with_uuid_only_creator_is_dropped() -> None:
+    # BitBucket may return a creator carrying only ``uuid`` (no ``account_id``), and
+    # the viewer identity itself falls back to ``uuid``. Mirroring the comment identity
+    # logic, a self-authored task in that shape must still be dropped — otherwise AWF
+    # addresses/re-anchors on its own task.
+    task = {
+        "id": 7,
+        "state": "UNRESOLVED",
+        "content": {"raw": "mine"},
+        "creator": {"uuid": "{viewer-uuid}", "display_name": "AWF"},
+    }
+    assert (
+        build_unresolved_task_threads(
+            [task],
+            repo=repo(),
+            pr_number=42,
+            account_id="{viewer-uuid}",
+        )
+        == ()
+    )
+
+
 def test_empty_and_idless_tasks_are_dropped() -> None:
     tasks = [
         {"id": 8, "state": "UNRESOLVED", "content": {"raw": "   "}},

@@ -699,6 +699,8 @@ def test_latest_external_review_activity_ignores_viewer_and_untimed_tasks() -> N
     tasks = [
         # viewer-authored → ignored even though newest.
         {"id": 1, "creator": {"account_id": "me"}, "updated_on": "2024-09-01T00:00:00Z"},
+        # viewer-authored via uuid-only creator (mirrors comment identity) → ignored.
+        {"id": 2, "creator": {"uuid": "me"}, "updated_on": "2024-09-02T00:00:00Z"},
         {"creator": {"account_id": "rev"}, "updated_on": "2024-08-01T00:00:00Z"},  # no id
         {"id": 3, "creator": {"account_id": "rev"}},  # no parseable timestamp → skipped
         # external task falls back to created_on when updated_on is absent.
