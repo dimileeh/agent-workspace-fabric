@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.schemas import WorkspaceControlResponse, WorkspaceControlWarningResponse
 from awf.common.config import get_settings
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace
+from awf.db.models import MergeCandidate, Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -30,6 +30,7 @@ from awf.node.cleanup import (
 )
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
+from awf.runtime.operator_hints import remonitor_has_elapsed_settle
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
@@ -157,6 +158,33 @@ def default_cleaner() -> WorkspaceCleaner:
         git=GitManager(work_dir / "git"),
         compose=ComposeManager(work_dir=work_dir, template_path=template),
     )
+
+
+def _remonitor_current_head_sha(
+    workspace: Workspace,
+    candidate: MergeCandidate | None,
+    monitor_state: dict[str, str],
+) -> str | None:
+    """Determine the effective head SHA for a remonitor, preferring workspace if past settle."""
+    candidate_head_sha = (
+        candidate.head_sha if candidate is not None and candidate.head_sha else None
+    )
+    workspace_head_sha = workspace.monitor_last_commit_sha
+    if (
+        candidate is not None
+        and candidate_head_sha is not None
+        and workspace_head_sha
+        and workspace_head_sha != candidate_head_sha
+        and workspace.pr_number is not None
+        and workspace.updated_at > candidate.updated_at
+        and remonitor_has_elapsed_settle(
+            monitor_state,
+            pr_number=workspace.pr_number,
+            head_sha=workspace_head_sha,
+        )
+    ):
+        return workspace_head_sha
+    return candidate_head_sha
 
 
 async def _reset_failed_workspace_for_remonitor(

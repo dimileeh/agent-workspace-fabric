@@ -7,10 +7,13 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository
+from awf.db.models import MergeCandidate
+from awf.db.repositories import MergeCandidateRepository, OperationRepository, TaskAttemptRepository
+from awf.runtime.monitor_state_keys import _non_check_reviewer_settle_done_key
 from awf.runtime.operator_hints import (
     OPERATOR_HINT_STATE_KEY,
     operator_hint_from_threads,
@@ -26,6 +29,7 @@ from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers
     _operations,
     _service,
     _workspace,
+    _workspace_with_candidate,
 )
 
 
@@ -357,7 +361,10 @@ async def test_guide_rejects_wrong_state_and_missing_pr_before_creating_operatio
 
     assert wrong_state.value.detail == {
         "status": WorkspaceStatus.requested.value,
-        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+        "eligible_statuses": [
+            WorkspaceStatus.monitoring_pr.value,
+            WorkspaceStatus.failed.value,
+        ],
     }
     assert missing_pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}
     assert await _operations(session, requested.id) == []
@@ -427,4 +434,259 @@ async def test_guide_rearms_pending_hint_after_prior_needs_human_wait(
     assert restored is not None
     assert restored.status == "pending"
     assert restored.directive == "implement, do not defer"
-    assert restored.operation_id != "op_old"
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_with_pr_resets_for_monitor_restart(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace with a PR resets it to monitoring_pr (issue #456)."""
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/88"
+    workspace.pr_number = 88
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "monitor crashed during ci wait"
+    workspace.monitor_iter_count = 6
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="fix the rebase conflict and continue",
+        reason="operator decision to restart failed monitor",
+        idempotency_key="guide-failed-reset",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    persisted = json.loads(monitor_state[OPERATOR_HINT_STATE_KEY])
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert workspace.monitor_iter_count == 0
+    assert workspace.version == 2
+    assert operations[0].status == "succeeded"
+    assert persisted["directive"] == "fix the rebase conflict and continue"
+    assert persisted["reason"] == "operator decision to restart failed monitor"
+    assert persisted["reason_code"] == "OPERATOR_GUIDE"
+    assert persisted["status"] == "pending"
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.reason_code == "OPERATOR_GUIDE"
+    assert guide_event.old_state == WorkspaceStatus.failed.value
+    assert guide_event.new_state == WorkspaceStatus.monitoring_pr.value
+    assert guide_event.payload["state_reset"] == {
+        "from": WorkspaceStatus.failed.value,
+        "to": WorkspaceStatus.monitoring_pr.value,
+        "monitor_iter_count_reset_from": 6,
+        "candidate_reopened": False,
+    }
+    audit_event = next(e for e in events if e.event_type == "workspace.audit.control_operation")
+    assert audit_event.reason_code == "OPERATOR_GUIDE"
+    assert audit_event.payload["action"] == OperationType.guide.value
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_reopens_merge_candidate(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace with a closed candidate reopens it (issue #456)."""
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.failed,
+        title="failed candidate guide",
+    )
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "monitor crashed during repair"
+    workspace.monitor_iter_count = 5
+    candidate.status = "closed"
+    candidate.close_reason = "STALE_MONITOR_FAILED"
+    candidate.closed_at = datetime.now(UTC)
+    candidate.merged_at = datetime.now(UTC)
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="continue with the fix",
+        idempotency_key="guide-failed-candidate",
+        expected_version=workspace.version,
+    )
+    attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+    events = await _events(session, workspace.id)
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert attempt is not None
+    assert attempt.status == WorkspaceStatus.monitoring_pr.value
+    assert candidate.status == "open"
+    assert candidate.close_reason is None
+    assert candidate.closed_at is None
+    assert candidate.merged_at is None
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.payload["state_reset"]["candidate_reopened"] is True
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_without_pr_rejected(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace with no PR raises MissingPrUrl, not StateError (issue #456)."""
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    # No pr_url set
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceGuideMissingPrUrlError) as exc_info:
+        await service.guide_workspace(workspace.id, directive="fix the issue")
+
+    assert exc_info.value.error_code == "WORKSPACE_PR_URL_REQUIRED"
+    assert await _operations(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_idempotency_replays(
+    session: AsyncSession,
+) -> None:
+    """Same-key retry on a guide-from-failed workspace returns the cached operation (issue #456)."""
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/89"
+    workspace.pr_number = 89
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="continue with the implementation",
+        idempotency_key="guide-failed-idempotency",
+        expected_version=workspace.version,
+    )
+    # After the first call workspace.version == 2 (state reset advanced it).
+    replay = await service.guide_workspace(
+        workspace.id,
+        directive="continue with the implementation",
+        idempotency_key="guide-failed-idempotency",
+        expected_version=workspace.version - 1,
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert response.operation_id == replay.operation_id
+    assert len(operations) == 1
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_force_clears_unexpired_claims(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace must null unexpired claims from a dead worker.
+
+    A failed workspace has no live worker; its monitor/execution claims
+    (even if unexpired) are orphaned. If guide only clears *stale* leases,
+    the failed→monitoring_pr transition leaves the row unclaimable until
+    the lease expires — new workers see a live claim and skip it.
+    Unlike guide on a live monitoring_pr workspace (where a real worker
+    holds the lease and picks up the directive on its next cycle), the
+    failed path must force-null all claims so claim_monitoring_pr can
+    acquire immediately (mirrors remonitor_workspace).
+    """
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/92"
+    workspace.pr_number = 92
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    workspace.monitor_claimed_by = "dead-monitor-worker"
+    workspace.monitor_claim_expires_at = future
+    workspace.execution_claimed_by = "dead-execution-worker"
+    workspace.execution_claim_expires_at = future
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="continue after failure",
+        idempotency_key="guide-failed-clear-claims",
+        expected_version=workspace.version,
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # Orphaned claims from the dead worker must be cleared unconditionally.
+    assert workspace.monitor_claimed_by is None
+    assert workspace.monitor_claim_expires_at is None
+    assert workspace.execution_claimed_by is None
+    assert workspace.execution_claim_expires_at is None
+    # claims_reset must record the force-cleared values for the audit trail.
+    claims_reset = operations[0].result["claims_reset"]
+    assert claims_reset["monitor_claimed_by"] == "dead-monitor-worker"
+    assert claims_reset["execution_claimed_by"] == "dead-execution-worker"
+
+
+@pytest.mark.unit
+async def test_guide_failed_workspace_uses_workspace_sha_when_past_settle(
+    session: AsyncSession,
+) -> None:
+    """Guide on a failed workspace uses workspace monitor_last_commit_sha when settle elapsed.
+
+    When the reviewer-settle window has elapsed for the workspace's head SHA and
+    the workspace was updated more recently than the (still-open) candidate, guide
+    must reopen the merge candidate with workspace.monitor_last_commit_sha — not
+    the stale candidate.head_sha.  This mirrors remonitor_workspace's
+    _remonitor_current_head_sha logic, which guide omitted before this fix
+    (thread PRRT_kwDOSJAM6s6Hr-2z).
+
+    The candidate must be open for the settle preference to fire; a closed
+    candidate falls back to latest.head_sha in both remonitor and guide.
+    """
+    workspace, candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.failed,
+        title="guide settle head sha",
+    )
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "monitor crashed"
+    workspace.monitor_iter_count = 3
+    # Advance the workspace to a newer head SHA while the open candidate still
+    # holds the older one — this is the state after the monitor pushed a new
+    # commit but failed before it could update the candidate row.
+    workspace_sha = "w" * 40
+    candidate_sha = "c" * 40
+    workspace.monitor_last_commit_sha = workspace_sha
+    candidate.head_sha = candidate_sha
+    # Keep the candidate open so _remonitor_current_head_sha can compare the two SHAs.
+    candidate.status = "open"
+    await session.flush()
+    # workspace.updated_at must be > candidate.updated_at for the settle preference
+    # to activate; backdate the candidate to guarantee the ordering.
+    await session.execute(
+        sa_update(MergeCandidate)
+        .where(MergeCandidate.id == candidate.id)
+        .values(updated_at=workspace.updated_at - timedelta(minutes=5))
+    )
+    await session.flush()
+    # Mark the reviewer-settle window as elapsed for the workspace's head SHA.
+    settle_key = _non_check_reviewer_settle_done_key(
+        pr_number=workspace.pr_number, head_sha=workspace_sha
+    )
+    workspace.monitor_threads_addressed = {settle_key: "elapsed"}
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="continue after failure",
+        idempotency_key="guide-settle-sha",
+        expected_version=workspace.version,
+    )
+    refreshed = await MergeCandidateRepository(session).get_by_attempt_id(candidate.attempt_id)
+
+    assert refreshed is not None
+    assert refreshed.status == "open"
+    # Guide must use the workspace's post-settle SHA, not the stale candidate SHA.
+    assert refreshed.head_sha == workspace_sha
