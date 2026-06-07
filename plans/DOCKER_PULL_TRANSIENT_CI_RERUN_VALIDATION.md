@@ -137,7 +137,7 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
 
 ## Commands run (focused)
 
-```
+```bash
 uv run --python 3.12 --extra dev pytest \
   tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py -q \
   -k "docker or registry_timeout or awaiting_headers or request_canceled or \
