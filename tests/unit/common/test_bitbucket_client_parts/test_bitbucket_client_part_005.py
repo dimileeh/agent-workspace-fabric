@@ -318,6 +318,51 @@ async def test_step_log_follows_offorigin_307_redirect_without_forge_auth() -> N
     assert "Authorization" not in storage_call.headers
 
 
+async def test_step_log_second_offorigin_redirect_is_refused_not_followed() -> None:
+    """The log-redirect grant is single-use: only ONE off-origin hop is allowed.
+
+    BitBucket documents exactly one 307 from the step-log endpoint to a signed,
+    off-origin storage URL. Once that first hop is followed (with the forge auth
+    stripped), the ``allow_log_redirect`` grant is consumed — so a *second*
+    off-origin redirect (e.g. a compromised or adversarial storage host bouncing the
+    now-unauthenticated client toward an internal/arbitrary target) faces the strict
+    SSRF guard and is refused before being issued. The best-effort log fetch tolerates
+    the resulting ``BitBucketClientError`` by yielding an empty excerpt rather than
+    chaining off-origin requests.
+    """
+    fake = FakeBitBucket()
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "FAILED", "name": "Pipeline"}],
+    )
+    fake.page("GET", f"{_REPO}/pipelines/", values=[{"uuid": "p1"}])
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/p1/steps/",
+        values=[{"uuid": "s1", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/p1/steps/s1/log",
+        status=307,
+        headers={"Location": "https://bbuseruploads.s3.amazonaws.com/log-storage/s1"},
+    )
+    # The storage host bounces to a SECOND off-origin host — must be refused, not chased.
+    fake.enqueue(
+        "GET",
+        "/log-storage/s1",
+        status=307,
+        headers={"Location": "https://evil.internal.example/secret"},
+    )
+    fake.enqueue("GET", "/secret", text="leaked-internal-data")
+    client = make_client(fake)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert failures[0].log_excerpt == ""
+    # The second off-origin target must never be contacted.
+    assert all(r.url.host != "evil.internal.example" for r in fake.calls("GET"))
+
+
 async def test_step_log_transport_failure_yields_empty_log_not_raise() -> None:
     """A transport timeout/reset on the step-log endpoint (or its signed storage
     redirect) must not escape the "best-effort, never raises" log fetch.

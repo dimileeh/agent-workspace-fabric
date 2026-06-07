@@ -1210,6 +1210,10 @@ class BitBucketClient:
         target = path
         target_params = params
         redirects = 0
+        # Single-use grant: ``allow_log_redirect`` permits exactly ONE off-origin hop
+        # (the documented step-log → signed-storage 307). It is consumed once that hop
+        # is followed so every later redirect faces the strict origin guard below.
+        log_redirect_allowed = allow_log_redirect
         while True:
             attempt = 0
             while True:
@@ -1248,7 +1252,7 @@ class BitBucketClient:
                     ),
                     reason_code=BITBUCKET_API_ERROR,
                 )
-            if allow_log_redirect and not self._is_forge_origin(location):
+            if log_redirect_allowed and not self._is_forge_origin(location):
                 # BB's step-log endpoint answers a documented 307 to an off-origin
                 # signed storage URL. The redirect comes from an already-authenticated
                 # api.bitbucket.org response, so follow it — but drop the forge
@@ -1256,6 +1260,15 @@ class BitBucketClient:
                 # storage host (the SSRF guard's core concern). The redirected body is
                 # only read as a redacted, truncated log excerpt and never re-acted on.
                 headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+                # Consume the single-use grant: BitBucket documents exactly ONE
+                # off-origin storage hop, so any *further* off-origin redirect (a
+                # compromised or adversarial storage host bouncing the now-unauthenticated
+                # client toward an internal/arbitrary target) is anomalous and must hit
+                # the strict ``_assert_forge_origin`` guard below instead of being chased.
+                # ``_request_text`` tolerates the resulting ``BitBucketClientError`` by
+                # returning ``""``, so a genuine multi-hop storage chain degrades to an
+                # empty log rather than an unbounded off-origin redirect chain.
+                log_redirect_allowed = False
             else:
                 # All other 3xx hops stay on the forge: each Location is origin-checked
                 # (same SSRF guard as pagination ``next``) before being re-issued.
