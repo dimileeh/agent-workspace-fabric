@@ -885,6 +885,21 @@ async def _capture_deferred_review_thread(
             issue_url=issue_url,
             stderr=_redact_and_truncate_github_error(exc.stderr),
         )
+    except BitBucketClientError as exc:
+        # BitBucket workspaces raise ``BitBucketClientError`` (not
+        # ``GitHubClientError``) when the courtesy ``post_comment`` fails. Without
+        # this arm the error would escape and terminate the monitor even though
+        # the tracking issue is already filed and recorded — the durable capture
+        # is done, so this comment is best-effort and its failure must be
+        # swallowed exactly like the GitHub case. ``BitBucketClientError`` has no
+        # ``stderr`` field; ``str(exc)`` carries an already-redacted body, redact
+        # again defensively before logging.
+        _log.warning(
+            "monitor.deferred_capture_comment_failed",
+            thread_id=thread.thread_id,
+            issue_url=issue_url,
+            stderr=_redact_and_truncate_github_error(str(exc)),
+        )
     await self._record_pr_monitor_audit_event(
         workspace_id=workspace_id,
         event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,

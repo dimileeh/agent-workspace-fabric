@@ -1300,6 +1300,88 @@ async def test_deferred_capture_permanent_bitbucket_failure_downgrades(
     assert state.threads_addressed_ids.get("T_bb_perm") == "defer"
 
 
+class _RaisingPostCommentClient:
+    """gh stand-in whose ``create_issue`` succeeds but ``post_comment`` raises.
+
+    Used to exercise the best-effort courtesy comment after a durable capture:
+    on a BitBucket workspace ``post_comment`` raises ``BitBucketClientError``,
+    which must be swallowed (the tracking issue is already filed) rather than
+    escaping to terminate the monitor.
+    """
+
+    def __init__(self, *, issue_url: str, exc: BaseException) -> None:
+        self._issue_url = issue_url
+        self._exc = exc
+
+    async def create_issue(self, *, repo: object, title: str, body: str) -> str:
+        return self._issue_url
+
+    async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        raise self._exc
+
+
+@pytest.mark.unit
+async def test_deferred_capture_bitbucket_comment_failure_still_succeeds(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # Filing the tracking issue is the durable capture; the explanatory PR comment
+    # is best-effort. On a BitBucket workspace ``post_comment`` raises
+    # ``BitBucketClientError`` — it must be swallowed (not escape and terminate the
+    # monitor), and capture still succeeds (returns True) with the issue recorded
+    # as filed so a retry never opens a duplicate.
+    from awf.common.bitbucket_client import BitBucketClientError
+    from awf.runtime.pr_monitor import _mark_review_thread_addressed
+    from awf.runtime.pr_monitor_runner.fix_cycle import (
+        _capture_deferred_review_thread,
+        _deferred_issue_filed_marker,
+        _review_thread_body_hash,
+    )
+
+    ws_id = await seed_monitoring_workspace(factory)
+    issue_url = "https://bitbucket.org/dimileeh/aira-web/issues/77"
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_RaisingPostCommentClient(
+            issue_url=issue_url,
+            exc=BitBucketClientError(
+                operation="bitbucket post_comment",
+                status=403,
+                body="forbidden",
+            ),
+        ),
+    )
+    thread = ReviewThread(
+        thread_id="T_bb_comment", path="src/x.py", line=1, body_excerpt="nit", author="rev"
+    )
+    state = MonitorState()
+    _mark_review_thread_addressed(state, thread, "defer")
+
+    result = await _capture_deferred_review_thread(
+        runner,
+        workspace_id=ws_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        thread=thread,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    # True -> the comment failure was swallowed; capture is durable and the caller
+    # may resolve the thread. The filed-issue marker is recorded for idempotency.
+    assert result is True
+    marker = _deferred_issue_filed_marker(thread.thread_id, _review_thread_body_hash(thread))
+    assert state.threads_addressed_ids.get(marker) == issue_url
+
+
 @pytest.mark.unit
 async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
     factory: async_sessionmaker[AsyncSession],
