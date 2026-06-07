@@ -986,6 +986,58 @@ class TestPullRequestUnexpectedErrorPart002:
             assert not [event for event in ws.events if event.event_type == _AUDIT_GIT_PUSH_EVENT]
 
     @pytest.mark.unit
+    async def test_bitbucket_create_failure_preserves_reason_code_on_failed_workspace(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # PRRT_kwDOSJAM6s6HqvLL: when ``push_and_open`` wraps a
+        # BitBucketClientError (auth / rate-limit / transport) as a
+        # PullRequestError, the executor must record the *specific* reason_code
+        # on the failed workspace transition — matching the other BitBucket
+        # handoff paths — instead of a generic INFRASTRUCTURE_FAILURE, so
+        # operators get actionable doctor guidance. The PR_CREATE_FAILED audit
+        # event (the action category) is still recorded.
+        from awf.common.bitbucket_client import BITBUCKET_AUTH_NOT_CONFIGURED
+        from awf.control.executor.constants import (
+            _AUDIT_PR_CREATED_EVENT,
+            _PR_CREATE_FAILED_REASON_CODE,
+        )
+        from awf.runtime.pr_creator import PullRequestError
+
+        class _RaisingPrCreator:
+            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
+                raise PullRequestError(
+                    operation="bitbucket create_pull_request",
+                    returncode=401,
+                    stderr="BITBUCKET_API_TOKEN is required.",
+                    head_sha="c" * 40,
+                    reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
+                )
+
+        ws_id = await _seed_ready(factory)
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=_RaisingPrCreator())
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            # The terminal failed-transition event carries the forge-specific
+            # reason_code, not the generic INFRASTRUCTURE_FAILURE fallback.
+            assert ws.events[-1].reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
+            # The PR-create audit event still categorises the action failure.
+            pr_create_events = [
+                event for event in ws.events if event.event_type == _AUDIT_PR_CREATED_EVENT
+            ]
+            assert len(pr_create_events) == 1
+            assert pr_create_events[0].reason_code == _PR_CREATE_FAILED_REASON_CODE
+
+    @pytest.mark.unit
     async def test_reuse_push_skips_forge_client_resolution(
         self,
         fake: FakeCommandRunner,

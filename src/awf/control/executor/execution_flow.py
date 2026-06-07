@@ -1345,6 +1345,11 @@ async def execute(
             from_status=WorkspaceStatus.pushing,
             failure_reason=FailureReason.infrastructure_failure,
             message=str(exc)[:2000],
+            # Preserve a forge-specific reason code (e.g. BitBucket auth /
+            # rate-limit / transport) so the failed workspace carries the
+            # actionable doctor guidance; ``None`` (git push, GitHub, no-URL)
+            # falls back to ``INFRASTRUCTURE_FAILURE``.
+            reason_code=exc.reason_code,
         )
         return
     except Exception as exc:

@@ -73,11 +73,19 @@ class PullRequestError(Exception):
         returncode: int,
         stderr: str,
         head_sha: str | None = None,
+        reason_code: str | None = None,
     ) -> None:
         self.operation = operation
         self.returncode = returncode
         self.stderr = stderr
         self.head_sha = head_sha
+        # Forge clients that carry an actionable reason code (e.g.
+        # ``BitBucketClientError`` with auth / rate-limit / transport codes)
+        # propagate it here so the executor records the specific doctor
+        # guidance on the failed workspace instead of a generic
+        # ``PR_CREATE_FAILED``. ``GitHubClientError`` has no reason code, and
+        # the push / no-client / no-URL raises leave this ``None``.
+        self.reason_code = reason_code
         super().__init__(
             f"{operation} failed (exit={returncode}): {stderr.strip() or '<no output>'}"
         )
@@ -213,12 +221,17 @@ class PullRequestCreator:
         except BitBucketClientError as exc:
             # BitBucket uses HTTP status (``None`` for transport errors) and a
             # redacted ``body`` where GitHub uses returncode/stderr — map them
-            # onto the same structured PullRequestError fields.
+            # onto the same structured PullRequestError fields. Preserve
+            # ``exc.reason_code`` (auth / rate-limit / transport) so the
+            # executor records the specific doctor guidance instead of a
+            # generic ``PR_CREATE_FAILED`` (mirrors the other BitBucket
+            # handoff paths that flow ``reason_code`` end-to-end).
             raise PullRequestError(
                 operation=exc.operation,
                 returncode=exc.status if exc.status is not None else 0,
                 stderr=exc.body,
                 head_sha=head_sha,
+                reason_code=exc.reason_code,
             ) from exc
 
         if not url:

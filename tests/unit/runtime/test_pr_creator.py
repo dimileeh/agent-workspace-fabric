@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import (
+    BITBUCKET_API_ERROR,
+    BITBUCKET_AUTH_NOT_CONFIGURED,
+    BitBucketClientError,
+)
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
@@ -140,6 +144,8 @@ class TestPushAndOpen:
         assert exc.value.returncode == 1
         assert exc.value.head_sha == "abc123def4567890"
         assert "gh: auth token expired" in exc.value.stderr
+        # GitHubClientError carries no reason_code, so the wrapper leaves it None.
+        assert exc.value.reason_code is None
 
     @pytest.mark.unit
     async def test_opens_pr_on_bitbucket_via_forge_client(self) -> None:
@@ -204,6 +210,39 @@ class TestPushAndOpen:
         assert exc.value.returncode == 403
         assert exc.value.head_sha == "abc123def4567890"
         assert "forbidden" in exc.value.stderr
+        # The BitBucketClientError's default reason_code flows through verbatim.
+        assert exc.value.reason_code == BITBUCKET_API_ERROR
+
+    @pytest.mark.unit
+    async def test_bitbucket_failure_preserves_actionable_reason_code(self) -> None:
+        # PRRT_kwDOSJAM6s6HqvLL: a BitBucketClientError carrying an actionable
+        # reason_code (auth / rate-limit / transport) must propagate it onto the
+        # PullRequestError so the executor records the specific doctor guidance
+        # instead of a generic PR_CREATE_FAILED.
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        forge = _FakeForgeClient(
+            error=BitBucketClientError(
+                operation="bitbucket create_pull_request",
+                status=401,
+                body="BITBUCKET_API_TOKEN is required.",
+                reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
+            )
+        )
+        creator = PullRequestCreator(runner)
+        with pytest.raises(PullRequestError) as exc:
+            await creator.push_and_open(
+                worktree_path=_WORKTREE,
+                branch_name="awf/ws_x",
+                base_branch="development",
+                title="t",
+                body="b",
+                forge_client=forge,
+                repo_url="git@bitbucket.org:workspace/repo.git",
+            )
+        assert exc.value.reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
 
     @pytest.mark.unit
     async def test_bitbucket_transport_failure_maps_status_none_to_zero(self) -> None:
@@ -480,6 +519,8 @@ class TestPushAndOpen:
             )
         assert exc.value.operation == "git push"
         assert exc.value.returncode == 128
+        # A push failure has no forge reason_code to carry.
+        assert exc.value.reason_code is None
         # 3 diagnostic queries + 1 push = 4 calls; the forge was never reached.
         assert len(runner.calls) == 4
 
