@@ -16,6 +16,7 @@ const actionPaths: Record<AwfControlAction, string> = {
   remonitor: "remonitor",
   refresh: "refresh",
   revalidate: "validate",
+  cancel: "cancel",
 };
 
 const invalidRequestStatus = 400;
@@ -114,13 +115,16 @@ async function parsePayload(
   return { ok: true, value: payload };
 }
 
-function awfBody(action: AwfControlAction, payload: WorkspaceControlRoutePayload): Record<string, string | ValidationTier> {
-  const body: Record<string, string | ValidationTier> = {};
+function awfBody(action: AwfControlAction, payload: WorkspaceControlRoutePayload): Record<string, string | ValidationTier | boolean> {
+  const body: Record<string, string | ValidationTier | boolean> = {};
   if (payload.reason) {
     body.reason = payload.reason;
   }
   if (action === "revalidate" && isValidationTier(payload.requested_tier)) {
     body.requested_tier = payload.requested_tier;
+  }
+  if (action === "cancel") {
+    body.stop_stack = true;
   }
   return body;
 }

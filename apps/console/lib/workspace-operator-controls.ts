@@ -43,7 +43,18 @@ const labels: Record<WorkspaceOperatorAction, string> = {
   remonitor: "Remonitor",
   refresh: "Refresh",
   revalidate: "Revalidate",
+  cancel: "Cancel",
 };
+
+const cancellableStatuses = new Set([
+  "requested",
+  "provisioning",
+  "ready",
+  "running",
+  "validating",
+  "pushing",
+  "monitoring_pr",
+]);
 
 const terminalOperationStatuses = new Set(["succeeded", "failed", "cancelled", "canceled"]);
 
@@ -53,6 +64,7 @@ export function getWorkspaceOperatorControls(context: WorkspaceOperatorContext):
     remonitorControl(context),
     refreshControl(context),
     revalidateControl(context),
+    cancelControl(context),
   ];
 
   if (!active) {
@@ -138,6 +150,17 @@ function revalidateControl(context: WorkspaceOperatorContext): WorkspaceOperator
   return control("revalidate", { visible: Boolean(context.mergeQueueItem) || Boolean(context.workspace), enabled: false, reason: "validation fresh", requestedTier });
 }
 
+function cancelControl(context: WorkspaceOperatorContext): WorkspaceOperatorControl {
+  if (isCancellable(context)) {
+    return control("cancel", { visible: true, enabled: true, reason: null });
+  }
+  return control("cancel", { visible: false, enabled: false, reason: "not cancellable" });
+}
+
+function isCancellable(context: WorkspaceOperatorContext): boolean {
+  return cancellableStatuses.has(context.overview.status);
+}
+
 function control(
   action: WorkspaceOperatorAction,
   state: Omit<WorkspaceOperatorControl, "action" | "label">,
@@ -166,6 +189,9 @@ function eligibleEnoughForActiveReason(action: WorkspaceOperatorAction, context:
   }
   if (action === "refresh") {
     return hasMergeCandidateOrStaleContext(context);
+  }
+  if (action === "cancel") {
+    return isCancellable(context);
   }
   return Boolean(workspacePrUrl(context)) || isPotentialValidationContext(context);
 }

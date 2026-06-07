@@ -220,7 +220,7 @@ type OperationAuditFieldsAreNullable = Expect<
 export const operationAuditFieldsAreNullable: OperationAuditFieldsAreNullable = true;
 
 type WorkspaceOperatorActionUnionIsExplicit = Expect<
-  Equal<WorkspaceOperatorAction, "remonitor" | "refresh" | "revalidate">
+  Equal<WorkspaceOperatorAction, "remonitor" | "refresh" | "revalidate" | "cancel">
 >;
 
 type WorkspaceControlResponseShape = Expect<

@@ -605,6 +605,8 @@ export function operatorActionReason(action: WorkspaceOperatorAction): string {
       return "operator console refresh";
     case "revalidate":
       return "operator console revalidate";
+    case "cancel":
+      return "operator console cancel";
     default:
       return "operator console";
   }
