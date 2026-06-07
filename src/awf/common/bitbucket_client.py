@@ -566,8 +566,11 @@ class BitBucketClient:
 
         If the repository issue tracker is disabled (404), fall back to posting the
         content as a PR comment (using remembered PR context), returning that comment
-        URL and emitting ``BITBUCKET_ISSUE_TRACKER_DISABLED``. Never crashes the
-        NotifyHuman path; always returns a usable URL.
+        URL and emitting ``BITBUCKET_ISSUE_TRACKER_DISABLED``. If that fallback POST
+        also fails (e.g. a 403 lacking comment permission), the ``BitBucketClientError``
+        propagates rather than returning a PR-page URL: nothing durable was captured, so
+        the deferred-capture caller must treat it as a failure and downgrade to human
+        attention instead of resolving the thread (fail safe, mirroring the GitHub path).
         """
         try:
             data = await self._request_json(
@@ -885,17 +888,21 @@ class BitBucketClient:
             )
         except BitBucketClientError as exc:
             # The fallback POST can itself fail (e.g. 403 when the bot lacks comment
-            # permission, or a transport error). Honor create_issue's "never crashes
-            # the NotifyHuman path" contract: the call site in fix_cycle.py only
-            # catches GitHubClientError, so an escaping BitBucketClientError would
-            # terminate the monitor. Return the PR page as a usable URL instead.
+            # permission, or a transport error). Do NOT swallow it: no issue was filed
+            # and no comment was posted, so nothing durable was captured. Returning a
+            # PR-page URL here would let the deferred-capture call site in fix_cycle.py
+            # record a capture that never happened and resolve the reviewer's thread,
+            # dropping the follow-up. Propagate instead — create_issue re-raises and the
+            # call site's BitBucketClientError handler requeues transient blips or
+            # downgrades permanent faults to needs_human, matching create_issue's
+            # documented fail-safe contract (leave the thread unresolved on failure).
             _log.warning(
                 "bitbucket.issue_fallback_comment_failed",
                 repo=repo.slug(),
                 reason_code=exc.reason_code,
                 status=exc.status,
             )
-            return self._pr_page_url(repo, ctx.pr_number)
+            raise
         return html_href(data) or self._pr_page_url(repo, ctx.pr_number)
 
     async def _current_account_id(self) -> str | None:
