@@ -833,6 +833,69 @@ class TestWorkspaceRemonitor:
         assert f"Generated Idempotency-Key: {generated_key}" in result.stderr
 
 
+class TestWorkspaceGuide:
+    """Workspace guide/instruct command tests (issue #447)."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("command", ["guide", "instruct"])
+    def test_posts_guide_request_with_directive_and_headers(
+        self,
+        command: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Post guide/instruct requests with directive, reason, and headers."""
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "workspace_id": "ws_monitor",
+                "operation_id": "op_guide",
+                "status": "monitoring_pr",
+                "message": "workspace operator guidance recorded",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    command,
+                    "ws_monitor",
+                    "--directive",
+                    "implement, do not defer",
+                    "--reason",
+                    "operator decision",
+                    "--idempotency-key",
+                    "guide-cli-key",
+                    "--if-match",
+                    "7",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "op_guide" in result.stdout
+        assert "env-secret" not in result.stdout
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_monitor/guide",
+        )
+        assert mock.call_args.kwargs["json"] == {
+            "directive": "implement, do not defer",
+            "reason": "operator decision",
+        }
+        assert mock.call_args.kwargs["headers"] == {
+            "Authorization": "Bearer env-secret",
+            "Idempotency-Key": "guide-cli-key",
+            "If-Match": "7",
+        }
+
+    @pytest.mark.unit
+    def test_guide_requires_directive_option(self) -> None:
+        """The --directive option is required for guide."""
+        result = _runner.invoke(app, ["workspace", "guide", "ws_monitor"])
+        assert result.exit_code != 0
+
+
 class TestWorkspaceControlCommandsPresence:
     """Workspace control command discovery tests."""
 
@@ -842,7 +905,16 @@ class TestWorkspaceControlCommandsPresence:
         result = _runner.invoke(app, ["workspace", "--help"])
 
         assert result.exit_code == 0
-        for command in ("cancel", "stop", "destroy", "refresh", "validate", "rebase"):
+        for command in (
+            "cancel",
+            "stop",
+            "destroy",
+            "refresh",
+            "validate",
+            "rebase",
+            "guide",
+            "instruct",
+        ):
             assert command in result.stdout
 
 
@@ -856,6 +928,8 @@ class TestWorkspaceControlCommandsPresence:
         ("refresh", ["ws_refresh", "--reason", "stale branch"]),
         ("validate", ["ws_validate", "--requested-tier", "2"]),
         ("rebase", ["ws_rebase", "--reason", "recover merge conflicts"]),
+        ("guide", ["ws_guide", "--directive", "implement, do not defer"]),
+        ("instruct", ["ws_instruct", "--directive", "implement, do not defer"]),
     ],
 )
 def test_workspace_control_commands_generate_idempotency_key_when_omitted(

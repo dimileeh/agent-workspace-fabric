@@ -39,6 +39,7 @@ def operator_hint_from_threads(threads_addressed: dict[str, str]) -> OperatorHin
         status = "pending"
     return OperatorHint(
         reason=reason,
+        directive=_optional_string(payload.get("directive")),
         operation_id=_optional_string(payload.get("operation_id")),
         requested_at=_optional_string(payload.get("requested_at")),
         reason_code=_optional_string(payload.get("reason_code")) or "OPERATOR_REMONITOR",
@@ -57,6 +58,7 @@ def persist_operator_hint(
         return threads_addressed
     payload = {
         "reason": hint.reason,
+        "directive": hint.directive,
         "operation_id": hint.operation_id,
         "requested_at": hint.requested_at,
         "reason_code": hint.reason_code,
@@ -89,6 +91,7 @@ def mark_operator_hint_needs_human(state: MonitorState, reason: str) -> None:
         return
     state.pending_operator_hint = OperatorHint(
         reason=hint.reason,
+        directive=hint.directive,
         operation_id=hint.operation_id,
         requested_at=hint.requested_at,
         reason_code=hint.reason_code,
@@ -103,6 +106,7 @@ def mark_operator_hint_agent_failed(state: MonitorState, reason: str) -> None:
         return
     state.pending_operator_hint = OperatorHint(
         reason=hint.reason,
+        directive=hint.directive,
         operation_id=hint.operation_id,
         requested_at=hint.requested_at,
         reason_code=hint.reason_code,
@@ -222,6 +226,7 @@ def build_pending_operator_hint_payload(hint: OperatorHint) -> dict[str, object]
         key: value
         for key, value in {
             "reason": hint.reason,
+            "directive": hint.directive,
             "operation_id": hint.operation_id,
             "requested_at": hint.requested_at,
             "reason_code": hint.reason_code,

@@ -6,15 +6,18 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.controls as controls
-from awf.api.schemas import WorkspaceControlRequest
+from awf.api.schemas import WorkspaceControlRequest, WorkspaceGuideRequest
 from awf.db.session import make_session_factory
 from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
     WorkspaceControlError,
+    WorkspaceGuideMissingPrUrlError,
+    WorkspaceGuideStateError,
     WorkspaceNotFoundError,
     WorkspaceRebaseMissingCandidateError,
     WorkspaceRebaseMissingPrUrlError,
@@ -84,6 +87,14 @@ def test_require_idempotency_key_strips_valid_values() -> None:
             400,
         ),
         (
+            WorkspaceGuideMissingPrUrlError(SimpleNamespace(status="monitoring_pr")),
+            400,
+        ),
+        (
+            WorkspaceGuideStateError(SimpleNamespace(status="requested")),
+            409,
+        ),
+        (
             WorkspaceRebaseMissingCandidateError(
                 SimpleNamespace(id="ws_1", pr_url="https://github.com/x/y/pull/1")
             ),
@@ -145,6 +156,15 @@ async def test_control_route_functions_map_missing_workspace_errors(
                 session=session,
             )
     async with factory() as session:
+        with pytest.raises(HTTPException) as guide_error:
+            await controls.guide_workspace(
+                "ws_missing",
+                WorkspaceGuideRequest(directive="do the thing"),
+                idempotency_key="guide-missing",
+                if_match=None,
+                session=session,
+            )
+    async with factory() as session:
         with pytest.raises(HTTPException) as destroy_error:
             await controls.destroy_workspace(
                 "ws_missing",
@@ -157,7 +177,22 @@ async def test_control_route_functions_map_missing_workspace_errors(
         cancel_error.value,
         stop_error.value,
         remonitor_error.value,
+        guide_error.value,
         destroy_error.value,
     ]
-    assert [error.status_code for error in errors] == [404, 404, 404, 404]
-    assert [error.detail["error_code"] for error in errors] == ["NOT_FOUND"] * 4
+    assert [error.status_code for error in errors] == [404, 404, 404, 404, 404]
+    assert [error.detail["error_code"] for error in errors] == ["NOT_FOUND"] * 5
+
+
+@pytest.mark.unit
+def test_guide_request_requires_non_empty_directive() -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceGuideRequest()  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        WorkspaceGuideRequest(directive="")
+    with pytest.raises(ValidationError):
+        WorkspaceGuideRequest(directive="   ")
+
+    request = WorkspaceGuideRequest(directive="implement, do not defer")
+    assert request.directive == "implement, do not defer"
+    assert request.reason is None

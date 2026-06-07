@@ -64,6 +64,7 @@ async def _run_operator_hint_cycle(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         reason=hint.reason,
+        directive=hint.directive,
         operation_id=hint.operation_id,
         workspace_runtime_context=self._workspace_runtime_context,
     )

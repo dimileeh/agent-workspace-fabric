@@ -11,6 +11,7 @@ from awf.api.schemas import (
     OperationResponse,
     WorkspaceControlRequest,
     WorkspaceControlResponse,
+    WorkspaceGuideRequest,
     WorkspaceOperationRequest,
     WorkspaceReasonWithLegacyRequestedTierRequest,
     WorkspaceReasonWithLegacyStopStackRequest,
@@ -21,6 +22,8 @@ from awf.service.controls import (
     VersionConflictError,
     WorkspaceControlError,
     WorkspaceControlService,
+    WorkspaceGuideMissingPrUrlError,
+    WorkspaceGuideStateError,
     WorkspaceNotFoundError,
     WorkspaceRebaseActiveConflictError,
     WorkspaceRebaseMissingCandidateError,
@@ -94,6 +97,31 @@ async def remonitor_workspace(
     try:
         return await _controls(session).remonitor_workspace(
             workspace_id,
+            reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+        )
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
+@router.post("/guide", response_model=WorkspaceControlResponse)
+async def guide_workspace(
+    workspace_id: str,
+    payload: WorkspaceGuideRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceControlResponse:
+    """Inject an operator ``directive`` into a live monitoring workspace.
+
+    ``directive`` is the agent instruction (acted on next monitor cycle);
+    ``reason`` is audit-only. This is the purpose-named affordance for operator
+    guidance — prefer it over overloading ``remonitor --reason``."""
+    try:
+        return await _controls(session).guide_workspace(
+            workspace_id,
+            directive=payload.directive,
             reason=payload.reason,
             idempotency_key=_require_idempotency_key(idempotency_key),
             expected_version=_parse_if_match(if_match),
@@ -212,6 +240,7 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
     elif isinstance(
         exc,
         (
+            WorkspaceGuideMissingPrUrlError,
             WorkspaceRemonitorMissingPrUrlError,
             WorkspaceValidateMissingPrUrlError,
             WorkspaceRebaseMissingPrUrlError,
@@ -226,6 +255,7 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
             ActiveWorkspaceDestroyError,
             IdempotencyConflictError,
             VersionConflictError,
+            WorkspaceGuideStateError,
             WorkspaceRefreshStateError,
             WorkspaceRemonitorStateError,
             WorkspaceValidateStateError,

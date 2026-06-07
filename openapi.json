@@ -2120,6 +2120,7 @@
           "cancel",
           "stop",
           "remonitor",
+          "guide",
           "sync_base",
           "comment_repair",
           "ci_repair",
@@ -8164,6 +8165,35 @@
         "title": "WorkspaceFailureSalvageResponse",
         "type": "object"
       },
+      "WorkspaceGuideRequest": {
+        "additionalProperties": false,
+        "description": "Operator-guidance request (issue #447).\n\n``directive`` is the first-class agent instruction injected into a live\nmonitoring workspace; ``reason`` is an optional audit reason. Use the\n``guide`` control rather than overloading ``remonitor --reason`` as the\ndirective channel.",
+        "properties": {
+          "directive": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Directive",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "directive"
+        ],
+        "title": "WorkspaceGuideRequest",
+        "type": "object"
+      },
       "WorkspaceLaunchPreflight": {
         "additionalProperties": false,
         "properties": {
@@ -14090,6 +14120,124 @@
         "summary": "List Workspace Events",
         "tags": [
           "workspaces"
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace_id}/guide": {
+      "post": {
+        "description": "Inject an operator ``directive`` into a live monitoring workspace.\n\n``directive`` is the agent instruction (acted on next monitor cycle);\n``reason`` is audit-only. This is the purpose-named affordance for operator\nguidance \u2014 prefer it over overloading ``remonitor --reason``.",
+        "operationId": "guide_workspace_v1_workspaces__workspace_id__guide_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceGuideRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceControlResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "WWW-Authenticate": {
+                "description": "Bearer challenge for the API token.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HttpExceptionErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Guide Workspace",
+        "tags": [
+          "workspace-controls"
         ]
       }
     },

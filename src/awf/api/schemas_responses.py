@@ -137,6 +137,20 @@ class WorkspaceControlRequest(WorkspaceReasonRequest):
     stop_stack: bool = True
 
 
+class WorkspaceGuideRequest(BaseModel):
+    """Operator-guidance request (issue #447).
+
+    ``directive`` is the first-class agent instruction injected into a live
+    monitoring workspace; ``reason`` is an optional audit reason. Use the
+    ``guide`` control rather than overloading ``remonitor --reason`` as the
+    directive channel."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    directive: Annotated[str, Field(min_length=1, max_length=1024)]
+    reason: Annotated[str | None, Field(default=None, max_length=1024)]
+
+
 class WorkspaceOperationRequest(WorkspaceReasonRequest):
     requested_tier: Annotated[int | None, Field(default=None, ge=1, le=3)]
 

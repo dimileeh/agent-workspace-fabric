@@ -41,6 +41,8 @@ from awf.service.controls_errors import (
     IdempotencyConflictError,
     VersionConflictError,
     WorkspaceControlError,
+    WorkspaceGuideMissingPrUrlError,
+    WorkspaceGuideStateError,
     WorkspaceNotFoundError,
     WorkspaceRebaseActiveConflictError,
     WorkspaceRebaseMissingCandidateError,
@@ -84,6 +86,10 @@ _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
 )
+# guide is a no-state-transition control: it injects a directive into a *live*
+# monitoring workspace, so only ``monitoring_pr`` is eligible. Re-engaging a
+# ``failed`` workspace stays remonitor's job (issue #447).
+_GUIDE_ELIGIBLE_STATUSES = (WorkspaceStatus.monitoring_pr,)
 _VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _VALIDATE_REPLAY_STATUSES = frozenset(
     {
@@ -108,6 +114,7 @@ _OPERATOR_API_SOURCE = "operator_api"
 _OPERATOR_CANCEL_REASON_CODE = "OPERATOR_CANCEL"
 _OPERATOR_STOP_REASON_CODE = "OPERATOR_STOP"
 _OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
+_OPERATOR_GUIDE_REASON_CODE = "OPERATOR_GUIDE"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
@@ -595,6 +602,127 @@ class WorkspaceControlService:
             operation=operation,
             message="workspace PR monitor recovery requested",
             warnings=warnings,
+        )
+
+    async def guide_workspace(
+        self,
+        workspace_id: str,
+        *,
+        directive: str,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        """Inject an operator ``directive`` into a live monitoring workspace.
+
+        Purpose-named operator-guidance control (issue #447). It arms a PENDING
+        :class:`OperatorHint` carrying the ``directive`` (the agent instruction,
+        distinct from the audit ``reason``) so the monitor's next ``decide()``
+        cycle re-engages the agent — even from a prior ``NotifyHuman`` wait —
+        without cancelling/re-adopting. It reuses the same OperatorHint engine
+        as ``remonitor`` but never changes workspace status (it mutates
+        ``monitor_threads_addressed`` while staying ``monitoring_pr``)."""
+
+        repo = WorkspaceRepository(self._session)
+        operations = OperationRepository(self._session)
+        directive_text = (directive or "").strip()
+        reason_text = (reason or "").strip()
+        workspace_for_payload = await self._require_workspace(repo, workspace_id)
+        payload = _operator_operation_payload(
+            reason=reason,
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            requested_action=OperationType.guide.value,
+            extra={
+                "directive": directive_text,
+                **_workspace_pr_operation_context(workspace_for_payload),
+            },
+        )
+        operation_payload = _operation_payload(payload, expected_version=expected_version)
+        prepared = await self._prepare_operation(
+            repo,
+            operations,
+            workspace_id=workspace_id,
+            operation_type=OperationType.guide,
+            payload=operation_payload,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+        )
+        workspace = prepared.workspace
+        if prepared.replay is not None:
+            return _control_response(
+                workspace=workspace,
+                operation=prepared.replay,
+                message="workspace operator guidance recorded",
+            )
+
+        current = WorkspaceStatus(workspace.status)
+        if current not in _GUIDE_ELIGIBLE_STATUSES:
+            raise WorkspaceGuideStateError(workspace)
+        if not workspace.pr_url:
+            raise WorkspaceGuideMissingPrUrlError(workspace)
+
+        operation = await operations.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.guide,
+            status=OperationStatus.running,
+            payload=operation_payload,
+            idempotency_key=prepared.idempotency_key,
+        )
+        monitor_state = dict(workspace.monitor_threads_addressed or {})
+        hint = OperatorHint(
+            reason=reason_text or directive_text,
+            directive=directive_text,
+            operation_id=operation.id,
+            requested_at=utcnow().isoformat(),
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            status="pending",
+        )
+        persist_operator_hint(monitor_state, hint)
+        workspace.monitor_threads_addressed = monitor_state
+        pending_operator_hint = build_pending_operator_hint_payload(hint)
+        claims_reset = _claim_reset_snapshot(workspace)
+        workspace.monitor_claimed_by = None
+        workspace.monitor_claim_expires_at = None
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+        await repo.advance_workspace_version(workspace)
+        event_payload: dict[str, object | None] = {
+            "reason": reason,
+            "directive": directive_text,
+            "operation_id": operation.id,
+            "claims_reset": claims_reset,
+            "pending_operator_hint": pending_operator_hint,
+        }
+        event_payload = _event_payload(event_payload, expected_version=expected_version)
+        await repo.add_event(
+            workspace,
+            event_type="workspace.guide_requested",
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            payload=event_payload,
+        )
+        await _add_control_audit_event(
+            repo,
+            workspace,
+            operation=operation,
+            action=OperationType.guide.value,
+            outcome="succeeded",
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            extra={"expected_version": expected_version, "directive": directive_text},
+        )
+        result: dict[str, object | None] = {
+            "status": workspace.status,
+            "claims_reset": claims_reset,
+            **_workspace_pr_operation_context(workspace),
+        }
+        await operations.finish(
+            operation,
+            status=OperationStatus.succeeded,
+            result=result,
+        )
+        return _control_response(
+            workspace=workspace,
+            operation=operation,
+            message="workspace operator guidance recorded",
         )
 
     async def request_refresh_workspace(
@@ -1416,6 +1544,8 @@ __all__ = [
     "IdempotencyConflictError",
     "VersionConflictError",
     "WorkspaceStackStopError",
+    "WorkspaceGuideMissingPrUrlError",
+    "WorkspaceGuideStateError",
     "WorkspaceRemonitorMissingPrUrlError",
     "WorkspaceRemonitorStateError",
     "WorkspaceRefreshStateError",

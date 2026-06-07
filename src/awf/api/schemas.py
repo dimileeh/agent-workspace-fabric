@@ -63,6 +63,7 @@ WorkspaceReasonWithLegacyRequestedTierRequest = (
     _schemas_responses.WorkspaceReasonWithLegacyRequestedTierRequest
 )
 WorkspaceControlRequest = _schemas_responses.WorkspaceControlRequest
+WorkspaceGuideRequest = _schemas_responses.WorkspaceGuideRequest
 WorkspaceOperationRequest = _schemas_responses.WorkspaceOperationRequest
 WorkspaceControlWarningResponse = _schemas_responses.WorkspaceControlWarningResponse
 WorkspaceControlResponse = _schemas_responses.WorkspaceControlResponse

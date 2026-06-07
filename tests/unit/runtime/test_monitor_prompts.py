@@ -566,6 +566,30 @@ class TestOperatorHintPrompt:
         assert "Do NOT push" in prompt
 
     @pytest.mark.unit
+    def test_directive_is_rendered_as_the_repair_evidence(self) -> None:
+        prompt = operator_hint_prompt(
+            pr_number=443,
+            repo_slug="dimileeh/awf",
+            reason="operator guidance recorded",
+            directive="implement the forge-neutral fix, do not defer",
+            operation_id="op_guide",
+        )
+
+        assert ("AWF-EVIDENCE> implement the forge-neutral fix, do not defer") in prompt
+        # The audit reason is not the agent instruction when a directive is set.
+        assert "AWF-EVIDENCE> operator guidance recorded" not in prompt
+
+    @pytest.mark.unit
+    def test_directive_absent_falls_back_to_reason(self) -> None:
+        prompt = operator_hint_prompt(
+            pr_number=443,
+            repo_slug="dimileeh/awf",
+            reason="reply to the relevant unresolved review thread",
+        )
+
+        assert "AWF-EVIDENCE> reply to the relevant unresolved review thread" in prompt
+
+    @pytest.mark.unit
     def test_prescribes_fixed_verdict_for_successful_code_or_no_code_hints(self) -> None:
         prompt = operator_hint_prompt(
             pr_number=329,

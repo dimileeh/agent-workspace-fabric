@@ -276,9 +276,15 @@ class MonitorState:
 
 @dataclass(frozen=True)
 class OperatorHint:
-    """Operator-provided remonitor hint that must be processed before merge."""
+    """Operator-provided remonitor/guide hint that must be processed before merge.
+
+    ``reason`` is the audit reason. ``directive`` is the agent instruction
+    injected by the purpose-named ``guide`` control (issue #447); when present
+    it is what the repair prompt acts on. ``remonitor`` leaves ``directive``
+    ``None`` and the prompt falls back to ``reason`` (backward-compatible)."""
 
     reason: str
+    directive: str | None = None
     operation_id: str | None = None
     requested_at: str | None = None
     reason_code: str = "OPERATOR_REMONITOR"
