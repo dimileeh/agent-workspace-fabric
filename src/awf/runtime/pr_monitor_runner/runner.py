@@ -237,36 +237,27 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         monitor_log=monitor_log,
                     ):
                         continue
-                    if isinstance(exc, BitBucketClientError):
-                        await self._write_monitor_log(
-                            monitor_log,
-                            {
-                                "event": "monitor.failed",
-                                "workspace_id": workspace_id,
-                                "reason": "bitbucket_error",
-                                "reason_code": exc.reason_code,
-                                "message": str(exc)[:400],
-                            },
-                        )
-                        await self._terminate_failed(
-                            workspace_id,
-                            message=f"monitor: bitbucket error: {exc}"[:2000],
-                            reason_code=exc.reason_code,
-                        )
-                    else:
-                        await self._write_monitor_log(
-                            monitor_log,
-                            {
-                                "event": "monitor.failed",
-                                "workspace_id": workspace_id,
-                                "reason": "github_error",
-                                "message": str(exc)[:400],
-                            },
-                        )
-                        await self._terminate_failed(
-                            workspace_id,
-                            message=f"monitor: github error: {exc}"[:2000],
-                        )
+                    # Mirror the ``_execute`` catch below: persist the forge's
+                    # ``reason_code`` for both forges so the two GitHub termination
+                    # paths write identical DB state (``GITHUB_API_ERROR`` for
+                    # GitHub, the specific code for BitBucket) rather than this path
+                    # decaying GitHub to the ``MONITOR_ABORT`` default.
+                    forge_label = "bitbucket" if isinstance(exc, BitBucketClientError) else "github"
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.failed",
+                            "workspace_id": workspace_id,
+                            "reason": f"{forge_label}_error",
+                            "reason_code": exc.reason_code,
+                            "message": str(exc)[:400],
+                        },
+                    )
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=f"monitor: {forge_label} error: {exc}"[:2000],
+                        reason_code=exc.reason_code,
+                    )
                     return
                 if _clear_transient_base_fetch_retry_state(state, context="fetch_pr_status"):
                     await self._persist_state(workspace_id, state)

@@ -567,7 +567,7 @@ def latest_external_review_activity(
     whose only feedback is a task would otherwise contribute nothing here, so once the
     agent resolves that task the anchor would decay to PR creation and the settle window
     would be skipped — letting the PR merge immediately after task resolution instead of
-    waiting out the quiet period after that review activity (issue #448 follow-up). Each
+    waiting out the quiet period after that review activity (issue #445 extension). Each
     non-viewer task's newest timestamp is considered with the ``review_task`` source.
     """
     latest_at: datetime | None = None
