@@ -336,6 +336,24 @@ async def _run_fix_cycle(
             ):
                 break
             raise
+        except BitBucketClientError as exc:
+            # BitBucket workspaces re-poll the PR through ``BitBucketClient``,
+            # whose ``fetch_pr_status`` raises ``BitBucketClientError`` (not
+            # ``GitHubClientError``). Without this arm a transient blip during the
+            # settle re-poll escapes to the runner's outer ``_execute`` handler,
+            # which continues the monitor instead of breaking settle and proceeding
+            # to push — so locally committed fixes may not be pushed after a
+            # recoverable Bitbucket fault. Mirror the GitHub arm: transient blips
+            # wait then break settle (proceed to push); permanent faults re-raise.
+            if await self._wait_after_transient_bitbucket_error(
+                exc,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="fix_cycle_settle_fetch_pr_status",
+                monitor_log=monitor_log,
+            ):
+                break
+            raise
         new_threads = [
             t for t in status.unresolved_inline_threads if _review_thread_needs_attention(state, t)
         ]

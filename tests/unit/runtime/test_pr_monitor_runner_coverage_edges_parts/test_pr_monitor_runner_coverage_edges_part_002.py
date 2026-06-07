@@ -84,6 +84,26 @@ class _BitBucketResolveThreadClient(DefaultMergeMethodGitHubClient):
         raise self._resolve_exc
 
 
+class _BitBucketSettlePollClient(DefaultMergeMethodGitHubClient):
+    """Command-based gh double whose ``fetch_pr_status`` raises a BitBucket error.
+
+    A BitBucket workspace's ``self._deps.gh`` is a ``BitBucketClient`` that raises
+    ``BitBucketClientError`` (not ``GitHubClientError``) from ``fetch_pr_status``.
+    Overriding only that method keeps the push/resolve flow command-based while
+    exercising the fix cycle's settle re-poll BitBucket arm.
+    """
+
+    def __init__(self, runner: FakeCommandRunner, exc: BitBucketClientError) -> None:
+        super().__init__(runner)
+        self._fetch_exc = exc
+
+    async def fetch_pr_status(
+        self, *, repo: RepoRef, pr_number: int, base_behind_count: int
+    ) -> PRStatus:
+        del repo, pr_number, base_behind_count
+        raise self._fetch_exc
+
+
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
@@ -877,6 +897,133 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
         "error_message": "bitbucket resolve_thread failed (status=403): forbidden: missing scope",
     }
     assert "please adjust this" not in repr(resolution_events[0].payload)
+
+
+@pytest.mark.unit
+async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # BitBucket workspaces re-poll the PR during the settle window via
+    # BitBucketClient, which raises BitBucketClientError (not GitHubClientError).
+    # A transient blip must break settle and proceed to push the locally committed
+    # fixes — without the BitBucket settle arm the error escapes _execute and the
+    # runner continues the monitor instead, stranding the committed fixes.
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    cmd.queue_result(returncode=0, stdout="{}")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketSettlePollClient(
+            cmd,
+            BitBucketClientError(
+                operation="bitbucket fetch_pr_status",
+                status=429,
+                body="rate limited",
+                reason_code=BITBUCKET_RATE_LIMITED,
+            ),
+        ),
+    )
+    thread = ReviewThread(
+        thread_id="T_settle",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The transient blip breaks the settle loop and proceeds to push + resolve;
+    # the addressed marker survives because the fix shipped.
+    assert sleep_fn.calls == [30, 60]
+    assert state.threads_addressed_ids["T_settle"] == "fix_committed"
+    worktree = tmp_path / "worktrees" / workspace_id
+    assert cmd.calls[0].args[:5] == _git_worktree_command(worktree)
+    assert cmd.calls[0].args[5] == "push"
+    assert cmd.calls[1].args[:3] == ["gh", "api", "graphql"]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # Not terminated: the BitBucket settle fault is handled in-loop.
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        retry_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.bitbucket_transient_error_retrying"
+        ]
+    assert len(retry_events) == 1
+    assert retry_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY"
+    assert retry_events[0].payload["context"] == "fix_cycle_settle_fetch_pr_status"
+
+
+@pytest.mark.unit
+async def test_fix_cycle_reraises_permanent_bitbucket_settle_poll_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A permanent BitBucket fault (403, token lacks the scope) during the settle
+    # re-poll must propagate like the GitHub arm's non-transient branch rather than
+    # being swallowed.
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketSettlePollClient(
+            cmd,
+            BitBucketClientError(
+                operation="bitbucket fetch_pr_status",
+                status=403,
+                body="forbidden: missing scope",
+            ),
+        ),
+    )
+    thread = ReviewThread(
+        thread_id="T_settle_perm",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+
+    with pytest.raises(BitBucketClientError, match="forbidden: missing scope"):
+        await runner._run_fix_cycle(
+            workspace_id="ws_bb_settle_perm",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            pr_head_sha="abc1234567890def",
+            initial_threads=(thread,),
+            initial_reviews=(),
+            state=MonitorState(),
+            remote_branch="awf/ws_bb_settle_perm",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
 
 
 @pytest.mark.unit
