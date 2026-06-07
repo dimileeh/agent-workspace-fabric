@@ -58,6 +58,7 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 from awf.service.merge_queue import MergeQueueBlocker
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -417,6 +418,145 @@ async def test_monitor_run_terminates_on_github_status_error(
         assert "github error" in (ws.failure_message or "")
         assert "gh auth failed" in (ws.failure_message or "")
         assert _retry_events(ws) == []
+
+
+class _BitBucketMergeRaisingClient(DefaultMergeMethodGitHubClient):
+    """Forge double whose ``merge_pr`` raises ``BitBucketClientError``.
+
+    Models a BitBucket workspace reaching the ``Merge`` action after the forge
+    gate flip: status/merge-method fetches succeed via the inherited GitHub
+    plumbing, but the merge forge call raises ``BitBucketClientError`` (which
+    ``GitHubClientError``-only action arms cannot catch).
+    """
+
+    def __init__(self, cmd: FakeCommandRunner, *, reason_code: str) -> None:
+        super().__init__(cmd)
+        self._merge_reason_code = reason_code
+
+    async def merge_pr(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        method: str = "squash",
+        delete_branch: bool = True,
+    ) -> str:
+        """Raise a deterministic BitBucket fault instead of merging."""
+        del repo, pr_number, method, delete_branch
+        raise BitBucketClientError(
+            operation="bitbucket merge_pr",
+            status=403,
+            body="merge is not permitted on this pull request",
+            reason_code=self._merge_reason_code,
+        )
+
+
+@pytest.mark.unit
+async def test_monitor_run_terminates_on_bitbucket_execute_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    # The poll reports a clean, mergeable PR so ``decide`` picks ``Merge``; the
+    # forge double then raises a deterministic ``BitBucketClientError`` from
+    # ``merge_pr``.
+    cmd.queue_result(returncode=0)  # git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # mergeable PR state
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitBucketMergeRaisingClient(cmd, reason_code="BITBUCKET_MERGE_FORBIDDEN"),
+    )
+
+    # Must not escape ``run()`` and crash the background monitor task.
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert "bitbucket error" in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == "BITBUCKET_MERGE_FORBIDDEN"
+        # Deterministic fault terminates rather than entering the transient
+        # re-poll loop.
+        assert _bitbucket_retry_events(ws) == []
+
+
+@pytest.mark.unit
+async def test_monitor_run_retries_transient_bitbucket_execute_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    # The merge attempt hits a transient BitBucket blip (5xx) → wait + re-poll;
+    # the PR then shows merged upstream so the monitor short-circuits to
+    # completed instead of crashing or terminating.
+    cmd.queue_result(returncode=0)  # poll: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # poll: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # poll: mergeable PR → Merge
+    cmd.queue_result(returncode=0)  # retry poll: git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # retry poll: base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))  # merged upstream
+    cmd.queue_result(returncode=0)  # compose down
+
+    class _TransientThenMergedClient(DefaultMergeMethodGitHubClient):
+        def __init__(self, inner: FakeCommandRunner) -> None:
+            super().__init__(inner)
+            self.merge_attempts = 0
+
+        async def merge_pr(
+            self,
+            *,
+            repo: RepoRef,
+            pr_number: int,
+            method: str = "squash",
+            delete_branch: bool = True,
+        ) -> str:
+            del repo, pr_number, method, delete_branch
+            self.merge_attempts += 1
+            raise BitBucketClientError(
+                operation="bitbucket merge_pr",
+                status=503,
+                body="service unavailable",
+                reason_code=BITBUCKET_API_ERROR,
+            )
+
+    gh = _TransientThenMergedClient(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [60]
+    assert gh.merge_attempts == 1
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+        retry_events = _bitbucket_retry_events(ws)
+        assert len(retry_events) == 1
+        assert retry_events[0].payload["context"] == "execute_action"
 
 
 @pytest.mark.unit

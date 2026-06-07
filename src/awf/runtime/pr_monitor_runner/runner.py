@@ -335,21 +335,59 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
 
                 remote_push_url = _remote_push_url_for_workspace(ws, base_repo=repo)
                 action = decide(status, state, self._config)
-                terminal = await self._execute(
-                    action=action,
-                    workspace_id=workspace_id,
-                    repo_url=ws.repo_url,
-                    repo=repo,
-                    pr_number=pr_number,
-                    status=status,
-                    state=state,
-                    base_branch=ws.branch_base,
-                    remote_branch=remote_branch,
-                    remote_push_url=remote_push_url,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    monitor_log=monitor_log,
-                )
+                try:
+                    terminal = await self._execute(
+                        action=action,
+                        workspace_id=workspace_id,
+                        repo_url=ws.repo_url,
+                        repo=repo,
+                        pr_number=pr_number,
+                        status=status,
+                        state=state,
+                        base_branch=ws.branch_base,
+                        remote_branch=remote_branch,
+                        remote_push_url=remote_push_url,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        monitor_log=monitor_log,
+                    )
+                except BitBucketClientError as exc:
+                    # The status-fetch path above catches ``BitBucketClientError``,
+                    # but ``_execute`` drives merge, thread-resolve, CI-rerun and
+                    # fix-cycle forge calls whose action arms catch
+                    # ``GitHubClientError`` alone. For a BitBucket workspace
+                    # ``self._deps.gh`` is a ``BitBucketClient`` that raises
+                    # ``BitBucketClientError`` instead — without this catch a
+                    # post-forge-gate-flip BitBucket fault would escape ``run()``
+                    # and crash the background monitor task rather than failing
+                    # the workspace with a reason code. Mirror the status-fetch
+                    # handling: recoverable blips wait and re-poll; deterministic
+                    # faults terminate with the preserved reason code.
+                    if await self._wait_after_transient_bitbucket_error(
+                        exc,
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        context="execute_action",
+                        monitor_log=monitor_log,
+                    ):
+                        await self._persist_state(workspace_id, state)
+                        continue
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.failed",
+                            "workspace_id": workspace_id,
+                            "reason": "bitbucket_error",
+                            "reason_code": exc.reason_code,
+                            "message": str(exc)[:400],
+                        },
+                    )
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=f"monitor: bitbucket error: {exc}"[:2000],
+                        reason_code=exc.reason_code,
+                    )
+                    return
                 await self._persist_state(workspace_id, state)
                 if terminal:
                     return
