@@ -228,6 +228,7 @@ __all__ = [
     "IdempotencyConflictError",
     "VersionConflictError",
     "WorkspaceControlError",
+    "WorkspaceGuideEmptyDirectiveError",
     "WorkspaceGuideMissingPrUrlError",
     "WorkspaceGuideStateError",
     "WorkspaceNotFoundError",
