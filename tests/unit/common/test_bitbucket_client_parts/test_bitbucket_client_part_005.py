@@ -140,6 +140,22 @@ async def test_create_issue_fallback_returns_pr_page_url_when_comment_has_no_hre
     assert url == "https://bitbucket.org/workspace/repo/pull-requests/42"
 
 
+async def test_create_issue_fallback_comment_failure_returns_pr_page_url() -> None:
+    # When the issue tracker is disabled (404) AND the fallback comment POST also
+    # fails (e.g. 403 lacking comment permission), create_issue must still honor its
+    # "never crashes the NotifyHuman path" contract by returning a usable URL rather
+    # than letting the BitBucketClientError escape — the fix_cycle.py call site only
+    # catches GitHubClientError, so an escaping error would terminate the monitor.
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)
+    fake.enqueue("POST", f"{_REPO}/issues", status=404, json={"type": "error"})
+    fake.enqueue("POST", f"{_PR}/comments", status=403, json={"type": "error"})
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    url = await client.create_issue(repo=repo(), title="t", body="b")
+    assert url == "https://bitbucket.org/workspace/repo/pull-requests/42"
+
+
 async def test_step_log_404_is_tolerated_as_empty() -> None:
     fake = FakeBitBucket()
     fake.page(

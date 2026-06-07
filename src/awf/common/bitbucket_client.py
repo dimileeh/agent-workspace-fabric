@@ -736,12 +736,26 @@ class BitBucketClient:
             # No PR context to comment on; return a usable URL without crashing.
             return self._issues_page_url(repo)
         comment_body = f"{title}\n\n{body}"
-        data = await self._request_json(
-            "POST",
-            f"{self._pr_path(repo, ctx.pr_number)}/comments",
-            operation="bitbucket create_issue comment-fallback",
-            json_body={"content": {"raw": comment_body}},
-        )
+        try:
+            data = await self._request_json(
+                "POST",
+                f"{self._pr_path(repo, ctx.pr_number)}/comments",
+                operation="bitbucket create_issue comment-fallback",
+                json_body={"content": {"raw": comment_body}},
+            )
+        except BitBucketClientError as exc:
+            # The fallback POST can itself fail (e.g. 403 when the bot lacks comment
+            # permission, or a transport error). Honor create_issue's "never crashes
+            # the NotifyHuman path" contract: the call site in fix_cycle.py only
+            # catches GitHubClientError, so an escaping BitBucketClientError would
+            # terminate the monitor. Return the PR page as a usable URL instead.
+            _log.warning(
+                "bitbucket.issue_fallback_comment_failed",
+                repo=repo.slug(),
+                reason_code=exc.reason_code,
+                status=exc.status,
+            )
+            return self._pr_page_url(repo, ctx.pr_number)
         return html_href(data) or self._pr_page_url(repo, ctx.pr_number)
 
     async def _current_account_id(self) -> str | None:
