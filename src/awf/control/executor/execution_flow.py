@@ -1282,6 +1282,12 @@ async def execute(
                     from_status=WorkspaceStatus.pushing,
                     failure_reason=FailureReason.infrastructure_failure,
                     message=str(exc)[:2000],
+                    # Preserve the forge-specific reason code (e.g.
+                    # BITBUCKET_AUTH_NOT_CONFIGURED) so the failed workspace
+                    # carries actionable doctor guidance, matching the
+                    # PullRequestError path below instead of falling back to
+                    # the generic INFRASTRUCTURE_FAILURE.
+                    reason_code=exc.reason_code,
                 )
                 return
             async with forge_client:

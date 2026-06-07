@@ -928,7 +928,10 @@ class TestPullRequestUnexpectedErrorPart002:
         # ``PullRequestError``. That construction failure must still be routed
         # through PR-failure handling: a PR_CREATE_FAILED audit event with
         # evidence, and no false git_push-succeeded event (the push never ran).
-        from awf.common.bitbucket_client import BitBucketClientError
+        from awf.common.bitbucket_client import (
+            BITBUCKET_AUTH_NOT_CONFIGURED,
+            BitBucketClientError,
+        )
         from awf.control.executor.constants import (
             _AUDIT_GIT_PUSH_EVENT,
             _AUDIT_PR_CREATED_EVENT,
@@ -969,6 +972,11 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "infrastructure_failure"
             assert "bitbucket auth" in (ws.failure_message or "")
+            # The terminal failed-transition event carries the forge-specific
+            # reason_code, not the generic INFRASTRUCTURE_FAILURE fallback —
+            # matching the PullRequestError path so operators get actionable
+            # doctor guidance even when the forge client fails to construct.
+            assert ws.events[-1].reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
             pr_create_events = [
                 event for event in ws.events if event.event_type == _AUDIT_PR_CREATED_EVENT
             ]
