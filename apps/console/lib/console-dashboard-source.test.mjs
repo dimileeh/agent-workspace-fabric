@@ -53,6 +53,16 @@ test("operator controls block renders success warnings", () => {
   assert.match(blockSource, /warning\.message \|\| warning\.warning_code/);
 });
 
+test("operator controls block keeps inactive reasons in hover tooltips", () => {
+  const blockSource = extractFunctionSource("OperatorControlsBlock");
+
+  assert.match(blockSource, /const tooltip = reason \? `\$\{control\.label\}: \$\{reason\}` : control\.label;/);
+  assert.match(blockSource, /role="tooltip"/);
+  assert.match(blockSource, /group-hover:block/);
+  assert.match(blockSource, /group-focus-within:block/);
+  assert.doesNotMatch(blockSource, />\{reason\}<\/span>/);
+});
+
 test("operator action state is guarded by current workspace selection", () => {
   const dashboard = dashboardSource.dashboard;
 

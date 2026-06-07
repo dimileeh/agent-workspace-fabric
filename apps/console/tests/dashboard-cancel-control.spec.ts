@@ -119,9 +119,8 @@ test.describe("Operator cancel control", () => {
     expect(cancelPosts).toBe(1);
   });
 
-  test("auto-dismisses an open confirmation when cancel becomes disabled", async ({ page }) => {
+  test("keeps cancel enabled while a workspace operation is active", async ({ page }) => {
     let cancelPosts = 0;
-    let activeOperation: string | null = null;
     await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
       cancelPosts += 1;
       await route.fulfill({
@@ -142,7 +141,7 @@ test.describe("Operator cancel control", () => {
       base_branch: "main",
       agent: "test-agent",
       status: "running",
-      active_operation: activeOperation,
+      active_operation: "op_background",
       version: 7,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -165,21 +164,17 @@ test.describe("Operator cancel control", () => {
     const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
     await expect(cancelButton).toBeVisible();
     await expect(cancelButton).toBeEnabled();
+    await expect(cancelButton.locator("..")).not.toContainText("active operation");
+    await expect(page.getByText("active operation", { exact: true })).toHaveCount(0);
 
-    // Open the cancel confirmation while cancel is still available.
+    // A background AWF operation must not disable the emergency cancel path.
     await cancelButton.click();
     const confirmation = page.getByTestId("operator-cancel-confirm");
     await expect(confirmation).toBeVisible();
 
-    // A background operation begins while the confirmation is open, so the
-    // cancel control becomes disabled. The still-open confirmation must drop
-    // itself and Confirm cancel must never POST against the guarded workspace.
-    activeOperation = "op_busy";
-
-    await expect(cancelButton).toBeDisabled({ timeout: 15000 });
-    await expect(confirmation).not.toBeVisible();
-    await page.waitForTimeout(200);
-    expect(cancelPosts).toBe(0);
+    await page.getByRole("button", { name: "Confirm cancel", exact: true }).click();
+    await expect(page.getByText("Cancel succeeded:")).toBeVisible();
+    expect(cancelPosts).toBe(1);
   });
 
   test("does not carry an open cancel confirmation across a workspace switch", async ({ page }) => {

@@ -73,9 +73,9 @@ export function getWorkspaceOperatorControls(context: WorkspaceOperatorContext):
 
   return controls.map((control) => ({
     ...control,
-    enabled: false,
+    enabled: control.action === "cancel" ? control.enabled : false,
     visible: control.visible || eligibleEnoughForActiveReason(control.action, context),
-    reason: "active operation",
+    reason: control.action === "cancel" ? control.reason : "active operation",
   }));
 }
 

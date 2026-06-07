@@ -149,14 +149,14 @@ test("cancel control is hidden and disabled for terminal and destroy statuses", 
   }
 });
 
-test("active operation disables cancel but keeps it visible for active statuses", () => {
+test("active operation keeps cancel enabled for active statuses", () => {
   const control = getWorkspaceOperatorControls({
     overview: overview({ status: "running", pr_url: null, active_operation: "op_active" }),
   }).find((item) => item.action === "cancel");
   assert.ok(control, "missing cancel control");
-  assert.equal(control.enabled, false);
+  assert.equal(control.enabled, true);
   assert.equal(control.visible, true);
-  assert.equal(control.reason, "active operation");
+  assert.equal(control.reason, null);
 });
 
 test("cancel success and failure summaries format the Cancel label", () => {
@@ -206,7 +206,7 @@ test("active monitoring workspace exposes the full operator action set", () => {
   assert.deepEqual(actions, new Set(["remonitor", "refresh", "revalidate", "cancel"]));
 });
 
-test("active operation disables all operator controls", () => {
+test("active operation disables non-cancel operator controls", () => {
   const eligible = {
     overview: overview({
       status: "monitoring_pr",
@@ -216,8 +216,13 @@ test("active operation disables all operator controls", () => {
     mergeQueueItem: mergeQueueItem({ required_next_action: "validate" }),
   };
   for (const control of getWorkspaceOperatorControls(eligible)) {
-    assert.equal(control.enabled, false);
-    assert.equal(control.reason, "active operation");
+    if (control.action === "cancel") {
+      assert.equal(control.enabled, true);
+      assert.equal(control.reason, null);
+    } else {
+      assert.equal(control.enabled, false);
+      assert.equal(control.reason, "active operation");
+    }
   }
 
   assertControl(

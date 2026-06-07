@@ -514,24 +514,33 @@ export function OperatorControlsBlock({
           const disabled = busy || !control.enabled || confirming !== null;
           const reason = busy && !submitting ? "operation active" : control.reason;
           const destructive = control.action === "cancel";
+          const tooltip = reason ? `${control.label}: ${reason}` : control.label;
           const buttonClassName = destructive
             ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-white px-2.5 text-[11px] font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
             : "inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
           return (
-            <div key={control.action} className="flex min-w-0 items-center gap-1.5">
+            <div key={control.action} className="group relative flex min-w-0 items-center gap-1.5">
               <button
                 type="button"
                 onClick={() =>
                   destructive ? setConfirming(control.action) : onAction(control.action, control.requestedTier)
                 }
                 disabled={disabled}
-                title={reason ? `${control.label}: ${reason}` : control.label}
+                aria-describedby={reason ? `operator-control-tip-${workspaceId}-${control.action}` : undefined}
                 className={buttonClassName}
               >
                 <OperatorControlIcon action={control.action} spinning={submitting} />
                 {control.label}
               </button>
-              {reason ? <span className="max-w-32 truncate text-[11px] text-slate-500">{reason}</span> : null}
+              {reason ? (
+                <span
+                  id={`operator-control-tip-${workspaceId}-${control.action}`}
+                  role="tooltip"
+                  className="pointer-events-none absolute left-0 top-[calc(100%+6px)] z-20 hidden max-w-56 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] font-medium text-white shadow-lg group-focus-within:block group-hover:block"
+                >
+                  {tooltip}
+                </span>
+              ) : null}
             </div>
           );
         })}
