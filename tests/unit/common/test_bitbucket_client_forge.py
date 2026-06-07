@@ -139,10 +139,13 @@ def test_parse_bb_datetime_handles_z_suffix_and_garbage() -> None:
     assert parse_bb_datetime(None) is None
 
 
-def test_extract_diffstat_paths_prefers_new_then_old() -> None:
+def test_extract_diffstat_paths_includes_both_rename_sides() -> None:
     entries = [
+        # Rename: both the destination and source paths must be reported so a
+        # move out of an owned/protected path cannot evade scope checks.
         {"new": {"path": "src/a.py"}, "old": {"path": "src/a_old.py"}},
         {"new": None, "old": {"path": "deleted.py"}},
         {"new": {"path": "src/a.py"}},  # duplicate ignored
+        {"new": {"path": "src/a_old.py"}},  # already collected → ignored
     ]
-    assert extract_diffstat_paths(entries) == ("src/a.py", "deleted.py")
+    assert extract_diffstat_paths(entries) == ("src/a.py", "src/a_old.py", "deleted.py")

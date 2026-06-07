@@ -415,8 +415,12 @@ def extract_diffstat_paths(entries: list[dict[str, Any]]) -> tuple[str, ...]:
             if isinstance(node, dict):
                 path = _clean_optional_str(node.get("path"))
                 if path is not None and path not in paths:
+                    # Collect both sides so rename/move entries (new.path !=
+                    # old.path) contribute the source path too; the membership
+                    # check de-duplicates ordinary modifications where the sides
+                    # match. Dropping the source path would let a rename out of
+                    # an owned/protected path evade scope/staleness checks.
                     paths.append(path)
-                    break
     return tuple(paths)
 
 
