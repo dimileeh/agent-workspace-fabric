@@ -897,16 +897,52 @@ class TestCiFailure:
     ) -> None:
         """A registry-*qualified* kubelet/containerd ``Failed to pull image
         "ghcr.io/org/app"`` event must not self-corroborate. The registry host is
-        just the image ref's domain, not actual Docker CLI / registry-protocol pull
-        context (a ``docker pull`` echo, ``/v2/`` request, or ``pull access
-        denied``), so the failing application image is a real deploy bug that must
-        reach the repair agent rather than be silently rerun as transient CI."""
+        just the image ref's domain, not actual Docker CLI pull context (a same-ref
+        ``docker pull`` echo), so the failing application image is a real deploy bug
+        that must reach the repair agent rather than be silently rerun as transient
+        CI."""
         failure = CheckFailure(
             name="e2e-tests",
             conclusion="FAILURE",
             log_excerpt=(
                 "=== RUN   TestDeployApp\n"
                 '    deploy_test.go:51: Failed to pull image "ghcr.io/org/app": '
+                "context deadline exceeded\n"
+                "--- FAIL: TestDeployApp (120.00s)"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_k8s_failed_to_pull_image_with_embedded_v2_url_reports_ci_failure(
+        self,
+    ) -> None:
+        """A kubelet/containerd ``Failed to pull image`` event for an *application*
+        image embeds the registry transport URL — ``Head "https://ghcr.io/v2/...":
+        context deadline exceeded`` — on its own line. The ``/v2/`` is part of the
+        kubelet event itself, not separate Docker CLI / registry-protocol evidence,
+        so it must not self-corroborate: a ``/v2/`` URL on the failing line (or an
+        adjacent wrapped line of the same multi-line event) cannot license a silent
+        rerun of a real deploy bug. ``--- FAIL`` Go output is not caught by the
+        structured code-failure checks, so without this guard it would be misrouted
+        to ``RerunTransientCI`` instead of reaching the repair agent."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestDeployApp\n"
+                '    deploy_test.go:51: Failed to pull image "ghcr.io/org/app": '
+                "rpc error: code = Unknown desc = failed to do request: "
+                'Head "https://ghcr.io/v2/org/app/manifests/v1": '
                 "context deadline exceeded\n"
                 "--- FAIL: TestDeployApp (120.00s)"
             ),

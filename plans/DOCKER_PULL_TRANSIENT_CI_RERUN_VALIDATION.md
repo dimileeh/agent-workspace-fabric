@@ -16,9 +16,8 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
   - `_CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER` (`"docker pull failed"`) — names
     the Docker CLI explicitly, so it anchors on its own.
   - `_CI_DOCKER_IMAGE_PULL_FAILURE_MARKER` (`"failed to pull image"`) corroborated
-    by `_CI_DOCKER_REGISTRY_PROTOCOL_CONTEXT_MARKERS` (`/v2/` / `"pull access
-    denied"`) by proximity, or by a `_CI_DOCKER_PULL_COMMAND_MARKER` (`"docker
-    pull"`) echo **only when that echo targets the same image ref** (matched via
+    **only** by a `_CI_DOCKER_PULL_COMMAND_MARKER` (`"docker pull"`) echo that
+    targets the same image ref (matched via
     `_CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN`). This phrasing is shared by
     Docker, containerd, and the Kubernetes kubelet, so a bare
     `Failed to pull image "app": context deadline exceeded` e2e/k8s deploy bug must
@@ -29,7 +28,18 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
     service-container setup `docker pull postgres:16` from corroborating a kubelet
     `failed to pull image "app"` bug for an unrelated application image purely by
     line distance; the ref is compared as a whitespace-delimited token so a
-    `docker pull myapp:1` echo cannot satisfy a `"app"` failure by substring. A
+    `docker pull myapp:1` echo cannot satisfy a `"app"` failure by substring.
+    Registry-*protocol* proximity corroboration (formerly
+    `_CI_DOCKER_REGISTRY_PROTOCOL_CONTEXT_MARKERS` = `/v2/` / `"pull access
+    denied"`) was **removed** (review comment PRRT_kwDOSJAM6s6HqN1K): a
+    kubelet/containerd application-image event embeds the `/v2/` transport URL in
+    its own (often multi-line) error — e.g. `Failed to pull image
+    "ghcr.io/org/app": ... Head "https://ghcr.io/v2/...": context deadline
+    exceeded` — so a nearby `/v2/` let the failing line self-corroborate and rerun
+    a real deploy bug, exactly as a bare registry host on the ref would. Genuine
+    Docker/service-container pull failures are still covered by the same-ref
+    `docker pull` echo, the `docker pull failed` marker, and the daemon-error
+    branch. A
     bare `"error response from daemon"` line is deliberately excluded from pull
     context (review comment PRRT_kwDOSJAM6s6HqEY1): the daemon emits it for any
     operation, so a generic daemon timeout adjacent to a kubelet `failed to pull
@@ -44,11 +54,12 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
     matches non-registry daemon operations such as
     `failed while pulling from local volume`.
   - `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` — the line-proximity window.
-  - `_is_docker_pull_failure_line(index, line, lines, docker_pull_command_indexes,
-    registry_protocol_indexes)` — whether one log line evidences a Docker
+  - `_is_docker_pull_failure_line(index, line, lines,
+    docker_pull_command_indexes)` — whether one log line evidences a Docker
     image-pull failure; delegates the `failed to pull image` branch to
-    `_image_pull_failure_is_corroborated(...)`, which requires registry-protocol
-    context by proximity or a same-ref `docker pull` echo within the window.
+    `_image_pull_failure_is_corroborated(...)`, which requires a same-ref `docker
+    pull` echo within the window (registry-protocol proximity corroboration was
+    removed — see review comment PRRT_kwDOSJAM6s6HqN1K above).
   - `_log_shows_docker_registry_timeout(log_text)` — whether a registry-timeout
     phrase is line-co-located with a pull-failure line; called as the final clause
     of `_looks_like_transient_ci_failure`.
@@ -56,7 +67,7 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
   still runs first, `_CI_TRANSIENT_FAILURE_MARKERS` is matched before the new
   logic, and `_should_rerun_transient_ci`/`decide` gate ordering is untouched.
 - `tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py`: added
-  18 focused unit tests (TDD across the feature's commits). Grouped by intent:
+  focused unit tests (TDD across the feature's commits). Grouped by intent:
 
   Positive — registry timeout dispatches `RerunTransientCI`:
   - `test_docker_pull_registry_timeout_dispatches_rerun` — full PR #449 log.
@@ -96,6 +107,12 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
     a kubelet `Failed to pull image "app"` event for an unrelated image does not
     corroborate it (different ref), so the real app-image bug reaches the repair
     agent (review comment PRRT_kwDOSJAM6s6HqJ-I).
+  - `test_k8s_failed_to_pull_image_with_embedded_v2_url_reports_ci_failure` — a
+    kubelet/containerd `Failed to pull image "ghcr.io/org/app"` event whose own
+    error embeds the registry transport URL (`Head "https://ghcr.io/v2/...":
+    context deadline exceeded`) does not self-corroborate: the `/v2/` is part of
+    the kubelet event, not separate Docker CLI evidence, so the real deploy bug
+    reaches the repair agent (review comment PRRT_kwDOSJAM6s6HqN1K).
   - `test_unrecognized_failure_log_reports_ci_failure` — unrecognized log.
 
   Safeguard / helper:
