@@ -103,6 +103,12 @@ BITBUCKET_PIPELINE_FULL_RERUN = "BITBUCKET_PIPELINE_FULL_RERUN"
 BITBUCKET_PIPELINE_NOT_RERUNNABLE = "BITBUCKET_PIPELINE_NOT_RERUNNABLE"
 BITBUCKET_ISSUE_TRACKER_DISABLED = "BITBUCKET_ISSUE_TRACKER_DISABLED"
 BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
+# BitBucket answers 409 Conflict on the merge POST when a merge for this PR is
+# already in flight (typically a prior 202 async merge whose task-status poll was
+# interrupted by a transient fault and re-issued by the monitor). It is recoverable
+# — re-polling ``fetch_pr_status`` observes the original merge's eventual MERGED
+# state — so it is classified transient rather than mapped to ``BITBUCKET_API_ERROR``.
+BITBUCKET_MERGE_IN_PROGRESS = "BITBUCKET_MERGE_IN_PROGRESS"
 
 _FrozenParams = tuple[tuple[str, str], ...]
 
@@ -634,12 +640,30 @@ class BitBucketClient:
                 reason_code=BITBUCKET_MERGE_METHOD_UNSUPPORTED,
             )
         merge_path = f"{self._pr_path(repo, pr_number)}/merge"
-        response = await self._request(
-            "POST",
-            merge_path,
-            operation="bitbucket merge_pr",
-            json_body={"merge_strategy": strategy, "close_source_branch": delete_branch},
-        )
+        try:
+            response = await self._request(
+                "POST",
+                merge_path,
+                operation="bitbucket merge_pr",
+                json_body={"merge_strategy": strategy, "close_source_branch": delete_branch},
+            )
+        except BitBucketClientError as exc:
+            if exc.status == 409:
+                # A 409 means BitBucket already has a merge in flight for this PR.
+                # This happens when a prior 202 async merge's task-status poll was
+                # interrupted by a transient fault and the monitor re-entered the
+                # loop and re-issued the merge. Re-raise with the transient
+                # ``BITBUCKET_MERGE_IN_PROGRESS`` reason so the monitor waits and
+                # re-polls ``fetch_pr_status`` — observing the original merge's
+                # eventual MERGED state — instead of terminating the workspace on a
+                # merge that may still be completing.
+                raise BitBucketClientError(
+                    operation="bitbucket merge_pr",
+                    status=exc.status,
+                    body=exc.body,
+                    reason_code=BITBUCKET_MERGE_IN_PROGRESS,
+                ) from exc
+            raise
         if response.status_code == 202:
             data: Any = await self._poll_merge_task(response, merge_path)
         else:
@@ -1171,6 +1195,14 @@ class BitBucketClient:
             redirects += 1
             target = location
             target_params = None
+            # Drop the request body on every redirect hop. ``Location`` already
+            # carries the resolved resource, and RFC 7231 §6.4 semantics drop the
+            # body for 302/303 redirects. The only body-carrying requests are
+            # POSTs (create PR, merge, post comment); none are expected to
+            # redirect, but clearing ``json_body`` removes any chance of an action
+            # payload (e.g. ``merge_pr``'s ``{"merge_strategy": ...}``) being
+            # re-issued verbatim to a redirected URL.
+            json_body = None
         if strict and response.status_code >= 400:
             raise self._error_for(response, operation)
         return response

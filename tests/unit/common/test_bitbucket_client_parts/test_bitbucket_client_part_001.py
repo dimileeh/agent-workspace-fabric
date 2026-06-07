@@ -295,6 +295,27 @@ async def test_request_follows_same_host_302_redirect() -> None:
     assert [r.url.path for r in fake.calls("GET")] == ["/a", "/b"]
 
 
+async def test_request_drops_post_body_on_redirect_hop() -> None:
+    # RFC 7231 §6.4 drops the body on a 302/303 redirect. ``_request`` must clear
+    # ``json_body`` after the first hop so an action payload (e.g. ``merge_pr``'s
+    # ``{"merge_strategy": ...}``) is never re-issued verbatim to the redirected
+    # URL, which could trigger a duplicate action.
+    fake = FakeBitBucket()
+    fake.enqueue(
+        "POST",
+        "/act",
+        status=302,
+        headers={"Location": "https://api.bitbucket.org/resolved"},
+    )
+    fake.enqueue("POST", "/resolved", json={"ok": True})
+    client = make_client(fake)
+    await client._request("POST", "/act", operation="op", json_body={"merge_strategy": "squash"})
+    posts = fake.calls("POST")
+    assert [r.url.path for r in posts] == ["/act", "/resolved"]
+    assert posts[0].content  # first hop carried the body
+    assert posts[1].content == b""  # redirected hop sent no body
+
+
 async def test_paginate_follows_redirect_then_collects_values() -> None:
     # The first diffstat hop redirects; pagination must resume from the resolved
     # resource so ``changed_paths`` is actually populated.
