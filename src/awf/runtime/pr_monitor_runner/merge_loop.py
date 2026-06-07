@@ -432,6 +432,33 @@ async def _attempt_merge_method(
                     "reason_code": BITBUCKET_MERGE_IN_PROGRESS,
                 },
             )
+            # Record an audit breadcrumb for the cancellation. Every other merge
+            # arm — GitHub failure, BitBucket deterministic failure, success —
+            # emits a ``merge_result`` event; without one here a long-running
+            # async merge that spans several poll cycles produces a chain of
+            # silently cancelled operations, leaving operators unable to tell
+            # "superseded by an already-in-flight merge" from an unexplained
+            # cancellation. The ``cancelled`` outcome + ``BITBUCKET_MERGE_IN_PROGRESS``
+            # reason code keep that distinction in the audit trail.
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_MERGE_RESULT_EVENT,
+                action="merge",
+                outcome="cancelled",
+                reason_code=BITBUCKET_MERGE_IN_PROGRESS,
+                pr_number=pr_number,
+                status=merge_status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                operation_id=operation_id,
+                operation_type=OperationType.monitor_state.value,
+                monitor_log=monitor_log,
+                evidence={
+                    "operation": "merge_pr",
+                    "merge_method": merge_method,
+                    "error_message": str(exc),
+                },
+            )
         return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
 
     merge_marker = _merge_completion_marker(

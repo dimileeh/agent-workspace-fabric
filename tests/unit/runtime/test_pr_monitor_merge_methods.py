@@ -1241,6 +1241,11 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
             workspace_id,
             operation_type=OperationType.monitor_state,
         )
+        audit_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.merge_result",
+            limit=20,
+        )
     assert not any(op.error_code == "BITBUCKET_MERGE_FAILED" for op in operations)
     assert not any(op.status == OperationStatus.failed.value for op in operations)
     # The merge-attempt operation must be terminal (cancelled), not orphaned as
@@ -1253,3 +1258,15 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     assert merge_ops, "expected a merge-attempt operation to be recorded"
     assert all(op.status == OperationStatus.cancelled.value for op in merge_ops)
     assert not any(op.status == OperationStatus.running.value for op in operations)
+    # The cancellation must leave an audit breadcrumb so operators can tell
+    # "superseded by an in-flight merge" apart from an unexplained cancelled
+    # operation — every other merge arm (GitHub, BitBucket failure, success)
+    # records a merge_result event, so this transient arm must too.
+    in_progress_events = [
+        event for event in audit_events if event.reason_code == BITBUCKET_MERGE_IN_PROGRESS
+    ]
+    assert len(in_progress_events) == 1
+    audit_payload = in_progress_events[0].payload
+    assert isinstance(audit_payload, dict)
+    assert audit_payload["action"] == "merge"
+    assert audit_payload["outcome"] == "cancelled"
