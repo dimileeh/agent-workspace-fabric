@@ -56,7 +56,11 @@ line-scoped: a registry-timeout marker only counts as Docker-caused when it sits
 or within `_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` (2) lines of, a Docker pull / daemon
 line — not merely somewhere in the same step log.
 
-## Tests (TDD, in `tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py`)
+## Tests (TDD, in `tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_003.py`)
+
+> The CI-failure suite (`TestCiFailure`) was later moved from
+> `test_pr_monitor_part_001.py` to `test_pr_monitor_part_003.py` when the part_001
+> module hit the 1500-line guardrail; these tests live in part_003.
 
 1. `test_docker_pull_registry_timeout_dispatches_rerun` — full PR #449 log → `RerunTransientCI`.
 2. `test_docker_pull_request_canceled_dispatches_rerun` — minimal `docker pull` +
@@ -71,9 +75,9 @@ line — not merely somewhere in the same step log.
 
 ```bash
 uv run --python 3.12 --extra dev pytest \
-  tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py -q -k transient
-uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor.py tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py
-uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor.py tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py
+  tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_003.py -q -k transient
+uv run --python 3.12 --extra dev ruff check src/awf/runtime/pr_monitor.py tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_003.py
+uv run --python 3.12 --extra dev ruff format --check src/awf/runtime/pr_monitor.py tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_003.py
 uv run --python 3.12 --extra dev mypy
 ```
 

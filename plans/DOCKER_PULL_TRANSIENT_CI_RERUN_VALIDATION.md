@@ -80,8 +80,10 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
 - The structured/code-failure short-circuit in `_looks_like_transient_ci_failure`
   still runs first, `_CI_TRANSIENT_FAILURE_MARKERS` is matched before the new
   logic, and `_should_rerun_transient_ci`/`decide` gate ordering is untouched.
-- `tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py`: added
-  focused unit tests (TDD across the feature's commits). Grouped by intent:
+- `tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_003.py`: added
+  focused unit tests (TDD across the feature's commits; the `TestCiFailure` suite
+  was moved here from `test_pr_monitor_part_001.py` when part_001 hit the 1500-line
+  guardrail). Grouped by intent:
 
   Positive — registry timeout dispatches `RerunTransientCI`:
   - `test_docker_pull_registry_timeout_dispatches_rerun` — full PR #449 log.
@@ -139,21 +141,21 @@ Implements `plans/DOCKER_PULL_TRANSIENT_CI_RERUN_PLAN.md`.
 
 ```bash
 uv run --python 3.12 --extra dev pytest \
-  tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py -q \
+  tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_003.py -q \
   -k "docker or registry_timeout or awaiting_headers or request_canceled or \
       context_deadline or daemon_error or failed_to_pull or unrecognized_failure or \
       log_shows_docker or app_failed_to_pull or setup_pull or cached_pull or \
       pulling_from or image"
-=> 23 passed, 96 deselected
+=> 28 passed, 28 deselected
 
 uv run --python 3.12 --extra dev ruff check \
   src/awf/runtime/pr_monitor.py \
-  tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py
+  tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_003.py
 => All checks passed!
 
 uv run --python 3.12 --extra dev ruff format --check \
   src/awf/runtime/pr_monitor.py \
-  tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_001.py
+  tests/unit/runtime/test_pr_monitor_parts/test_pr_monitor_part_003.py
 => 2 files already formatted
 
 uv run --python 3.12 --extra dev mypy
@@ -218,3 +220,26 @@ not spuriously suppress a genuine same-ref pull failure.
   success status between echo and failure → still `RerunTransientCI`) locks in that
   genuine same-ref pull failures remain transient, exercising the
   `_docker_pull_command_succeeded` False branch.
+
+## Follow-up — uncorroborated-event guard covers wrapped multi-line errors (issue:4642392722)
+
+The original uncorroborated-event guard in `_log_shows_docker_registry_timeout`
+only suppressed a registry-timeout marker that sat **on** an uncorroborated
+`failed to pull image` line. A kubelet/containerd event can wrap its error onto a
+*following* line (`Failed to pull image "app"` then a bare `context deadline
+exceeded` on the next line); that timeout line carries no `failed to pull image`
+text of its own, so the on-line-only guard let it be attributed to a nearby
+unrelated transient `docker pull failed` anchor within the proximity window and
+silently rerun a real deploy bug. The guard now excludes any timeout marker within
+`_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW` lines of an uncorroborated `failed to pull
+image` line (which subsumes the same-line case), so the wrapped variant reaches the
+repair agent.
+
+- Covered by
+  `test_wrapped_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure`
+  (wrapped timeout → `ReportCiFailure`), the companion to the same-line
+  `test_uncorroborated_image_event_timeout_near_transient_pull_reports_ci_failure`.
+- The positive boundary test
+  `test_registry_timeout_at_exact_window_boundary_dispatches_rerun` (no
+  uncorroborated `failed to pull image` line present → still `RerunTransientCI`)
+  locks in that the new exclusion does not over-fire on genuine transient pulls.
