@@ -518,7 +518,7 @@ export function OperatorControlsBlock({
           const buttonClassName = destructive
             ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-white px-2.5 text-[11px] font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
             : "inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
-            return (
+          return (
             <div
               key={control.action}
               tabIndex={disabled && reason ? 0 : undefined}
@@ -531,7 +531,6 @@ export function OperatorControlsBlock({
                   destructive ? setConfirming(control.action) : onAction(control.action, control.requestedTier)
                 }
                 disabled={disabled}
-                aria-describedby={!disabled && reason ? `operator-control-tip-${workspaceId}-${control.action}` : undefined}
                 className={buttonClassName}
               >
                 <OperatorControlIcon action={control.action} spinning={submitting} />

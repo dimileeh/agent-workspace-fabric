@@ -71,10 +71,6 @@ test("operator control tooltip-describedby target follows disabled focus state",
     blockSource,
     /aria-describedby=\{disabled && reason \? `operator-control-tip-\$\{workspaceId\}-\$\{control\.action\}` : undefined\}/,
   );
-  assert.match(
-    blockSource,
-    /aria-describedby=\{!disabled && reason \? `operator-control-tip-\$\{workspaceId\}-\$\{control\.action\}` : undefined\}/,
-  );
 });
 
 test("operator action state is guarded by current workspace selection", () => {
