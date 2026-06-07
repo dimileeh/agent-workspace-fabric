@@ -177,6 +177,24 @@ def test_shared_redactors_catch_truncated_github_tokens(raw_token: str) -> None:
 
 
 @pytest.mark.unit
+def test_shared_redactors_mask_atlassian_api_token_shapes() -> None:
+    """Verify Atlassian API tokens (ATATT…) never leak through diagnostics.
+
+    Defense-in-depth: the BitBucket git-auth design never logs the token, but a
+    stray token in a log line, an assignment, or a URL must still be masked.
+    """
+    raw_token = "ATATT3xFfGF0abcDEF_123-456=.789"
+
+    bare = f"clone failed for token {raw_token} on bitbucket.org"
+    assignment = f"BITBUCKET_API_TOKEN={raw_token}"
+    url = f"https://agent@example.com:{raw_token}@bitbucket.org/ws/repo.git"
+
+    for text in (bare, assignment, url):
+        assert raw_token not in redaction.redact_secrets(text)
+        assert raw_token not in audit.redact_audit_text(text)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("raw_token", ["xoxb-", "xoxb-a", "xoxp-", "xoxp-a"])
 def test_shared_redactors_catch_truncated_slack_tokens(raw_token: str) -> None:
     """Verify shortened rejected Slack token values do not leak in diagnostics."""

@@ -157,6 +157,26 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         _reason_catalog_link("BITBUCKET_AUTH_NOT_CONFIGURED"),
     ),
+    "BITBUCKET_GIT_AUTH_NOT_CONFIGURED": _ReasonText(
+        (
+            "AWF could not authenticate git over HTTPS to a bitbucket.org "
+            "repository because the BitBucket git credentials are not configured."
+        ),
+        (
+            "Set BITBUCKET_API_TOKEN and BITBUCKET_EMAIL in the AWF service "
+            "environment (the same Atlassian API token credentials the BitBucket "
+            "REST client uses), then remonitor or recreate the workspace."
+        ),
+        (
+            "The worker tried to clone or push a bitbucket.org repository but "
+            "BITBUCKET_API_TOKEN and/or BITBUCKET_EMAIL were missing, so git had "
+            "no credential for HTTPS basic auth. AWF fails fast with this reason "
+            "code instead of attempting an unauthenticated clone that would hang "
+            "or fail opaquely."
+        ),
+        "awf service doctor",
+        _reason_catalog_link("BITBUCKET_GIT_AUTH_NOT_CONFIGURED"),
+    ),
     "BITBUCKET_PIPELINE_FULL_RERUN": _ReasonText(
         (
             "AWF re-ran the entire BitBucket pipeline because BitBucket Cloud has "

@@ -17,6 +17,8 @@ import awf.adapters.registry  # noqa: F401 - populate adapter registry for servi
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.forge import ForgeClient, concrete_forge_for_repo, make_forge_client
+from awf.common.git_auth import add_git_config_entries as _add_git_config_entries
+from awf.common.git_auth import apply_bitbucket_git_auth
 from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
@@ -405,6 +407,12 @@ def _service_git_environment(host_home: Path, *, github_token: str | None = None
                 ("url.https://github.com/.insteadOf", "git@github.com:"),
             ),
         )
+    # BitBucket git-over-HTTPS auth, host-scoped to bitbucket.org so the GitHub
+    # path above is byte-for-byte unchanged. Reads the live process environment
+    # (where ``BitBucketClient.from_env`` also reads its credentials) and never
+    # places the token in any returned env value — git invokes the helper, which
+    # reads the secret from the environment on demand.
+    apply_bitbucket_git_auth(env, os.environ)
     ssh_command = ["ssh"]
     if ssh_auth_sock := os.environ.get("SSH_AUTH_SOCK"):
         env["SSH_AUTH_SOCK"] = ssh_auth_sock
@@ -434,18 +442,6 @@ def _apply_service_git_environment(env: dict[str, str]) -> None:
     """Apply host git/SSH settings to subprocesses launched by the worker."""
 
     os.environ.update(env)
-
-
-def _add_git_config_entries(
-    env: dict[str, str],
-    entries: tuple[tuple[str, str], ...],
-) -> None:
-    start_index = int(env.get("GIT_CONFIG_COUNT", "0"))
-    for offset, (key, value) in enumerate(entries):
-        index = start_index + offset
-        env[f"GIT_CONFIG_KEY_{index}"] = key
-        env[f"GIT_CONFIG_VALUE_{index}"] = value
-    env["GIT_CONFIG_COUNT"] = str(start_index + len(entries))
 
 
 async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:

@@ -1132,6 +1132,57 @@ def test_service_git_environment_forwards_ssh_agent_socket(
     assert "IdentityAgent=/run/host-services/ssh-auth.sock" in env["GIT_SSH_COMMAND"]
 
 
+@pytest.mark.unit
+def test_service_git_environment_wires_bitbucket_helper_without_leaking_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret_token = "ATATT-service-token-do-not-render"
+    monkeypatch.setenv("BITBUCKET_API_TOKEN", secret_token)
+    monkeypatch.setenv("BITBUCKET_EMAIL", "agent@example.com")
+
+    env = worker_mod._service_git_environment(
+        tmp_path / "host-home",
+        github_token="ghp_service_token",
+    )
+
+    count = int(env["GIT_CONFIG_COUNT"])
+    entries = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
+    }
+    # BitBucket host-scoped helper is wired alongside the (unchanged) GitHub one.
+    assert "credential.https://bitbucket.org.helper" in entries
+    assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
+    assert entries["url.https://github.com/.insteadOf"] == "git@github.com:"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    # The Atlassian token never lands in any git env value.
+    assert all(secret_token not in value for value in env.values())
+
+
+@pytest.mark.unit
+def test_service_git_environment_unchanged_without_bitbucket_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+    monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+
+    env = worker_mod._service_git_environment(
+        tmp_path / "host-home",
+        github_token="ghp_service_token",
+    )
+
+    # Pure regression: no bitbucket helper, no terminal-prompt override, and the
+    # GitHub credential helper plus safe.directory entries are untouched.
+    assert "GIT_TERMINAL_PROMPT" not in env
+    count = int(env["GIT_CONFIG_COUNT"])
+    entries = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
+    }
+    assert not any("bitbucket.org" in key for key in entries)
+    assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
+
+
 class _RecordingForgeClient:
     """Minimal ForgeClient stub that records aclose() calls."""
 

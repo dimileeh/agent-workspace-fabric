@@ -17,6 +17,7 @@ KNOWN_TOKEN_PATTERN: Final = (
     r"sk-proj-[A-Za-z0-9_-]{8,}|"
     r"sk-[A-Za-z0-9_-]{8,}|"
     r"AIza[A-Za-z0-9_-]{12,}|"
+    r"ATATT[A-Za-z0-9_=.+/-]{8,}|"
     r"xox[baprs]-[A-Za-z0-9-]*"
     r")(?![A-Za-z0-9_])"
 )
@@ -64,6 +65,7 @@ STRICT_KNOWN_TOKEN_PATTERN: Final = (
     r"sk-proj-[A-Za-z0-9_-]{8,}|"
     r"sk-[A-Za-z0-9_-]{8,}|"
     r"AIza[A-Za-z0-9_-]{12,}|"
+    r"ATATT[A-Za-z0-9_=.+/-]{8,}|"
     r"xox[baprs]-[A-Za-z0-9-]{6,}"
     r")(?![A-Za-z0-9_])"
 )
