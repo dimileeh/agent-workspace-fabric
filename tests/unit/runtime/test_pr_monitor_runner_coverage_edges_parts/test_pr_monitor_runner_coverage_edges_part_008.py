@@ -1175,6 +1175,131 @@ async def test_deferred_capture_transient_failure_requeues_instead_of_downgradin
     assert state.threads_addressed_ids.get("T_defer") is None
 
 
+class _RaisingCreateIssueClient:
+    """Minimal gh stand-in whose ``create_issue`` raises a forced error.
+
+    Used to exercise the deferred-capture failure arms with a
+    ``BitBucketClientError`` (the BitBucket forge raises this, not
+    ``GitHubClientError``) so the capture path's forge-neutral downgrade is
+    covered for BitBucket workspaces.
+    """
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    async def create_issue(self, *, repo: object, title: str, body: str) -> str:
+        raise self._exc
+
+
+@pytest.mark.unit
+async def test_deferred_capture_transient_bitbucket_failure_requeues(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A transient BitBucket fault (rate limit) during create_issue must NOT
+    # downgrade a valid defer to needs_human: clear the verdict so the next poll
+    # re-attempts capture, mirroring the GitHub transient path.
+    from awf.common.bitbucket_client import (
+        BITBUCKET_RATE_LIMITED,
+        BitBucketClientError,
+    )
+    from awf.runtime.pr_monitor import _mark_review_thread_addressed
+    from awf.runtime.pr_monitor_runner.fix_cycle import _capture_deferred_review_thread
+
+    ws_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_RaisingCreateIssueClient(
+            BitBucketClientError(
+                operation="bitbucket create_issue",
+                status=429,
+                body="rate limited",
+                reason_code=BITBUCKET_RATE_LIMITED,
+            )
+        ),
+    )
+    thread = ReviewThread(
+        thread_id="T_bb_defer", path="src/x.py", line=1, body_excerpt="nit", author="rev"
+    )
+    state = MonitorState()
+    _mark_review_thread_addressed(state, thread, "defer")
+
+    result = await _capture_deferred_review_thread(
+        runner,
+        workspace_id=ws_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        thread=thread,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    assert result is None
+    assert state.threads_addressed_ids.get("T_bb_defer") is None
+
+
+@pytest.mark.unit
+async def test_deferred_capture_permanent_bitbucket_failure_downgrades(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    # A permanent BitBucket fault (403, token lacks issues scope) during
+    # create_issue must downgrade to needs_human (return False) rather than escape
+    # to the runner's generic handler and terminate the monitor.
+    from awf.common.bitbucket_client import BitBucketClientError
+    from awf.runtime.pr_monitor import _mark_review_thread_addressed
+    from awf.runtime.pr_monitor_runner.fix_cycle import _capture_deferred_review_thread
+
+    ws_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=_RaisingCreateIssueClient(
+            BitBucketClientError(
+                operation="bitbucket create_issue",
+                status=403,
+                body="forbidden: missing issues scope",
+            )
+        ),
+    )
+    thread = ReviewThread(
+        thread_id="T_bb_perm", path="src/x.py", line=1, body_excerpt="nit", author="rev"
+    )
+    state = MonitorState()
+    _mark_review_thread_addressed(state, thread, "defer")
+
+    result = await _capture_deferred_review_thread(
+        runner,
+        workspace_id=ws_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        thread=thread,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{ws_id}",
+        operation_id=None,
+        operation_type=None,
+        monitor_log=None,
+    )
+
+    # False -> the caller marks the thread needs_human (merge stays blocked); the
+    # defer verdict is preserved on the thread, not cleared (that is the transient
+    # path) and not silently resolved.
+    assert result is False
+    assert state.threads_addressed_ids.get("T_bb_perm") == "defer"
+
+
 @pytest.mark.unit
 async def test_fix_cycle_continues_to_next_thread_after_transient_capture(
     factory: async_sessionmaker[AsyncSession],
