@@ -6,15 +6,19 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.controls as controls
-from awf.api.schemas import WorkspaceControlRequest
+from awf.api.schemas import WorkspaceControlRequest, WorkspaceGuideRequest
 from awf.db.session import make_session_factory
 from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
     WorkspaceControlError,
+    WorkspaceGuideEmptyDirectiveError,
+    WorkspaceGuideMissingPrUrlError,
+    WorkspaceGuideStateError,
     WorkspaceNotFoundError,
     WorkspaceRebaseMissingCandidateError,
     WorkspaceRebaseMissingPrUrlError,
@@ -84,6 +88,18 @@ def test_require_idempotency_key_strips_valid_values() -> None:
             400,
         ),
         (
+            WorkspaceGuideMissingPrUrlError(SimpleNamespace(status="monitoring_pr")),
+            400,
+        ),
+        (
+            WorkspaceGuideEmptyDirectiveError(),
+            400,
+        ),
+        (
+            WorkspaceGuideStateError(SimpleNamespace(status="requested")),
+            409,
+        ),
+        (
             WorkspaceRebaseMissingCandidateError(
                 SimpleNamespace(id="ws_1", pr_url="https://github.com/x/y/pull/1")
             ),
@@ -145,6 +161,15 @@ async def test_control_route_functions_map_missing_workspace_errors(
                 session=session,
             )
     async with factory() as session:
+        with pytest.raises(HTTPException) as guide_error:
+            await controls.guide_workspace(
+                "ws_missing",
+                WorkspaceGuideRequest(directive="do the thing"),
+                idempotency_key="guide-missing",
+                if_match=None,
+                session=session,
+            )
+    async with factory() as session:
         with pytest.raises(HTTPException) as destroy_error:
             await controls.destroy_workspace(
                 "ws_missing",
@@ -157,7 +182,50 @@ async def test_control_route_functions_map_missing_workspace_errors(
         cancel_error.value,
         stop_error.value,
         remonitor_error.value,
+        guide_error.value,
         destroy_error.value,
     ]
-    assert [error.status_code for error in errors] == [404, 404, 404, 404]
-    assert [error.detail["error_code"] for error in errors] == ["NOT_FOUND"] * 4
+    assert [error.status_code for error in errors] == [404, 404, 404, 404, 404]
+    assert [error.detail["error_code"] for error in errors] == ["NOT_FOUND"] * 5
+
+
+@pytest.mark.unit
+def test_guide_request_requires_non_empty_directive() -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceGuideRequest()  # type: ignore[call-arg]
+    with pytest.raises(ValidationError):
+        WorkspaceGuideRequest(directive="")
+    with pytest.raises(ValidationError):
+        WorkspaceGuideRequest(directive="   ")
+
+    request = WorkspaceGuideRequest(directive="implement, do not defer")
+    assert request.directive == "implement, do not defer"
+    assert request.reason is None
+
+
+@pytest.mark.unit
+def test_guide_request_directive_schema_rejects_whitespace_only() -> None:
+    # The OpenAPI/JSON schema must mirror the runtime contract: a non-whitespace
+    # pattern so generated clients/docs do not advertise whitespace-only directives
+    # as valid (str_strip_whitespace only enforces this at validation time).
+    directive_schema = WorkspaceGuideRequest.model_json_schema()["properties"]["directive"]
+    assert directive_schema["minLength"] == 1
+    assert directive_schema["pattern"] == r"\S"
+
+
+@pytest.mark.unit
+def test_guide_route_documents_bad_directive_and_ineligible_state_errors() -> None:
+    # ``guide`` surfaces 400 for bad directives (WorkspaceGuideEmptyDirectiveError /
+    # WorkspaceGuideMissingPrUrlError) and 409 for ineligible workspace state
+    # (WorkspaceGuideStateError) via ``_http_error``. The regenerated OpenAPI contract
+    # must advertise those so client generators and operator docs are complete.
+    from awf.api.app import create_app
+
+    openapi = create_app(use_lifespan=False).openapi()
+    guide_responses = openapi["paths"]["/v1/workspaces/{workspace_id}/guide"]["post"]["responses"]
+
+    for code, description in (("400", "Bad Request"), ("409", "Conflict")):
+        assert code in guide_responses, f"guide route must document {code}"
+        assert guide_responses[code]["description"] == description
+        schema = guide_responses[code]["content"]["application/json"]["schema"]
+        assert schema["$ref"] == "#/components/schemas/HttpExceptionErrorResponse"

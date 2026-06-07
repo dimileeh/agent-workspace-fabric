@@ -137,6 +137,25 @@ class WorkspaceControlRequest(WorkspaceReasonRequest):
     stop_stack: bool = True
 
 
+class WorkspaceGuideRequest(BaseModel):
+    """Operator-guidance request (issue #447).
+
+    ``directive`` is the first-class agent instruction injected into a live
+    monitoring workspace; ``reason`` is an optional audit reason. Use the
+    ``guide`` control rather than overloading ``remonitor --reason`` as the
+    directive channel."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    # ``pattern`` requires at least one non-whitespace character so the OpenAPI
+    # schema mirrors the runtime contract: ``str_strip_whitespace`` + ``min_length``
+    # already reject whitespace-only directives, but without the pattern generated
+    # clients/docs would advertise ``"   "`` as valid. ``\S`` (not a lookahead) is
+    # used because pydantic-core's regex engine does not support lookarounds.
+    directive: Annotated[str, Field(min_length=1, max_length=1024, pattern=r"\S")]
+    reason: Annotated[str | None, Field(default=None, max_length=1024)]
+
+
 class WorkspaceOperationRequest(WorkspaceReasonRequest):
     requested_tier: Annotated[int | None, Field(default=None, ge=1, le=3)]
 

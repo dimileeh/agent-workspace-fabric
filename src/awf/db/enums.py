@@ -77,6 +77,7 @@ class OperationType(StrEnum):
     cancel = "cancel"
     stop = "stop"
     remonitor = "remonitor"
+    guide = "guide"
     sync_base = "sync_base"
     comment_repair = "comment_repair"
     ci_repair = "ci_repair"

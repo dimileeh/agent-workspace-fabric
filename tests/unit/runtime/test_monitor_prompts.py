@@ -550,8 +550,7 @@ class TestOperatorHintPrompt:
         )
 
         assert (
-            "An operator manually requested re-monitoring this PR with the following hint:"
-            in prompt
+            "An operator manually provided guidance for this PR with the following hint:" in prompt
         )
         assert "Address what the hint says, commit any code changes locally" in prompt
         assert "push a fix commit" not in prompt
@@ -559,11 +558,35 @@ class TestOperatorHintPrompt:
         assert "op_rehint" in prompt
         assert "Workspace runtime context" in prompt
         assert "UNTRUSTED EXTERNAL EVIDENCE" in prompt
-        assert "source_kind: operator_remonitor_hint" in prompt
+        assert "source_kind: operator_hint" in prompt
         assert (
             "AWF-EVIDENCE> the docs CTA URL 404s; correct URL is https://example.test/docs"
         ) in prompt
         assert "Do NOT push" in prompt
+
+    @pytest.mark.unit
+    def test_directive_is_rendered_as_the_repair_evidence(self) -> None:
+        prompt = operator_hint_prompt(
+            pr_number=443,
+            repo_slug="dimileeh/awf",
+            reason="operator guidance recorded",
+            directive="implement the forge-neutral fix, do not defer",
+            operation_id="op_guide",
+        )
+
+        assert ("AWF-EVIDENCE> implement the forge-neutral fix, do not defer") in prompt
+        # The audit reason is not the agent instruction when a directive is set.
+        assert "AWF-EVIDENCE> operator guidance recorded" not in prompt
+
+    @pytest.mark.unit
+    def test_directive_absent_falls_back_to_reason(self) -> None:
+        prompt = operator_hint_prompt(
+            pr_number=443,
+            repo_slug="dimileeh/awf",
+            reason="reply to the relevant unresolved review thread",
+        )
+
+        assert "AWF-EVIDENCE> reply to the relevant unresolved review thread" in prompt
 
     @pytest.mark.unit
     def test_prescribes_fixed_verdict_for_successful_code_or_no_code_hints(self) -> None:

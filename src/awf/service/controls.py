@@ -41,6 +41,9 @@ from awf.service.controls_errors import (
     IdempotencyConflictError,
     VersionConflictError,
     WorkspaceControlError,
+    WorkspaceGuideEmptyDirectiveError,
+    WorkspaceGuideMissingPrUrlError,
+    WorkspaceGuideStateError,
     WorkspaceNotFoundError,
     WorkspaceRebaseActiveConflictError,
     WorkspaceRebaseMissingCandidateError,
@@ -53,6 +56,7 @@ from awf.service.controls_errors import (
     WorkspaceValidateMissingPrUrlError,
     WorkspaceValidateStateError,
 )
+from awf.service.controls_guide import _WorkspaceGuideMixin
 from awf.service.controls_types import (
     CleanerFactory,
     ProjectStopper,
@@ -158,7 +162,7 @@ def _remonitor_current_head_sha(
     return candidate_head_sha
 
 
-class WorkspaceControlService:
+class WorkspaceControlService(_WorkspaceGuideMixin):
     """Business logic for sensitive workspace lifecycle controls."""
 
     def __init__(
@@ -1416,6 +1420,9 @@ __all__ = [
     "IdempotencyConflictError",
     "VersionConflictError",
     "WorkspaceStackStopError",
+    "WorkspaceGuideEmptyDirectiveError",
+    "WorkspaceGuideMissingPrUrlError",
+    "WorkspaceGuideStateError",
     "WorkspaceRemonitorMissingPrUrlError",
     "WorkspaceRemonitorStateError",
     "WorkspaceRefreshStateError",

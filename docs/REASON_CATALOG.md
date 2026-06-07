@@ -771,3 +771,17 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Operator Fix:** Wait for the response's `Retry-After` delay, reduce workspace creation concurrency, or replay the original request with the same idempotency key and body when recovering from a lost response.
 **Related Command:** `awf workspace list`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_create_rate_limited](#workspace_create_rate_limited)
+
+### WORKSPACE_GUIDE_DIRECTIVE_REQUIRED
+**Problem:** Workspace guide directive must not be empty or whitespace-only.
+**Likely Cause:** `awf workspace guide` was called without a `--directive`, or with a directive that is blank or only whitespace.
+**Operator Fix:** Re-run the guide control with a non-empty instruction, e.g. `awf workspace guide <id> --directive "<instruction for the PR monitor>"`.
+**Related Command:** `awf workspace guide`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_directive_required](#workspace_guide_directive_required)
+
+### WORKSPACE_STATE_NOT_GUIDABLE
+**Problem:** Workspace is not in a state eligible for operator guidance.
+**Likely Cause:** The workspace is not in `monitoring_pr`; operator guidance can only steer the PR monitor while it owns an open pull request.
+**Operator Fix:** Wait until the workspace reaches `monitoring_pr` (an open PR is being monitored), then re-issue `awf workspace guide`. Inspect state with `awf workspace show <workspace_id>`.
+**Related Command:** `awf workspace guide`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_state_not_guidable](#workspace_state_not_guidable)

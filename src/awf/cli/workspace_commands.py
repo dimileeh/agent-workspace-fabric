@@ -318,7 +318,14 @@ def workspace_retry(
 @workspace_app.command("remonitor")
 def workspace_remonitor(
     workspace_id: str = typer.Argument(...),
-    reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    reason: str | None = typer.Option(
+        None,
+        "--reason",
+        help=(
+            "Operator audit reason. NOTE: historically doubled as the agent directive; "
+            "to inject an instruction prefer `awf workspace guide --directive`."
+        ),
+    ),
     idempotency_key: str | None = _control_idempotency_key_option(),
     if_match: str | None = typer.Option(
         None,
@@ -329,7 +336,11 @@ def workspace_remonitor(
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
-    """Request PR monitor recovery for a monitoring workspace."""
+    """Request PR monitor recovery for a monitoring workspace.
+
+    For injecting an operator instruction into a live monitoring workspace, use
+    the purpose-named `awf workspace guide --directive` control instead.
+    """
     headers = _control_headers(
         api_token=api_token,
         idempotency_key=idempotency_key,
@@ -344,6 +355,109 @@ def workspace_remonitor(
         headers=headers,
     )
     _handle_response(response, fmt)
+
+
+def _guide_workspace_impl(
+    *,
+    workspace_id: str,
+    directive: str,
+    reason: str | None,
+    idempotency_key: str | None,
+    if_match: str | None,
+    api_token: str | None,
+    base_url: str | None,
+    fmt: OutputFormat,
+    action: str,
+) -> None:
+    headers = _control_headers(
+        api_token=api_token,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        action=action,
+    )
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/guide",
+        base_url=_base_url(base_url),
+        json={"directive": directive, "reason": reason},
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("guide")
+def workspace_guide(
+    workspace_id: str = typer.Argument(...),
+    directive: str = typer.Option(
+        ...,
+        "--directive",
+        help="Operator instruction for the agent's next monitor cycle (acted on, not deferred).",
+    ),
+    reason: str | None = typer.Option(
+        None, "--reason", help="Optional operator audit reason (not the agent instruction)."
+    ),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Inject an operator directive into a live monitoring workspace (issue #447).
+
+    Closes the NotifyHuman/human-wait loop without cancel+re-adopt: the
+    directive reaches the agent on the monitor's next cycle. This is the
+    purpose-named affordance for operator guidance.
+    """
+    _guide_workspace_impl(
+        workspace_id=workspace_id,
+        directive=directive,
+        reason=reason,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        api_token=api_token,
+        base_url=base_url,
+        fmt=fmt,
+        action="guide",
+    )
+
+
+@workspace_app.command("instruct")
+def workspace_instruct(
+    workspace_id: str = typer.Argument(...),
+    directive: str = typer.Option(
+        ...,
+        "--directive",
+        help="Operator instruction for the agent's next monitor cycle (acted on, not deferred).",
+    ),
+    reason: str | None = typer.Option(
+        None, "--reason", help="Optional operator audit reason (not the agent instruction)."
+    ),
+    idempotency_key: str | None = _control_idempotency_key_option(),
+    if_match: str | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version or ETag.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Alias for ``guide``: inject an operator directive into a monitoring workspace."""
+    _guide_workspace_impl(
+        workspace_id=workspace_id,
+        directive=directive,
+        reason=reason,
+        idempotency_key=idempotency_key,
+        if_match=if_match,
+        api_token=api_token,
+        base_url=base_url,
+        fmt=fmt,
+        action="instruct",
+    )
 
 
 @workspace_app.command("cancel")

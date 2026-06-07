@@ -790,6 +790,27 @@ class WorkspaceService:
             await s.commit()
             return result
 
+    async def guide_workspace(
+        self,
+        workspace_id: str,
+        *,
+        directive: str,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        """Inject an operator directive into a live monitoring workspace."""
+        async with self._factory() as s:
+            result = await self._controls(s).guide_workspace(
+                workspace_id,
+                directive=directive,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                expected_version=expected_version,
+            )
+            await s.commit()
+            return result
+
     async def request_validate_workspace(
         self,
         workspace_id: str,

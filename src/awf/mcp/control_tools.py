@@ -260,6 +260,52 @@ def register_control_tools(
             return _tool_error(exc)
         return _tool_result(result.model_dump(mode="json"))
 
+    @mcp.tool(name="awf_guide_workspace")
+    async def awf_guide_workspace(
+        workspace_id: str = Field(
+            ..., min_length=1, max_length=256, description="Workspace ID to guide."
+        ),
+        directive: str = Field(
+            ...,
+            max_length=1024,
+            json_schema_extra={"minLength": 1},
+            description=(
+                "Operator instruction for the agent's next monitor cycle "
+                "(acted on, not deferred); distinct from the audit reason."
+            ),
+        ),
+        reason: str | None = Field(
+            default=None,
+            max_length=1024,
+            description="Optional operator audit reason (not the agent instruction).",
+        ),
+        idempotency_key: str | None = Field(
+            ...,
+            max_length=128,
+            json_schema_extra={"minLength": 1},
+            description="Required idempotency key for safe retries after timeout or dropped response.",
+        ),
+        expected_version: int | None = Field(
+            default=None,
+            description="Optional optimistic concurrency version (maps to If-Match).",
+        ),
+    ) -> StructuredToolResult:
+        """Operator control: inject a directive into a live monitoring workspace; not shell access."""
+        idempotency_key_value = _required_idempotency_key(idempotency_key)
+        if idempotency_key_value is None:
+            return _idempotency_key_error()
+        try:
+            result = await service.guide_workspace(
+                workspace_id,
+                directive=directive,
+                reason=reason,
+                idempotency_key=idempotency_key_value,
+                expected_version=expected_version,
+            )
+        except WorkspaceControlError as exc:
+            return _tool_error(exc)
+        return _tool_result(result.model_dump(mode="json"))
+
     @mcp.tool(name="awf_request_workspace_validation")
     async def awf_request_workspace_validation(
         workspace_id: str = Field(

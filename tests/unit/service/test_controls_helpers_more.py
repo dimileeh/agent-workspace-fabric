@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta, timezone
+
 import pytest
 
 from awf.db.enums import OperationType
@@ -10,6 +12,7 @@ from awf.node.cleanup import WorkspaceCleanupResult, WorkspaceCleanupStepResult
 from awf.service import controls_helpers
 from awf.service.controls_errors import WorkspaceStackStopError
 from awf.service.controls_helpers import (
+    _claim_lease_is_live,
     _cleanup_failure_message,
     _cleanup_optional_string,
     _cleanup_reason_code,
@@ -523,3 +526,45 @@ def test_payload_matches_identity_skips_keys_absent_from_identity() -> None:
         identity={"reason_code": "OPERATOR_REBASE"},
         identity_keys=frozenset({"reason_code", "absent_key"}),
     )
+
+
+@pytest.mark.unit
+def test_claim_lease_is_live_false_for_missing_owner_or_expiry() -> None:
+    now = datetime.now(UTC)
+    assert not _claim_lease_is_live(None, now + timedelta(minutes=5), now=now)
+    assert not _claim_lease_is_live("worker", None, now=now)
+
+
+@pytest.mark.unit
+def test_claim_lease_is_live_naive_expiry_against_aware_now() -> None:
+    # Naive stored expiry + aware ``now`` (the realistic path) compares naively.
+    now = datetime.now(UTC)
+    naive_future = now.replace(tzinfo=None) + timedelta(minutes=5)
+    assert _claim_lease_is_live("worker", naive_future, now=now)
+
+
+@pytest.mark.unit
+def test_claim_lease_is_live_aware_expiry_against_naive_now() -> None:
+    # Symmetric guard: an aware expiry paired with a naive ``now`` must compare
+    # naively rather than raising ``TypeError`` on a mixed-awareness comparison.
+    aware_now = datetime.now(UTC)
+    naive_now = aware_now.replace(tzinfo=None)
+    assert _claim_lease_is_live("worker", aware_now + timedelta(minutes=5), now=naive_now)
+    assert not _claim_lease_is_live("worker", aware_now - timedelta(minutes=5), now=naive_now)
+
+
+@pytest.mark.unit
+def test_claim_lease_is_live_non_utc_aware_expiry_converts_before_compare() -> None:
+    # An aware ``expires_at`` in a non-UTC offset must be converted to UTC before
+    # the tz-naive comparison; stripping the offset without converting would
+    # treat the local wall-clock as UTC and could mark an expired lease live.
+    plus_530 = timezone(timedelta(hours=5, minutes=30))
+    aware_now = datetime.now(UTC)
+    naive_now = aware_now.replace(tzinfo=None)
+    # Same instant as ``naive_now`` but expressed in +05:30 — its naive
+    # wall-clock reads ~5.5h ahead, so a non-converting strip would wrongly
+    # report it as live.
+    expired_other_zone = (aware_now - timedelta(minutes=5)).astimezone(plus_530)
+    assert not _claim_lease_is_live("worker", expired_other_zone, now=naive_now)
+    live_other_zone = (aware_now + timedelta(minutes=5)).astimezone(plus_530)
+    assert _claim_lease_is_live("worker", live_other_zone, now=naive_now)

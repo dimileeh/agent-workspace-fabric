@@ -715,6 +715,32 @@ Existing monitor workspaces can also be recovered with
 `awf workspace remonitor`, the matching REST control route, or
 `awf_remonitor_workspace` through MCP.
 
+### Operator guidance (`guide`/`instruct`)
+
+`remonitor` recovers a *lost* monitor; to **steer a live one**, use the
+purpose-named `guide` control (alias `instruct`). It injects an operator
+**directive** — a first-class agent instruction, distinct from the audit
+`reason` — into a workspace that is still `monitoring_pr`. The monitor's next
+`decide()` cycle reads it as a non-deferrable, pending operator hint and
+re-engages the agent ("address this, do not defer"), so a workspace parked on a
+`NotifyHuman`/human-wait deferral is resumed **without** the destructive
+cancel + re-`adopt-pr` dance. Guidance stays advisory: it is context for the
+agent's next cycle, never a direct PR mutation.
+
+```bash
+uv run --python 3.12 --extra dev awf workspace guide <id> \
+  --directive "implement the forge-neutral fix, do not defer" \
+  --reason "operator decision recorded" \
+  --idempotency-key <key>
+```
+
+It mirrors the other controls 1:1 across CLI (`awf workspace guide`/`instruct`),
+REST (`POST /v1/workspaces/{id}/guide`), and MCP (`awf_guide_workspace`), and is
+idempotent + audited (reason code `OPERATOR_GUIDE`). Historically
+`remonitor --reason` doubled as the directive channel (the reason string was fed
+to the agent); that still works, but `guide --directive` is the intended,
+purpose-named affordance — `remonitor` stays focused on monitor recovery.
+
 ## Working With Dockerized Projects
 
 For non-Docker projects, profile `docker.mode` can be `none`.
@@ -1035,6 +1061,7 @@ The console uses these AWF endpoints:
 - `GET /v1/workspaces/{id}/operations` for active and completed operations.
 - `GET /v1/workspaces/{id}/logs` and `GET /v1/workspaces/{id}/logs/{stream_id}` for log metadata and tail reads.
 - `POST /v1/workspaces/{id}/remonitor` for audited operator PR-monitor recovery; CLI: `awf workspace remonitor <id> --idempotency-key <key>`.
+- `POST /v1/workspaces/{id}/guide` for an audited operator **directive** into a live monitoring workspace (closes the `NotifyHuman` loop); CLI: `awf workspace guide <id> --directive "..." --idempotency-key <key>` (alias `instruct`); MCP: `awf_guide_workspace`.
 - `POST /v1/workspaces/{id}/refresh`, `/validate`, and `/rebase` for async
   operator recovery operations. Duplicate `Idempotency-Key` replays return the
   stored operation after later workspace state changes; fresh-key active

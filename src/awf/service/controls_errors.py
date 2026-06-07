@@ -9,6 +9,11 @@ _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
     WorkspaceStatus.failed,
 )
+# guide is a no-state-transition control: it injects a directive into a *live*
+# monitoring workspace, so only ``monitoring_pr`` is eligible. Re-engaging a
+# ``failed`` workspace stays remonitor's job (issue #447). Defined here as the
+# single source of truth and imported by ``controls_guide.py``.
+_GUIDE_ELIGIBLE_STATUSES = (WorkspaceStatus.monitoring_pr,)
 _VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _REBASE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 
@@ -106,6 +111,35 @@ class WorkspaceRemonitorStateError(WorkspaceControlError):
         )
 
 
+class WorkspaceGuideMissingPrUrlError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_PR_URL_REQUIRED",
+            message="Workspace guide requires an existing PR URL.",
+            detail={"status": workspace.status},
+        )
+
+
+class WorkspaceGuideEmptyDirectiveError(WorkspaceControlError):
+    def __init__(self) -> None:
+        super().__init__(
+            error_code="WORKSPACE_GUIDE_DIRECTIVE_REQUIRED",
+            message="Workspace guide directive must not be empty or whitespace-only.",
+        )
+
+
+class WorkspaceGuideStateError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_STATE_NOT_GUIDABLE",
+            message="Workspace is not in a state eligible for operator guidance.",
+            detail={
+                "status": workspace.status,
+                "eligible_statuses": [status.value for status in _GUIDE_ELIGIBLE_STATUSES],
+            },
+        )
+
+
 class WorkspaceRefreshStateError(WorkspaceControlError):
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
@@ -194,6 +228,9 @@ __all__ = [
     "IdempotencyConflictError",
     "VersionConflictError",
     "WorkspaceControlError",
+    "WorkspaceGuideEmptyDirectiveError",
+    "WorkspaceGuideMissingPrUrlError",
+    "WorkspaceGuideStateError",
     "WorkspaceNotFoundError",
     "WorkspaceRebaseActiveConflictError",
     "WorkspaceRebaseMissingCandidateError",

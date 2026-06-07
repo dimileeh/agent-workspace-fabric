@@ -276,14 +276,33 @@ class MonitorState:
 
 @dataclass(frozen=True)
 class OperatorHint:
-    """Operator-provided remonitor hint that must be processed before merge."""
+    """Operator-provided remonitor/guide hint that must be processed before merge.
+
+    ``reason`` is the audit reason. ``directive`` is the agent instruction
+    injected by the purpose-named ``guide`` control (issue #447); when present
+    it is what the repair prompt acts on. ``remonitor`` leaves ``directive``
+    ``None`` and the prompt falls back to ``reason`` (backward-compatible)."""
 
     reason: str
+    directive: str | None = None
     operation_id: str | None = None
     requested_at: str | None = None
     reason_code: str = "OPERATOR_REMONITOR"
     status: Literal["pending", "needs_human", "agent_failed"] = "pending"
     status_reason: str | None = None
+
+    @property
+    def control_label(self) -> str:
+        """Operator-facing name of the control that produced this hint.
+
+        The purpose-named ``guide`` control sets ``directive`` (and the
+        ``OPERATOR_GUIDE`` reason code); ``remonitor`` leaves ``directive``
+        ``None``. Triage messaging derives the label from those signals so a
+        guided hint that lands in ``needs_human``/``agent_failed`` is not
+        mislabelled as a remonitor hint."""
+        if self.directive is not None or self.reason_code == "OPERATOR_GUIDE":
+            return "operator guide hint"
+        return "operator remonitor hint"
 
 
 @dataclass(frozen=True)
@@ -1263,7 +1282,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         reason_suffix = f" Reason: {hint.status_reason}" if hint.status_reason else ""
         return NotifyHuman(
             message=(
-                "An operator remonitor hint still requires human attention before "
+                f"An {hint.control_label} still requires human attention before "
                 f"this PR can merge.{reason_suffix}"
             )
         )

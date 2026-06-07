@@ -232,14 +232,21 @@ def operator_hint_prompt(
     pr_number: int,
     repo_slug: str,
     reason: str,
+    directive: str | None = None,
     operation_id: str | None = None,
     workspace_runtime_context: str = "",
 ) -> str:
-    """Prompt the CLI to process an operator remonitor hint."""
+    """Prompt the CLI to process an operator remonitor/guide hint.
+
+    ``directive`` is the first-class operator instruction from the ``guide``
+    control (issue #447); when present it is the text the agent acts on. The
+    ``remonitor`` control passes only ``reason`` and the prompt falls back to
+    it, so existing behavior is unchanged."""
+    effective = directive or reason
     evidence = render_untrusted_evidence(
         UntrustedEvidence(
-            source_kind="operator_remonitor_hint",
-            source_name="AWF operator remonitor hint",
+            source_kind="operator_hint",
+            source_name="AWF operator hint",
             source_id=operation_id,
             location=f"{repo_slug}#{pr_number}",
             metadata=(
@@ -247,11 +254,11 @@ def operator_hint_prompt(
                 ("pr", f"#{pr_number}"),
                 ("operation_id", operation_id),
             ),
-            text=reason,
+            text=effective,
         )
     )
     return (
-        f"An operator manually requested re-monitoring this PR with the following hint:\n\n"
+        "An operator manually provided guidance for this PR with the following hint:\n\n"
         f"{evidence}\n\n"
         f"{_workspace_runtime_context_section(workspace_runtime_context)}"
         f"{_SAFETY_POLICY}\n"

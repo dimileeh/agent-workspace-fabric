@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -207,7 +207,19 @@ async def _cancel_stale_pr_monitor_recovery_operations(
     operations: OperationRepository,
     *,
     workspace_id: str,
+    reason_code: str = _OPERATOR_REMONITOR_REASON_CODE,
+    requested_action: str = OperationType.remonitor.value,
 ) -> list[dict[str, object]]:
+    """Cancel in-flight PR-monitor ``validate_only``/``rebase_only`` recovery ops.
+
+    Operator controls that reset the monitor claim and re-engage the agent
+    (``remonitor`` and ``guide``) must clear any recovery operation the PR
+    monitor launched, or the stale recovery cycle keeps running alongside the
+    new directive cycle and conflicts on the same workspace. ``reason_code`` and
+    ``requested_action`` flow into the cancelled operation's audit trail so it
+    reflects the control that pre-empted it (defaults preserve ``remonitor``).
+    """
+
     cancelled: list[dict[str, object]] = []
     active: list[Operation] = []
     for status in (OperationStatus.pending, OperationStatus.running):
@@ -228,12 +240,12 @@ async def _cancel_stale_pr_monitor_recovery_operations(
             status=OperationStatus.cancelled,
             result={
                 "status": OperationStatus.cancelled.value,
-                "reason_code": _OPERATOR_REMONITOR_REASON_CODE,
-                "requested_action": OperationType.remonitor.value,
+                "reason_code": reason_code,
+                "requested_action": requested_action,
             },
-            error_code=_OPERATOR_REMONITOR_REASON_CODE,
+            error_code=reason_code,
             error_message=(
-                "Cancelled stale PR monitor recovery operation before operator remonitor."
+                f"Cancelled stale PR monitor recovery operation before operator {requested_action}."
             ),
         )
     return cancelled
@@ -581,6 +593,79 @@ def _claim_reset_snapshot(workspace: Workspace) -> dict[str, str | None]:
         "execution_claimed_by": workspace.execution_claimed_by,
         "execution_claim_expires_at": _json_datetime(workspace.execution_claim_expires_at),
     }
+
+
+def _claim_lease_is_live(
+    claimed_by: str | None,
+    expires_at: datetime | None,
+    *,
+    now: datetime,
+) -> bool:
+    """Return ``True`` when a claim is a live lease (owner set, future expiry).
+
+    A claim with no owner or no expiry is treated as stale/claimable, matching
+    ``claim_monitoring_pr`` which adopts a row whose ``*_claim_expires_at`` is
+    NULL. Naive expiries are compared naively (some storage paths persist
+    tz-naive datetimes), mirroring the worker's staleness helpers.
+    """
+    if claimed_by is None or expires_at is None:
+        return False
+    if expires_at.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    elif expires_at.tzinfo is not None and now.tzinfo is None:
+        # Symmetric guard: callers pass an aware ``utcnow()`` today, but a naive
+        # ``now`` paired with an aware ``expires_at`` would raise ``TypeError`` at
+        # the comparison below. Convert to UTC and then strip so the naive value
+        # represents the same instant regardless of the original offset (a
+        # non-UTC ``+05:30`` expiry must not compare as if its wall-clock were
+        # UTC, which could treat an already-expired lease as live).
+        expires_at = expires_at.astimezone(UTC).replace(tzinfo=None)
+    return expires_at > now
+
+
+def _reset_stale_monitor_execution_claims(
+    workspace: Workspace,
+    *,
+    now: datetime,
+) -> dict[str, str | None]:
+    """Clear only *stale* monitor/execution leases, preserving live ones.
+
+    Operator re-arming controls (``guide``) persist a pending directive without
+    changing workspace status. Nulling an unexpired lease here would make the
+    row immediately re-claimable (``claim_monitoring_pr`` treats a NULL expiry
+    as claimable), letting a second worker start a duplicate monitor while the
+    original loop is still running — the monitor heartbeat only stops on
+    claim-loss, it never aborts the in-flight run. So a live lease is left
+    untouched and the directive is picked up on the next monitor cycle; only
+    stale/expired leases are cleared. Returns a snapshot of the claims actually
+    reset (preserved leases report ``None``).
+    """
+    # Each key holds the *old* claim value when the claim was actually cleared
+    # (stale/expired/unset) and stays ``None`` when a live lease was preserved.
+    # Note this makes "live lease kept" indistinguishable from "was never
+    # claimed" in ``claims_reset`` alone — a post-call auditor that needs that
+    # distinction must read ``workspace.monitor_claimed_by`` directly.
+    reset: dict[str, str | None] = {
+        "monitor_claimed_by": None,
+        "monitor_claim_expires_at": None,
+        "execution_claimed_by": None,
+        "execution_claim_expires_at": None,
+    }
+    if not _claim_lease_is_live(
+        workspace.monitor_claimed_by, workspace.monitor_claim_expires_at, now=now
+    ):
+        reset["monitor_claimed_by"] = workspace.monitor_claimed_by
+        reset["monitor_claim_expires_at"] = _json_datetime(workspace.monitor_claim_expires_at)
+        workspace.monitor_claimed_by = None
+        workspace.monitor_claim_expires_at = None
+    if not _claim_lease_is_live(
+        workspace.execution_claimed_by, workspace.execution_claim_expires_at, now=now
+    ):
+        reset["execution_claimed_by"] = workspace.execution_claimed_by
+        reset["execution_claim_expires_at"] = _json_datetime(workspace.execution_claim_expires_at)
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+    return reset
 
 
 def _json_datetime(value: datetime | None) -> str | None:

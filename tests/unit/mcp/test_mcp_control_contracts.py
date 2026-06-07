@@ -39,6 +39,7 @@ _CONTROL_TOOLS = [
     "awf_stop_workspace",
     "awf_destroy_workspace",
     "awf_remonitor_workspace",
+    "awf_guide_workspace",
     "awf_request_workspace_validation",
     "awf_refresh_workspace",
     "awf_rebase_workspace",
@@ -50,6 +51,7 @@ _CONTROL_TOOLS_WITH_EXPECTED_VERSION = [
     "awf_stop_workspace",
     "awf_destroy_workspace",
     "awf_remonitor_workspace",
+    "awf_guide_workspace",
     "awf_request_workspace_validation",
     "awf_refresh_workspace",
     "awf_rebase_workspace",
@@ -207,6 +209,35 @@ class _MockService:
             operation_status="succeeded",
             status="monitoring_pr",
             message="workspace PR monitor recovery requested",
+        )
+
+    async def guide_workspace(
+        self,
+        workspace_id: str,
+        *,
+        directive: str,
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        self.calls.append(
+            (
+                "guide",
+                {
+                    "workspace_id": workspace_id,
+                    "directive": directive,
+                    "reason": reason,
+                    "idempotency_key": idempotency_key,
+                    "expected_version": expected_version,
+                },
+            )
+        )
+        return WorkspaceControlResponse(
+            workspace_id=workspace_id,
+            operation_id="op_guide",
+            operation_status="succeeded",
+            status="monitoring_pr",
+            message="workspace operator guidance recorded",
         )
 
     async def request_validate_workspace(
@@ -432,7 +463,7 @@ class _FailingMockService(_MockService):
 
 @pytest.mark.unit
 class TestToolRegistrationAndSchema:
-    async def test_all_eight_control_tools_are_registered(self) -> None:
+    async def test_all_control_tools_are_registered(self) -> None:
         mcp = build_mcp_server(service=_MockService())
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
@@ -547,6 +578,26 @@ class TestSuccessPaths:
                 ),
             ),
             (
+                "awf_guide_workspace",
+                {
+                    "workspace_id": "ws_guide",
+                    "directive": "implement, do not defer",
+                    "reason": "operator decision",
+                    "idempotency_key": "ik-g",
+                    "expected_version": 11,
+                },
+                (
+                    "guide",
+                    {
+                        "workspace_id": "ws_guide",
+                        "directive": "implement, do not defer",
+                        "reason": "operator decision",
+                        "idempotency_key": "ik-g",
+                        "expected_version": 11,
+                    },
+                ),
+            ),
+            (
                 "awf_request_workspace_validation",
                 {
                     "workspace_id": "ws_validate",
@@ -634,6 +685,26 @@ class TestSuccessPaths:
 
         assert isinstance(payload, dict)
         assert service.calls[0][1]["idempotency_key"] == idempotency_key
+
+    async def test_guide_requires_idempotency_key_and_directive(self) -> None:
+        service = _MockService()
+        mcp = build_mcp_server(service=service)
+
+        # Directive required by schema.
+        with pytest.raises(ToolError, match="directive"):
+            await _call_result(
+                mcp, "awf_guide_workspace", {"workspace_id": "ws_x", "idempotency_key": "ik"}
+            )
+        # Blank idempotency key (directive present) → structured invalid-request.
+        result = await _call_result(
+            mcp,
+            "awf_guide_workspace",
+            {"workspace_id": "ws_x", "directive": "do it", "idempotency_key": ""},
+        )
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_REQUEST"
+        assert service.calls == []
 
     async def test_refresh_and_rebase_return_operation_response_shape(self) -> None:
         service = _MockService()
