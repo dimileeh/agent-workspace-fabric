@@ -196,8 +196,8 @@ function hasActiveCancellationOperation(context: WorkspaceOperatorContext): bool
   const cancellationOperations = (context.operations ?? []).filter((operation) =>
     cancellationOperationTypes.has(operation.type),
   );
-  if (cancellationOperations.length > 0) {
-    return cancellationOperations.some((operation) => !terminalOperationStatuses.has(operation.status));
+  if (cancellationOperations.some((operation) => !terminalOperationStatuses.has(operation.status))) {
+    return true;
   }
   return context.overview.active_operation === "cancel" || context.overview.active_operation === "stop";
 }

@@ -262,6 +262,89 @@ test.describe("Operator cancel control", () => {
     expect(cancelPosts).toBe(0);
   });
 
+  test("keeps cancel disabled when only terminal cancel rows are in details", async ({ page }) => {
+    let cancelPosts = 0;
+    await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
+      cancelPosts += 1;
+      await route.fulfill({
+        json: {
+          workspace_id: WORKSPACE_ID,
+          operation_id: "op_cancel123",
+          operation_status: "succeeded",
+          status: "cancelled",
+          message: "cancel requested",
+        },
+      });
+    });
+
+    const workspacePayload = () => ({
+      workspace_id: WORKSPACE_ID,
+      title: "Mock Workspace",
+      repo_url: "https://github.com/test/repo",
+      base_branch: "main",
+      agent: "test-agent",
+      status: "running",
+      active_operation: "cancel",
+      version: 7,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      lifecycle: [],
+      llm_usage: null,
+      recovery: null,
+    });
+
+    await page.route("/api/awf/workspaces/overview*", async (route) => {
+      await route.fulfill({ json: { items: [workspacePayload()], has_more: false } });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}`, async (route) => {
+      await route.fulfill({ json: workspacePayload() });
+    });
+    await page.route(`/api/awf/workspaces/${WORKSPACE_ID}/operations*`, async (route) => {
+      await route.fulfill({
+        json: {
+          items: [
+            {
+              id: "op_cancel456",
+              workspace_id: WORKSPACE_ID,
+              type: "cancel",
+              status: "canceled",
+              error_code: null,
+              error_message: null,
+              payload: null,
+              result: null,
+              idempotency_key: null,
+              created_at: new Date().toISOString(),
+              started_at: new Date().toISOString(),
+              finished_at: new Date().toISOString(),
+              owner: null,
+              source: null,
+              action: null,
+              pr_number: null,
+              pr_url: null,
+              source_head_sha: null,
+              source_base_sha: null,
+              reason: null,
+              reason_code: null,
+              failure_code: null,
+              failure_message: null,
+              log_stream_refs: {},
+              log_stream_ids: [],
+            },
+          ],
+          has_more: false,
+        },
+      });
+    });
+
+    await page.goto(`/?workspaceId=${WORKSPACE_ID}`);
+
+    const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
+    await expect(cancelButton).toBeVisible();
+    await expect(cancelButton).toBeDisabled();
+    await page.waitForTimeout(200);
+    expect(cancelPosts).toBe(0);
+  });
+
   test("does not carry an open cancel confirmation across a workspace switch", async ({ page }) => {
     const SECOND_WORKSPACE_ID = "ws_mock456";
 
