@@ -1258,7 +1258,7 @@ async def execute(
                     "executor.pr_failed",
                     workspace_id=workspace_id,
                     operation=exc.operation,
-                    returncode=exc.status,
+                    returncode=exc.status if exc.status is not None else 0,
                 )
                 await self._record_executor_pr_audit_event(
                     workspace_id,
