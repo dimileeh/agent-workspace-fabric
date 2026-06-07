@@ -56,7 +56,13 @@ from awf.runtime.pr_monitor_runner.types import (
 )
 from awf.service.merge_queue import MergeQueueBlocker
 
-_MERGE_METHOD_PREFERENCE = ("squash", "merge", "rebase")
+# ``fast_forward`` is intentionally LAST so squash stays the default and the
+# GitHub precedence (squash > merge > rebase) is unchanged: it only ever wins on a
+# repo/branch policy that allows no other method (e.g. a fast-forward-only BitBucket
+# repo, which previously wedged on a spurious MERGE_METHOD_MISMATCH — issue #448).
+# AWF preference wins among allowed strategies; BitBucket's ``default_merge_strategy``
+# is ignored, uniform with GitHub.
+_MERGE_METHOD_PREFERENCE = ("squash", "merge", "rebase", "fast_forward")
 _KNOWN_MERGE_METHODS = frozenset(_MERGE_METHOD_PREFERENCE)
 _MERGE_METHOD_MISMATCH_REASON = "MERGE_METHOD_MISMATCH"
 
