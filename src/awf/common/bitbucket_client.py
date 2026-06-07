@@ -679,10 +679,15 @@ class BitBucketClient:
         """Mark a reviewer task RESOLVED via ``PUT .../tasks/{id}``.
 
         A 403 (the token lacks task-resolution permission) is re-raised with the stable
-        ``BITBUCKET_TASK_RESOLVE_FORBIDDEN`` reason code so the monitor escalates to a
-        human blocker instead of retrying — the agent re-addressing the task cannot grant
-        a missing scope. Any other failure propagates so the fix-cycle rolls back the
-        addressed-state and the still-open task keeps blocking merge next poll.
+        ``BITBUCKET_TASK_RESOLVE_FORBIDDEN`` reason code — distinct from the generic API
+        error so the escalation is diagnosable — because the agent re-addressing the task
+        cannot grant a missing scope. Any other failure propagates with its native reason
+        code. Either way the PUT raised, so the task stays UNRESOLVED and keeps blocking
+        merge. The fix-cycle requeues only transient blips; every *permanent* task-resolve
+        failure (403 or otherwise) is downgraded to ``needs_human`` and kept addressed so
+        it does NOT re-route to the agent (tasks live in the inline-thread feed, so
+        clearing the addressed marker would re-fire ``AddressComments`` against a fault
+        the agent cannot fix — a retry storm), while ``decide()`` escalates to NotifyHuman.
         """
         owner, name, pr_number, task_id = decode_task_id(thread_id)
         path = (
