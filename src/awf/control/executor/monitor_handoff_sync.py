@@ -106,6 +106,36 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
 
+    # Release-PR sync is GitHub-only, but BitBucket is a *globally* supported forge
+    # (issue #345 Part 2), so it clears ``_gate_sync_handoff_unsupported_forge``
+    # above. Apply the release-sync-specific GitHub-only gate here — before the
+    # commits-ahead probe and the no-op completion — so a BitBucket release sync
+    # with zero commits ahead fails ``RELEASE_SYNC_FORGE_NOT_SUPPORTED`` instead of
+    # silently completing as ``NO_CHANGES_TO_SYNC``. The concrete forge is read from
+    # the snapshot ``_gate_sync_handoff_unsupported_forge`` just resolved+persisted
+    # (mirroring ``unsupported_forge_error``); the same guard runs again before
+    # ``make_forge_client`` below as defense-in-depth on the commits-ahead path.
+    try:
+        ensure_release_sync_forge_supported(
+            concrete_forge_for_repo(
+                (workspace.resolved_profile or {}).get("forge"),
+                workspace.repo_url,
+            ),
+            repo_slug=repo.slug(),
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+    except ReleasePrSyncError as exc:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"sync_release_pr failed: {exc.message}",
+            reason_code=exc.reason_code,
+            details=exc.detail,
+        )
+        return
+
     # Profile setup installs/repairs the monitor toolchain; source/target
     # divergence can still change while it runs, so re-count before PR adoption.
     try:
