@@ -1431,6 +1431,42 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_forward_permanent_detail_beyond_timeout_window_reports_ci_failure(
+        self,
+    ) -> None:
+        """A ``failed to pull image "<ref>": manifest unknown`` detail that follows
+        a ``docker pull failed`` summary must be detected as permanent even when the
+        corresponding ``docker pull <ref>`` command echo is more than
+        ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines before the summary.
+
+        Regression for the bug where the forward detail probe passed
+        ``start = index - window`` as the backward search bound for
+        ``_forward_detail_ref_matches_pull``, causing it to miss the command echo and
+        return False — so the manifest-unknown permanent failure was misclassified as
+        transient and triggered an unnecessary rerun."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull app:v99\n"  # index 0 — echo, > 2 lines before summary
+                "Pulling from library/app\n"  # index 1 — pull progress
+                "context deadline exceeded\n"  # index 2 — unrelated timeout in log
+                "Docker pull failed with exit code 1\n"  # index 3 — summary
+                'Failed to pull image "app:v99": manifest unknown'  # index 4 — permanent detail
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_image_name_containing_denied_with_timeout_dispatches_rerun(self) -> None:
         """A Docker image whose name contains "denied:" as a substring must not
         cause a transient pull timeout to be classified as a permanent failure.
