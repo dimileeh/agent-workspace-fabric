@@ -916,6 +916,77 @@ class TestPullRequestUnexpectedErrorPart002:
             assert ws.pr_url == "https://github.com/x/y/pull/55"
 
     @pytest.mark.unit
+    async def test_forge_client_construction_failure_records_pr_create_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``make_forge_client`` builds the BitBucket client eagerly via
+        # ``from_env()``, so a missing/invalid BitBucket API env raises
+        # ``BitBucketClientError`` *before* ``push_and_open`` can wrap it as a
+        # ``PullRequestError``. That construction failure must still be routed
+        # through PR-failure handling: a PR_CREATE_FAILED audit event with
+        # evidence, and no false git_push-succeeded event (the push never ran).
+        from awf.common.bitbucket_client import BitBucketClientError
+        from awf.control.executor.constants import (
+            _AUDIT_GIT_PUSH_EVENT,
+            _AUDIT_PR_CREATED_EVENT,
+            _PR_CREATE_FAILED_REASON_CODE,
+        )
+
+        def _raise_make_forge_client(forge: str, runner: object) -> object:
+            raise BitBucketClientError(
+                operation="bitbucket auth",
+                status=None,
+                body="BITBUCKET_API_TOKEN is required.",
+                reason_code="BITBUCKET_AUTH_NOT_CONFIGURED",
+            )
+
+        monkeypatch.setattr(_execution_flow, "make_forge_client", _raise_make_forge_client)
+
+        pr_creator = _ForgeRecordingPrCreator()
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.repo_url = "git@bitbucket.org:workspace/repo.git"
+            await s.commit()
+
+        _queue_full_happy_path(fake)
+
+        executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
+        await executor.execute(ws_id)
+
+        # push_and_open is never reached because the client construction fails first.
+        assert pr_creator.forge_client is None
+        assert pr_creator.repo_url is None
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "bitbucket auth" in (ws.failure_message or "")
+            pr_create_events = [
+                event for event in ws.events if event.event_type == _AUDIT_PR_CREATED_EVENT
+            ]
+            assert len(pr_create_events) == 1
+            event = pr_create_events[0]
+            assert event.reason_code == _PR_CREATE_FAILED_REASON_CODE
+            assert event.payload["outcome"] == "failed"
+            assert event.payload["evidence"] == {
+                "operation": "bitbucket auth",
+                "returncode": 0,
+                "error_message": "BITBUCKET_API_TOKEN is required.",
+            }
+            # No git_push event — the push never ran, so it must not be recorded
+            # as succeeded (or failed).
+            assert not [event for event in ws.events if event.event_type == _AUDIT_GIT_PUSH_EVENT]
+
+    @pytest.mark.unit
     async def test_reuse_push_skips_forge_client_resolution(
         self,
         fake: FakeCommandRunner,

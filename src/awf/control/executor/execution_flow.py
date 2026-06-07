@@ -1232,15 +1232,58 @@ async def execute(
                 remote_url=existing_pr_remote_url,
             )
         else:
-            # New PR: resolve the forge client inside the try so a
-            # make_forge_client / BitBucket from_env() failure degrades to
-            # infrastructure_failure via the handlers below rather than crashing
-            # uncaught. ``async with`` releases the BitBucket httpx pool
-            # deterministically (GitHub aclose is a no-op).
-            forge_client = make_forge_client(
-                concrete_forge_for_repo(profile.forge, ws.repo_url),
-                self._runner,
-            )
+            # New PR: ``make_forge_client`` builds the BitBucket client eagerly
+            # via ``from_env()``, so a missing/invalid BitBucket API env raises
+            # ``BitBucketClientError`` here — before ``push_and_open`` runs the
+            # git push or the create-PR call, so it cannot be wrapped as a
+            # ``PullRequestError`` downstream. Map it onto the same
+            # PR_CREATE_FAILED audit event + evidence that a ``create_pull_request``
+            # failure records (instead of falling through to the opaque
+            # "unexpected error" handler that emits no PR audit event), then fail
+            # the run. No git_push-succeeded event is recorded because the push
+            # never ran. ``BitBucketClientError`` is imported lazily so the
+            # GitHub-only hot path never pays for the httpx import it drags in
+            # (mirrors forge.make_forge_client / pr_creator). ``async with``
+            # releases the BitBucket httpx pool deterministically (GitHub aclose
+            # is a no-op).
+            from awf.common.bitbucket_client import BitBucketClientError
+
+            try:
+                forge_client = make_forge_client(
+                    concrete_forge_for_repo(profile.forge, ws.repo_url),
+                    self._runner,
+                )
+            except BitBucketClientError as exc:
+                _log.error(
+                    "executor.pr_failed",
+                    workspace_id=workspace_id,
+                    operation=exc.operation,
+                    returncode=exc.status,
+                )
+                await self._record_executor_pr_audit_event(
+                    workspace_id,
+                    event_type=_AUDIT_PR_CREATED_EVENT,
+                    action="pr_create",
+                    outcome="failed",
+                    reason_code=_PR_CREATE_FAILED_REASON_CODE,
+                    branch_name=push_branch_name,
+                    remote_branch=audit_remote_branch,
+                    pr_number=None,
+                    pr_url=None,
+                    source_head_sha=None,
+                    evidence={
+                        "operation": exc.operation,
+                        "returncode": exc.status if exc.status is not None else 0,
+                        "error_message": exc.body.strip() or "<no output>",
+                    },
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.pushing,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=str(exc)[:2000],
+                )
+                return
             async with forge_client:
                 pr = await self._pr_creator.push_and_open(
                     worktree_path=worktree_path,
