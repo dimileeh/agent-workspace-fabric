@@ -300,8 +300,8 @@ async def execute(
             # repo_url that detects as github) slipped past it. Resolution
             # has now stamped + persisted the concrete forge onto
             # ``ws.resolved_profile``, so fail fast here — before profile
-            # setup, the agent run, push, and ``gh pr create`` — instead of
-            # letting an unsupported forge reach the gh path.
+            # setup, the agent run, and push — instead of letting an
+            # unsupported forge reach the push/PR-open step.
             resolved_forge_error = unsupported_forge_error(ws)
             if resolved_forge_error is not None:
                 await self._mark_failed(
