@@ -51,15 +51,16 @@ async def guide_workspace(
     idempotency_key: str | None = None,
     expected_version: int | None = None,
 ) -> WorkspaceControlResponse:
-    """Inject an operator ``directive`` into a live monitoring workspace.
+    """Inject an operator ``directive`` into a live or failed workspace.
 
     Purpose-named operator-guidance control (issue #447). It arms a PENDING
     :class:`OperatorHint` carrying the ``directive`` (the agent instruction,
     distinct from the audit ``reason``) so the monitor's next ``decide()``
     cycle re-engages the agent — even from a prior ``NotifyHuman`` wait —
-    without cancelling/re-adopting. It reuses the same OperatorHint engine
-    as ``remonitor`` but never changes workspace status (it mutates
-    ``monitor_threads_addressed`` while staying ``monitoring_pr``)."""
+    without cancelling/re-adopting. For ``monitoring_pr`` workspaces it
+    mutates ``monitor_threads_addressed`` without changing status; for
+    ``failed`` workspaces (issue #456) it resets to ``monitoring_pr``
+    using the same state-reset as ``remonitor``."""
 
     repo = WorkspaceRepository(self._session)
     operations = OperationRepository(self._session)
