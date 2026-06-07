@@ -1,0 +1,117 @@
+import { test, expect, type Page } from "@playwright/test";
+
+const WORKSPACE_ID = "ws_mock123";
+
+async function mockBootstrap(page: Page) {
+  await page.route("/api/awf/health", async (route) => {
+    await route.fulfill({ json: { status: "ok" } });
+  });
+  await page.route("/api/awf/metrics/resources/saturation", async (route) => {
+    await route.fulfill({ json: { generated_at: new Date().toISOString() } });
+  });
+  await page.route("/api/awf/metrics/workspaces/summary", async (route) => {
+    await route.fulfill({ json: { active: 1, failed: 0 } });
+  });
+  await page.route("/api/awf/merge-queue*", async (route) => {
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+  await page.route("/api/awf/metrics/failures/summary", async (route) => {
+    await route.fulfill({ json: { taxonomy: [], latest_examples: [], total_failures: 0 } });
+  });
+
+  const mockWorkspace = {
+    workspace_id: WORKSPACE_ID,
+    title: "Mock Workspace",
+    repo_url: "https://github.com/test/repo",
+    base_branch: "main",
+    agent: "test-agent",
+    status: "running",
+    version: 7,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+  };
+
+  await page.route("/api/awf/workspaces/overview*", async (route) => {
+    await route.fulfill({ json: { items: [mockWorkspace], has_more: false } });
+  });
+  await page.route(`/api/awf/workspaces/${WORKSPACE_ID}`, async (route) => {
+    await route.fulfill({ json: mockWorkspace });
+  });
+  await page.route(`/api/awf/workspaces/${WORKSPACE_ID}/runtime`, async (route) => {
+    await route.fulfill({ json: { status: "running" } });
+  });
+  await page.route(`/api/awf/workspaces/${WORKSPACE_ID}/events*`, async (route) => {
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+  await page.route(`/api/awf/workspaces/${WORKSPACE_ID}/operations*`, async (route) => {
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+  await page.route(`/api/awf/workspaces/${WORKSPACE_ID}/logs`, async (route) => {
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+  await page.route("/api/awf/workspaces/*/stream*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" },
+      body: `data: ${JSON.stringify({ type: "connected", workspace_id: WORKSPACE_ID })}\n\n`,
+    });
+  });
+}
+
+test.describe("Operator cancel control", () => {
+  test.beforeEach(async ({ page }) => {
+    await mockBootstrap(page);
+  });
+
+  test("renders cancel, requires confirmation, and POSTs only on confirm", async ({ page }) => {
+    let cancelPosts = 0;
+    await page.route(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`, async (route) => {
+      cancelPosts += 1;
+      await route.fulfill({
+        json: {
+          workspace_id: WORKSPACE_ID,
+          operation_id: "op_cancel123",
+          operation_status: "succeeded",
+          status: "cancelled",
+          message: "cancelled",
+        },
+      });
+    });
+
+    await page.goto(`/?workspaceId=${WORKSPACE_ID}`);
+
+    const cancelButton = page.getByRole("button", { name: "Cancel", exact: true });
+    await expect(cancelButton).toBeVisible();
+    await expect(cancelButton).toBeEnabled();
+
+    // 1. Clicking Cancel reveals confirmation that mentions the workspace id.
+    await cancelButton.click();
+    const confirmation = page.getByTestId("operator-cancel-confirm");
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation).toContainText(WORKSPACE_ID);
+
+    // 2. Dismiss does not POST.
+    await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+    await expect(confirmation).not.toBeVisible();
+    await page.waitForTimeout(200);
+    expect(cancelPosts).toBe(0);
+
+    // 3. Confirm issues exactly one POST and renders the success state.
+    await cancelButton.click();
+    await expect(confirmation).toBeVisible();
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (req) =>
+          req.url().includes(`/api/operator/workspaces/${WORKSPACE_ID}/cancel`) &&
+          req.method() === "POST",
+      ),
+      page.getByRole("button", { name: "Confirm cancel", exact: true }).click(),
+    ]);
+    expect(request.method()).toBe("POST");
+    await expect(page.getByText("Cancel succeeded:")).toBeVisible();
+    expect(cancelPosts).toBe(1);
+  });
+});

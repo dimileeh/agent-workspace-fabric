@@ -3,6 +3,7 @@
 import {
 Activity,
 AlertCircle,
+Ban,
 CheckCircle2,
 FileText,
 Loader2,
@@ -11,7 +12,8 @@ RefreshCw,
 X
 } from "lucide-react";
 import {
-useLayoutEffect
+useLayoutEffect,
+useState
 } from "react";
 
 import { formatAgentEffort,formatAgentLabel } from "@/lib/agent-format";
@@ -289,6 +291,7 @@ export function WorkspaceSummary({
         <OperatorControlsBlock
           controls={operatorControls}
           state={operatorActionState}
+          workspaceId={overview.workspace_id}
           onAction={onOperatorAction}
         />
         <UsageSummaryBlock
@@ -460,12 +463,15 @@ export function WorkspaceRecoveryBlock({
 export function OperatorControlsBlock({
   controls,
   state,
+  workspaceId,
   onAction,
 }: {
   controls: WorkspaceOperatorControl[];
   state: OperatorActionState;
+  workspaceId: string;
   onAction: (action: WorkspaceOperatorAction, requestedTier?: number) => void;
 }) {
+  const [confirming, setConfirming] = useState<WorkspaceOperatorAction | null>(null);
   const visibleControls = controls.filter((control) => control.visible);
   if (visibleControls.length === 0) {
     return null;
@@ -487,14 +493,20 @@ export function OperatorControlsBlock({
           const submitting = submittingAction === control.action;
           const disabled = busy || !control.enabled;
           const reason = busy && !submitting ? "operation active" : control.reason;
+          const destructive = control.action === "cancel";
+          const buttonClassName = destructive
+            ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-white px-2.5 text-[11px] font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+            : "inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
           return (
             <div key={control.action} className="flex min-w-0 items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => onAction(control.action, control.requestedTier)}
+                onClick={() =>
+                  destructive ? setConfirming(control.action) : onAction(control.action, control.requestedTier)
+                }
                 disabled={disabled}
                 title={reason ? `${control.label}: ${reason}` : control.label}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                className={buttonClassName}
               >
                 <OperatorControlIcon action={control.action} spinning={submitting} />
                 {control.label}
@@ -504,6 +516,36 @@ export function OperatorControlsBlock({
           );
         })}
       </div>
+      {confirming === "cancel" ? (
+        <div
+          data-testid="operator-cancel-confirm"
+          className="grid gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-red-900"
+        >
+          <span className="min-w-0 break-words">
+            Cancel workspace <span className="mono">{workspaceId}</span>? This stops its stack and ends the run.
+          </span>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                onAction("cancel");
+                setConfirming(null);
+              }}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-red-600 px-2.5 text-[11px] font-medium text-white transition hover:bg-red-700"
+            >
+              <Ban size={13} aria-hidden />
+              Confirm cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirming(null)}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
       {state.status === "success" ? (
         <div className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-emerald-900">
           <span>{state.message}</span>
@@ -544,6 +586,9 @@ export function OperatorControlIcon({
   }
   if (action === "refresh") {
     return <RefreshCw size={13} aria-hidden />;
+  }
+  if (action === "cancel") {
+    return <Ban size={13} aria-hidden />;
   }
   return <CheckCircle2 size={13} aria-hidden />;
 }
