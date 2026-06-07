@@ -690,6 +690,15 @@ _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER = "docker pull failed"
 #     pull failure even though it names no ``/v2/`` path. That host is contacted
 #     *only* for registry operations and can never be an image ref, so it is a
 #     request-form marker on its own.
+#   * ``/token?`` — the Bearer-auth token endpoint request of *non*-Docker-Hub
+#     registries. GHCR/ACR/Harbor and friends select their own token host (``Get
+#     "https://ghcr.io/token?service=...&scope=...": context deadline exceeded``),
+#     which is neither ``/v2/`` nor ``auth.docker.io``, so without this marker a real
+#     GHCR token-fetch timeout would never anchor and the registry flake would be
+#     reported instead of rerun. The ``?`` query makes it unambiguously a token
+#     *request* URL, never an image ref (a bare ``.../token`` repo path on a permanent
+#     denial carries no ``?`` query and, lacking the timeout marker, never anchors
+#     either).
 # A generic phrase such as ``pulling from`` is likewise excluded: it would match
 # unrelated daemon operations (e.g. ``failed while pulling from local volume``).
 # The registry timeout marker is required on that line because the request form
@@ -703,6 +712,7 @@ _CI_DOCKER_DAEMON_ERROR_MARKER = "error response from daemon"
 _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "/v2/",
     "auth.docker.io",
+    "/token?",
 )
 
 # ``failed to pull image "<ref>"`` is emitted by Docker, containerd, and the
@@ -871,8 +881,9 @@ def _is_docker_pull_failure_line(
     so a generic daemon timeout next to a kubelet ``failed to pull image`` event
     must not corroborate it. The daemon wrapper anchors only as its own evidence
     line, and only when that same line also carries *both* a registry *request* form
-    (``_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS`` — a ``/v2/`` distribution-API path
-    or the ``auth.docker.io`` token host) *and* a registry timeout marker
+    (``_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS`` — a ``/v2/`` distribution-API path,
+    the ``auth.docker.io`` token host, or a non-Docker-Hub ``/token?`` Bearer-auth
+    request) *and* a registry timeout marker
     (``_CI_DOCKER_REGISTRY_TIMEOUT_MARKERS``). A bare image-reference host such as
     ``ghcr.io`` is **not** such evidence: it also sits on the image ref of permanent
     daemon errors (``pull access denied for ghcr.io/org/app``, ``No such image:

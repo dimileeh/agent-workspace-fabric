@@ -848,6 +848,69 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_daemon_error_with_ghcr_token_endpoint_timeout_dispatches_rerun(
+        self,
+    ) -> None:
+        """Pulling from a non-Docker-Hub Bearer-auth registry (GHCR, ACR, Harbor,
+        ...) first fetches a token from the registry-selected token endpoint —
+        ``https://ghcr.io/token?service=...&scope=...``. When that request times out
+        the daemon reports the failure against the token endpoint, which carries no
+        ``/v2/`` path and is not ``auth.docker.io``. The ``/token?`` request form is
+        contacted only for registry auth, so it is registry pull context and the
+        timeout is rerun as transient infra rather than reported to the repair
+        agent."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/app:v1\n"
+                'Error response from daemon: Get "https://ghcr.io/token'
+                '?service=ghcr.io&scope=repository:org/app:pull": '
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_daemon_token_endpoint_denial_does_not_anchor_adjacent_timeout(
+        self,
+    ) -> None:
+        """The ``/token?`` request form, like ``/v2/``, must carry the registry-
+        timeout marker on its own line to anchor. A permanent token-auth denial
+        (``Error response from daemon: Get "https://ghcr.io/token?...":
+        unauthorized``) is a synchronous 401, not a timeout, so an *adjacent
+        unrelated* ``context deadline exceeded`` must not let it pose as a transient
+        registry pull — the real auth bug must reach the repair agent."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                'Error response from daemon: Get "https://ghcr.io/token'
+                '?service=ghcr.io&scope=repository:org/app:pull": unauthorized\n'
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_daemon_pull_access_denied_does_not_anchor_adjacent_timeout(self) -> None:
         """``pull access denied`` is a synchronous registry 403 — it cannot itself
         cause a ``context deadline exceeded``, so a daemon-error auth-denial line
