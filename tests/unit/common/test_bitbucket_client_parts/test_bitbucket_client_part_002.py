@@ -333,6 +333,11 @@ async def test_merge_pr_async_202_non_success_terminal_status_raises() -> None:
     with pytest.raises(BitBucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "FAILED" in str(excinfo.value)
+    # The error must not reuse the original 202 POST status: a task that ended in
+    # ``FAILED`` is not an HTTP-202 failure, and reporting ``status=202`` would make
+    # it indistinguishable from a poll-budget timeout. The HTTP status is omitted.
+    assert excinfo.value.status is None
+    assert "status=202" not in str(excinfo.value)
 
 
 async def test_merge_pr_async_202_poll_budget_exhausted_raises() -> None:

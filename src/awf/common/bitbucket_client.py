@@ -710,9 +710,15 @@ class BitBucketClient:
             if task_status == "SUCCESS":
                 return merge_result
             if task_status and task_status != "PENDING":
+                # ``response`` is the original 202 POST; the poll GET that surfaced
+                # this terminal status carried its own (200) status, so reusing
+                # ``response.status_code`` here would misreport every task failure
+                # as ``status=202`` and make it indistinguishable from a poll-budget
+                # timeout. The diagnostic signal is the task status itself, so omit
+                # the HTTP status (rendered ``n/a``) and carry ``task_status`` in the body.
                 raise BitBucketClientError(
                     operation=operation,
-                    status=response.status_code,
+                    status=None,
                     body=f"BitBucket merge task ended in non-success status {task_status!r}",
                 )
         raise BitBucketClientError(
