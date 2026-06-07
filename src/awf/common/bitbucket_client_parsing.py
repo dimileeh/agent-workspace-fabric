@@ -351,6 +351,13 @@ def build_review_threads(
             continue
         first = external[0]
         inline_meta = root.get("inline") if isinstance(root.get("inline"), dict) else {}
+        # Mirror the GitHub path (github_client.py): an inline comment BitBucket
+        # marks ``outdated`` after a new push no longer describes the current
+        # diff. Downstream gates treat every unresolved thread as actionable and
+        # never consult ``is_outdated``, so keeping it here would drive needless
+        # fix cycles and block merges. Drop it as GitHub drops ``isOutdated``.
+        if isinstance(inline_meta, dict) and bool(inline_meta.get("outdated")):
+            continue
         line = inline_meta.get("to") if isinstance(inline_meta, dict) else None
         if line is None and isinstance(inline_meta, dict):
             line = inline_meta.get("from")
@@ -366,9 +373,7 @@ def build_review_threads(
                 is_resolved=False,
                 comments=external,
                 url=first.url,
-                is_outdated=bool(inline_meta.get("outdated"))
-                if isinstance(inline_meta, dict)
-                else False,
+                is_outdated=False,
             )
         )
     return tuple(threads)

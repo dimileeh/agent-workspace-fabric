@@ -30,13 +30,17 @@ def _inline_comment(
     account: str = "other",
     parent: int | None = None,
     resolved: bool = False,
+    outdated: bool = False,
 ) -> dict:
+    inline: dict = {"path": "src/a.py", "to": 10}
+    if outdated:
+        inline["outdated"] = True
     comment: dict = {
         "id": comment_id,
         "content": {"raw": body},
         "user": {"account_id": account, "display_name": "Reviewer"},
         "created_on": f"2024-01-{comment_id:02d}T00:00:00+00:00",
-        "inline": {"path": "src/a.py", "to": 10},
+        "inline": inline,
         "links": {"html": {"href": f"https://bitbucket.org/i/{comment_id}"}},
     }
     if parent is not None:
@@ -89,6 +93,17 @@ async def test_resolved_thread_is_filtered() -> None:
 async def test_viewer_authored_thread_is_filtered() -> None:
     fake = FakeBitBucket()
     _seed_fetch_status(fake, [_inline_comment(100, "mine", account="viewer")], account_id="viewer")
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.unresolved_inline_threads == ()
+
+
+async def test_outdated_thread_is_filtered() -> None:
+    # Mirror the GitHub path: a BitBucket inline comment marked ``outdated``
+    # after a new push no longer describes the current diff, so it must not
+    # appear in ``unresolved_inline_threads`` and drive a fix cycle / block merge.
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake, [_inline_comment(100, "stale finding", outdated=True)])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert status.unresolved_inline_threads == ()
