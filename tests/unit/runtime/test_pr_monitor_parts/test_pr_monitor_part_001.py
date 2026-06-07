@@ -326,6 +326,24 @@ class TestOperatorHints:
         assert "operator remonitor hint" in action.message
         assert "agent could not produce a fix commit" in action.message
 
+    @pytest.mark.unit
+    def test_unprocessed_guide_hint_needing_human_uses_guide_label(self) -> None:
+        hint = OperatorHint(
+            reason="rework the CTA copy",
+            directive="rework the CTA copy",
+            reason_code="OPERATOR_GUIDE",
+            status="needs_human",
+            status_reason="agent could not produce a fix commit",
+        )
+        state = MonitorState(pending_operator_hint=hint)
+
+        action = decide(_status(), state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "operator guide hint" in action.message
+        assert "operator remonitor hint" not in action.message
+
 
 class TestAddressComments:
     @pytest.mark.unit
