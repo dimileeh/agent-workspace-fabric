@@ -70,28 +70,55 @@ async def test_account_id_is_cached_across_status_fetches() -> None:
     assert sum(1 for r in fake.requests if r.url.path == "/2.0/user") == 1
 
 
-async def test_account_id_fetch_error_is_tolerated() -> None:
+async def test_account_id_fetch_error_propagates() -> None:
+    # A failing /2.0/user lookup must surface as a BitBucketClientError rather
+    # than be swallowed: silently disabling self-comment filtering would treat
+    # AWF's own comments as external feedback. The transient 5xx is preserved so
+    # the monitor's transient-retry path can keep polling.
     fake = FakeBitBucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert excinfo.value.status == 500
+
+
+async def test_account_id_failure_is_not_cached_then_succeeds() -> None:
+    # A failed lookup must not be cached as account_id=None: a later poll has to
+    # retry /2.0/user so self-comment filtering recovers after a transient blip.
+    # All responses are enqueued up front; the FIFO fake pops the first /2.0/user
+    # (500) on the first poll and serves the second (200) on the next.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])  # first poll: empty
     fake.page(
         "GET",
-        f"{_PR}/comments",
+        f"{_PR}/comments",  # second poll: the viewer's own comment
         values=[
             {
                 "id": 1,
                 "content": {"raw": "hi"},
-                "user": {"account_id": "someone"},
+                "user": {"account_id": "me"},
                 "created_on": "2024-01-01T00:00:00Z",
             }
         ],
     )
     fake.page("GET", f"{_PR}/diffstat", values=[])
-    fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})
+    fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})  # first poll fails
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})  # second poll succeeds
     client = make_client(fake)
+    with pytest.raises(BitBucketClientError):
+        await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    # Second poll: /2.0/user is retried and now succeeds, marking the viewer's
+    # own comment as authored-by-viewer so it is filtered out.
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    # No account id → cannot filter viewer comments, but assembly still succeeds.
-    assert len(status.unresolved_review_comments) == 1
+    assert sum(1 for r in fake.requests if r.url.path == "/2.0/user") == 2
+    assert len(status.unresolved_review_comments) == 0
 
 
 async def test_account_id_non_dict_body_leaves_account_none() -> None:

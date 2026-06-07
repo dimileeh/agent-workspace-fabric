@@ -745,20 +745,25 @@ class BitBucketClient:
         return html_href(data) or self._pr_page_url(repo, ctx.pr_number)
 
     async def _current_account_id(self) -> str | None:
-        """Return the authenticated account id (cached) to filter own comments."""
+        """Return the authenticated account id (cached) to filter own comments.
+
+        Propagates ``BitBucketClientError`` instead of swallowing it. A silent
+        ``/2.0/user`` failure leaves ``account_id`` unset, so the comment parsers
+        cannot mark ``viewer_did_author`` and AWF's own PR comments look like
+        unresolved external feedback — sending the agent into needless comment
+        cycles. Letting the error surface routes transient faults
+        (5xx/transport/rate-limit) through the monitor's retry path and fails
+        auth/4xx faults fast. Only a successful lookup is cached, so a later poll
+        retries after a transient blip.
+        """
         if self._account_id_fetched:
             return self._account_id
-        self._account_id_fetched = True
-        try:
-            data = await self._request_json(
-                "GET", "/2.0/user", operation="bitbucket current_user", cache=True
-            )
-        except BitBucketClientError as exc:
-            _log.warning("bitbucket.current_user_unavailable", reason_code=exc.reason_code)
-            self._account_id = None
-            return None
+        data = await self._request_json(
+            "GET", "/2.0/user", operation="bitbucket current_user", cache=True
+        )
         if isinstance(data, dict):
             self._account_id = _clean_optional_str(data.get("account_id") or data.get("uuid"))
+        self._account_id_fetched = True
         return self._account_id
 
     def _remember_pr(self, repo: RepoRef, pr_number: int, pr: dict[str, Any]) -> None:
