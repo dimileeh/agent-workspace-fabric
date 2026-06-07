@@ -71,7 +71,7 @@ class TestSyncReleasePrHandoffForgeGate:
             )
 
         monkeypatch.setattr(
-            "awf.control.executor.monitor_handoff.make_forge_client",
+            "awf.control.executor.monitor_handoff_sync.make_forge_client",
             _raise_forge_not_supported,
         )
 
@@ -127,7 +127,7 @@ class TestSyncReleasePrHandoffForgeGate:
             )
 
         monkeypatch.setattr(
-            "awf.control.executor.monitor_handoff.make_forge_client",
+            "awf.control.executor.monitor_handoff_sync.make_forge_client",
             _raise_bitbucket_auth_error,
         )
 

@@ -42,6 +42,7 @@ from awf.adapters import registry as _registry  # noqa: F401 — populate regist
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import monitor_handoff as monitor_handoff_module
 from awf.control.executor import monitor_handoff_setup as monitor_handoff_setup_module
+from awf.control.executor import monitor_handoff_sync as monitor_handoff_sync_module
 from awf.control.executor.constants import PR_MONITOR_SETUP_FAILED_REASON_CODE
 from awf.control.executor.monitor_handoff import (
     _build_handoff_pr_monitor,
@@ -955,7 +956,7 @@ class TestSyncReleasePrHandoffRemainingBranches:
         def _no_forge_client(*_args: Any, **_kwargs: Any) -> object:
             raise AssertionError("make_forge_client must not run for a non-GitHub release sync")
 
-        monkeypatch.setattr(monitor_handoff_module, "make_forge_client", _no_forge_client)
+        monkeypatch.setattr(monitor_handoff_sync_module, "make_forge_client", _no_forge_client)
 
         validation = _OkSetupValidation()
         ws_id = await _seed_ready(
