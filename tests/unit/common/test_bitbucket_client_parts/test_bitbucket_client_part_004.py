@@ -406,6 +406,52 @@ async def test_failing_check_logs_pipeline_without_ref_metadata_keeps_newest() -
     assert failures[0].run_id == "pipe-1"
 
 
+async def test_failing_check_logs_prefers_pr_pipeline_over_branch_pipeline() -> None:
+    """Prefer the PR pipeline over a same-branch branch pipeline on one commit.
+
+    Regression for PRRT_kwDOSJAM6s6HnnXW: Bitbucket can record both a branch
+    pipeline and a pull-request pipeline for the same commit on the same source
+    branch. Both match the branch ref, so picking the newest branch match could
+    tail the unrelated branch pipeline's steps. The lookup must prefer the
+    pipeline whose ``target.pullrequest.id`` is this PR.
+    """
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)  # primes _pr_context with source branch "feature/head"
+    fake.page(
+        "GET",
+        f"{_REPO}/commit/{_HEAD}/statuses",
+        values=[{"state": "FAILED", "name": "Pipeline #5", "key": "PIPELINE"}],
+    )
+    fake.page(
+        "GET",
+        _PIPELINES,
+        values=[
+            # newest, a branch pipeline on the same source branch → must be skipped
+            {"uuid": "branch-pipe", "target": {"ref_name": "feature/head"}},
+            # older, the PR pipeline for this PR → selected by pullrequest id
+            {
+                "uuid": "pr-pipe",
+                "target": {"source": "feature/head", "pullrequest": {"id": 42}},
+            },
+        ],
+    )
+    fake.page(
+        "GET",
+        f"{_REPO}/pipelines/pr-pipe/steps/",
+        values=[{"uuid": "step-2", "name": "Test", "state": {"result": {"name": "FAILED"}}}],
+    )
+    fake.enqueue(
+        "GET",
+        f"{_REPO}/pipelines/pr-pipe/steps/step-2/log",
+        text="FAILED tests/test_x.py::test_y\n",
+    )
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
+    assert [f.name for f in failures] == ["Test"]
+    assert failures[0].run_id == "pr-pipe"  # PR pipeline, not the newer branch pipeline
+
+
 # ── rerun_failed_workflow_jobs ────────────────────────────────────────────────
 
 

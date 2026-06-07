@@ -393,7 +393,7 @@ class BitBucketClient:
         self,
         *,
         repo: RepoRef,
-        pr_number: int,  # noqa: ARG002 - kept for API consistency with GitHub
+        pr_number: int,
         head_sha: str,
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
@@ -416,7 +416,7 @@ class BitBucketClient:
         if not failed:
             return ()
 
-        pipeline = await self._find_pipeline_for_commit(repo, head_sha, source_branch)
+        pipeline = await self._find_pipeline_for_commit(repo, head_sha, pr_number, source_branch)
         if pipeline is None:
             return tuple(
                 self._external_status_failure(status, pytest_fallback_commands) for status in failed
@@ -721,19 +721,24 @@ class BitBucketClient:
     # ── Pipeline-chain internals ───────────────────────────────────────────
 
     async def _find_pipeline_for_commit(
-        self, repo: RepoRef, commit_sha: str, source_branch: str | None = None
+        self, repo: RepoRef, commit_sha: str, pr_number: int, source_branch: str | None = None
     ) -> dict[str, Any] | None:
-        """Return the most recent pipeline for a commit, scoped to the PR ref.
+        """Return the most recent pipeline for a commit, scoped to the PR.
 
         Multiple pipelines can target the same commit (a branch pipeline plus a PR
         pipeline, or a later manual run). The failing commit status was already
         scoped by ``refname`` to the PR source branch, so the pipeline lookup must
         apply the same ref context — otherwise the newest pipeline by commit hash
         alone may belong to a different ref and yield step logs that do not match
-        the failing status. When candidate pipelines expose ref metadata but none
-        match, return ``None`` so the caller falls back to the external-status path
-        rather than mis-attributing a wrong-ref log; when no pipeline exposes ref
-        metadata, keep the newest as before.
+        the failing status.
+
+        Branch and PR pipelines for the same commit share the source branch, so a
+        branch-only match could still pick the wrong (branch) pipeline when it is
+        newer. Prefer the pipeline whose ``target.pullrequest.id`` is this PR
+        first; only then fall back to branch-ref matching. When candidate pipelines
+        expose ref metadata but none match, return ``None`` so the caller falls
+        back to the external-status path rather than mis-attributing a wrong-ref
+        log; when no pipeline exposes ref metadata, keep the newest as before.
         """
         pipelines = await self._paginate(
             f"{self._repo_path(repo)}/pipelines/",
@@ -742,6 +747,9 @@ class BitBucketClient:
         )
         if not pipelines:
             return None
+        pr_matched = [p for p in pipelines if _pipeline_targets_pr(p, pr_number)]
+        if pr_matched:
+            return pr_matched[0]
         if source_branch is None:
             return pipelines[0]
         matched = [p for p in pipelines if _pipeline_targets_branch(p, source_branch)]
@@ -1227,6 +1235,18 @@ def _pipeline_has_ref_info(pipeline: dict[str, Any]) -> bool:
     """True when a pipeline's target exposes any ref identity to match against."""
     target = _as_dict(pipeline.get("target"))
     return any(_clean_optional_str(target.get(key)) is not None for key in ("ref_name", "source"))
+
+
+def _pipeline_targets_pr(pipeline: dict[str, Any], pr_number: int) -> bool:
+    """True when a pipeline ran for THIS pull request.
+
+    Bitbucket PR pipelines carry ``target.pullrequest.id``; branch and manual
+    pipelines do not. Matching it distinguishes the PR pipeline from a branch
+    pipeline that ran on the same commit and source branch — both match the
+    branch ref, so without this their steps could be mis-attributed to the PR.
+    """
+    pr_id = _as_dict(_as_dict(pipeline.get("target")).get("pullrequest")).get("id")
+    return _clean_optional_str(pr_id) == str(pr_number)
 
 
 def _freeze_params(params: Mapping[str, str] | None) -> _FrozenParams:
