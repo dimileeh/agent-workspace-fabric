@@ -148,5 +148,6 @@ class RunnerDelegatesMixin:
 
     _fetch_status_for_decision = _transient_ops._fetch_status_for_decision
     _wait_after_transient_github_error = _transient_ops._wait_after_transient_github_error
+    _wait_after_transient_bitbucket_error = _transient_ops._wait_after_transient_bitbucket_error
     _wait_after_transient_base_fetch_error = _transient_ops._wait_after_transient_base_fetch_error
     _write_defer_signal = _transient_ops._write_defer_signal

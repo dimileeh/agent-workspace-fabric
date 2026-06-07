@@ -42,6 +42,7 @@ from awf.adapters import registry as _registry  # noqa: F401 — populate regist
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import monitor_handoff as monitor_handoff_module
 from awf.control.executor import monitor_handoff_setup as monitor_handoff_setup_module
+from awf.control.executor import monitor_handoff_sync as monitor_handoff_sync_module
 from awf.control.executor.constants import PR_MONITOR_SETUP_FAILED_REASON_CODE
 from awf.control.executor.monitor_handoff import (
     _build_handoff_pr_monitor,
@@ -931,6 +932,144 @@ class TestSyncReleasePrHandoffRemainingBranches:
             assert ws.failure_reason == FailureReason.infrastructure_failure.value
             assert "sync_release_pr failed" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "RELEASE_SYNC_FETCH_FAILED"
+
+    @pytest.mark.unit
+    async def test_release_handoff_bitbucket_forge_fails_before_client_construction(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # BitBucket Cloud is a *supported* forge, so it clears the handoff's
+        # unsupported-forge gate and reaches the forge-client construction — but
+        # release-PR sync is GitHub-only. The concrete-client-forge guard must
+        # fire *before* ``make_forge_client`` so the workspace is marked
+        # RELEASE_SYNC_FORGE_NOT_SUPPORTED, not BITBUCKET_AUTH_NOT_CONFIGURED from
+        # a credential-less ``BitBucketClient.from_env()``. No forge client may be
+        # constructed on this unsupported path.
+        fake.queue_result(returncode=0)  # initial git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # initial rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="2\n")  # post-setup rev-list --count
+
+        def _no_forge_client(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("make_forge_client must not run for a non-GitHub release sync")
+
+        monkeypatch.setattr(monitor_handoff_sync_module, "make_forge_client", _no_forge_client)
+
+        validation = _OkSetupValidation()
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=_release_sync_policy(),
+        )
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.repo_url = "git@bitbucket.org:o/r.git"
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED_RUNNING")
+            await s.commit()
+            workspace = ws
+
+        def _monitor_factory(*_a: Any, **_k: Any) -> object:
+            raise AssertionError("monitor must not build for an unsupported forge")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor._handoff_sync_release_pr_monitor(
+            workspace_id=ws_id,
+            workspace=workspace,
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=executor._config.worktrees_root / ws_id,
+        )
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            assert "sync_release_pr failed" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
+            assert ws.events[-1].payload["details"]["forge"] == "bitbucket"
+
+    @pytest.mark.unit
+    async def test_release_handoff_bitbucket_forge_fails_before_no_op_completion(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # BitBucket is a globally supported forge, so it clears
+        # ``_gate_sync_handoff_unsupported_forge``. Release-PR sync is GitHub-only,
+        # though, so even when the source branch is *zero commits ahead* the
+        # workspace must fail RELEASE_SYNC_FORGE_NOT_SUPPORTED rather than silently
+        # complete as NO_CHANGES_TO_SYNC. The git probe (queued below) would report
+        # zero-ahead and trigger the no-op completion if the early forge gate were
+        # removed; with the gate in place those results are never consumed.
+        fake.queue_result(returncode=0)  # git fetch (only if the gate is bypassed)
+        fake.queue_result(returncode=0, stdout="0\n")  # rev-list --count == 0 (no-op path)
+
+        def _no_forge_client(*_args: Any, **_kwargs: Any) -> object:
+            raise AssertionError("make_forge_client must not run for a non-GitHub release sync")
+
+        monkeypatch.setattr(monitor_handoff_sync_module, "make_forge_client", _no_forge_client)
+
+        validation = _OkSetupValidation()
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            task_policy=_release_sync_policy(),
+        )
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.repo_url = "git@bitbucket.org:o/r.git"
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED_RUNNING")
+            await s.commit()
+            workspace = ws
+
+        def _monitor_factory(*_a: Any, **_k: Any) -> object:
+            raise AssertionError("monitor must not build for an unsupported forge")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=_monitor_factory,
+        )
+
+        await executor._handoff_sync_release_pr_monitor(
+            workspace_id=ws_id,
+            workspace=workspace,
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=executor._config.worktrees_root / ws_id,
+        )
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            assert "sync_release_pr failed" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
+            assert ws.events[-1].payload["details"]["forge"] == "bitbucket"
+            # Must NOT have short-circuited through the no-op completion path.
+            assert all(e.reason_code != "NO_CHANGES_TO_SYNC" for e in ws.events)
 
     @pytest.mark.unit
     async def test_release_handoff_stale_status_after_monitor_built_skips(

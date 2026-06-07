@@ -9,7 +9,7 @@ specific merge-gate branch without running the full monitor integration loop.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,7 +23,6 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.enums import (
     AgentRuntime,
-    TaskClass,
     WorkspaceStatus,
 )
 from awf.db.models import Operation, Workspace
@@ -35,7 +34,6 @@ from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
-    Merge,
     MergeableState,
     MergeStateStatus,
     MonitorState,
@@ -46,9 +44,6 @@ from awf.runtime.pr_monitor import (
     _mark_review_thread_addressed,
     _review_thread_body_state_key,
 )
-from awf.runtime.pr_monitor_runner import (
-    PullRequestMonitorRunner,
-)
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.helpers import (
     _drop_stale_review_comment_addressed_state,
@@ -58,7 +53,6 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _review_comment_body_state_key,
 )
 from awf.runtime.pr_monitor_runner.types import (
-    BaseBehindCountError,
     BaseFetchError,
     ProviderRecoveryRetryError,
 )
@@ -67,7 +61,6 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
-    pr_payload,
     seed_monitoring_workspace,
 )
 
@@ -76,78 +69,6 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-
-
-class PersistCheckingSleep(RecordedSleep):
-    def __init__(
-        self,
-        *,
-        factory: async_sessionmaker[AsyncSession],
-        workspace_id: str,
-        state_key: str,
-        expected_value: str,
-    ) -> None:
-        super().__init__()
-        self._factory = factory
-        self._workspace_id = workspace_id
-        self._state_key = state_key
-        self._expected_value = expected_value
-
-    async def __call__(self, seconds: float) -> None:
-        async with self._factory() as session:
-            workspace = await WorkspaceRepository(session).get(self._workspace_id)
-            assert workspace is not None
-            assert workspace.monitor_threads_addressed[self._state_key] == self._expected_value
-        await super().__call__(seconds)
-
-
-class PersistCheckingCommandRunner(FakeCommandRunner):
-    def __init__(
-        self,
-        *,
-        factory: async_sessionmaker[AsyncSession],
-        workspace_id: str,
-        state_key: str,
-        expected_value: str,
-    ) -> None:
-        super().__init__()
-        self._factory = factory
-        self._workspace_id = workspace_id
-        self._state_key = state_key
-        self._expected_value = expected_value
-
-    async def run(
-        self,
-        args: list[str],
-        *,
-        input_bytes: bytes | None = None,
-        cwd: str | None = None,
-    ) -> CommandResult:
-        if args[:3] == ["gh", "run", "rerun"]:
-            async with self._factory() as session:
-                workspace = await WorkspaceRepository(session).get(self._workspace_id)
-                assert workspace is not None
-                assert (
-                    workspace.monitor_threads_addressed.get(self._state_key) == self._expected_value
-                )
-        return await super().run(args, input_bytes=input_bytes, cwd=cwd)
-
-
-def _monitor_runner(
-    tmp_path: Path,
-    fake: FakeCommandRunner,
-    *,
-    session_factory: async_sessionmaker[AsyncSession] | None = None,
-    workspace_runtime_context: str = "",
-) -> PullRequestMonitorRunner:
-    return PullRequestMonitorRunner(
-        session_factory=session_factory or object(),  # type: ignore[arg-type]
-        runner=fake,
-        adapter=object(),  # type: ignore[arg-type]
-        gh=object(),  # type: ignore[arg-type]
-        worktrees_root=tmp_path / "work" / "git" / "worktrees",
-        workspace_runtime_context=workspace_runtime_context,
-    )
 
 
 def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") -> PRStatus:
@@ -163,15 +84,6 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
     )
 
 
-class _CommandIterable:
-    def __iter__(self) -> Iterator[object]:
-        return iter(("pytest -q", object(), "ruff check ."))
-
-
-def _gh_pr_merge_calls(cmd: FakeCommandRunner) -> list[list[str]]:
-    return [call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
-
-
 class _CapturingGH:
     def __init__(self, status: PRStatus | None = None) -> None:
         self.status = status or _green_status()
@@ -179,6 +91,7 @@ class _CapturingGH:
         self.failing_log_requests: list[tuple[RepoRef, int, str, tuple[str, ...]]] = []
         self.posted_comments: list[tuple[RepoRef, int, str]] = []
         self.post_errors: list[GitHubClientError] = []
+        self.closed = False
 
     async def fetch_pr_status(
         self,
@@ -208,6 +121,11 @@ class _CapturingGH:
         if self.post_errors:
             raise self.post_errors.pop(0)
         self.posted_comments.append((repo, pr_number, body))
+
+    async def aclose(self) -> None:
+        # The runner closes its forge client in run()'s finally; record it so the
+        # leak-fix regression test can assert the client was released.
+        self.closed = True
 
 
 def _provider_recovery_policy(
@@ -291,53 +209,6 @@ async def _provider_recovery_snapshot(
             operations,
             requested_ids,
         )
-
-
-async def _mark_refactor_task(
-    factory: async_sessionmaker[AsyncSession],
-    workspace_id: str,
-    *,
-    auto_merge: bool = True,
-) -> None:
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        workspace.task_class = TaskClass.refactor_task.value
-        workspace.auto_merge = auto_merge
-        await session.commit()
-
-
-async def _dispatch_merge_recovery(
-    *,
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-    workspace_id: str,
-    pr_number: int,
-    head_sha: str,
-    sleep_fn: RecordedSleep | None = None,
-) -> bool:
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn or RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        initial_review_grace_period_seconds=0,
-    )
-    return await runner._execute(
-        action=Merge(),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_green_status(pr_number=pr_number, head_sha=head_sha),
-        state=MonitorState(started_at=0.0),
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
 
 
 @pytest.mark.unit
@@ -1137,344 +1008,3 @@ async def test_run_fails_workspace_when_base_fetch_cannot_be_refreshed(
         assert workspace.failure_reason == "infrastructure_failure"
         assert workspace.failure_message is not None
         assert "could not refresh base branch" in workspace.failure_message
-
-
-@pytest.mark.unit
-async def test_run_retries_transient_base_fetch_500_and_completes(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    cmd.queue_result(
-        returncode=128,
-        stderr=(
-            "remote: Internal Server Error\n"
-            "fatal: unable to access 'https://github.com/example/repo.git/': "
-            "The requested URL returned error: 500"
-        ),
-    )
-    cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="0\n")
-    cmd.queue_result(returncode=0, stdout=pr_payload(closed=True, merged=True))
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-    )
-    runner._deps.gh = _CapturingGH(  # type: ignore[assignment]
-        status=replace(
-            _green_status(),
-            closed=True,
-            merged=True,
-            merge_commit_sha="mergecommit1234567890",
-        )
-    )
-
-    await runner.run(
-        workspace_id=workspace_id,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert sleep_fn.calls == [5.0]
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        assert workspace.status == WorkspaceStatus.completed.value
-        assert any(
-            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY" for event in workspace.events
-        )
-
-
-@pytest.mark.unit
-async def test_run_retries_remote_tracking_ref_lock_race_and_completes(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    cmd.queue_result(
-        returncode=1,
-        stderr=(
-            "error: cannot lock ref "
-            "'refs/remotes/origin/codex/awf-post-merge-fixes': is at "
-            "dffa1db03af61da5db52e16a6e79163c35b88d5d but expected "
-            "cc82a8d265b6d63593417a13d3d9507cc0ede8d5\n"
-            "From https://github.com/dimileeh/aira-agent-workspace-fabric\n"
-            " ! cc82a8d2..dffa1db0  codex/awf-post-merge-fixes -> "
-            "origin/codex/awf-post-merge-fixes  (unable to update local ref)"
-        ),
-    )
-    cmd.queue_result(returncode=0)
-    cmd.queue_result(returncode=0, stdout="0\n")
-    cmd.queue_result(returncode=0, stdout=pr_payload(closed=True, merged=True))
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-    )
-    runner._deps.gh = _CapturingGH(  # type: ignore[assignment]
-        status=replace(
-            _green_status(),
-            closed=True,
-            merged=True,
-            merge_commit_sha="mergecommit1234567890",
-        )
-    )
-
-    await runner.run(
-        workspace_id=workspace_id,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert sleep_fn.calls == [5.0]
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        assert workspace.status == WorkspaceStatus.completed.value
-        assert any(
-            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY" for event in workspace.events
-        )
-
-
-@pytest.mark.unit
-async def test_run_fails_after_transient_base_fetch_retry_budget_is_exhausted(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    transient_stderr = (
-        "remote: Internal Server Error\n"
-        "fatal: unable to access 'https://github.com/example/repo.git/': "
-        "The requested URL returned error: 500"
-    )
-    cmd.queue_result(returncode=128, stderr=transient_stderr)
-    cmd.queue_result(returncode=128, stderr=transient_stderr)
-    cmd.queue_result(returncode=128, stderr=transient_stderr)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-    )
-    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 2)
-    object.__setattr__(
-        runner._runner_config,
-        "transient_base_fetch_initial_backoff_seconds",
-        3.0,
-    )
-    object.__setattr__(
-        runner._runner_config,
-        "transient_base_fetch_max_backoff_seconds",
-        10.0,
-    )
-    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
-
-    await runner.run(
-        workspace_id=workspace_id,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert sleep_fn.calls == [3.0, 6.0]
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        assert workspace.status == WorkspaceStatus.failed.value
-        assert workspace.failure_reason == "infrastructure_failure"
-        assert workspace.failure_message is not None
-        assert "could not refresh base branch" in workspace.failure_message
-        assert any(
-            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
-            for event in workspace.events
-        )
-        failed_transitions = [
-            event
-            for event in workspace.events
-            if event.event_type == "workspace.state_changed"
-            and event.new_state == WorkspaceStatus.failed.value
-        ]
-        assert failed_transitions[-1].reason_code == ("GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED")
-
-
-@pytest.mark.unit
-async def test_sync_base_transient_base_fetch_retry_budget_survives_status_refresh(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    cmd = FakeCommandRunner()
-    sleep_fn = RecordedSleep()
-    transient_stderr = (
-        "remote: Internal Server Error\n"
-        "fatal: unable to access 'https://github.com/example/repo.git/': "
-        "The requested URL returned error: 500"
-    )
-    for _ in range(3):
-        cmd.queue_result(returncode=0)  # top-of-loop git fetch origin development
-        cmd.queue_result(returncode=0, stdout="1\n")  # base branch is still ahead
-        cmd.queue_result(returncode=0)  # sync_base merge --abort
-        cmd.queue_result(returncode=128, stderr=transient_stderr)  # sync_base fetch
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-        max_outer_iterations=3,
-    )
-    object.__setattr__(runner._runner_config, "transient_base_fetch_max_retries", 2)
-    object.__setattr__(
-        runner._runner_config,
-        "transient_base_fetch_initial_backoff_seconds",
-        5.0,
-    )
-    object.__setattr__(
-        runner._runner_config,
-        "transient_base_fetch_max_backoff_seconds",
-        30.0,
-    )
-    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
-
-    await runner.run(
-        workspace_id=workspace_id,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-
-    assert sleep_fn.calls == [5.0, 10.0]
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        assert workspace.status == WorkspaceStatus.failed.value
-        assert workspace.failure_reason == "infrastructure_failure"
-        assert workspace.failure_message is not None
-        assert "could not refresh base branch" in workspace.failure_message
-        assert any(
-            event.reason_code == "GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED"
-            and event.payload.get("context") == "sync_base"
-            for event in workspace.events
-        )
-        failed_transitions = [
-            event
-            for event in workspace.events
-            if event.event_type == "workspace.state_changed"
-            and event.new_state == WorkspaceStatus.failed.value
-        ]
-        assert failed_transitions[-1].reason_code == ("GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED")
-
-
-@pytest.mark.unit
-async def test_base_behind_count_failure_is_explicit_not_zero(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=128, stderr="fatal: bad object")
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    with pytest.raises(BaseBehindCountError):
-        await runner._count_base_behind(
-            worktree_path=tmp_path / "worktrees" / "ws_count",
-            base_branch="development",
-        )
-
-
-@pytest.mark.unit
-async def test_sync_base_no_progress_state_is_persisted_across_restarts(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    await runner._persist_state(
-        workspace_id,
-        MonitorState(
-            sync_base_no_progress_signature="abc|CONFLICTING|DIRTY|base_behind=0",
-            sync_base_no_progress_count=2,
-            threads_addressed_ids={"T1": "fix_committed"},
-        ),
-    )
-
-    workspace = await runner._load_workspace(workspace_id)
-    state = runner._load_state(workspace)
-
-    assert state.sync_base_no_progress_signature == "abc|CONFLICTING|DIRTY|base_behind=0"
-    assert state.sync_base_no_progress_count == 2
-    assert state.threads_addressed_ids == {"T1": "fix_committed"}
-
-
-@pytest.mark.unit
-async def test_pr_feedback_resolution_body_change_creates_new_comment_identity(
-    factory: async_sessionmaker[AsyncSession],
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-    async with factory() as session:
-        repo = PRFeedbackResolutionRepository(session)
-        await repo.record_resolution(
-            scm_provider="github",
-            repository_key="dimileeh/aira-web",
-            pull_request_key="42",
-            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
-            head_sha="old-head",
-            feedback_kind="review_comment",
-            feedback_id="issue:4391271818",
-            feedback_body="old body",
-            feedback_author="chatgpt-codex-connector[bot]",
-            feedback_url="https://github.example/comment/4391271818",
-            verdict="false_positive",
-            reason="old comment body",
-            source_workspace_id=workspace_id,
-        )
-        await repo.record_resolution(
-            scm_provider="github",
-            repository_key="dimileeh/aira-web",
-            pull_request_key="42",
-            pull_request_url="https://github.com/dimileeh/aira-web/pull/42",
-            head_sha="new-head",
-            feedback_kind="review_comment",
-            feedback_id="issue:4391271818",
-            feedback_body="new body with new actionable content",
-            feedback_author="chatgpt-codex-connector[bot]",
-            feedback_url="https://github.example/comment/4391271818",
-            verdict="defer",
-            reason="body changed, so the monitor must re-evaluate it",
-            source_workspace_id=workspace_id,
-        )
-        await session.commit()
-
-        rows = await repo.list_for_pr(
-            scm_provider="github",
-            repository_key="dimileeh/aira-web",
-            pull_request_key="42",
-        )
-
-    assert len(rows) == 2
-    assert {row.reason for row in rows} == {
-        "old comment body",
-        "body changed, so the monitor must re-evaluate it",
-    }

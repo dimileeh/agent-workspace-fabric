@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shlex
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 import awf.adapters.registry  # noqa: F401 - populate adapter registry for service execution
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncioSubprocessRunner
-from awf.common.forge import concrete_forge_for_repo, make_forge_client
+from awf.common.forge import ForgeClient, concrete_forge_for_repo, make_forge_client
 from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
@@ -69,6 +70,37 @@ _log = get_logger(__name__)
 class WorkerRuntime:
     engine: AsyncEngine
     worker: ControlWorker
+
+
+# Tasks scheduled by _release_forge_client_after_build_error are kept referenced
+# here until they finish so the event loop does not GC a pending close mid-flight
+# (the close is fire-and-forget on the error path; nothing else awaits it).
+_PENDING_FORGE_CLIENT_CLOSERS: set[asyncio.Task[None]] = set()
+
+
+def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
+    """Close a forge client whose PR-monitor build failed before handoff.
+
+    ``_pr_monitor_factory`` builds the forge client *before* invoking the monitor
+    builder, and the runner only releases that client in ``run()``'s ``finally``.
+    If the builder raises, ``run()`` never executes, so the freshly built client
+    would otherwise leak — for a ``BitBucketClient`` that strands an ``httpx``
+    connection pool until GC (a ``GitHubClient`` close is a no-op). Closing here
+    keeps the per-monitor client's lifecycle bounded on the build-error path too.
+
+    ``aclose`` is async while the factory is synchronous. In production the
+    factory runs inside the executor's event loop, so schedule the close as a
+    tracked task; when no loop is running (direct unit-test calls) drive it to
+    completion synchronously.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(gh.aclose())
+        return
+    closer = loop.create_task(gh.aclose())
+    _PENDING_FORGE_CLIENT_CLOSERS.add(closer)
+    closer.add_done_callback(_PENDING_FORGE_CLIENT_CLOSERS.discard)
 
 
 def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
@@ -182,15 +214,19 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             else build_release_pr_monitor
         )
         # Build the forge client from the persisted resolved forge (reconstructed,
-        # never re-resolved). github → GitHubClient (unchanged behavior); an
-        # unsupported forge (e.g. bitbucket) raises ForgeNotSupportedError so the
-        # monitor build fails fast rather than mis-routing to GitHub. Use
+        # never re-resolved). github → GitHubClient; bitbucket → BitBucketClient
+        # (issue #345). A genuinely-unknown forge raises ForgeNotSupportedError so
+        # the monitor build fails fast rather than mis-routing to GitHub. Use
         # concrete_forge_for_repo (not plain concrete_forge) to mirror the
         # executor forge gate: a legacy/missing snapshot normalizes profile.forge
         # to "auto", so fall back to the workspace repo_url's host. Without this,
         # a monitor rebuild that runs before the executor gate on a pre-Phase-1
         # BitBucket snapshot would silently construct a GitHubClient instead of
-        # failing fast.
+        # routing to BitBucket. This client owns resources (a BitBucketClient holds
+        # an httpx connection pool); the monitor runner closes it via gh.aclose()
+        # when its run() finishes, so the per-monitor client is not leaked. If the
+        # builder below raises before that handoff, run() never closes it, so the
+        # build is guarded to release the client on the error path too.
         gh = make_forge_client(concrete_forge_for_repo(profile.forge, workspace.repo_url), runner)
         grace_seconds = (
             workspace.initial_review_grace_period_seconds
@@ -216,7 +252,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "workspace_runtime_context": render_workspace_runtime_context(profile),
             "provider_recovery_default_model": provider_recovery_default_model,
         }
-        return monitor_builder(**monitor_kwargs)
+        try:
+            return monitor_builder(**monitor_kwargs)
+        except Exception:
+            # The runner takes ownership of ``gh`` and closes it in run()'s
+            # finally, but only once the monitor is built. A build failure means
+            # run() never executes, so release the freshly built client here to
+            # avoid leaking a BitBucket httpx pool (PRRT_kwDOSJAM6s6HnRTp).
+            _release_forge_client_after_build_error(gh)
+            raise
 
     executor = WorkspaceExecutor(
         session_factory=session_factory,

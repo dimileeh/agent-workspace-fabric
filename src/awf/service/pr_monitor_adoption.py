@@ -52,6 +52,12 @@ PR_ADOPTION_SUPERSEDED_REASON = "PR_ADOPTION_SUPERSEDED_TERMINAL_WORKSPACE"
 PR_ADOPTION_ADMITTED_REASON = "PR_ADOPTION_ADMITTED"
 PR_ADOPTION_OPERATION_ACTION = "adopt_pr_monitor"
 PR_ADOPTION_TASK_KIND = "sync_feature_pr"
+# Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (issue
+# #345 flipped bitbucket into ``_SUPPORTED_FORGES``), so a ``bitbucket.org`` ref
+# clears the adoption forge gate. But the *default* adoption metadata fetcher
+# shells ``gh pr view``, which is GitHub-only — so this honest code says "the
+# default fetcher cannot serve this supported forge yet", not "unsupported forge".
+PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY = "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"
 _LIVE_ADOPTION_STATUSES = frozenset(
     {
         WorkspaceStatus.requested.value,
@@ -69,6 +75,7 @@ _PR_ADOPTION_ERROR_CODE_CONTRACT = (
     {"error_code": "PR_ADOPTION_INPUT_REQUIRED"},
     {"error_code": "INVALID_GITHUB_REPO"},
     {"error_code": "FORGE_NOT_SUPPORTED"},
+    {"error_code": "PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY"},
     {"error_code": "PR_NOT_FOUND"},
     {"error_code": "PR_ALREADY_CLOSED"},
     {"error_code": "PR_ALREADY_MERGED"},
@@ -148,11 +155,13 @@ class PullRequestMonitorAdoptionService:
         )
         live_adoption = _select_live_adoption_workspace(adoption_history)
         if live_adoption is not None:
+            _raise_if_adoption_forge_mismatch(live_adoption, repo=repo)
             _raise_if_policy_conflicts(live_adoption, request, repo=repo)
             return await self._response(live_adoption, attached_existing=True)
 
         existing = await workspace_repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
+            _raise_if_adoption_forge_mismatch(existing, repo=repo)
             _raise_if_existing_workspace_is_not_requested_adoption(
                 existing,
                 repo=repo,
@@ -548,6 +557,24 @@ async def _default_metadata_fetcher(
     repo: RepoRef,
     pr_number: int,
 ) -> PullRequestAdoptionMetadata:
+    # ``fetch_pull_request_adoption_metadata`` shells ``gh pr view --repo
+    # owner/repo``, which always targets github.com. Forge detection (issue #345)
+    # makes ``RepoRef.from_url`` accept non-GitHub hosts, and the Part 2 gate flip
+    # lets a ``bitbucket.org`` ref clear the adoption forge gate — so without this
+    # guard the default fetcher would silently query GitHub for the *same* slug
+    # (a different repo). Fail closed: a BitBucket-aware adoption metadata fetcher
+    # is follow-up work and must be injected explicitly, never reached by mis-route.
+    if repo.forge != "github":
+        raise PRMonitorAdoptionError(
+            error_code=PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY,
+            message=(
+                "Default PR adoption metadata fetch is GitHub-only "
+                "(uses `gh pr view`); forge "
+                f"{repo.forge!r} requires an injected forge-aware metadata fetcher."
+            ),
+            status_code=422,
+            detail={"repo_slug": repo.slug(), "forge": repo.forge},
+        )
     return await fetch_pull_request_adoption_metadata(
         runner=AsyncioSubprocessRunner(),
         repo=repo,
@@ -1006,6 +1033,50 @@ def _workspace_status_for_response(status: str) -> WorkspaceStatus | str:
         return WorkspaceStatus(status)
     except ValueError:
         return status
+
+
+def _adoption_workspace_forge(workspace: Workspace) -> str | None:
+    """Recover the forge of an adopted workspace from its persisted repo URL.
+
+    ``_adoption_repo_url`` always persists a parseable URL (the request URL or
+    ``repo.ssh_url()``), so ``RepoRef.from_url`` recovers the forge. Return
+    ``None`` for an unparseable legacy URL so the caller falls back to the prior
+    forge-agnostic behavior rather than rejecting a resumable adoption.
+    """
+    try:
+        return RepoRef.from_url(workspace.repo_url).forge
+    except ValueError:
+        return None
+
+
+def _raise_if_adoption_forge_mismatch(workspace: Workspace, *, repo: RepoRef) -> None:
+    """Reject attaching a request to an adoption on a different forge.
+
+    Repo identity is ``(forge, owner, name)``, but the adoption idempotency key
+    and history lookup are keyed on the forge-agnostic ``owner/repo`` slug. After
+    issue #345 flipped bitbucket into the supported-forge set, a ``bitbucket.org``
+    request for the same slug/PR would otherwise attach to an existing GitHub
+    adoption *before* ``_fetch_metadata`` (and the GitHub-only default-fetcher
+    gate) ever runs. Fail closed here so a same-slug/different-forge request never
+    silently inherits a different repository's monitor. (Letting same-slug
+    different-forge adoptions coexist would require forge-qualified identity keys
+    — follow-up work.)
+    """
+    existing_forge = _adoption_workspace_forge(workspace)
+    if existing_forge is not None and existing_forge != repo.forge:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message=(
+                "Canonical PR adoption idempotency key is already owned by a "
+                "workspace on a different forge."
+            ),
+            detail={
+                "workspace_id": workspace.id,
+                "repo_slug": repo.slug(),
+                "requested_forge": repo.forge,
+                "existing_forge": existing_forge,
+            },
+        )
 
 
 def _raise_if_existing_workspace_is_not_requested_adoption(

@@ -12,6 +12,7 @@ from dataclasses import (
 from pathlib import Path
 from typing import Any, cast
 
+from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
@@ -62,7 +63,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _non_check_reviewer_settle_wait_operation_context,
     _notify_human_reason,
     _pending_review_feedback_count,
-    _redact_and_truncate_github_error,
+    _redact_and_truncate_forge_error,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -95,13 +96,19 @@ async def _post_workflow_scope_notification_best_effort(
             state=state,
             blocker_reason=blocker_reason,
         )
-    except GitHubClientError as exc:
+    except (GitHubClientError, BitBucketClientError) as exc:
+        # A BitBucket workspace posts the human hint through ``BitBucketClient``,
+        # whose ``post_comment`` raises ``BitBucketClientError`` (not
+        # ``GitHubClientError``). Catch it alongside the GitHub error so a
+        # transient or permanent comment failure degrades to a logged warning
+        # here too, instead of escaping this best-effort helper and aborting the
+        # surrounding workflow-scope failure handling.
         _log.warning(
             "monitor.workflow_scope_notification_failed",
             workspace_id=workspace_id,
             pr_number=pr_number,
             head_sha=status.head_sha[:10],
-            error=_redact_and_truncate_github_error(str(exc)),
+            error=_redact_and_truncate_forge_error(str(exc)),
         )
 
 
@@ -512,7 +519,7 @@ async def _execute(
             requested_action="rerun_failed_ci",
             reason=(
                 "CI failure logs matched transient infrastructure signatures; "
-                "rerunning failed GitHub jobs before invoking an agent."
+                "rerunning failed CI jobs before invoking an agent."
             ),
             reason_code=_CI_TRANSIENT_RERUN_REASON,
             pr_number=pr_number,
@@ -547,12 +554,20 @@ async def _execute(
             for run_id in run_ids:
                 try:
                     await self._deps.gh.rerun_failed_workflow_jobs(repo=repo, run_id=run_id)
-                except GitHubClientError:
+                except (GitHubClientError, BitBucketClientError):
+                    # A BitBucket forge raises ``BitBucketClientError`` here (e.g.
+                    # ``BITBUCKET_PIPELINE_NOT_RERUNNABLE`` for a custom/manual
+                    # pipeline target it cannot reconstruct). Catch it alongside
+                    # the GitHub error so it is recorded as a failed transient
+                    # rerun below instead of escaping ``_execute`` to the runner's
+                    # non-transient handler, which would ``_terminate_failed`` the
+                    # workspace permanently rather than logging the limitation and
+                    # continuing to poll.
                     failed_run_id = run_id
                     raise
                 accepted_run_ids.append(run_id)
-        except GitHubClientError as exc:
-            error_message = _redact_and_truncate_github_error(str(exc))
+        except (GitHubClientError, BitBucketClientError) as exc:
+            error_message = _redact_and_truncate_forge_error(str(exc))
             if accepted_run_ids:
                 partial_event_payload = {
                     **event_payload,
@@ -595,8 +610,8 @@ async def _execute(
                     action="ci_transient_rerun_wait",
                     requested_action="wait_for_rerun_rollup",
                     reason=(
-                        "GitHub accepted at least one failed-job rerun; "
-                        "waiting before the next PR status poll so the "
+                        "The CI provider accepted at least one failed-job "
+                        "rerun; waiting before the next PR status poll so the "
                         "rollup can leave its stale failure snapshot."
                     ),
                     reason_code=_CI_TRANSIENT_RERUN_REASON,
@@ -687,9 +702,9 @@ async def _execute(
             action="ci_transient_rerun_wait",
             requested_action="wait_for_rerun_rollup",
             reason=(
-                "GitHub accepted the failed-job rerun; waiting before the "
-                "next PR status poll so the rollup can leave its stale "
-                "failure snapshot."
+                "The CI provider accepted the failed-job rerun; waiting "
+                "before the next PR status poll so the rollup can leave its "
+                "stale failure snapshot."
             ),
             reason_code=_CI_TRANSIENT_RERUN_REASON,
             pr_number=pr_number,
@@ -1364,6 +1379,44 @@ async def _execute(
                     "reason_code": "GITHUB_ERROR",
                 },
                 error_code="GITHUB_ERROR",
+                error_message=str(exc),
+            )
+            raise
+        except BitBucketClientError as exc:
+            # A BitBucket workspace posts the human notification through
+            # ``BitBucketClient``, whose ``post_comment`` raises
+            # ``BitBucketClientError`` (not ``GitHubClientError``). Mirror the
+            # GitHub arm: a transient blip waits then keeps polling; a permanent
+            # fault finishes the operation as failed and re-raises. Without this
+            # arm a comment failure would escape ``_execute`` uncaught.
+            if await self._wait_after_transient_bitbucket_error(
+                exc,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                context="post_human_notification",
+                monitor_log=monitor_log,
+            ):
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "transient_bitbucket_error",
+                        "reason_code": "BITBUCKET_TRANSIENT_ERROR",
+                    },
+                    error_code="BITBUCKET_TRANSIENT_ERROR",
+                    error_message=str(exc),
+                )
+                return False
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "outcome": "bitbucket_error",
+                    "reason_code": "BITBUCKET_ERROR",
+                },
+                error_code="BITBUCKET_ERROR",
                 error_message=str(exc),
             )
             raise

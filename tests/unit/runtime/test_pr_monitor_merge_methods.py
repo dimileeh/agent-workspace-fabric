@@ -9,9 +9,16 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.audit import redact_audit_text
+from awf.common.bitbucket_client import (
+    BITBUCKET_MERGE_IN_PROGRESS,
+    BITBUCKET_MERGE_METHOD_UNSUPPORTED,
+    BITBUCKET_MERGE_TASK_TIMEOUT,
+    BITBUCKET_RATE_LIMITED,
+    BitBucketClientError,
+)
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
-from awf.db.enums import OperationStatus
+from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
@@ -230,8 +237,8 @@ class _MergeMethodClient:
         branch_methods: tuple[str, ...] | None = None,
         repo_error: GitHubClientError | None = None,
         branch_error: GitHubClientError | None = None,
-        merge_results: list[str | GitHubClientError] | None = None,
-        post_comment_error: GitHubClientError | None = None,
+        merge_results: list[str | GitHubClientError | BitBucketClientError] | None = None,
+        post_comment_error: GitHubClientError | BitBucketClientError | None = None,
     ) -> None:
         """Configure repository policy, branch policy, and merge outcomes."""
         self.repo_methods = repo_methods
@@ -292,7 +299,7 @@ class _MergeMethodClient:
         assert delete_branch is True
         self.merge_calls.append(method)
         result = self.merge_results.pop(0)
-        if isinstance(result, GitHubClientError):
+        if isinstance(result, GitHubClientError | BitBucketClientError):
             raise result
         return result
 
@@ -519,6 +526,77 @@ async def test_merge_method_preflight_notification_transient_error_retries(
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_merge_method_preflight_notification_transient_bitbucket_error_retries(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A BitBucket workspace posts the preflight-rejection notification through
+    BitBucketClient, whose post_comment raises BitBucketClientError (not
+    GitHubClientError). A transient blip must wait and keep polling instead of
+    escaping the merge loop uncaught — mirroring the GitHub transient arm."""
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
+            returncode=1,
+            stderr="HTTP 403 Resource not accessible by integration",
+        ),
+        post_comment_error=BitBucketClientError(
+            operation="bitbucket post_comment",
+            status=429,
+            body="rate limited",
+            reason_code=BITBUCKET_RATE_LIMITED,
+        ),
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == []
+    assert gh.comments == []
+    assert sleep_fn.calls == [60]
+    assert any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_merge_method_preflight_notification_permanent_bitbucket_error_raises(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A permanent BitBucket fault (403) during the preflight-rejection
+    notification must propagate like the GitHub non-transient arm rather than
+    being swallowed."""
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
+            returncode=1,
+            stderr="HTTP 403 Resource not accessible by integration",
+        ),
+        post_comment_error=BitBucketClientError(
+            operation="bitbucket post_comment",
+            status=403,
+            body="forbidden: missing scope",
+        ),
+    )
+
+    with pytest.raises(BitBucketClientError, match="forbidden: missing scope"):
+        await _execute_merge(
+            factory=factory,
+            tmp_path=tmp_path,
+            gh=gh,
+        )
 
 
 @pytest.mark.unit
@@ -982,3 +1060,283 @@ async def test_unclassified_single_merge_failure_notifies_without_method_blocker
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A permanent BitBucket merge fault notifies a human instead of terminating.
+
+    BitBucket workspaces merge through ``BitBucketClient.merge_pr``, which raises
+    ``BitBucketClientError`` (not ``GitHubClientError``). A deterministic failure
+    (branch restrictions, unresolved tasks, a 4xx) must follow the GitHub
+    merge-blocker behaviour — post a human notification and keep polling — rather
+    than escaping ``_attempt_merge_method`` and terminating the workspace.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="merge_pr",
+                status=403,
+                body="merge checks have not passed",
+            )
+        ],
+    )
+
+    terminal, state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert len(gh.comments) == 1
+    assert "BitBucket rejected the merge attempt" in gh.comments[0]
+    assert sleep_fn.calls == [60]
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
+async def test_deterministic_bitbucket_merge_failure_forwards_specific_reason_code(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The failed merge operation forwards ``exc.reason_code`` end-to-end.
+
+    A specific code such as ``BITBUCKET_MERGE_METHOD_UNSUPPORTED`` (raised when a
+    merge method maps to no BitBucket strategy) must surface in the operation
+    record and audit event rather than being flattened to a generic
+    ``BITBUCKET_MERGE_FAILED`` — otherwise an operator inspecting events has to
+    read the prose ``error_message`` to recover the real cause.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="merge_pr",
+                status=None,
+                body="unsupported merge method for BitBucket: 'rebase'",
+                reason_code=BITBUCKET_MERGE_METHOD_UNSUPPORTED,
+            )
+        ],
+    )
+
+    terminal, _state, _sleep_fn, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    async with factory() as session:
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.monitor_state,
+        )
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+
+    failed_ops = [op for op in operations if op.status == OperationStatus.failed.value]
+    assert failed_ops, "expected a failed merge operation to be recorded"
+    assert all(op.error_code == BITBUCKET_MERGE_METHOD_UNSUPPORTED for op in failed_ops)
+    assert not any(op.error_code == "BITBUCKET_MERGE_FAILED" for op in failed_ops)
+
+    merge_failed_events = [
+        event
+        for event in events
+        if isinstance(event.payload, dict)
+        and event.payload.get("action") == "merge"
+        and event.payload.get("outcome") == "failed"
+    ]
+    assert merge_failed_events, "expected a failed merge audit event"
+    assert all(
+        event.payload.get("reason_code") == BITBUCKET_MERGE_METHOD_UNSUPPORTED
+        for event in merge_failed_events
+    )
+
+
+@pytest.mark.unit
+async def test_transient_bitbucket_merge_failure_waits_without_notify(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A transient BitBucket merge blip waits and re-polls without notifying."""
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="merge_pr",
+                status=429,
+                body="rate limited",
+                reason_code=BITBUCKET_RATE_LIMITED,
+            )
+        ],
+    )
+
+    terminal, _state, sleep_fn, _workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert gh.comments == []
+    assert sleep_fn.calls == [60]
+
+
+@pytest.mark.unit
+async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A 409 ``BITBUCKET_MERGE_IN_PROGRESS`` cancels (never fails) the operation.
+
+    The reason code is transient: ``_wait_after_transient_bitbucket_error`` keeps
+    the monitor polling and a later ``fetch_pr_status`` observes the in-flight
+    merge's MERGED state, completing the workspace successfully. Recording a
+    permanent ``BITBUCKET_MERGE_FAILED`` operation here would leave an inconsistent
+    audit trail (operation "failed" while the workspace completes), so the failure
+    record is omitted for this reason code while still waiting and re-polling.
+
+    The running merge-attempt operation must still reach a terminal state: if the
+    in-flight merge completes before the next loop re-enters ``Merge`` the monitor
+    short-circuits to completion and never finishes this operation, orphaning it as
+    ``running`` forever. The attempt is therefore cancelled before returning the
+    transient blocker.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="merge_pr",
+                status=409,
+                body="merge already in progress",
+                reason_code=BITBUCKET_MERGE_IN_PROGRESS,
+            )
+        ],
+    )
+
+    terminal, _state, sleep_fn, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert gh.comments == []
+    assert sleep_fn.calls == [60]
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.monitor_state,
+        )
+        audit_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.merge_result",
+            limit=20,
+        )
+    assert not any(op.error_code == "BITBUCKET_MERGE_FAILED" for op in operations)
+    assert not any(op.status == OperationStatus.failed.value for op in operations)
+    # The merge-attempt operation must be terminal (cancelled), not orphaned as
+    # ``running`` — otherwise a later ShortCircuitCompleted leaves it stuck.
+    merge_ops = [
+        op
+        for op in operations
+        if isinstance(op.payload, dict) and op.payload.get("reason_code") == "MERGE"
+    ]
+    assert merge_ops, "expected a merge-attempt operation to be recorded"
+    assert all(op.status == OperationStatus.cancelled.value for op in merge_ops)
+    assert not any(op.status == OperationStatus.running.value for op in operations)
+    # The cancellation must leave an audit breadcrumb so operators can tell
+    # "superseded by an in-flight merge" apart from an unexplained cancelled
+    # operation — every other merge arm (GitHub, BitBucket failure, success)
+    # records a merge_result event, so this transient arm must too.
+    in_progress_events = [
+        event for event in audit_events if event.reason_code == BITBUCKET_MERGE_IN_PROGRESS
+    ]
+    assert len(in_progress_events) == 1
+    audit_payload = in_progress_events[0].payload
+    assert isinstance(audit_payload, dict)
+    assert audit_payload["action"] == "merge"
+    assert audit_payload["outcome"] == "cancelled"
+
+
+async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An exhausted async-merge poll budget cancels (never fails) the operation.
+
+    ``BitBucketClient`` raises ``BITBUCKET_MERGE_TASK_TIMEOUT`` when the bounded
+    poll budget is exhausted while the merge task is still PENDING. The merge may
+    still complete server-side, so this is treated exactly like
+    ``BITBUCKET_MERGE_IN_PROGRESS``: the attempt operation is cancelled (not
+    failed), no "merge rejected" comment is posted, and the monitor waits and
+    re-polls. Misclassifying it as deterministic would post a spurious notification
+    and leave a permanently-failed operation for a merge that succeeds.
+    """
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            BitBucketClientError(
+                operation="bitbucket merge_pr (task-status)",
+                status=None,
+                body="BitBucket merge task did not complete within 30 polls",
+                reason_code=BITBUCKET_MERGE_TASK_TIMEOUT,
+            )
+        ],
+    )
+
+    terminal, _state, sleep_fn, workspace_id = await _execute_merge(
+        factory=factory,
+        tmp_path=tmp_path,
+        gh=gh,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    # No "merge rejected" notification while the async merge may still be running.
+    assert gh.comments == []
+    assert sleep_fn.calls == [60]
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.monitor_state,
+        )
+        audit_events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.merge_result",
+            limit=20,
+        )
+    assert not any(op.status == OperationStatus.failed.value for op in operations)
+    merge_ops = [
+        op
+        for op in operations
+        if isinstance(op.payload, dict) and op.payload.get("reason_code") == "MERGE"
+    ]
+    assert merge_ops, "expected a merge-attempt operation to be recorded"
+    assert all(op.status == OperationStatus.cancelled.value for op in merge_ops)
+    assert not any(op.status == OperationStatus.running.value for op in operations)
+    # The cancellation breadcrumb carries the timeout reason code so operators can
+    # tell it apart from the 409 already-in-flight case.
+    timeout_events = [
+        event for event in audit_events if event.reason_code == BITBUCKET_MERGE_TASK_TIMEOUT
+    ]
+    assert len(timeout_events) == 1
+    audit_payload = timeout_events[0].payload
+    assert isinstance(audit_payload, dict)
+    assert audit_payload["outcome"] == "cancelled"

@@ -12,6 +12,7 @@ import pytest
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.forge import (
+    _SUPPORTED_FORGES,
     FORGE_NOT_SUPPORTED_REASON_CODE,
     ForgeClient,
     ForgeNotSupportedError,
@@ -32,17 +33,20 @@ def test_make_forge_client_github_returns_github_client() -> None:
 
 
 @pytest.mark.unit
-def test_make_forge_client_bitbucket_raises_not_supported() -> None:
+def test_make_forge_client_bitbucket_returns_bitbucket_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #345 Part 2 flips the gate: bitbucket is now a supported forge and the
+    # factory builds a BitBucketClient from the env auth contract (was: raised
+    # ForgeNotSupportedError in Part 1).
+    from awf.common.bitbucket_client import BitBucketClient
+
+    monkeypatch.setenv("BITBUCKET_AUTH_MODE", "bearer")
+    monkeypatch.setenv("BITBUCKET_API_TOKEN", "tok")
     runner = FakeCommandRunner()
-    with pytest.raises(ForgeNotSupportedError) as excinfo:
-        make_forge_client("bitbucket", runner)
-    exc = excinfo.value
-    assert exc.reason_code == FORGE_NOT_SUPPORTED_REASON_CODE
-    assert exc.reason_code == "FORGE_NOT_SUPPORTED"
-    assert exc.message == (
-        "BitBucket forge support is not yet implemented (issue #345 Phase 1 adds detection only)."
-    )
-    assert str(exc) == exc.message
+    client = make_forge_client("bitbucket", runner)
+    assert isinstance(client, BitBucketClient)
+    assert "bitbucket" in _SUPPORTED_FORGES
 
 
 @pytest.mark.unit
@@ -52,6 +56,7 @@ def test_make_forge_client_unknown_value_fails_closed() -> None:
     with pytest.raises(ForgeNotSupportedError) as excinfo:
         make_forge_client("gitlab", runner)  # type: ignore[arg-type]
     assert excinfo.value.reason_code == FORGE_NOT_SUPPORTED_REASON_CODE
+    assert "gitlab" not in _SUPPORTED_FORGES
 
 
 @pytest.mark.unit
@@ -61,9 +66,15 @@ def test_ensure_forge_supported_github_is_noop() -> None:
 
 
 @pytest.mark.unit
-def test_ensure_forge_supported_bitbucket_raises() -> None:
+def test_ensure_forge_supported_bitbucket_is_noop() -> None:
+    # Part 2 flip: bitbucket is supported, so the gate no longer raises.
+    ensure_forge_supported("bitbucket")
+
+
+@pytest.mark.unit
+def test_ensure_forge_supported_unknown_forge_raises() -> None:
     with pytest.raises(ForgeNotSupportedError) as excinfo:
-        ensure_forge_supported("bitbucket")
+        ensure_forge_supported("gitlab")  # type: ignore[arg-type]
     assert excinfo.value.reason_code == FORGE_NOT_SUPPORTED_REASON_CODE
 
 

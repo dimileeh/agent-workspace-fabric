@@ -67,6 +67,12 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
 
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 
+_BITBUCKET_TRANSIENT_RETRY_REASON = "BITBUCKET_TRANSIENT_RETRY"
+
+# BitBucket HTTP statuses that the monitor treats as recoverable server-side
+# blips (symmetric to GitHub's 5xx transient markers).
+_BITBUCKET_TRANSIENT_HTTP_STATUSES = frozenset({500, 502, 503, 504})
+
 _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
 
 _GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"

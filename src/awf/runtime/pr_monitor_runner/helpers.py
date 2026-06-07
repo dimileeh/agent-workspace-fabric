@@ -16,6 +16,14 @@ from datetime import (
 from pathlib import Path
 from typing import Any
 
+from awf.common.bitbucket_client import (
+    BITBUCKET_API_ERROR,
+    BITBUCKET_MERGE_IN_PROGRESS,
+    BITBUCKET_MERGE_TASK_TIMEOUT,
+    BITBUCKET_RATE_LIMITED,
+    BITBUCKET_TRANSPORT_ERROR,
+    BitBucketClientError,
+)
 from awf.common.github_client import GitHubClientError
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
@@ -78,6 +86,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _AUTHORIZATION_BEARER_RE,
     _AWF_VERDICT,
     _BASE_FETCH_RETRY_COUNT_KEY_PREFIX,
+    _BITBUCKET_TRANSIENT_HTTP_STATUSES,
     _NON_TRANSIENT_GITHUB_ERROR_MARKERS,
     _PENDING_CHECK_STATUSES,
     _PR_MONITOR_REASON_CODES_BY_STALE_REASON,
@@ -514,10 +523,22 @@ def _first_needs_human_reason(status: PRStatus, state: MonitorState) -> str | No
 
 
 def _merge_rejection_reason(stderr: str) -> str:
-    detail = " ".join(_redact_and_truncate_github_error(stderr).split())[:240]
+    detail = " ".join(_redact_and_truncate_forge_error(stderr).split())[:240]
     if detail:
         return f"GitHub rejected the merge attempt: {detail}"
     return "GitHub rejected the merge attempt"
+
+
+def _bitbucket_merge_rejection_reason(exc: BitBucketClientError) -> str:
+    """Describe a deterministic BitBucket merge failure for a human notification.
+
+    Mirrors :func:`_merge_rejection_reason`. ``exc`` already carries a redacted
+    body (set at construction) and always renders a non-empty
+    ``operation failed (status=...)`` summary, so surface it directly; collapse
+    whitespace and cap to match the GitHub wording.
+    """
+    detail = " ".join(str(exc).split())[:240]
+    return f"BitBucket rejected the merge attempt: {detail}"
 
 
 def _transient_github_retry_payload(
@@ -533,8 +554,28 @@ def _transient_github_retry_payload(
         "returncode": exc.returncode,
         "pr_number": pr_number,
         "wait_seconds": wait_seconds,
-        "message": _redact_and_truncate_github_error(str(exc)),
-        "stderr": _redact_and_truncate_github_error(exc.stderr),
+        "message": _redact_and_truncate_forge_error(str(exc)),
+        "stderr": _redact_and_truncate_forge_error(exc.stderr),
+    }
+
+
+def _transient_bitbucket_retry_payload(
+    exc: BitBucketClientError,
+    *,
+    context: str,
+    pr_number: int,
+    wait_seconds: float,
+) -> dict[str, object]:
+    # ``exc`` already carries a redacted body (set at construction), so its
+    # ``str()`` is safe to log/persist; truncate to match the GitHub payload.
+    return {
+        "context": context,
+        "operation": exc.operation,
+        "status": exc.status,
+        "reason_code": exc.reason_code,
+        "pr_number": pr_number,
+        "wait_seconds": wait_seconds,
+        "message": str(exc)[:400],
     }
 
 
@@ -554,11 +595,11 @@ def _transient_base_fetch_retry_payload(
         "retry_number": retry_number,
         "max_retries": max_retries,
         "wait_seconds": wait_seconds,
-        "message": _redact_and_truncate_github_error(str(exc)),
+        "message": _redact_and_truncate_forge_error(str(exc)),
     }
 
 
-def _redact_and_truncate_github_error(value: str, *, limit: int = 400) -> str:
+def _redact_and_truncate_forge_error(value: str, *, limit: int = 400) -> str:
     redacted = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", value)
     redacted = _AUTHORIZATION_BEARER_RE.sub(r"\1<redacted>", redacted)
     redacted = _TOKEN_RE.sub(_REDACTION, redacted).strip()
@@ -575,6 +616,35 @@ def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
     if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
         return False
     return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
+
+
+def _is_transient_bitbucket_client_error(exc: BitBucketClientError) -> bool:
+    """Classify BitBucket failures that should keep the monitor polling.
+
+    Symmetric to :func:`_is_transient_github_client_error`: recoverable blips
+    should make the monitor wait and re-poll rather than terminating the
+    workspace. Recoverable cases are rate limiting that survived the client's
+    internal ``Retry-After`` backoff, transport-level faults (connection
+    reset/refused, timeout, DNS — surfaced as ``BITBUCKET_TRANSPORT_ERROR``),
+    a 409 on the merge POST signalling an already-in-flight merge
+    (``BITBUCKET_MERGE_IN_PROGRESS``), an exhausted async-merge poll budget while
+    the merge task was still PENDING (``BITBUCKET_MERGE_TASK_TIMEOUT`` — BitBucket
+    may still complete it server-side), and 5xx server faults. Deterministic
+    faults — auth, other 4xx, JSON parse, and
+    the pagination/SSRF safety aborts (which also carry ``status=None`` but
+    map to ``BITBUCKET_API_ERROR``) — must fail fast.
+    """
+
+    if exc.reason_code in (
+        BITBUCKET_RATE_LIMITED,
+        BITBUCKET_TRANSPORT_ERROR,
+        BITBUCKET_MERGE_IN_PROGRESS,
+        BITBUCKET_MERGE_TASK_TIMEOUT,
+    ):
+        return True
+    if exc.reason_code != BITBUCKET_API_ERROR:
+        return False
+    return exc.status in _BITBUCKET_TRANSIENT_HTTP_STATUSES
 
 
 def _is_transient_base_fetch_error(exc: BaseFetchError) -> bool:

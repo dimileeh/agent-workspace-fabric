@@ -1456,3 +1456,29 @@ class TestFetchPrStatusPart001:
             )
 
         assert len(fake.calls) == 1
+
+
+@pytest.mark.unit
+async def test_aclose_is_a_noop_and_runs_no_commands() -> None:
+    # GitHubClient wraps a stateless command runner, so aclose() owns nothing to
+    # release. It exists to satisfy the ForgeClient.aclose contract (issue
+    # :4640573294) so callers close any forge client uniformly without branching
+    # on the concrete forge — for a BitBucketClient aclose() releases an httpx
+    # connection pool.
+    fake = FakeCommandRunner()
+    client = GitHubClient(fake)
+
+    await client.aclose()
+
+    assert fake.calls == []
+
+
+@pytest.mark.unit
+async def test_async_context_manager_yields_self_and_closes_without_commands() -> None:
+    fake = FakeCommandRunner()
+    client = GitHubClient(fake)
+
+    async with client as entered:
+        assert entered is client
+
+    assert fake.calls == []

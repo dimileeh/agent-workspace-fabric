@@ -16,10 +16,11 @@ from typing import Literal
 ForgeKind = Literal["github", "bitbucket"]
 """Concrete code-forge vocabulary persisted on ``resolved_profile.forge``.
 
-Dependency-free literal (issue #345 Phase 1). ``"auto"`` is a resolution-input
-value only — it lives on the profile field type, never in ``ForgeKind`` itself,
-because the resolver always persists a concrete kind. ``"bitbucket"`` is detected
-but not yet implemented (Phase 1 fails fast with ``FORGE_NOT_SUPPORTED``)."""
+Dependency-free literal (issue #345). ``"auto"`` is a resolution-input value only
+— it lives on the profile field type, never in ``ForgeKind`` itself, because the
+resolver always persists a concrete kind. Both ``"github"`` and ``"bitbucket"``
+(BitBucket Cloud, Part 2) are implemented; an unknown forge fails fast with
+``FORGE_NOT_SUPPORTED``."""
 
 
 class WorkspaceStatus(StrEnum):

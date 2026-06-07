@@ -712,6 +712,23 @@ class GitHubClient:
         """Store the shared command runner for all GitHub operations."""
         self._runner = runner
 
+    async def aclose(self) -> None:
+        """No-op: a ``GitHubClient`` owns no closable resource.
+
+        It wraps a stateless ``AsyncCommandRunner`` (each ``gh`` call is its own
+        subprocess), so there is no connection pool to release. This satisfies the
+        :class:`~awf.common.forge.ForgeClient` ``aclose`` contract so callers can
+        close any forge client uniformly, without branching on the concrete forge.
+        """
+
+    async def __aenter__(self) -> GitHubClient:
+        """Enter an ``async with`` block, returning this client unchanged."""
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        """Exit an ``async with`` block (no-op; see :meth:`aclose`)."""
+        await self.aclose()
+
     async def fetch_pr_status(
         self,
         *,
