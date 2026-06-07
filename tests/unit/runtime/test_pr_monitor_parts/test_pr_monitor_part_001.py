@@ -861,6 +861,65 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_k8s_registry_qualified_failed_to_pull_image_reports_ci_failure(
+        self,
+    ) -> None:
+        """A registry-*qualified* kubelet/containerd ``Failed to pull image
+        "ghcr.io/org/app"`` event must not self-corroborate. The registry host is
+        just the image ref's domain, not actual Docker CLI / registry-protocol pull
+        context (a ``docker pull`` echo, ``/v2/`` request, or ``pull access
+        denied``), so the failing application image is a real deploy bug that must
+        reach the repair agent rather than be silently rerun as transient CI."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "=== RUN   TestDeployApp\n"
+                '    deploy_test.go:51: Failed to pull image "ghcr.io/org/app": '
+                "context deadline exceeded\n"
+                "--- FAIL: TestDeployApp (120.00s)"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_k8s_multiline_registry_image_event_reports_ci_failure(self) -> None:
+        """A multi-line kubelet event repeats the registry-qualified image ref on
+        adjacent lines (``Failed to pull`` then ``Back-off pulling``). A registry
+        host on a *neighbouring* ref line is still just the image ref, not Docker
+        pull context, so it must not corroborate the ``failed to pull image``
+        marker — the application image bug reaches the repair agent rather than
+        being silently rerun."""
+        failure = CheckFailure(
+            name="e2e-tests",
+            conclusion="FAILURE",
+            log_excerpt=(
+                '  Warning  Failed   kubelet  Failed to pull image "ghcr.io/org/app:v1": '
+                "context deadline exceeded\n"
+                '  Normal   BackOff  kubelet  Back-off pulling image "ghcr.io/org/app:v1"'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_daemon_error_timeout_without_pull_context_reports_ci_failure(self) -> None:
         """A bare ``Error response from daemon: context deadline exceeded`` from an
         ordinary ``docker run``/``docker build`` test step — no registry URL, image,

@@ -690,20 +690,34 @@ _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
 # Kubernetes kubelet alike. A bare kubelet/containerd ``Failed to pull image
 # "app"`` event for an *application* image in an e2e deployment is a real
 # image/deploy bug the repair agent must see, so this marker only anchors a
-# registry timeout when explicit Docker pull context — a ``docker pull`` command
-# echo, or a registry host / ``/v2/`` API path / ``pull access denied`` — sits
-# within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines, i.e. the failing pull went
-# through the Docker CLI / registry rather than a bare kubelet event. A bare
-# ``error response from daemon`` line is deliberately *not* pull context: the
+# registry timeout when *actual* Docker CLI / registry-protocol pull context —
+# a ``docker pull`` command echo, a ``/v2/`` registry API request, or a
+# ``pull access denied`` registry-auth error — sits within
+# ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines, i.e. the failing pull went
+# through the Docker CLI / registry rather than a bare kubelet event.
+#
+# A registry *host* (``ghcr.io``, ``gcr.io``, …) is deliberately *not* such
+# context here, even though it is for the daemon-error branch above: hosts are
+# part of any image ref, so a registry-qualified ``Failed to pull image
+# "ghcr.io/org/app"`` event carries one on its own (and on neighbouring
+# back-off) line. Treating that host as pull context lets the ``failed to pull
+# image`` line self-corroborate and silently rerun a real application-image bug,
+# defeating the guard entirely — so only Docker/registry *protocol* evidence,
+# not the ref's domain, qualifies.
+#
+# A bare ``error response from daemon`` line is likewise *not* pull context: the
 # daemon emits it for any operation (``docker run``/``build``/start), so a
 # generic daemon timeout adjacent to a kubelet ``failed to pull image`` event
 # must not corroborate it. A daemon line only counts when it *also* carries
-# registry context — which the registry markers below already capture — keeping
+# registry context — which the registry markers above already capture — keeping
 # this consistent with the same-line requirement in ``_is_docker_pull_failure_line``.
 _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER = "failed to pull image"
+# Actual Docker CLI / registry-protocol pull context. Bare registry hosts are
+# excluded (see above) so a registry-qualified image ref cannot self-corroborate.
 _CI_DOCKER_PULL_CONTEXT_MARKERS = (
     "docker pull",
-    *_CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS,
+    "/v2/",
+    "pull access denied",
 )
 
 # ``gh run view --log-failed`` emits the whole failed step, so a real
@@ -803,11 +817,14 @@ def _is_docker_pull_failure_line(
 
     ``docker pull failed`` names the Docker CLI, so it qualifies on its own. The
     ``failed to pull image`` wording is shared with containerd / the Kubernetes
-    kubelet, so it qualifies only when explicit Docker pull context (a ``docker
-    pull`` echo, or a registry host / ``/v2/`` path) sits within
-    ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines — otherwise a bare kubelet
-    ``failed to pull image "app"`` event from an e2e deployment (a real image bug)
-    would be silently rerun. A bare ``error response from daemon`` line is not
+    kubelet, so it qualifies only when actual Docker pull context (a ``docker
+    pull`` echo, a ``/v2/`` registry request, or ``pull access denied``) sits
+    within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` lines — a bare registry *host*
+    is not such context, since a registry-qualified ``failed to pull image
+    "ghcr.io/org/app"`` event carries the host on the ref itself and would
+    self-corroborate. Otherwise a bare kubelet ``failed to pull image "app"``
+    event from an e2e deployment (a real image bug) would be silently rerun. A
+    bare ``error response from daemon`` line is not
     such context (it is excluded from ``_CI_DOCKER_PULL_CONTEXT_MARKERS``): the
     daemon emits it for any operation, so a generic daemon timeout next to a
     kubelet ``failed to pull image`` event must not corroborate it. The daemon
