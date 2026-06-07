@@ -219,9 +219,13 @@ async def test_merge_pr_unsupported_method_raises_without_request() -> None:
     assert fake.calls("POST") == []  # never POSTed a wrong strategy
 
 
-async def test_merge_pr_missing_commit_hash_returns_empty() -> None:
+async def test_merge_pr_missing_commit_hash_raises() -> None:
+    # A terminal merge with no commit hash is an unusable payload: returning a
+    # silent "" would be recorded downstream as a successful merge. Raise instead
+    # so the miss is diagnosable rather than masking success.
     fake = FakeBitBucket()
     fake.enqueue("POST", f"{_PR}/merge", json={"state": "MERGED"})
     client = make_client(fake)
-    sha = await client.merge_pr(repo=repo(), pr_number=42, method="squash")
-    assert sha == ""
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.merge_pr(repo=repo(), pr_number=42, method="squash")
+    assert "merge_commit.hash" in str(excinfo.value)

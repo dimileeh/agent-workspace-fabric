@@ -615,8 +615,18 @@ class BitBucketClient:
         )
         merge_commit = data.get("merge_commit") if isinstance(data, dict) else None
         if isinstance(merge_commit, dict):
-            return _clean_optional_str(merge_commit.get("hash")) or ""
-        return ""
+            sha = _clean_optional_str(merge_commit.get("hash"))
+            if sha:
+                return sha
+        # A terminal merge that returns no commit hash is an unusable payload: a
+        # silent ``""`` would be recorded downstream as a successful merge with an
+        # empty marker. Raise instead so the miss is diagnosable and routes through
+        # the monitor's BitBucketClientError handling rather than masking success.
+        raise BitBucketClientError(
+            operation="bitbucket merge_pr",
+            status=None,
+            body="BitBucket merge response omitted merge_commit.hash",
+        )
 
     # ── Pipeline-chain internals ───────────────────────────────────────────
 
