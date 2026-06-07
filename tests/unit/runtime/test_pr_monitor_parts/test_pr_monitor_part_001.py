@@ -998,6 +998,37 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_daemon_error_with_docker_hub_auth_endpoint_timeout_dispatches_rerun(
+        self,
+    ) -> None:
+        """Pulling from Docker Hub first fetches a bearer token from
+        ``auth.docker.io/token``; when that request times out the daemon reports the
+        failure against the auth endpoint rather than ``registry-1.docker.io``/``/v2/``.
+        The auth host is the registry-auth token service contacted only for registry
+        operations, so it is registry pull context and the timeout is rerun as
+        transient infra."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                'Error response from daemon: Get "https://auth.docker.io/token'
+                '?service=registry.docker.io&scope=repository:library/postgres:pull": '
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_bare_daemon_error_does_not_anchor_failed_to_pull_image(self) -> None:
         """A bare ``Error response from daemon: context deadline exceeded`` line —
         no registry/image-pull context — must not corroborate a nearby

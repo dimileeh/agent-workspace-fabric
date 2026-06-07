@@ -671,13 +671,20 @@ _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER = "docker pull failed"
 # Markers stay specific: a generic phrase such as ``pulling from`` would also match
 # unrelated daemon operations (e.g. ``failed while pulling from local volume``), so
 # only the registry API path, known hosts, and the registry-auth ``pull access
-# denied`` error qualify.
+# denied`` error qualify. ``auth.docker.io`` is the Docker Hub registry-auth token
+# service: pulling from Docker Hub first fetches a bearer token from
+# ``auth.docker.io/token``, so a daemon timeout reported against that host (e.g.
+# ``Error response from daemon: Get "https://auth.docker.io/token?...": context
+# deadline exceeded``) is a registry pull failure even though it names neither a
+# ``/v2/`` path nor a ``registry-1.docker.io``/``index.docker.io`` host. That host
+# is contacted only for registry operations, so it stays as specific as the others.
 _CI_DOCKER_DAEMON_ERROR_MARKER = "error response from daemon"
 _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "/v2/",
     "registry-1.docker.io",
     "index.docker.io",
     "registry.hub.docker.com",
+    "auth.docker.io",
     "ghcr.io",
     "gcr.io",
     "quay.io",
