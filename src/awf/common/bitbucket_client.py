@@ -466,7 +466,7 @@ class BitBucketClient:
         account_id = await self._current_account_id()
         merged, closed, merge_commit_sha = parse_pr_terminal_state(pr)
         latest_review_at, latest_review_source = latest_external_review_activity(
-            comments, account_id=account_id
+            comments, account_id=account_id, tasks=tasks
         )
         quiet_anchor_at, quiet_anchor_source = _quiet_period_anchor(
             latest_external_review_activity_at=latest_review_at,

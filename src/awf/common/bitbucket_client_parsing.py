@@ -553,14 +553,22 @@ def latest_external_review_activity(
     comments: list[dict[str, Any]],
     *,
     account_id: str | None,
+    tasks: list[dict[str, Any]] | None = None,
 ) -> tuple[datetime | None, str | None]:
-    """Return the newest external (non-viewer) comment activity timestamp + source.
+    """Return the newest external (non-viewer) review activity timestamp + source.
 
     Mirrors the GitHub status path's ``_latest_activity_from_thread_comments``: every
     non-deleted comment the viewer did not author counts as review activity — inline
     *and* top-level, resolved threads included — so the non-check-reviewer quiet window
     re-anchors on a late Bitbucket reviewer comment instead of decaying to the
     head-only fallback (which would let a fresh comment be merged past immediately).
+
+    Reviewer *tasks* (the ``/tasks`` feed) count too, **including resolved ones**: a PR
+    whose only feedback is a task would otherwise contribute nothing here, so once the
+    agent resolves that task the anchor would decay to PR creation and the settle window
+    would be skipped — letting the PR merge immediately after task resolution instead of
+    waiting out the quiet period after that review activity (issue #448 follow-up). Each
+    non-viewer task's newest timestamp is considered with the ``review_task`` source.
     """
     latest_at: datetime | None = None
     latest_source: str | None = None
@@ -577,6 +585,19 @@ def latest_external_review_activity(
         source = "review_thread_comment" if _comment_is_inline(comment) else "issue_comment"
         if latest_at is None or candidate > latest_at:
             latest_at, latest_source = candidate, source
+    for task in tasks or ():
+        if task.get("id") is None:
+            continue
+        creator = _task_creator(task)
+        if account_id is not None and _clean_optional_str(creator.get("account_id")) == account_id:
+            continue
+        candidate = parse_bb_datetime(task.get("updated_on")) or parse_bb_datetime(
+            task.get("created_on")
+        )
+        if candidate is None:
+            continue
+        if latest_at is None or candidate > latest_at:
+            latest_at, latest_source = candidate, "review_task"
     return latest_at, latest_source
 
 

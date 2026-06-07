@@ -139,6 +139,40 @@ async def test_fetch_pr_status_populates_review_activity_anchor() -> None:
     assert status.quiet_period_anchor_source == "issue_comment"
 
 
+async def test_fetch_pr_status_anchors_on_resolved_reviewer_task() -> None:
+    # A task-only PR whose task the agent already resolved: no pending comments/threads,
+    # but the resolved reviewer task must still populate the review-activity anchor so the
+    # non-check-reviewer settle window is honored instead of merging immediately.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page(
+        "GET",
+        f"{_PR}/tasks",
+        values=[
+            {
+                "id": 7,
+                "state": "RESOLVED",
+                "content": {"raw": "please fix"},
+                "creator": {"account_id": "rev"},
+                "created_on": "2024-05-01T00:00:00Z",
+                "updated_on": "2024-05-03T00:00:00Z",
+            }
+        ],
+    )
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    # Resolved task does not block merge but does anchor the quiet window.
+    assert status.unresolved_inline_threads == ()
+    assert status.latest_external_review_activity_at == datetime(2024, 5, 3, tzinfo=UTC)
+    assert status.latest_external_review_activity_source == "review_task"
+    assert status.quiet_period_anchor_at == datetime(2024, 5, 3, tzinfo=UTC)
+    assert status.quiet_period_anchor_source == "review_task"
+
+
 async def test_fetch_pr_status_without_activity_leaves_anchor_unset() -> None:
     # No external review activity and no PR timestamps → anchor stays None so the
     # settle gate keeps its head-only fallback (unchanged behavior).
@@ -637,6 +671,42 @@ def test_latest_external_review_activity_inline_source_and_empty() -> None:
     at, source = latest_external_review_activity(inline, account_id="me")
     assert at == datetime(2024, 1, 1, tzinfo=UTC)
     assert source == "review_thread_comment"
+
+
+def test_latest_external_review_activity_includes_resolved_task() -> None:
+    # A PR whose only feedback is a reviewer task: once the agent resolves it the task
+    # no longer blocks merge, but its review activity must still anchor the quiet window
+    # (resolved tasks included) so the settle gate does not decay to PR-creation and let
+    # the PR merge immediately after task resolution.
+    tasks = [
+        {
+            "id": 1,
+            "state": "RESOLVED",
+            "creator": {"account_id": "rev"},
+            "created_on": "2024-03-01T00:00:00Z",
+            "updated_on": "2024-03-05T00:00:00Z",  # newest → wins over the comment
+        }
+    ]
+    comments = [
+        {"id": 9, "user": {"account_id": "rev"}, "updated_on": "2024-03-02T00:00:00Z"},
+    ]
+    at, source = latest_external_review_activity(comments, account_id="me", tasks=tasks)
+    assert at == datetime(2024, 3, 5, tzinfo=UTC)
+    assert source == "review_task"
+
+
+def test_latest_external_review_activity_ignores_viewer_and_untimed_tasks() -> None:
+    tasks = [
+        # viewer-authored → ignored even though newest.
+        {"id": 1, "creator": {"account_id": "me"}, "updated_on": "2024-09-01T00:00:00Z"},
+        {"creator": {"account_id": "rev"}, "updated_on": "2024-08-01T00:00:00Z"},  # no id
+        {"id": 3, "creator": {"account_id": "rev"}},  # no parseable timestamp → skipped
+        # external task falls back to created_on when updated_on is absent.
+        {"id": 4, "creator": {"account_id": "rev"}, "created_on": "2024-01-01T00:00:00Z"},
+    ]
+    at, source = latest_external_review_activity([], account_id="me", tasks=tasks)
+    assert at == datetime(2024, 1, 1, tzinfo=UTC)
+    assert source == "review_task"
 
 
 def test_build_blocking_reviews_flags_changes_requested_participant() -> None:
