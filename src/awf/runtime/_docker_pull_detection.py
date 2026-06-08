@@ -106,7 +106,7 @@ _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
 # ``_image_ref_matches_daemon_url`` to prevent a hostless ``/v2/<repo>/manifests/``
 # fragment from matching a permanent error URL from a different registry
 # (e.g. ``ghcr.io``) that happens to host the same repo path.
-_DOCKER_HUB_REGISTRY_HOSTS = ("registry-1.docker.io", "index.docker.io")
+_DOCKER_HUB_REGISTRY_HOSTS = ("registry-1.docker.io", "index.docker.io", "docker.io")
 
 # ``failed to pull image "<ref>"`` is emitted by Docker, containerd, and the
 # Kubernetes kubelet alike. A bare kubelet/containerd ``Failed to pull image
@@ -438,13 +438,26 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     if "/" not in repo_path and (not _is_registry_host or _host in _DOCKER_HUB_REGISTRY_HOSTS):
         lib_prefix = f"/v2/library/{repo_path}/manifests/"
         if lib_prefix in line:
-            if not _is_registry_host and not any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS):
+            # Apply the Docker Hub host guard for unqualified refs AND for explicit
+            # Docker Hub alias hosts (docker.io / registry-1.docker.io / index.docker.io).
+            # When the ref has an explicit Docker Hub alias host the daemon resolves it
+            # to registry-1.docker.io, so the line will carry that host — not the alias.
+            # Scoping to a Docker Hub host prevents a non-Docker-Hub URL (e.g.
+            # ghcr.io/v2/library/<name>/...) from being incorrectly attributed to a
+            # docker.io pull (PRRT_kwDOSJAM6s6HtZne).
+            if (not _is_registry_host or _host in _DOCKER_HUB_REGISTRY_HOSTS) and not any(
+                h in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+            ):
                 return False
             effective_ref = manifest_ref if manifest_ref is not None else "latest"
             return f"{lib_prefix}{effective_ref}" in line
         lib_repo_prefix = f"/v2/library/{repo_path}/"
         if lib_repo_prefix in line:
-            return _is_registry_host or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
+            # Same Docker Hub host guard as lib_prefix above: for unqualified refs and
+            # Docker Hub alias hosts, require a Docker Hub host in the line.
+            return (_is_registry_host and _host not in _DOCKER_HUB_REGISTRY_HOSTS) or any(
+                h in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+            )
     # Token-service endpoint URLs embed the repository in the OAuth scope
     # parameter as scope=repository%3A<repo>%3A<actions> (URL-encoded from
     # scope=repository:<repo>:<actions>).  A permanent auth failure at the

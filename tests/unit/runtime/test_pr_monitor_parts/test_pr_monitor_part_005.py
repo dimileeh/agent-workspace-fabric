@@ -1301,3 +1301,80 @@ class TestImageRefMatchesDaemonUrl:
 
         assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_explicit_docker_io_library_image_matches_docker_hub_manifest_url(self) -> None:
+        """A ``docker.io/``-prefixed Docker Hub library image must match a daemon
+        error URL from ``registry-1.docker.io``.
+
+        ``docker pull docker.io/postgres:16`` is an explicit Docker Hub pull.
+        Docker resolves the omitted namespace to the library namespace, so the
+        daemon reports ``registry-1.docker.io/v2/library/postgres/manifests/16``.
+        Before the fix, ``docker.io`` was absent from ``_DOCKER_HUB_REGISTRY_HOSTS``
+        so the library-URL guard skipped the ``/v2/library/<name>/`` check entirely
+        and the function returned False — the permanent denial was not attributed
+        to the pull, and AWF reran as transient instead of reporting the failure.
+
+        Regression for PRRT_kwDOSJAM6s6HtZne."""
+        hub_line = 'Head "https://registry-1.docker.io/v2/library/postgres/manifests/16": denied'
+        assert _image_ref_matches_daemon_url("docker.io/postgres:16", hub_line) is True
+
+    @pytest.mark.unit
+    def test_explicit_docker_io_library_image_wrong_registry_does_not_match(self) -> None:
+        """A ``docker.io/``-prefixed Docker Hub library image must NOT match a
+        daemon error URL from a different registry.
+
+        Counterpart to the positive regression: a permanent denial from ghcr.io
+        that embeds ``/v2/library/postgres/manifests/16`` must not be attributed
+        to a ``docker.io/postgres:16`` pull.
+
+        Regression for PRRT_kwDOSJAM6s6HtZne."""
+        ghcr_line = 'Head "https://ghcr.io/v2/library/postgres/manifests/16": denied'
+        assert _image_ref_matches_daemon_url("docker.io/postgres:16", ghcr_line) is False
+
+    @pytest.mark.unit
+    def test_explicit_docker_io_library_image_token_endpoint_matches(self) -> None:
+        """A ``docker.io/``-prefixed Docker Hub library image must match an
+        ``auth.docker.io`` token-service denial with the ``library/<name>`` scope.
+
+        Regression for PRRT_kwDOSJAM6s6HtZne."""
+        line = (
+            'get "https://auth.docker.io/token?scope=repository%3alibrary%2fpostgres%3apull":'
+            " denied"
+        )
+        assert _image_ref_matches_daemon_url("docker.io/postgres:16", line) is True
+
+    @pytest.mark.unit
+    def test_explicit_docker_io_library_image_permanent_failure_reports_ci_failure(
+        self,
+    ) -> None:
+        """``decide()`` must classify a permanent denial for a ``docker.io/``-
+        prefixed Docker Hub library image as a non-retryable CI failure.
+
+        Before the fix, ``_image_ref_matches_daemon_url`` returned False for
+        ``docker.io/postgres:16`` daemon URLs (``docker.io`` missing from
+        ``_DOCKER_HUB_REGISTRY_HOSTS``), so the permanence probe could not
+        attribute the denial to the pull, leaving it in the transient set and
+        producing RerunTransientCI instead of ReportCiFailure.
+
+        Regression for PRRT_kwDOSJAM6s6HtZne."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull docker.io/postgres:16\n"
+                'Error response from daemon: Head "https://registry-1.docker.io/v2/library/postgres/manifests/16": denied\n'
+                "docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="99000000003",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
