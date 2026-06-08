@@ -682,7 +682,14 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                 and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
                 for k in range(index + 1, probe_index)
             )
-            and _forward_detail_ref_matches_pull(lines[probe_index], back_start, index, lines)
+            and _forward_detail_ref_matches_pull(
+                lines[probe_index],
+                max(
+                    back_start, start
+                ),  # stale echo before the evidence window must not gate the detail match (PRRT_kwDOSJAM6s6HtwnG)
+                index,
+                lines,
+            )
             for probe_index in range(index + 1, end)
         )
     return False

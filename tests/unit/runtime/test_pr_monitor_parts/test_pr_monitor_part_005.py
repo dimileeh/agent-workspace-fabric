@@ -933,3 +933,42 @@ class TestCiFailure:
 
         assert isinstance(action, RerunTransientCI), action
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_stale_echo_before_window_does_not_reject_forward_permanent_detail(
+        self,
+    ) -> None:
+        """A stale ``docker pull <imageA>`` echo outside the evidence window must not
+        cause the forward detail probe to reject a no-echo permanent detail for a
+        different image.
+
+        When the only pull echo precedes the evidence window, ``preceding_pull_image``
+        is correctly left as ``None``, but the stale ``back_start`` was still passed
+        to ``_forward_detail_ref_matches_pull``, which scanned the full log from
+        ``back_start`` and found the stale echo.  Since the detail's image ref
+        (``myapp:v99``) did not match the stale echo ref (``postgres:16``), the
+        helper returned False and the permanent forward detail was ignored, causing
+        the summary to be misclassified as transient and rerun instead of reported
+        (PRRT_kwDOSJAM6s6HtwnG)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"  # line 0 — stale echo, outside window
+                "Status: Downloaded newer image for postgres:16\n"  # line 1 — unrelated
+                "Setting up test environment\n"  # line 2 — unrelated (pushes summary to index 4)
+                "context deadline exceeded\n"  # line 3 — timeout
+                "Docker pull failed with exit code 1\n"  # line 4 — summary (start=2, stale echo at 0)
+                'Failed to pull image "myapp:v99": manifest unknown\n'  # line 5 — permanent forward detail
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
