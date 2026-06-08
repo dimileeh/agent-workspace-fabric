@@ -18,6 +18,28 @@ Security contract (mirrors how the GitHub token reaches git):
   ``!gh auth git-credential`` helper.
 - The helper is scoped to ``https://bitbucket.org`` so it can only ever fire for
   bitbucket.org URLs — GitHub git auth is byte-for-byte unchanged.
+
+Two intentionally divergent mechanisms (#465/#466)
+--------------------------------------------------
+
+There are **two** BitBucket git-auth paths because they cross different layers:
+
+- **Worker** (``apply_bitbucket_git_auth`` + ``bitbucket_git_config_entries``):
+  a host-scoped shell **credential helper** wired straight into the worker's git
+  process environment. No compose layer sits between the helper string and git,
+  so embedding a token-referencing ``$BITBUCKET_API_TOKEN`` shell snippet is
+  safe. This path is already shipped (#461/#464/#467) and is left byte-for-byte
+  unchanged.
+- **Agent** (``apply_bitbucket_agent_git_auth`` + ``bitbucket_agent_git_config_entries``
+  + ``bitbucket_askpass_script``): an **askpass file + URL-username rewrite**. The
+  agent env crosses four layers (Jinja2 template → YAML → docker-compose
+  ``${VAR}`` interpolation → container shell); rendering a token-referencing
+  shell helper through that stack is fragile and risks leaking the token into the
+  rendered ``compose.yml``. Instead a *static* askpass script (no token, only the
+  env-var *name*) reads ``$BITBUCKET_API_TOKEN`` from the container runtime env at
+  git call time, and ``insteadOf`` rewrites carry the non-secret sentinel username
+  in the URL. The token VALUE never appears in any rendered string — only at
+  runtime in the container env via the existing ``${BITBUCKET_API_TOKEN}`` lease.
 """
 
 from __future__ import annotations
@@ -110,6 +132,64 @@ def bitbucket_git_config_entries() -> tuple[tuple[str, str], ...]:
         ("url.https://bitbucket.org/.insteadOf", "git@bitbucket.org:"),
         ("url.https://bitbucket.org/.insteadOf", "ssh://git@bitbucket.org/"),
     )
+
+
+# Agent-side rewrite target carrying the non-secret sentinel username. Any
+# bitbucket.org remote (HTTPS or either SSH-form shape) is rewritten to this base
+# URL so git authenticates over HTTPS with ``GIT_ASKPASS`` supplying the token as
+# the password. The sentinel username is **not** secret, so embedding it in the
+# URL is safe; the rewrite target itself carries the sentinel prefix, so it never
+# re-matches the bare ``https://bitbucket.org/`` source rule (no rewrite loop).
+_BITBUCKET_AGENT_GIT_URL = f"https://{_BITBUCKET_GIT_USERNAME}@bitbucket.org/"
+_BITBUCKET_AGENT_INSTEADOF_KEY = f"url.{_BITBUCKET_AGENT_GIT_URL}.insteadOf"
+
+
+def bitbucket_askpass_script(token_env_var: str) -> str:
+    """Return the **static** ``GIT_ASKPASS`` script body for agent-side bitbucket auth.
+
+    The returned content carries **no token value** — only the env-var *name*
+    ``token_env_var``. git invokes the script and reads the secret from the
+    container runtime environment (``$BITBUCKET_API_TOKEN``) on demand. Because
+    the sentinel username is supplied via the ``insteadOf`` URL rewrite, git only
+    ever asks the askpass for the *password*, so the script just prints the token.
+
+    The script is materialized to a per-workspace file and mounted read-only +
+    executable into the agent (see ``node.secret_mounts``).
+    """
+    return f"#!/bin/sh\nprintf '%s' \"${token_env_var}\"\n"
+
+
+def bitbucket_agent_git_config_entries() -> tuple[tuple[str, str], ...]:
+    """Return the agent-side ``insteadOf`` rewrites for bitbucket.org remotes.
+
+    Every bitbucket.org remote shape that ``RepoRef.from_url`` accepts — the
+    HTTPS form, the scp-like ``git@bitbucket.org:ws/repo.git`` form, and the
+    ``ssh://git@bitbucket.org/ws/repo.git`` form — is rewritten to the
+    sentinel-username HTTPS base URL (``insteadOf`` is multi-valued). The entries
+    contain **no token** and **no shell syntax** — plain URLs only — so they are
+    safe to render through the compose ``GIT_CONFIG_*`` env layer. The token is
+    supplied separately at runtime by the mounted askpass script.
+    """
+    return (
+        (_BITBUCKET_AGENT_INSTEADOF_KEY, "https://bitbucket.org/"),
+        (_BITBUCKET_AGENT_INSTEADOF_KEY, "git@bitbucket.org:"),
+        (_BITBUCKET_AGENT_INSTEADOF_KEY, "ssh://git@bitbucket.org/"),
+    )
+
+
+def apply_bitbucket_agent_git_auth(env: dict[str, str], *, askpass_path: str) -> None:
+    """Wire agent-side bitbucket.org HTTPS auth into ``env`` in place.
+
+    Sets ``GIT_ASKPASS`` to the mounted askpass path, ``GIT_TERMINAL_PROMPT=0``
+    (fail fast instead of hanging on a TTY prompt), and **accumulates** the
+    ``insteadOf`` ``GIT_CONFIG_*`` rewrites onto any existing ``GIT_CONFIG_COUNT``
+    so it composes with other blocks. The token name flows only into the askpass
+    *script content* (produced by :func:`bitbucket_askpass_script`), never into
+    ``env`` — so no secret value is ever placed in the agent environment.
+    """
+    env["GIT_ASKPASS"] = askpass_path
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    add_git_config_entries(env, bitbucket_agent_git_config_entries())
 
 
 def add_git_config_entries(

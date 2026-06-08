@@ -12,11 +12,17 @@ import pytest
 from awf.common.git_auth import (
     BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
     GitAuthNotConfiguredError,
+    apply_bitbucket_agent_git_auth,
     apply_bitbucket_git_auth,
+    bitbucket_agent_git_config_entries,
+    bitbucket_askpass_script,
     bitbucket_git_config_entries,
     is_bitbucket_repo,
     verify_bitbucket_git_auth,
 )
+
+_AGENT_INSTEADOF_KEY = "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+_ASKPASS_PATH = "/run/awf/secrets/bb-askpass.sh"
 
 _TOKEN = "ATATT-do-not-render-secret"
 _EMAIL = "agent@example.com"
@@ -149,6 +155,110 @@ def test_apply_bitbucket_git_auth_noop_when_not_configured(
     env: dict[str, str] = {}
     assert apply_bitbucket_git_auth(env, source_env) is False
     assert env == {}
+
+
+@pytest.mark.unit
+def test_worker_bitbucket_git_config_entries_unchanged_byte_for_byte() -> None:
+    # The worker credential-helper path is an independent mechanism from the
+    # agent askpass + insteadOf path (#465/#466) and must stay byte-for-byte
+    # unchanged. This locks the exact worker entries as a regression guard.
+    assert bitbucket_git_config_entries() == (
+        ("credential.https://bitbucket.org.helper", ""),
+        (
+            "credential.https://bitbucket.org.helper",
+            '!f() { test "$1" = get && '
+            "printf 'username=x-bitbucket-api-token-auth\\npassword=%s\\n' "
+            '"$BITBUCKET_API_TOKEN"; }; f',
+        ),
+        ("credential.https://bitbucket.org.useHttpPath", "true"),
+        ("url.https://bitbucket.org/.insteadOf", "git@bitbucket.org:"),
+        ("url.https://bitbucket.org/.insteadOf", "ssh://git@bitbucket.org/"),
+    )
+
+
+@pytest.mark.unit
+def test_bitbucket_askpass_script_is_static_and_references_env_name() -> None:
+    script = bitbucket_askpass_script("BITBUCKET_API_TOKEN")
+
+    # A POSIX-sh script that prints the token read from the container runtime env.
+    assert script.startswith("#!/bin/sh")
+    assert '"$BITBUCKET_API_TOKEN"' in script
+    # No token value, no sentinel username, no credential-helper/username syntax.
+    assert _TOKEN not in script
+    assert "x-bitbucket-api-token-auth" not in script
+    assert "username=" not in script
+    # Static for the same env-var name (no nonce / no randomness).
+    assert bitbucket_askpass_script("BITBUCKET_API_TOKEN") == script
+
+
+@pytest.mark.unit
+def test_bitbucket_askpass_script_references_exactly_the_injected_env_name() -> None:
+    # The script references the env-var *name* passed in, not a hard-coded alias.
+    script = bitbucket_askpass_script("CUSTOM_TOKEN_VAR")
+    assert '"$CUSTOM_TOKEN_VAR"' in script
+    assert "BITBUCKET_API_TOKEN" not in script
+
+
+@pytest.mark.unit
+def test_bitbucket_agent_git_config_entries_rewrite_all_remote_forms() -> None:
+    entries = bitbucket_agent_git_config_entries()
+
+    # All three rewrites land on the sentinel-username insteadOf key.
+    assert all(key == _AGENT_INSTEADOF_KEY for key, _ in entries)
+    values = [value for _, value in entries]
+    # HTTPS form + both SSH-form shapes RepoRef.from_url accepts.
+    assert values == [
+        "https://bitbucket.org/",
+        "git@bitbucket.org:",
+        "ssh://git@bitbucket.org/",
+    ]
+    # No token, no shell metacharacters (plain URLs only).
+    assert all(_TOKEN not in value for value in values)
+    assert all("$" not in value and "!" not in value for value in values)
+
+
+@pytest.mark.unit
+def test_apply_bitbucket_agent_git_auth_sets_askpass_and_terminal_prompt() -> None:
+    env: dict[str, str] = {}
+
+    apply_bitbucket_agent_git_auth(env, askpass_path=_ASKPASS_PATH)
+
+    assert env["GIT_ASKPASS"] == _ASKPASS_PATH
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    count = int(env["GIT_CONFIG_COUNT"])
+    rendered = {(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]) for i in range(count)}
+    assert (_AGENT_INSTEADOF_KEY, "https://bitbucket.org/") in rendered
+    assert (_AGENT_INSTEADOF_KEY, "git@bitbucket.org:") in rendered
+    assert (_AGENT_INSTEADOF_KEY, "ssh://git@bitbucket.org/") in rendered
+    # No token value anywhere in the agent git env.
+    assert all(_TOKEN not in value for value in env.values())
+
+
+@pytest.mark.unit
+def test_apply_bitbucket_agent_git_auth_accumulates_onto_existing_git_config() -> None:
+    # Pre-seed two entries (e.g. as another block would) at indices 0 and 1.
+    env: dict[str, str] = {
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "*",
+        "GIT_CONFIG_KEY_1": "credential.helper",
+        "GIT_CONFIG_VALUE_1": "",
+    }
+
+    apply_bitbucket_agent_git_auth(env, askpass_path=_ASKPASS_PATH)
+
+    # Exact final indexed layout: the three insteadOf rewrites land at 2, 3, 4.
+    assert env["GIT_CONFIG_COUNT"] == "5"
+    assert env["GIT_CONFIG_KEY_2"] == _AGENT_INSTEADOF_KEY
+    assert env["GIT_CONFIG_VALUE_2"] == "https://bitbucket.org/"
+    assert env["GIT_CONFIG_KEY_3"] == _AGENT_INSTEADOF_KEY
+    assert env["GIT_CONFIG_VALUE_3"] == "git@bitbucket.org:"
+    assert env["GIT_CONFIG_KEY_4"] == _AGENT_INSTEADOF_KEY
+    assert env["GIT_CONFIG_VALUE_4"] == "ssh://git@bitbucket.org/"
+    # Pre-existing entries are preserved untouched.
+    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert env["GIT_CONFIG_VALUE_0"] == "*"
+    assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
 
 
 @pytest.mark.unit

@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
+from awf.common.git_auth import (
+    apply_bitbucket_agent_git_auth,
+    bitbucket_askpass_script,
+)
 from awf.common.immutability import frozen_mapping
 from awf.node.compose_manager import AuthMount
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
@@ -42,6 +46,17 @@ _BITBUCKET_TARGET_SOURCE_NAMES: dict[str, tuple[str, ...]] = {
     "BITBUCKET_API_TOKEN": ("BITBUCKET_API_TOKEN",),
     "BITBUCKET_EMAIL": ("BITBUCKET_EMAIL",),
 }
+# Agent-side BitBucket git-over-HTTPS auth (issues #465/#466). When the token
+# target below is injected into the agent env, the resolver also materializes a
+# static ``GIT_ASKPASS`` script (no token — only the env-var *name*) and mounts
+# it read-only at the askpass target, then wires ``GIT_ASKPASS`` +
+# ``insteadOf`` into the agent env. The token VALUE never lands in any rendered
+# string; only ``${BITBUCKET_API_TOKEN}`` (the lease placeholder) and the
+# runtime ``$BITBUCKET_API_TOKEN`` inside the mounted script reference it.
+_BITBUCKET_GIT_TOKEN_TARGET = "BITBUCKET_API_TOKEN"
+_BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
+_BITBUCKET_ASKPASS_FILENAME = "bb-askpass.sh"
+_SECRET_LEASE_MATERIALIZATION_SUBDIR = "secret-leases"
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HOME_ROOT_RE = re.compile(r"^/(?:home|Users)/[^/]+/?$")
 
@@ -122,7 +137,6 @@ class LocalSecretLeaseMountResolver:
         *,
         workspace_id: str,
     ) -> LocalSecretLeaseResolution:
-        del workspace_id  # reserved for future per-workspace local lease materialization
         source_env = os.environ if self.host_env is None else self.host_env
         env: dict[str, str] = {}
         mounts: list[AuthMount] = []
@@ -187,6 +201,18 @@ class LocalSecretLeaseMountResolver:
                 _append_env_pair(env, pair)
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
+                if pair[0] == _BITBUCKET_GIT_TOKEN_TARGET and "GIT_ASKPASS" not in env:
+                    # The git token was injected: wire agent-side git-over-HTTPS
+                    # auth (askpass file + insteadOf). Gated on GIT_ASKPASS being
+                    # absent so a duplicate token lease cannot mount the script
+                    # twice. The email lease (REST basic auth) is independent and
+                    # does not trigger this.
+                    self._materialize_bitbucket_agent_askpass(
+                        env,
+                        mounts,
+                        workspace_id=workspace_id,
+                        token_env_var=pair[0],
+                    )
                 continue
 
             if provider in _LOCAL_FILE_PROVIDERS:
@@ -295,6 +321,39 @@ class LocalSecretLeaseMountResolver:
             self._missing(secret, provider=provider, omitted_optional=omitted_optional)
             return None
         return (secret.target, f"${{{source_name}}}")
+
+    def _materialize_bitbucket_agent_askpass(
+        self,
+        env: dict[str, str],
+        mounts: list[AuthMount],
+        *,
+        workspace_id: str,
+        token_env_var: str,
+    ) -> None:
+        """Materialize + mount the agent-side BitBucket ``GIT_ASKPASS`` script.
+
+        Writes a **static** askpass script (containing no token — only the
+        ``token_env_var`` *name*) to a per-workspace subdir of ``work_dir``,
+        marks it world read+execute (``0o555``) so the agent (uid 1000) can
+        execute the read-only bind mount, mounts it at the askpass target, and
+        wires ``GIT_ASKPASS`` + ``insteadOf`` into ``env``. The token VALUE never
+        appears in the script, the mount, or ``env`` — only the runtime
+        ``$BITBUCKET_API_TOKEN`` reference, resolved inside the container at git
+        call time. The bind-mount source uses ``work_dir`` directly, matching the
+        host-equal convention used for the other auth-mount sources.
+        """
+        script_dir = self.work_dir / _SECRET_LEASE_MATERIALIZATION_SUBDIR / workspace_id
+        script_dir.mkdir(parents=True, exist_ok=True)
+        askpass_path = script_dir / _BITBUCKET_ASKPASS_FILENAME
+        askpass_path.write_text(bitbucket_askpass_script(token_env_var), encoding="utf-8")
+        # World read+execute: a non-secret, static script. Read-only bind mounts
+        # preserve the host inode mode, so world-x lets the agent execute it
+        # without a chown.
+        askpass_path.chmod(0o555)
+        mounts.append(
+            AuthMount(source=str(askpass_path), target=_BITBUCKET_ASKPASS_TARGET, mode="ro")
+        )
+        apply_bitbucket_agent_git_auth(env, askpass_path=_BITBUCKET_ASKPASS_TARGET)
 
     def _resolve_local_file_secret(
         self,

@@ -638,6 +638,26 @@ def test_invalid_local_lease_shapes_raise_structured_errors(
     assert "sk-live-do-not-render" not in str(raised.value)
 
 
+def _bitbucket_token_lease() -> dict[str, object]:
+    return {
+        "name": "bitbucket-token",
+        "kind": "env",
+        "target": "BITBUCKET_API_TOKEN",
+        "provider": "bitbucket",
+        "ref": "token",
+    }
+
+
+def _bitbucket_email_lease() -> dict[str, object]:
+    return {
+        "name": "bitbucket-email",
+        "kind": "env",
+        "target": "BITBUCKET_EMAIL",
+        "provider": "bitbucket",
+        "ref": "email",
+    }
+
+
 @pytest.mark.unit
 def test_bitbucket_provider_exposes_token_and_email_placeholders(tmp_path: Path) -> None:
     raw_token = "ATATT-do-not-render"
@@ -648,28 +668,31 @@ def test_bitbucket_provider_exposes_token_and_email_placeholders(tmp_path: Path)
     )
 
     resolution = resolver.resolve(
-        _profile(
-            {
-                "name": "bitbucket-token",
-                "kind": "env",
-                "target": "BITBUCKET_API_TOKEN",
-                "provider": "bitbucket",
-                "ref": "token",
-            },
-            {
-                "name": "bitbucket-email",
-                "kind": "env",
-                "target": "BITBUCKET_EMAIL",
-                "provider": "bitbucket",
-                "ref": "email",
-            },
-        ),
+        _profile(_bitbucket_token_lease(), _bitbucket_email_lease()),
         workspace_id="ws_secret",
     )
 
-    assert resolution.environment == (
-        ("BITBUCKET_API_TOKEN", "${BITBUCKET_API_TOKEN}"),
-        ("BITBUCKET_EMAIL", "${BITBUCKET_EMAIL}"),
+    env = dict(resolution.environment)
+    # The token/email leases stay compose ``${VAR}`` placeholders, never values.
+    assert env["BITBUCKET_API_TOKEN"] == "${BITBUCKET_API_TOKEN}"
+    assert env["BITBUCKET_EMAIL"] == "${BITBUCKET_EMAIL}"
+    # The git token lease additionally wires agent-side git-over-HTTPS auth.
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    instead_of_key = "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+    count = int(env["GIT_CONFIG_COUNT"])
+    config = {(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]) for i in range(count)}
+    assert (instead_of_key, "https://bitbucket.org/") in config
+    assert (instead_of_key, "git@bitbucket.org:") in config
+    assert (instead_of_key, "ssh://git@bitbucket.org/") in config
+    # The askpass script is mounted read-only into the agent.
+    assert (
+        AuthMount(
+            source=str(tmp_path / "work" / "secret-leases" / "ws_secret" / "bb-askpass.sh"),
+            target="/run/awf/secrets/bb-askpass.sh",
+            mode="ro",
+        )
+        in resolution.mounts
     )
     rendered = json.dumps(
         {"resolution": repr(resolution), "metadata": resolution.metadata},
@@ -677,7 +700,102 @@ def test_bitbucket_provider_exposes_token_and_email_placeholders(tmp_path: Path)
     )
     assert raw_token not in rendered
     assert resolution.metadata["providers"] == ["bitbucket"]
+    # ``targets`` tracks profile-declared lease targets; the AWF-internal askpass
+    # mount is reflected by ``mount_count`` only, not as a declared target.
     assert resolution.metadata["targets"] == ["BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL"]
+    assert resolution.metadata["mount_count"] == 1
+
+
+@pytest.mark.unit
+def test_bitbucket_token_only_lease_still_wires_agent_git_auth(tmp_path: Path) -> None:
+    # The agent askpass needs only the token; the sentinel username replaces the
+    # email for git, so a token-only lease (no BITBUCKET_EMAIL) still wires auth.
+    raw_token = "ATATT-do-not-render"
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": raw_token})
+
+    resolution = resolver.resolve(
+        _profile(_bitbucket_token_lease()),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" in env
+    assert resolution.metadata["mount_count"] == 1
+    assert raw_token not in json.dumps(
+        {"resolution": repr(resolution), "metadata": resolution.metadata}, default=str
+    )
+
+
+@pytest.mark.unit
+def test_bitbucket_email_only_lease_does_not_wire_agent_git_auth(tmp_path: Path) -> None:
+    # The email lease feeds REST basic auth only; it must not trigger the agent
+    # git askpass wiring (which is gated strictly on the token target).
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_EMAIL": "agent@example.com"})
+
+    resolution = resolver.resolve(
+        _profile(_bitbucket_email_lease()),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert env == {"BITBUCKET_EMAIL": "${BITBUCKET_EMAIL}"}
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
+    assert resolution.metadata["mount_count"] == 0
+
+
+@pytest.mark.unit
+def test_bitbucket_askpass_script_materialized_read_only_executable_and_static(
+    tmp_path: Path,
+) -> None:
+    raw_token = "ATATT-do-not-render"
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": raw_token})
+
+    resolution = resolver.resolve(
+        _profile(_bitbucket_token_lease()),
+        workspace_id="ws_secret",
+    )
+
+    askpass_mount = next(
+        m for m in resolution.mounts if m.target == "/run/awf/secrets/bb-askpass.sh"
+    )
+    assert askpass_mount.mode == "ro"
+    script_path = Path(askpass_mount.source)
+    # Host file is world read+execute (0o555) so the agent can run the ro mount.
+    assert script_path.stat().st_mode & 0o111
+    assert (script_path.stat().st_mode & 0o777) == 0o555
+    content = script_path.read_text(encoding="utf-8")
+    # Static script: references the injected env-var name, never the token value.
+    assert content.startswith("#!/bin/sh")
+    assert '"$BITBUCKET_API_TOKEN"' in content
+    assert raw_token not in content
+
+
+@pytest.mark.unit
+def test_non_bitbucket_lease_does_not_wire_agent_git_auth(tmp_path: Path) -> None:
+    # A non-bitbucket (env/OpenAI) lease yields none of the agent git wiring.
+    resolver = _resolver(tmp_path, host_env={"OPENAI_API_KEY": "sk-live-do-not-render"})
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
 
 
 @pytest.mark.unit
