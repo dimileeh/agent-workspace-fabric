@@ -113,6 +113,11 @@ async def test_fetch_pr_status_no_checks_observed_when_no_statuses() -> None:
     # Empty statuses still parse to PENDING (the gate-6 default), so without the
     # operator opt-out the monitor would keep waiting.
     assert status.check_state == CheckState.PENDING
+    # A clean OPEN PR reports a KNOWN mergeable state regardless of CI presence, so
+    # with the operator opt-out the decide() path proceeds to Merge() rather than
+    # WaitForCI("unknown_mergeable_state"). Assert it explicitly (spec point 7).
+    assert status.mergeable == MergeableState.MERGEABLE
+    assert status.merge_state_status == MergeStateStatus.CLEAN
 
 
 async def test_fetch_pr_status_failed_check() -> None:
