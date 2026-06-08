@@ -993,6 +993,8 @@ class TaskAttemptListResponse(BaseModel):
 
 
 class WorkspaceOverviewResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     workspace_id: str
     task_id: str
     title: str
