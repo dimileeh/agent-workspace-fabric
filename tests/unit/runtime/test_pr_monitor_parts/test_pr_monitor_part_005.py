@@ -1053,3 +1053,64 @@ class TestCiFailure:
 
         assert isinstance(action, RerunTransientCI), action
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_tagless_stale_echo_rejects_different_tag_forward_detail(
+        self,
+    ) -> None:
+        """A tagless stale pull (``docker pull ghcr.io/org/app``) defaults to
+        ``:latest`` per Docker docs.  A forward detail for a *different* tag
+        (``ghcr.io/org/app:bad``) must not match the stale guard — accepting any
+        tag of the same repo would mark a transient registry timeout as permanent
+        when an unrelated kubelet event for the same repo but a different tag
+        appears in the forward window (PRRT_kwDOSJAM6s6Hujrw)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "docker pull ghcr.io/org/app\n"  # line 0 — tagless stale echo, no success
+                "context deadline exceeded\n"  # line 1
+                "context deadline exceeded\n"  # line 2
+                "Docker pull failed with exit code 1\n"  # line 3 — summary (stale echo at 0)
+                'Failed to pull image "ghcr.io/org/app:bad": manifest unknown\n'  # line 4 — wrong tag
+            ),
+            run_id="27091023773",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_tagless_stale_echo_accepts_latest_tag_forward_detail(
+        self,
+    ) -> None:
+        """A tagless stale pull (``docker pull ghcr.io/org/app``) must still match
+        a forward detail for ``:latest`` because Docker treats a tagless pull as
+        ``:latest`` (PRRT_kwDOSJAM6s6Hujrw)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "docker pull ghcr.io/org/app\n"  # line 0 — tagless stale echo, no success
+                "context deadline exceeded\n"  # line 1
+                "context deadline exceeded\n"  # line 2
+                "Docker pull failed with exit code 1\n"  # line 3 — summary (stale echo at 0)
+                'Failed to pull image "ghcr.io/org/app:latest": manifest unknown\n'  # line 4 — :latest permanent
+            ),
+            run_id="27091023774",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)

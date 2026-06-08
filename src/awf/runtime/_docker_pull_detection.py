@@ -363,11 +363,17 @@ def _forward_detail_ref_matches_pull(
     if stale_guard_image is not None:
         # A stale echo exists whose pull did not succeed — the summary likely
         # belongs to the stale pull; only accept if the detail targets the same
-        # image (or its tagless form) so unrelated kubelet events are rejected.
+        # image (or its tagless/latest form) so unrelated kubelet events are
+        # rejected.  A tagless stale pull (e.g. ``docker pull ghcr.io/org/app``)
+        # defaults to ``:latest`` per Docker docs, so only a ``:latest``-tagged
+        # detail (or the tagless daemon-error form) matches — accepting *any* tag
+        # would cause ``ghcr.io/org/app:bad`` to match a stale ``ghcr.io/org/app``
+        # pull and incorrectly mark a transient timeout as permanent
+        # (PRRT_kwDOSJAM6s6Hujrw).
         return (
             image_ref == stale_guard_image
             or image_ref == _strip_image_tag(stale_guard_image)
-            or stale_guard_image == _strip_image_tag(image_ref)
+            or image_ref == stale_guard_image + ":latest"
         )
     return True
 
