@@ -612,3 +612,35 @@ def test_verify_bitbucket_git_auth_rejects_non_https_scheme(repo_url: str) -> No
     assert "HTTPS" in message
     assert _TOKEN not in message
     assert _EMAIL not in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "HTTPS://bitbucket.org/ws/repo.git",
+        "Https://bitbucket.org/ws/repo.git",
+        "HTTPS://bitbucket.org:443/ws/repo.git",
+        "HTTPS://x-bitbucket-api-token-auth@bitbucket.org/ws/repo.git",
+    ],
+)
+def test_verify_bitbucket_git_auth_rejects_uppercase_scheme(repo_url: str) -> None:
+    # ``urlsplit`` normalizes the scheme to lowercase, so a non-canonical-scheme
+    # URL such as ``HTTPS://bitbucket.org/ws/repo.git`` would clear a lowercased
+    # check even though git keeps the literal uppercase scheme at agent time. The
+    # agent-side ``insteadOf`` rewrites and the askpass ``case "$url" in https://*)``
+    # gate match only the literal lowercase ``https://`` prefix, so git neither
+    # rewrites the remote nor releases the token and the clone fails opaquely. The
+    # preflight must reject a non-canonical scheme casing the same way it rejects a
+    # mixed-case host.
+    with pytest.raises(GitAuthNotConfiguredError) as raised:
+        verify_bitbucket_git_auth(
+            repo_url,
+            {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_EMAIL": _EMAIL},
+        )
+
+    assert raised.value.reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED
+    message = str(raised.value)
+    assert "HTTPS" in message
+    assert _TOKEN not in message
+    assert _EMAIL not in message

@@ -327,10 +327,13 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     No-op for non-bitbucket repos (GitHub git auth is unaffected) and for SSH
     bitbucket URLs (``git@bitbucket.org:…`` / ``ssh://git@bitbucket.org/…``), which
     authenticate with SSH keys rather than the HTTPS credential helper. Rejects a
-    non-HTTPS (e.g. ``http://``) bitbucket.org URL: ``RepoRef.from_url`` still
-    classifies it as bitbucket, but the agent-side ``insteadOf`` rewrites and askpass
-    cover only ``https://bitbucket.org/…``, so such a URL would clear the preflight
-    yet never authenticate, failing opaquely. For an HTTPS bitbucket.org repo missing
+    bitbucket.org URL whose scheme is not the canonical lowercase ``https`` — both a
+    non-HTTPS scheme (e.g. ``http://``) and a non-canonical casing (e.g.
+    ``HTTPS://bitbucket.org/…``). ``RepoRef.from_url`` still classifies it as bitbucket
+    (``urlsplit`` lowercases the scheme), but the agent-side ``insteadOf`` rewrites and
+    askpass cover only the literal lowercase ``https://bitbucket.org/…`` prefix, so such
+    a URL would clear the preflight yet never authenticate, failing opaquely. For an
+    HTTPS bitbucket.org repo missing
     ``BITBUCKET_API_TOKEN`` and/or ``BITBUCKET_EMAIL``,
     raises :class:`GitAuthNotConfiguredError` with
     ``reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED`` and a message that names
@@ -373,13 +376,20 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     # an https:// prompt. Without this gate such a URL clears the preflight yet both
     # mechanisms silently decline to authenticate and git fails opaquely. Require the
     # https scheme so the misconfiguration surfaces as the same fast, diagnosable error.
-    # ``scheme`` is always ``http`` or ``https`` here: ``RepoRef.from_url`` only
-    # classifies a URL as bitbucket via its scheme-bearing http(s)/ssh branch (the
-    # bare ``owner/repo`` slug defaults to GitHub), and the ssh shapes returned
-    # early above. Gate on ``!= "https"`` so the guard self-documents the HTTPS-only
-    # contract rather than tolerating an unreachable empty scheme.
-    scheme = urlsplit(repo_url.strip()).scheme.lower()
-    if scheme != "https":
+    # Compare the **raw**, case-preserved scheme rather than ``urlsplit().scheme``:
+    # ``urlsplit`` normalizes the scheme to lowercase, so an uppercase-scheme URL such
+    # as ``HTTPS://bitbucket.org/ws/repo.git`` would clear a lowercased check even
+    # though git keeps the literal uppercase scheme at agent time. Git's ``insteadOf``
+    # rewrites and the askpass ``case "$url" in https://*)`` gate match only the literal
+    # lowercase ``https://`` prefix, so a non-canonical scheme is neither rewritten nor
+    # served the token and the clone fails opaquely — exactly like the mixed-case host
+    # below (which mirrors this case-preserving comparison). The scheme here always
+    # bears a ``://`` separator: ``RepoRef.from_url`` only classifies a URL as bitbucket
+    # via its host-bearing http(s)/ssh branch (the bare ``owner/repo`` slug defaults to
+    # GitHub), and the ssh shapes returned early above. Require the canonical lowercase
+    # ``https`` so the guard self-documents the HTTPS-only contract.
+    raw_scheme = repo_url.strip().split("://", 1)[0]
+    if raw_scheme != "https":
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
             message=(
