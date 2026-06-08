@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from awf.runtime._docker_pull_detection import _image_ref_matches_daemon_url
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -803,4 +804,55 @@ class TestCiFailure:
         )
 
         assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)
+
+
+class TestImageRefMatchesDaemonUrl:
+    """Unit tests for ``_image_ref_matches_daemon_url``."""
+
+    @pytest.mark.unit
+    def test_private_registry_with_port_matches_daemon_url(self) -> None:
+        """A private-registry image ref with an explicit port must match the
+        corresponding daemon distribution-API URL.
+
+        Before the fix, ``partition(":")`` split on the port colon, yielding
+        ``ref_no_tag = "registry.example.com"`` (a hostname) instead of
+        ``registry.example.com:8080/myapp``.  The ``/v2/myapp/`` fragment check
+        then failed and the pull was misclassified as transient.
+
+        Regression for issue:4644047856."""
+        line = 'Head "https://registry.example.com:8080/v2/myapp/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("registry.example.com:8080/myapp:latest", line) is True
+
+    @pytest.mark.unit
+    def test_standard_registry_image_with_tag_matches_daemon_url(self) -> None:
+        """A normal registry image ref (no port) continues to match correctly."""
+        line = 'Head "https://ghcr.io/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is True
+
+    @pytest.mark.unit
+    def test_private_registry_with_port_and_decide_reports_ci_failure(self) -> None:
+        """``decide()`` must classify a denied pull for a private-registry-with-port
+        image as a permanent CI failure (ReportCiFailure), not a transient rerun.
+
+        Regression for issue:4644047856."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull registry.example.com:8080/myapp:latest\n"
+                "Docker pull failed with exit code 1\n"
+                'Error response from daemon: Head "https://registry.example.com:8080/v2/myapp/manifests/latest": denied\n'
+                "context deadline exceeded"
+            ),
+            run_id="99000000001",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)

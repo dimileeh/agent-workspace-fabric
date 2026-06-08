@@ -348,7 +348,12 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     daemon API URLs, not ``/v2/<name>/``, so both fragments are checked when
     the resolved repo path contains no slash.
     """
-    ref_no_tag, _, _ = image_ref.partition(":")
+    # Strip the image tag (last ":tag") without confusing a registry port
+    # ("registry.host:5000/image:tag") with a tag separator.  A colon is a
+    # tag separator only when nothing after it contains a "/" — a registry
+    # port is always followed by a "/" (the image path component).
+    colon = image_ref.rfind(":")
+    ref_no_tag = image_ref[:colon] if colon != -1 and "/" not in image_ref[colon:] else image_ref
     slash = ref_no_tag.find("/")
     repo_path = ref_no_tag[slash + 1 :] if slash != -1 and "." in ref_no_tag[:slash] else ref_no_tag
     if not repo_path:
