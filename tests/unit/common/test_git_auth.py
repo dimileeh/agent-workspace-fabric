@@ -583,3 +583,32 @@ def test_verify_bitbucket_git_auth_rejects_mixed_case_host(repo_url: str) -> Non
     assert "bitbucket.org" in message
     assert _TOKEN not in message
     assert _EMAIL not in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "http://bitbucket.org/ws/repo.git",
+        "http://bitbucket.org:80/ws/repo.git",
+    ],
+)
+def test_verify_bitbucket_git_auth_rejects_non_https_scheme(repo_url: str) -> None:
+    # ``RepoRef.from_url`` classifies an ``http://`` bitbucket URL as bitbucket and
+    # the mixed-case/userinfo checks all pass for a clean lowercase http:// URL, but
+    # the agent-side mechanisms are HTTPS-only: the ``insteadOf`` rewrites match the
+    # ``https://bitbucket.org/`` prefix and the askpass script emits nothing for a
+    # non-HTTPS prompt. Such a URL would clear the preflight yet both mechanisms
+    # silently decline to authenticate, so git fails opaquely afterwards. The
+    # preflight must reject a non-HTTPS scheme with a fast, diagnosable error.
+    with pytest.raises(GitAuthNotConfiguredError) as raised:
+        verify_bitbucket_git_auth(
+            repo_url,
+            {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_EMAIL": _EMAIL},
+        )
+
+    assert raised.value.reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED
+    message = str(raised.value)
+    assert "HTTPS" in message
+    assert _TOKEN not in message
+    assert _EMAIL not in message

@@ -326,8 +326,12 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
 
     No-op for non-bitbucket repos (GitHub git auth is unaffected) and for SSH
     bitbucket URLs (``git@bitbucket.org:…`` / ``ssh://git@bitbucket.org/…``), which
-    authenticate with SSH keys rather than the HTTPS credential helper. For an
-    HTTPS bitbucket.org repo missing ``BITBUCKET_API_TOKEN`` and/or ``BITBUCKET_EMAIL``,
+    authenticate with SSH keys rather than the HTTPS credential helper. Rejects a
+    non-HTTPS (e.g. ``http://``) bitbucket.org URL: ``RepoRef.from_url`` still
+    classifies it as bitbucket, but the agent-side ``insteadOf`` rewrites and askpass
+    cover only ``https://bitbucket.org/…``, so such a URL would clear the preflight
+    yet never authenticate, failing opaquely. For an HTTPS bitbucket.org repo missing
+    ``BITBUCKET_API_TOKEN`` and/or ``BITBUCKET_EMAIL``,
     raises :class:`GitAuthNotConfiguredError` with
     ``reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED`` and a message that names
     only the missing env var(s) — never any value — turning an otherwise opaque
@@ -361,6 +365,25 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     """
     if not is_bitbucket_repo(repo_url) or _is_ssh_transport(repo_url):
         return
+    # Reject a non-HTTPS bitbucket.org URL (e.g. ``http://bitbucket.org/ws/repo.git``).
+    # ``RepoRef.from_url`` classifies http:// bitbucket remotes as bitbucket, and the
+    # mixed-case/userinfo checks below all pass for a clean lowercase http:// URL, but
+    # the agent-side mechanisms are HTTPS-only: the ``insteadOf`` rewrites match the
+    # ``https://bitbucket.org/`` prefix and the askpass script emits the token only for
+    # an https:// prompt. Without this gate such a URL clears the preflight yet both
+    # mechanisms silently decline to authenticate and git fails opaquely. Require the
+    # https scheme so the misconfiguration surfaces as the same fast, diagnosable error.
+    scheme = urlsplit(repo_url.strip()).scheme.lower()
+    if scheme not in ("", "https"):
+        raise GitAuthNotConfiguredError(
+            reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
+            message=(
+                "BitBucket git authentication requires HTTPS: the agent-side "
+                "insteadOf rewrites and askpass mechanism only cover "
+                "https://bitbucket.org/… URLs. Use "
+                "https://bitbucket.org/<workspace>/<repo>.git."
+            ),
+        )
     missing = [
         name
         for name in (_BITBUCKET_TOKEN_ENV, _BITBUCKET_EMAIL_ENV)
