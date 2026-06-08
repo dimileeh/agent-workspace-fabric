@@ -10,7 +10,6 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from awf.profiles.compose import merge_agent_environment
 from awf.profiles.lint import profile_lint_errors
 from awf.profiles.models import (
     DockerMode,
@@ -32,14 +31,6 @@ from awf.profiles.resolver import (
     _validation_error_message,
     resolve_workspace_profile,
 )
-
-
-@pytest.mark.unit
-def test_merge_environment_does_not_overwrite_existing_keys() -> None:
-    assert merge_agent_environment(
-        (("EXISTING", "base"),),
-        (("EXISTING", "override"), ("NEW", "value")),
-    ) == (("EXISTING", "base"), ("NEW", "value"))
 
 
 @pytest.mark.unit

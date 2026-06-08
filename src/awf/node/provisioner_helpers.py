@@ -46,6 +46,7 @@ def _stack_secret_lease_mount_metadata(
     }
     for key in (
         "env_count",
+        "total_env_count",
         "mount_count",
         "providers",
         "targets",

@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
+from awf.common.git_auth import (
+    apply_bitbucket_agent_git_auth,
+    bitbucket_askpass_script,
+)
 from awf.common.immutability import frozen_mapping
 from awf.node.compose_manager import AuthMount
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
@@ -20,6 +24,8 @@ SECRET_LEASE_SOURCE_INVALID = "SECRET_LEASE_SOURCE_INVALID"
 SECRET_LEASE_TARGET_MISMATCH = "SECRET_LEASE_TARGET_MISMATCH"
 SECRET_LEASE_TARGET_KIND_MISMATCH = "SECRET_LEASE_TARGET_KIND_MISMATCH"
 SECRET_LEASE_WRITABLE_UNSUPPORTED = "SECRET_LEASE_WRITABLE_UNSUPPORTED"
+SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT = "SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT"
+SECRET_LEASE_BITBUCKET_TERMINAL_PROMPT_CONFLICT = "SECRET_LEASE_BITBUCKET_TERMINAL_PROMPT_CONFLICT"
 
 _ENV_PROVIDERS = frozenset(("env",))
 _GITHUB_PROVIDERS = frozenset(("github",))
@@ -42,6 +48,23 @@ _BITBUCKET_TARGET_SOURCE_NAMES: dict[str, tuple[str, ...]] = {
     "BITBUCKET_API_TOKEN": ("BITBUCKET_API_TOKEN",),
     "BITBUCKET_EMAIL": ("BITBUCKET_EMAIL",),
 }
+# Agent-side BitBucket git-over-HTTPS auth (issues #465/#466). When the token
+# target below is injected into the agent env, the resolver also materializes a
+# static ``GIT_ASKPASS`` script (no token — only the env-var *name*) and mounts
+# it read-only at the askpass target, then wires ``GIT_ASKPASS`` +
+# ``insteadOf`` into the agent env. The token VALUE never lands in any rendered
+# string; only ``${BITBUCKET_API_TOKEN}`` (the lease placeholder) and the
+# runtime ``$BITBUCKET_API_TOKEN`` inside the mounted script reference it.
+_BITBUCKET_GIT_TOKEN_TARGET = "BITBUCKET_API_TOKEN"
+# ``apply_bitbucket_agent_git_auth`` sets GIT_TERMINAL_PROMPT to this value so git
+# fails fast instead of hanging on a TTY prompt when the askpass cannot supply a
+# credential. A profile runtime.environment value other than this would shadow it
+# via StackLauncher's first-writer-wins merge and re-enable the hang/prompt.
+_GIT_TERMINAL_PROMPT_ENV = "GIT_TERMINAL_PROMPT"
+_GIT_TERMINAL_PROMPT_FAIL_FAST = "0"
+_BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
+_BITBUCKET_ASKPASS_FILENAME = "bb-askpass.sh"
+_SECRET_LEASE_MATERIALIZATION_SUBDIR = "secret-leases"
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HOME_ROOT_RE = re.compile(r"^/(?:home|Users)/[^/]+/?$")
 
@@ -122,16 +145,38 @@ class LocalSecretLeaseMountResolver:
         *,
         workspace_id: str,
     ) -> LocalSecretLeaseResolution:
-        del workspace_id  # reserved for future per-workspace local lease materialization
         source_env = os.environ if self.host_env is None else self.host_env
+        # When a profile already declares GIT_ASKPASS in its runtime environment,
+        # StackLauncher merges the lease env on top WITHOUT clobbering it
+        # (``merge_agent_environment``), so the profile's GIT_ASKPASS wins in the
+        # container. Wiring the bitbucket askpass block in that case would emit
+        # ``insteadOf`` rewrites that force an askpass password while Git invokes
+        # the profile's unrelated script — breaking private Bitbucket fetch/push.
+        # Detect it here so the auth block stays gated on the effective agent env.
+        profile_presets_git_askpass = "GIT_ASKPASS" in profile.runtime.environment
         env: dict[str, str] = {}
         mounts: list[AuthMount] = []
         providers: list[str] = []
         targets: list[str] = []
+        # Counts the distinct profile-declared lease env vars actually injected.
+        # AWF-internal git-auth env vars (GIT_ASKPASS/GIT_CONFIG_* injected by the
+        # bitbucket askpass wiring) land in ``env`` too, so ``len(env)``
+        # over-counts declared leases; this keeps ``env_count`` a faithful
+        # declared-lease proxy. Only increment when ``_append_env_pair`` injects a
+        # new key, so two leases resolving to the same target key count once (the
+        # second is skipped as a duplicate) rather than inflating the tally.
+        lease_env_count = 0
         omitted_optional: list[dict[str, str]] = []
         satisfied_legacy_targets: set[str] = set()
         satisfied_legacy_providers: set[str] = set()
         skipped_unresolved_count = 0
+        # The bitbucket git-token lease secret, captured when its placeholder is
+        # injected (``None`` until then). The agent-side askpass wiring decision is
+        # deferred until after the loop (below) so it observes the *final* resolved
+        # env and is independent of secret ordering; keeping the secret (not just a
+        # bool) lets the post-loop runtime-override conflict reject with the
+        # offending lease's identity.
+        bitbucket_git_token_secret: ProfileSecret | None = None
 
         for secret in profile.secrets:
             provider = _normalized_provider(secret)
@@ -154,7 +199,8 @@ class LocalSecretLeaseMountResolver:
                 )
                 if pair is None:
                     continue
-                _append_env_pair(env, pair)
+                if _append_env_pair(env, pair):
+                    lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
                 continue
@@ -169,7 +215,8 @@ class LocalSecretLeaseMountResolver:
                 if not pairs:
                     continue
                 for pair in pairs:
-                    _append_env_pair(env, pair)
+                    if _append_env_pair(env, pair):
+                        lease_env_count += 1
                     _append_unique(targets, pair[0])
                 _append_unique(providers, provider)
                 satisfied_legacy_providers.add("github")
@@ -184,9 +231,24 @@ class LocalSecretLeaseMountResolver:
                 )
                 if pair is None:
                     continue
-                _append_env_pair(env, pair)
+                injected = _append_env_pair(env, pair)
+                if injected:
+                    lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
+                # Record the git-token injection only when THIS lease actually
+                # claimed the target key. If an earlier lease (e.g. a generic
+                # ``provider: env`` lease targeting BITBUCKET_API_TOKEN from a
+                # stale/unrelated host var) already set the key, _append_env_pair
+                # returns False and the effective container token is that earlier
+                # placeholder, NOT this bitbucket lease's ${BITBUCKET_API_TOKEN}.
+                # Wiring the askpass on top would then authenticate with the wrong
+                # token, so leave bitbucket_git_token_secret unset and let the
+                # post-loop block skip the askpass wiring. The askpass wiring runs
+                # once after the loop (the email lease, REST basic auth, is
+                # independent and does not trigger it).
+                if injected and pair[0] == _BITBUCKET_GIT_TOKEN_TARGET:
+                    bitbucket_git_token_secret = secret
                 continue
 
             if provider in _LOCAL_FILE_PROVIDERS:
@@ -217,10 +279,76 @@ class LocalSecretLeaseMountResolver:
             if mount.target == "/home/agent/.config/gh":
                 satisfied_legacy_providers.add("github")
 
+        if (
+            bitbucket_git_token_secret is not None
+            and "GIT_ASKPASS" not in env
+            and not profile_presets_git_askpass
+        ):
+            runtime_token_override = profile.runtime.environment.get(_BITBUCKET_GIT_TOKEN_TARGET)
+            if (
+                runtime_token_override is not None
+                and runtime_token_override != env[_BITBUCKET_GIT_TOKEN_TARGET]
+            ):
+                # runtime.environment already defines the token target with a
+                # DIFFERENT value, so StackLauncher's first-writer-wins merge
+                # (merge_agent_environment) keeps the profile's literal value and
+                # drops the lease placeholder (``${BITBUCKET_API_TOKEN}``). The AWF
+                # askpass would then read the profile's stale/blank token at git call
+                # time instead of the resolved lease, silently breaking private
+                # Bitbucket fetch/push despite a configured lease. Reject the
+                # conflict here — on the effective agent env — so the operator
+                # removes the runtime override (or the lease) rather than shipping
+                # broken auth (issue #466). A runtime override that is BYTE-IDENTICAL
+                # to the lease placeholder is not a conflict: the merge keeps a value
+                # equal to what the lease would inject, so the askpass still reads the
+                # resolved lease token. Wiring proceeds normally in that case.
+                self._raise(
+                    SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT,
+                    bitbucket_git_token_secret,
+                    provider="bitbucket",
+                )
+            runtime_terminal_prompt = profile.runtime.environment.get(_GIT_TERMINAL_PROMPT_ENV)
+            if (
+                runtime_terminal_prompt is not None
+                and runtime_terminal_prompt != _GIT_TERMINAL_PROMPT_FAIL_FAST
+            ):
+                # The AWF askpass wiring sets GIT_TERMINAL_PROMPT=0 (fail fast on a
+                # missing credential) in the lease env, but StackLauncher's
+                # first-writer-wins merge (merge_agent_environment) keeps a profile
+                # runtime.environment value. A non-"0" override would shadow the
+                # lease's "0" and let git hang or prompt on a TTY despite the askpass
+                # wiring. Reject the conflict here — on the effective agent env — so
+                # the operator drops the override rather than shipping a defeated
+                # fail-fast guarantee. A byte-identical "0" agrees with AWF and is not
+                # a conflict, so wiring proceeds normally in that case.
+                self._raise(
+                    SECRET_LEASE_BITBUCKET_TERMINAL_PROMPT_CONFLICT,
+                    bitbucket_git_token_secret,
+                    provider="bitbucket",
+                )
+            # Wire agent-side git-over-HTTPS auth (askpass file + insteadOf) once,
+            # AFTER every lease is resolved, so the gate observes the final agent
+            # env. Deferring past the loop makes the decision independent of secret
+            # ordering: a profile that declares its own GIT_ASKPASS — whether in
+            # runtime.environment (``profile_presets_git_askpass``) OR via an env
+            # lease (``target: GIT_ASKPASS``, now reflected in ``env`` regardless
+            # of where it sits relative to the token lease) — owns askpass, and
+            # AWF must not contradict it with insteadOf rewrites that only the AWF
+            # askpass can satisfy (issue #466). Gating on GIT_ASKPASS being absent
+            # from the resolved lease env also means a duplicate token lease cannot
+            # mount the script twice.
+            self._materialize_bitbucket_agent_askpass(
+                env,
+                mounts,
+                workspace_id=workspace_id,
+                token_env_var=_BITBUCKET_GIT_TOKEN_TARGET,
+            )
+
         metadata: dict[str, Any] = {
             "schema": "secret_lease_mount_metadata.v1",
             "mount_plan": "profile_declared_secret_leases",
-            "env_count": len(env),
+            "env_count": lease_env_count,
+            "total_env_count": len(env),
             "mount_count": len(mounts),
             "providers": providers,
             "targets": targets,
@@ -295,6 +423,56 @@ class LocalSecretLeaseMountResolver:
             self._missing(secret, provider=provider, omitted_optional=omitted_optional)
             return None
         return (secret.target, f"${{{source_name}}}")
+
+    def _materialize_bitbucket_agent_askpass(
+        self,
+        env: dict[str, str],
+        mounts: list[AuthMount],
+        *,
+        workspace_id: str,
+        token_env_var: str,
+    ) -> None:
+        """Materialize + mount the agent-side BitBucket ``GIT_ASKPASS`` script.
+
+        Writes a **static** askpass script (containing no token — only the
+        ``token_env_var`` *name*) to a per-workspace subdir of ``work_dir``,
+        marks it world read+execute (``0o555``) so the agent (uid 1000) can
+        execute the read-only bind mount, mounts it at the askpass target, and
+        wires ``GIT_ASKPASS`` + ``insteadOf`` into ``env``. The token VALUE never
+        appears in the script, the mount, or ``env`` — only the runtime
+        ``$BITBUCKET_API_TOKEN`` reference, resolved inside the container at git
+        call time. The bind-mount source uses ``work_dir`` directly, matching the
+        host-equal convention used for the other auth-mount sources.
+        """
+        # Defense in depth: ``workspace_id`` is internal AWF data (``ws_`` + hex),
+        # but it is used here to build a filesystem path. Reject empty ids, path
+        # separators, or traversal segments so a future source change cannot escape
+        # ``work_dir`` or collide on a shared parent (an empty id would collapse
+        # ``work_dir / subdir / ""`` to ``work_dir / subdir``).
+        if (
+            not workspace_id
+            or "/" in workspace_id
+            or "\\" in workspace_id
+            or workspace_id in (".", "..")
+        ):
+            raise ValueError(f"Invalid workspace_id for askpass materialization: {workspace_id!r}")
+        script_dir = self.work_dir / _SECRET_LEASE_MATERIALIZATION_SUBDIR / workspace_id
+        script_dir.mkdir(parents=True, exist_ok=True)
+        askpass_path = script_dir / _BITBUCKET_ASKPASS_FILENAME
+        # Idempotent re-materialization (reprovision / stack relaunch): a prior
+        # run leaves the script at 0o555 with no write bits, so ``write_text``
+        # would raise ``PermissionError`` when not running as root. Drop any
+        # existing file first so the rewrite always succeeds.
+        askpass_path.unlink(missing_ok=True)
+        askpass_path.write_text(bitbucket_askpass_script(token_env_var), encoding="utf-8")
+        # World read+execute: a non-secret, static script. Read-only bind mounts
+        # preserve the host inode mode, so world-x lets the agent execute it
+        # without a chown.
+        askpass_path.chmod(0o555)
+        mounts.append(
+            AuthMount(source=str(askpass_path), target=_BITBUCKET_ASKPASS_TARGET, mode="ro")
+        )
+        apply_bitbucket_agent_git_auth(env, askpass_path=_BITBUCKET_ASKPASS_TARGET)
 
     def _resolve_local_file_secret(
         self,
@@ -458,10 +636,18 @@ def _known_local_auth_targets() -> frozenset[str]:
     return frozenset(target for _, target in _KNOWN_LOCAL_AUTH_REFS.values())
 
 
-def _append_env_pair(env: dict[str, str], pair: tuple[str, str]) -> None:
+def _append_env_pair(env: dict[str, str], pair: tuple[str, str]) -> bool:
+    """Inject ``pair`` into ``env`` unless its key is already present.
+
+    Returns ``True`` when a new key was injected and ``False`` when a prior
+    lease already claimed the target key, so callers can count only the
+    distinct env vars actually set rather than every resolved lease.
+    """
     key, value = pair
-    if key not in env:
-        env[key] = value
+    if key in env:
+        return False
+    env[key] = value
+    return True
 
 
 def _append_unique(items: list[str], value: str) -> None:

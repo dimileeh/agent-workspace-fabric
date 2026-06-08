@@ -24,6 +24,19 @@ def _profile(*secrets: dict[str, object]) -> WorkspaceProfile:
     )
 
 
+def _profile_with_runtime_env(
+    runtime_environment: dict[str, str],
+    *secrets: dict[str, object],
+) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "lease-profile",
+            "secrets": list(secrets),
+            "runtime": {"environment": runtime_environment},
+        }
+    )
+
+
 def _resolver(
     tmp_path: Path,
     *,
@@ -67,8 +80,43 @@ def test_env_provider_exposes_placeholder_without_secret_value(tmp_path: Path) -
     )
     assert raw_secret not in rendered
     assert resolution.metadata["env_count"] == 1
+    # No AWF-internal env vars here, so the full env count matches the lease count.
+    assert resolution.metadata["total_env_count"] == 1
     assert resolution.metadata["mount_count"] == 0
     assert resolution.metadata["providers"] == ["env"]
+    assert resolution.metadata["targets"] == ["OPENAI_API_KEY"]
+
+
+@pytest.mark.unit
+def test_duplicate_env_target_counts_once(tmp_path: Path) -> None:
+    # Two env leases resolving to the same target key only inject one env var
+    # (the second is skipped as a duplicate), so ``env_count`` must not
+    # double-count it — it stays a faithful distinct-declared-lease proxy.
+    resolver = _resolver(tmp_path, host_env={"OPENAI_API_KEY": "sk-secret"})
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "openai-primary",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            },
+            {
+                "name": "openai-duplicate",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            },
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
+    assert resolution.metadata["env_count"] == 1
+    assert resolution.metadata["total_env_count"] == 1
     assert resolution.metadata["targets"] == ["OPENAI_API_KEY"]
 
 
@@ -638,6 +686,39 @@ def test_invalid_local_lease_shapes_raise_structured_errors(
     assert "sk-live-do-not-render" not in str(raised.value)
 
 
+def _bitbucket_token_lease() -> dict[str, object]:
+    return {
+        "name": "bitbucket-token",
+        "kind": "env",
+        "target": "BITBUCKET_API_TOKEN",
+        "provider": "bitbucket",
+        "ref": "token",
+    }
+
+
+def _bitbucket_email_lease() -> dict[str, object]:
+    return {
+        "name": "bitbucket-email",
+        "kind": "env",
+        "target": "BITBUCKET_EMAIL",
+        "provider": "bitbucket",
+        "ref": "email",
+    }
+
+
+def _git_askpass_env_lease() -> dict[str, object]:
+    # A profile env lease that injects the container's GIT_ASKPASS from a host env
+    # var. This is a profile-provided GIT_ASKPASS just like one declared in
+    # runtime.environment — AWF must not override it with the bitbucket askpass.
+    return {
+        "name": "profile-askpass",
+        "kind": "env",
+        "target": "GIT_ASKPASS",
+        "provider": "env",
+        "ref": "env/PROFILE_ASKPASS",
+    }
+
+
 @pytest.mark.unit
 def test_bitbucket_provider_exposes_token_and_email_placeholders(tmp_path: Path) -> None:
     raw_token = "ATATT-do-not-render"
@@ -648,28 +729,31 @@ def test_bitbucket_provider_exposes_token_and_email_placeholders(tmp_path: Path)
     )
 
     resolution = resolver.resolve(
-        _profile(
-            {
-                "name": "bitbucket-token",
-                "kind": "env",
-                "target": "BITBUCKET_API_TOKEN",
-                "provider": "bitbucket",
-                "ref": "token",
-            },
-            {
-                "name": "bitbucket-email",
-                "kind": "env",
-                "target": "BITBUCKET_EMAIL",
-                "provider": "bitbucket",
-                "ref": "email",
-            },
-        ),
+        _profile(_bitbucket_token_lease(), _bitbucket_email_lease()),
         workspace_id="ws_secret",
     )
 
-    assert resolution.environment == (
-        ("BITBUCKET_API_TOKEN", "${BITBUCKET_API_TOKEN}"),
-        ("BITBUCKET_EMAIL", "${BITBUCKET_EMAIL}"),
+    env = dict(resolution.environment)
+    # The token/email leases stay compose ``${VAR}`` placeholders, never values.
+    assert env["BITBUCKET_API_TOKEN"] == "${BITBUCKET_API_TOKEN}"
+    assert env["BITBUCKET_EMAIL"] == "${BITBUCKET_EMAIL}"
+    # The git token lease additionally wires agent-side git-over-HTTPS auth.
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    instead_of_key = "url.https://x-bitbucket-api-token-auth@bitbucket.org/.insteadOf"
+    count = int(env["GIT_CONFIG_COUNT"])
+    config = {(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]) for i in range(count)}
+    assert (instead_of_key, "https://bitbucket.org/") in config
+    assert (instead_of_key, "git@bitbucket.org:") in config
+    assert (instead_of_key, "ssh://git@bitbucket.org/") in config
+    # The askpass script is mounted read-only into the agent.
+    assert (
+        AuthMount(
+            source=str(tmp_path / "work" / "secret-leases" / "ws_secret" / "bb-askpass.sh"),
+            target="/run/awf/secrets/bb-askpass.sh",
+            mode="ro",
+        )
+        in resolution.mounts
     )
     rendered = json.dumps(
         {"resolution": repr(resolution), "metadata": resolution.metadata},
@@ -677,7 +761,372 @@ def test_bitbucket_provider_exposes_token_and_email_placeholders(tmp_path: Path)
     )
     assert raw_token not in rendered
     assert resolution.metadata["providers"] == ["bitbucket"]
+    # ``targets`` tracks profile-declared lease targets; the AWF-internal askpass
+    # mount is reflected by ``mount_count`` only, not as a declared target.
     assert resolution.metadata["targets"] == ["BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL"]
+    assert resolution.metadata["mount_count"] == 1
+    # ``env_count`` stays a faithful declared-lease proxy (the two token/email
+    # leases) and excludes the AWF-internal git-auth env vars (GIT_ASKPASS,
+    # GIT_TERMINAL_PROMPT, and the GIT_CONFIG_* insteadOf entries), which inflate
+    # ``total_env_count`` only.
+    assert resolution.metadata["env_count"] == 2
+    assert resolution.metadata["total_env_count"] == len(env)
+    assert resolution.metadata["total_env_count"] > resolution.metadata["env_count"]
+
+
+@pytest.mark.unit
+def test_bitbucket_token_only_lease_still_wires_agent_git_auth(tmp_path: Path) -> None:
+    # The agent askpass needs only the token; the sentinel username replaces the
+    # email for git, so a token-only lease (no BITBUCKET_EMAIL) still wires auth.
+    raw_token = "ATATT-do-not-render"
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": raw_token})
+
+    resolution = resolver.resolve(
+        _profile(_bitbucket_token_lease()),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" in env
+    assert resolution.metadata["mount_count"] == 1
+    assert raw_token not in json.dumps(
+        {"resolution": repr(resolution), "metadata": resolution.metadata}, default=str
+    )
+
+
+@pytest.mark.unit
+def test_bitbucket_email_only_lease_does_not_wire_agent_git_auth(tmp_path: Path) -> None:
+    # The email lease feeds REST basic auth only; it must not trigger the agent
+    # git askpass wiring (which is gated strictly on the token target).
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_EMAIL": "agent@example.com"})
+
+    resolution = resolver.resolve(
+        _profile(_bitbucket_email_lease()),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert env == {"BITBUCKET_EMAIL": "${BITBUCKET_EMAIL}"}
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
+    # No git wiring, so the declared-lease count equals the full env count.
+    assert resolution.metadata["env_count"] == 1
+    assert resolution.metadata["total_env_count"] == 1
+    assert resolution.metadata["mount_count"] == 0
+
+
+@pytest.mark.unit
+def test_bitbucket_token_lease_skips_git_auth_when_profile_presets_git_askpass(
+    tmp_path: Path,
+) -> None:
+    # When the profile already declares GIT_ASKPASS in runtime.environment, the
+    # StackLauncher merge keeps the profile's value (merge_agent_environment does
+    # not clobber existing keys). If the resolver still wired its own askpass +
+    # insteadOf rewrites, Git would rewrite bitbucket.org URLs to require an
+    # askpass password but invoke the profile's unrelated GIT_ASKPASS, breaking
+    # private Bitbucket fetch/push. So when the profile presets GIT_ASKPASS the
+    # resolver must NOT wire the agent git-auth block (no GIT_ASKPASS override,
+    # no insteadOf rewrites, no askpass mount) — it leaves the token placeholder
+    # for the profile's own askpass to consume.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    resolution = resolver.resolve(
+        _profile_with_runtime_env(
+            {"GIT_ASKPASS": "/profile/askpass.sh"},
+            _bitbucket_token_lease(),
+        ),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    # The token lease placeholder is still emitted for the profile's askpass.
+    assert env == {"BITBUCKET_API_TOKEN": "${BITBUCKET_API_TOKEN}"}
+    # No AWF-internal git-auth wiring: the resolver did not override GIT_ASKPASS,
+    # emit insteadOf rewrites, or mount the bitbucket askpass script.
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_TERMINAL_PROMPT" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
+    assert resolution.metadata["mount_count"] == 0
+    assert resolution.metadata["env_count"] == 1
+    assert resolution.metadata["total_env_count"] == 1
+
+
+@pytest.mark.unit
+def test_bitbucket_token_lease_rejects_runtime_env_token_override(tmp_path: Path) -> None:
+    # When runtime.environment ALSO defines BITBUCKET_API_TOKEN, StackLauncher's
+    # first-writer-wins merge (merge_agent_environment) keeps the profile's literal
+    # value and drops the lease placeholder (${BITBUCKET_API_TOKEN}). Wiring the
+    # AWF askpass on top would then read the profile's stale/blank token instead of
+    # the resolved lease, silently breaking private Bitbucket fetch/push despite a
+    # configured lease. The resolver must reject the conflict rather than emit
+    # broken auth, so the operator removes the runtime override (or the lease).
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    with pytest.raises(SecretLeaseResolutionError) as excinfo:
+        resolver.resolve(
+            _profile_with_runtime_env(
+                {"BITBUCKET_API_TOKEN": "stale-or-blank"},
+                _bitbucket_token_lease(),
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert excinfo.value.reason_code == "SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT"
+    assert excinfo.value.target == "BITBUCKET_API_TOKEN"
+    assert excinfo.value.provider == "bitbucket"
+    # Neither the conflicting runtime value nor the host token value leaks into the
+    # structured error.
+    assert "stale-or-blank" not in str(excinfo.value)
+    assert "ATATT-do-not-render" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_bitbucket_token_lease_rejects_runtime_env_terminal_prompt_override(
+    tmp_path: Path,
+) -> None:
+    # ``apply_bitbucket_agent_git_auth`` sets GIT_TERMINAL_PROMPT=0 in the lease env
+    # so git fails fast instead of hanging on a TTY prompt when the askpass cannot
+    # supply a credential. But StackLauncher's first-writer-wins merge
+    # (merge_agent_environment) keeps a profile runtime.environment value, so a
+    # profile that sets GIT_TERMINAL_PROMPT to a non-"0" value would shadow the
+    # lease's "0" and re-enable the hang/prompt despite the AWF askpass wiring.
+    # Reject the conflict here — on the effective agent env — so the operator drops
+    # the runtime override rather than shipping a defeated fail-fast guarantee.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    with pytest.raises(SecretLeaseResolutionError) as excinfo:
+        resolver.resolve(
+            _profile_with_runtime_env(
+                {"GIT_TERMINAL_PROMPT": "1"},
+                _bitbucket_token_lease(),
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert excinfo.value.reason_code == "SECRET_LEASE_BITBUCKET_TERMINAL_PROMPT_CONFLICT"
+    assert excinfo.value.provider == "bitbucket"
+
+
+@pytest.mark.unit
+def test_bitbucket_token_lease_allows_runtime_env_terminal_prompt_zero(
+    tmp_path: Path,
+) -> None:
+    # A runtime.environment GIT_TERMINAL_PROMPT that already equals "0" matches the
+    # lease's fail-fast value, so the merge keeps the intended behaviour. It is not
+    # a conflict: the resolver must accept it and wire the agent-side git auth
+    # normally rather than rejecting a config that agrees with AWF.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    resolution = resolver.resolve(
+        _profile_with_runtime_env(
+            {"GIT_TERMINAL_PROMPT": "0"},
+            _bitbucket_token_lease(),
+        ),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" in env
+    assert resolution.metadata["mount_count"] == 1
+
+
+@pytest.mark.unit
+def test_bitbucket_token_lease_allows_runtime_env_matching_placeholder(
+    tmp_path: Path,
+) -> None:
+    # A runtime.environment override that is BYTE-IDENTICAL to the lease placeholder
+    # (``${BITBUCKET_API_TOKEN}``) is NOT a conflict: StackLauncher's first-writer-wins
+    # merge keeps a value equal to what the lease would inject, so the AWF askpass
+    # still reads the resolved lease token. The resolver must accept it and wire the
+    # agent-side git auth normally rather than rejecting a valid, non-overriding config.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    resolution = resolver.resolve(
+        _profile_with_runtime_env(
+            {"BITBUCKET_API_TOKEN": "${BITBUCKET_API_TOKEN}"},
+            _bitbucket_token_lease(),
+        ),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert env["BITBUCKET_API_TOKEN"] == "${BITBUCKET_API_TOKEN}"
+    # The non-conflicting passthrough still wires the agent-side git-over-HTTPS auth.
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" in env
+    assert resolution.metadata["mount_count"] == 1
+
+
+@pytest.mark.unit
+def test_bitbucket_token_lease_skips_git_auth_when_env_lease_claimed_token_target(
+    tmp_path: Path,
+) -> None:
+    # When an earlier generic ``provider: env`` lease already claims
+    # BITBUCKET_API_TOKEN (here from an unrelated host var), _append_env_pair
+    # returns False for the bitbucket lease and the effective container token is
+    # the env lease's placeholder (${STALE_BB_TOKEN}), NOT the bitbucket lease's
+    # ${BITBUCKET_API_TOKEN}. Wiring the AWF askpass + insteadOf on top would make
+    # private fetch/push authenticate with the wrong (or empty) token, so the
+    # resolver must NOT record the bitbucket git-token secret and must skip the
+    # askpass wiring entirely.
+    env_token_lease = {
+        "name": "stale-bitbucket-token",
+        "kind": "env",
+        "target": "BITBUCKET_API_TOKEN",
+        "provider": "env",
+        "ref": "env/STALE_BB_TOKEN",
+    }
+    resolver = _resolver(
+        tmp_path,
+        host_env={
+            "STALE_BB_TOKEN": "stale-do-not-render",
+            "BITBUCKET_API_TOKEN": "ATATT-do-not-render",
+        },
+    )
+
+    resolution = resolver.resolve(
+        _profile(env_token_lease, _bitbucket_token_lease()),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    # The env lease's placeholder wins the target key; the bitbucket lease is a
+    # duplicate and is dropped.
+    assert env["BITBUCKET_API_TOKEN"] == "${STALE_BB_TOKEN}"
+    # No AWF-internal git-auth wiring: no askpass override, no insteadOf rewrites,
+    # no askpass mount.
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_TERMINAL_PROMPT" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
+    assert resolution.metadata["mount_count"] == 0
+    # Only the env lease injected a distinct key; the duplicate bitbucket lease
+    # does not inflate the declared-lease tally.
+    assert resolution.metadata["env_count"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("askpass_first", [True, False])
+def test_bitbucket_token_lease_respects_profile_git_askpass_env_lease_any_order(
+    tmp_path: Path,
+    askpass_first: bool,
+) -> None:
+    # A profile that declares GIT_ASKPASS via an *env lease* (not just
+    # runtime.environment) owns askpass exactly the same way: wiring AWF's askpass
+    # + insteadOf on top would contradict the profile's GIT_ASKPASS and break
+    # private Bitbucket fetch/push. The decision must be deterministic regardless
+    # of whether the GIT_ASKPASS lease sits before or after the bitbucket token in
+    # profile.secrets — the resolver wires the askpass once, after every lease is
+    # resolved, so secret ordering cannot flip the outcome.
+    resolver = _resolver(
+        tmp_path,
+        host_env={
+            "BITBUCKET_API_TOKEN": "ATATT-do-not-render",
+            "PROFILE_ASKPASS": "/profile/askpass.sh",
+        },
+    )
+    leases = (
+        (_git_askpass_env_lease(), _bitbucket_token_lease())
+        if askpass_first
+        else (_bitbucket_token_lease(), _git_askpass_env_lease())
+    )
+
+    resolution = resolver.resolve(_profile(*leases), workspace_id="ws_secret")
+
+    env = dict(resolution.environment)
+    # The profile's GIT_ASKPASS lease placeholder is preserved, not overridden by
+    # the AWF bitbucket askpass mount path, and the token placeholder is emitted
+    # for the profile's own askpass to consume.
+    assert env["GIT_ASKPASS"] == "${PROFILE_ASKPASS}"
+    assert env["BITBUCKET_API_TOKEN"] == "${BITBUCKET_API_TOKEN}"
+    # No AWF-internal git-auth wiring: no insteadOf rewrites, no askpass mount.
+    assert "GIT_TERMINAL_PROMPT" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
+    assert resolution.metadata["mount_count"] == 0
+    assert resolution.metadata["env_count"] == 2
+
+
+@pytest.mark.unit
+def test_bitbucket_askpass_script_materialized_read_only_executable_and_static(
+    tmp_path: Path,
+) -> None:
+    raw_token = "ATATT-do-not-render"
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": raw_token})
+
+    resolution = resolver.resolve(
+        _profile(_bitbucket_token_lease()),
+        workspace_id="ws_secret",
+    )
+
+    askpass_mount = next(
+        m for m in resolution.mounts if m.target == "/run/awf/secrets/bb-askpass.sh"
+    )
+    assert askpass_mount.mode == "ro"
+    script_path = Path(askpass_mount.source)
+    # Host file is world read+execute (0o555) so the agent can run the ro mount.
+    assert script_path.stat().st_mode & 0o111
+    assert (script_path.stat().st_mode & 0o777) == 0o555
+    content = script_path.read_text(encoding="utf-8")
+    # Static script: references the injected env-var name, never the token value.
+    assert content.startswith("#!/bin/sh")
+    assert '"$BITBUCKET_API_TOKEN"' in content
+    assert raw_token not in content
+
+
+@pytest.mark.unit
+def test_bitbucket_askpass_rematerializes_after_chmod_on_reprovision(
+    tmp_path: Path,
+) -> None:
+    # The first materialization writes the script and marks it 0o555 (no write
+    # bits). A later resolve for the same workspace (reprovision / stack
+    # relaunch) must rewrite the read-only script in place rather than raising
+    # PermissionError, matching the idempotent ``mkdir(exist_ok=True)`` intent.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+    profile = _profile(_bitbucket_token_lease())
+
+    first = resolver.resolve(profile, workspace_id="ws_secret")
+    script_path = Path(
+        next(m for m in first.mounts if m.target == "/run/awf/secrets/bb-askpass.sh").source
+    )
+    assert (script_path.stat().st_mode & 0o777) == 0o555
+
+    # Second resolve must not raise even though the file is non-writable.
+    second = resolver.resolve(profile, workspace_id="ws_secret")
+    assert any(m.target == "/run/awf/secrets/bb-askpass.sh" for m in second.mounts)
+    assert (script_path.stat().st_mode & 0o777) == 0o555
+    assert script_path.read_text(encoding="utf-8").startswith("#!/bin/sh")
+
+
+@pytest.mark.unit
+def test_non_bitbucket_lease_does_not_wire_agent_git_auth(tmp_path: Path) -> None:
+    # A non-bitbucket (env/OpenAI) lease yields none of the agent git wiring.
+    resolver = _resolver(tmp_path, host_env={"OPENAI_API_KEY": "sk-live-do-not-render"})
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
 
 
 @pytest.mark.unit

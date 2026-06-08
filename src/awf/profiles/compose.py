@@ -234,18 +234,96 @@ def _endpoint_url(endpoint: ProfileAppEndpoint, path: str) -> str:
     return urlunsplit((endpoint.scheme, f"{endpoint.service}:{endpoint.port}", path, "", ""))
 
 
+_GIT_CONFIG_COUNT_KEY = "GIT_CONFIG_COUNT"
+_GIT_CONFIG_KEY_PREFIX = "GIT_CONFIG_KEY_"
+_GIT_CONFIG_VALUE_PREFIX = "GIT_CONFIG_VALUE_"
+
+
+def _is_git_config_protocol_key(key: str) -> bool:
+    # Only the numerically-indexed protocol vars (``GIT_CONFIG_KEY_<n>`` /
+    # ``GIT_CONFIG_VALUE_<n>``) and ``GIT_CONFIG_COUNT`` belong to the block that is
+    # split out and re-emitted contiguously. A key that merely shares the prefix but
+    # has a non-numeric suffix (e.g. ``GIT_CONFIG_KEY_THRESHOLD``) is not a protocol
+    # entry: matching it here would strip it from ``others`` yet, lacking a numeric
+    # index, it would never be re-emitted — silently dropping it from the merged env.
+    if key == _GIT_CONFIG_COUNT_KEY:
+        return True
+    for prefix in (_GIT_CONFIG_KEY_PREFIX, _GIT_CONFIG_VALUE_PREFIX):
+        if key.startswith(prefix):
+            return key[len(prefix) :].isdigit()
+    return False
+
+
+def _git_config_count(pairs: tuple[tuple[str, str], ...]) -> int:
+    for key, value in pairs:
+        if key == _GIT_CONFIG_COUNT_KEY:
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+    return 0
+
+
+def _split_git_config_entries(
+    pairs: tuple[tuple[str, str], ...],
+) -> tuple[list[tuple[str, str]], tuple[tuple[str, str], ...]]:
+    """Split env pairs into ordered git-config (key, value) entries and the rest.
+
+    The git-config entries are returned in index order (``0..GIT_CONFIG_COUNT-1``);
+    every ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_n``/``GIT_CONFIG_VALUE_n`` var is
+    stripped from the second tuple so the protocol can be re-emitted contiguously
+    by the caller without leaking stray indices.
+    """
+    mapping = dict(pairs)
+    entries: list[tuple[str, str]] = []
+    for index in range(_git_config_count(pairs)):
+        config_key = mapping.get(f"{_GIT_CONFIG_KEY_PREFIX}{index}")
+        config_value = mapping.get(f"{_GIT_CONFIG_VALUE_PREFIX}{index}")
+        if config_key is None or config_value is None:
+            continue
+        entries.append((config_key, config_value))
+    others = tuple((k, v) for k, v in pairs if not _is_git_config_protocol_key(k))
+    return entries, others
+
+
 def merge_agent_environment(
     base_environment: tuple[tuple[str, str], ...],
     additions: tuple[tuple[str, str], ...],
 ) -> tuple[tuple[str, str], ...]:
-    """Merge agent environment pairs without overwriting existing keys."""
+    """Merge agent environment pairs without overwriting existing keys.
 
-    merged: list[tuple[str, str]] = list(base_environment)
+    Non-git-config keys keep "first writer wins" semantics (the base value is
+    preserved). The ``GIT_CONFIG_KEY_n/VALUE_n/COUNT`` protocol is merged
+    specially: both the base and the additions are split into their *present*
+    git-config entries, concatenated in order, and re-emitted as a single
+    contiguous ``0..N-1`` block with a matching ``GIT_CONFIG_COUNT``. The lease
+    resolver always emits its bitbucket ``insteadOf`` entries starting at index
+    0, so a profile that already declares indexed ``GIT_CONFIG_*`` in
+    ``runtime.environment`` would otherwise either collide on index 0 (dropped by
+    the skip-existing rule) or sit above the effective count and never reach git,
+    breaking private Bitbucket HTTPS in the agent. Re-emitting a fresh contiguous
+    block keeps both blocks reachable and tolerates a malformed base whose count
+    overstates the present entries (holes) or whose indexed keys lack a count —
+    git rejects any block with holes or a mismatched count, so the base is
+    normalized rather than passed through verbatim.
+    """
+
+    base_entries, base_others = _split_git_config_entries(base_environment)
+    addition_entries, addition_others = _split_git_config_entries(additions)
+    merged: list[tuple[str, str]] = list(base_others)
     existing = {key for key, _ in merged}
-    for key, value in additions:
+    for key, value in addition_others:
         if key not in existing:
             merged.append((key, value))
             existing.add(key)
+    entries = base_entries + addition_entries
+    if not entries:
+        return tuple(merged)
+
+    for index, (config_key, config_value) in enumerate(entries):
+        merged.append((f"{_GIT_CONFIG_KEY_PREFIX}{index}", config_key))
+        merged.append((f"{_GIT_CONFIG_VALUE_PREFIX}{index}", config_value))
+    merged.append((_GIT_CONFIG_COUNT_KEY, str(len(entries))))
     return tuple(merged)
 
 
