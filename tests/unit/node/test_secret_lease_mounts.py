@@ -885,6 +885,58 @@ def test_bitbucket_token_lease_rejects_runtime_env_token_override(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_bitbucket_token_lease_rejects_runtime_env_terminal_prompt_override(
+    tmp_path: Path,
+) -> None:
+    # ``apply_bitbucket_agent_git_auth`` sets GIT_TERMINAL_PROMPT=0 in the lease env
+    # so git fails fast instead of hanging on a TTY prompt when the askpass cannot
+    # supply a credential. But StackLauncher's first-writer-wins merge
+    # (merge_agent_environment) keeps a profile runtime.environment value, so a
+    # profile that sets GIT_TERMINAL_PROMPT to a non-"0" value would shadow the
+    # lease's "0" and re-enable the hang/prompt despite the AWF askpass wiring.
+    # Reject the conflict here — on the effective agent env — so the operator drops
+    # the runtime override rather than shipping a defeated fail-fast guarantee.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    with pytest.raises(SecretLeaseResolutionError) as excinfo:
+        resolver.resolve(
+            _profile_with_runtime_env(
+                {"GIT_TERMINAL_PROMPT": "1"},
+                _bitbucket_token_lease(),
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert excinfo.value.reason_code == "SECRET_LEASE_BITBUCKET_TERMINAL_PROMPT_CONFLICT"
+    assert excinfo.value.provider == "bitbucket"
+
+
+@pytest.mark.unit
+def test_bitbucket_token_lease_allows_runtime_env_terminal_prompt_zero(
+    tmp_path: Path,
+) -> None:
+    # A runtime.environment GIT_TERMINAL_PROMPT that already equals "0" matches the
+    # lease's fail-fast value, so the merge keeps the intended behaviour. It is not
+    # a conflict: the resolver must accept it and wire the agent-side git auth
+    # normally rather than rejecting a config that agrees with AWF.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    resolution = resolver.resolve(
+        _profile_with_runtime_env(
+            {"GIT_TERMINAL_PROMPT": "0"},
+            _bitbucket_token_lease(),
+        ),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" in env
+    assert resolution.metadata["mount_count"] == 1
+
+
+@pytest.mark.unit
 def test_bitbucket_token_lease_allows_runtime_env_matching_placeholder(
     tmp_path: Path,
 ) -> None:

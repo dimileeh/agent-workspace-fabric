@@ -25,6 +25,7 @@ SECRET_LEASE_TARGET_MISMATCH = "SECRET_LEASE_TARGET_MISMATCH"
 SECRET_LEASE_TARGET_KIND_MISMATCH = "SECRET_LEASE_TARGET_KIND_MISMATCH"
 SECRET_LEASE_WRITABLE_UNSUPPORTED = "SECRET_LEASE_WRITABLE_UNSUPPORTED"
 SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT = "SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT"
+SECRET_LEASE_BITBUCKET_TERMINAL_PROMPT_CONFLICT = "SECRET_LEASE_BITBUCKET_TERMINAL_PROMPT_CONFLICT"
 
 _ENV_PROVIDERS = frozenset(("env",))
 _GITHUB_PROVIDERS = frozenset(("github",))
@@ -55,6 +56,12 @@ _BITBUCKET_TARGET_SOURCE_NAMES: dict[str, tuple[str, ...]] = {
 # string; only ``${BITBUCKET_API_TOKEN}`` (the lease placeholder) and the
 # runtime ``$BITBUCKET_API_TOKEN`` inside the mounted script reference it.
 _BITBUCKET_GIT_TOKEN_TARGET = "BITBUCKET_API_TOKEN"
+# ``apply_bitbucket_agent_git_auth`` sets GIT_TERMINAL_PROMPT to this value so git
+# fails fast instead of hanging on a TTY prompt when the askpass cannot supply a
+# credential. A profile runtime.environment value other than this would shadow it
+# via StackLauncher's first-writer-wins merge and re-enable the hang/prompt.
+_GIT_TERMINAL_PROMPT_ENV = "GIT_TERMINAL_PROMPT"
+_GIT_TERMINAL_PROMPT_FAIL_FAST = "0"
 _BITBUCKET_ASKPASS_TARGET = "/run/awf/secrets/bb-askpass.sh"
 _BITBUCKET_ASKPASS_FILENAME = "bb-askpass.sh"
 _SECRET_LEASE_MATERIALIZATION_SUBDIR = "secret-leases"
@@ -297,6 +304,25 @@ class LocalSecretLeaseMountResolver:
                 # resolved lease token. Wiring proceeds normally in that case.
                 self._raise(
                     SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT,
+                    bitbucket_git_token_secret,
+                    provider="bitbucket",
+                )
+            runtime_terminal_prompt = profile.runtime.environment.get(_GIT_TERMINAL_PROMPT_ENV)
+            if (
+                runtime_terminal_prompt is not None
+                and runtime_terminal_prompt != _GIT_TERMINAL_PROMPT_FAIL_FAST
+            ):
+                # The AWF askpass wiring sets GIT_TERMINAL_PROMPT=0 (fail fast on a
+                # missing credential) in the lease env, but StackLauncher's
+                # first-writer-wins merge (merge_agent_environment) keeps a profile
+                # runtime.environment value. A non-"0" override would shadow the
+                # lease's "0" and let git hang or prompt on a TTY despite the askpass
+                # wiring. Reject the conflict here — on the effective agent env — so
+                # the operator drops the override rather than shipping a defeated
+                # fail-fast guarantee. A byte-identical "0" agrees with AWF and is not
+                # a conflict, so wiring proceeds normally in that case.
+                self._raise(
+                    SECRET_LEASE_BITBUCKET_TERMINAL_PROMPT_CONFLICT,
                     bitbucket_git_token_secret,
                     provider="bitbucket",
                 )
