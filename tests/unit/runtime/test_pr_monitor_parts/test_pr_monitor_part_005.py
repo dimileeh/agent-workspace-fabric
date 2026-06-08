@@ -218,6 +218,36 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_permanent_pull_detail_after_summary_no_echo_dispatches_report_ci_failure(
+        self,
+    ) -> None:
+        """A permanent 'failed to pull image' detail that follows a 'Docker pull
+        failed' summary must mark the summary permanent even when the log stream
+        did not echo the 'docker pull <ref>' command (no-echo wrapper).  Without
+        the echo, _forward_detail_ref_matches_pull used to return False and the
+        summary was left as transient, burning retry budget on a missing tag
+        (PRRT_kwDOSJAM6s6Hti1K)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "context deadline exceeded\n"
+                "Docker pull failed with exit code 1\n"
+                'Failed to pull image "myapp:v99": manifest unknown\n'
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_permanent_pull_detail_after_summary_new_command_echo_dispatches_rerun(
         self,
     ) -> None:

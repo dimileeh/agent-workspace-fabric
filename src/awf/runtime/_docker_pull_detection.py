@@ -317,26 +317,36 @@ def _forward_detail_ref_matches_pull(
     detail_line: str, back_start: int, summary_index: int, lines: list[str]
 ) -> bool:
     """Whether a ``failed to pull image`` detail line targets the same image as
-    the preceding ``docker pull <ref>`` command echo.
+    the preceding ``docker pull <ref>`` command echo, or whether no such echo
+    is available (no-echo fallback).
 
     Extracts the quoted image ref from *detail_line* using
     ``_CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN`` and checks that the same ref
     appears as a whitespace-delimited token in at least one ``docker pull``
-    command echo found in ``lines[back_start:summary_index]``.  Returns False
-    when the detail carries no quoted ref or when no matching command echo
-    exists in the backward window — both cases indicate the detail cannot be
-    confirmed as belonging to the same pull operation.
+    command echo found in ``lines[back_start:summary_index]``.  When no pull
+    command echo exists in that window (the wrapper/log stream did not echo the
+    pull command), returns True — the caller's "no intervening pull" guard
+    already ensures the detail is adjacent to the summary with no new pull
+    started between them.  Returns False only when the detail carries no quoted
+    ref, or when a pull echo is present but its image ref does not match.
     """
     match = _CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN.search(detail_line)
     if match is None:
         return False
     image_ref = match.group(1)
-    return any(
-        _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
-        and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
-        and image_ref in lines[k].split()
-        for k in range(back_start, summary_index)
-    )
+    echo_found = False
+    for k in range(back_start, summary_index):
+        if (
+            _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
+            and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
+        ):
+            echo_found = True
+            if image_ref in lines[k].split():
+                return True
+    # No pull echo exists in the backward window: the wrapper/log stream did
+    # not echo the command.  The caller's "no intervening pull" guard already
+    # ensures the detail is adjacent to the summary, so accept it.
+    return not echo_found
 
 
 def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
