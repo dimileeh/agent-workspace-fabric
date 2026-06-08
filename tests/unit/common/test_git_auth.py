@@ -208,18 +208,22 @@ def _run_askpass(prompt: str, *, token: str = _TOKEN) -> str:
     """
     import subprocess
     import tempfile
+    from pathlib import Path
 
     script = bitbucket_askpass_script("BITBUCKET_API_TOKEN")
     with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
         handle.write(script)
         path = handle.name
-    result = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-only
-        ["/bin/sh", path, prompt],
-        capture_output=True,
-        text=True,
-        env={"BITBUCKET_API_TOKEN": token},
-        check=True,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-only
+            ["/bin/sh", path, prompt],
+            capture_output=True,
+            text=True,
+            env={"BITBUCKET_API_TOKEN": token},
+            check=True,
+        )
+    finally:
+        Path(path).unlink()
     return result.stdout
 
 
