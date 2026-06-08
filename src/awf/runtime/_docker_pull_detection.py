@@ -142,6 +142,10 @@ _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER = "failed to pull image"
 # The quoted image ref on a ``failed to pull image "<ref>"`` line, used to confirm
 # that a corroborating ``docker pull`` echo targets the *same* image (see below).
 _CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN = re.compile(r'failed to pull image\s+"([^"]+)"')
+# Shell redirection / pipe metacharacters that may trail a ``docker pull <image>``
+# command echo (e.g. ``docker pull img 2>&1``).  Tokens containing these must not
+# be mistaken for the image ref when extracting it from the echo.
+_SHELL_REDIRECTION_METACHAR_RE = re.compile(r"[><&|;]")
 # A bare ``docker pull`` *command* echo precedes successful setup pulls too, so it
 # corroborates a ``failed to pull image`` line only when it targets the *same*
 # image ref — proximity alone would let a successful ``docker pull postgres:16``
@@ -686,7 +690,17 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                 # Skip option flags (e.g. --quiet) and their values (e.g.
                 # --platform linux/amd64) that may precede the image ref; the
                 # image is always the last positional argument to docker pull.
-                non_flags = [t for t in pull_tokens[pull_idx + 1 :] if not t.startswith("-")]
+                # Truncate at the first shell redirection / pipe metacharacter so
+                # that e.g. "docker pull img 2>&1" does not store "2>&1" as the
+                # image ref (PRRT_kwDOSJAM6s6HuqsM).
+                _rel = pull_tokens[pull_idx + 1 :]
+                _cut = next(
+                    (i for i, t in enumerate(_rel) if _SHELL_REDIRECTION_METACHAR_RE.search(t)),
+                    None,
+                )
+                non_flags = [
+                    t for t in (_rel[:_cut] if _cut is not None else _rel) if not t.startswith("-")
+                ]
                 if non_flags:
                     preceding_pull_image = non_flags[-1]
             except StopIteration:
@@ -706,8 +720,19 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             stale_tokens = lines[back_start].split()
             try:
                 stale_pull_idx = next(i for i, t in enumerate(stale_tokens) if t == "pull")
+                _stale_rel = stale_tokens[stale_pull_idx + 1 :]
+                _stale_cut = next(
+                    (
+                        i
+                        for i, t in enumerate(_stale_rel)
+                        if _SHELL_REDIRECTION_METACHAR_RE.search(t)
+                    ),
+                    None,
+                )
                 stale_non_flags = [
-                    t for t in stale_tokens[stale_pull_idx + 1 :] if not t.startswith("-")
+                    t
+                    for t in (_stale_rel[:_stale_cut] if _stale_cut is not None else _stale_rel)
+                    if not t.startswith("-")
                 ]
                 if stale_non_flags:
                     _stale_img = stale_non_flags[-1]

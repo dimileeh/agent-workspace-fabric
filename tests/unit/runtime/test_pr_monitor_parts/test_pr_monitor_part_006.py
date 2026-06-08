@@ -1145,3 +1145,44 @@ class TestEvidenceLinePullImageExtractionEdgeCases:
             "docker pull failed",  # summary (index=3)
         ]
         assert _evidence_line_is_permanent_pull_failure(3, lines) is False
+
+    @pytest.mark.unit
+    def test_pull_echo_with_shell_redirect_does_not_corrupt_preceding_pull_image(
+        self,
+    ) -> None:
+        """When the pull echo preceding the summary has a shell redirection suffix
+        (e.g. ``docker pull ghcr.io/org/app:bad 2>&1``), the ``2>&1`` token must
+        not be stored as ``preceding_pull_image``.  A backward daemon denial for the
+        correct image must still be matched so the summary is classified as a
+        permanent (non-retryable) failure.
+
+        Regression for PRRT_kwDOSJAM6s6HuqsM."""
+        lines = [
+            "docker pull ghcr.io/org/app:bad 2>&1",  # pull echo with redirect
+            # Lines are lowercased by _log_shows_docker_registry_timeout before
+            # being passed to this function.
+            "error response from daemon: pull access denied for ghcr.io/org/app,"
+            " repository does not exist or may require 'docker login': denied",
+            "docker pull failed with exit code 1",  # summary (index=2)
+        ]
+        assert _evidence_line_is_permanent_pull_failure(2, lines) is True
+
+    @pytest.mark.unit
+    def test_stale_pull_echo_with_shell_redirect_does_not_corrupt_stale_guard_image(
+        self,
+    ) -> None:
+        """When a stale pull echo (before the evidence window) has a shell
+        redirection suffix, the ``2>&1`` token must not be stored as
+        ``stale_guard_image``.  A forward ``failed to pull image`` detail for the
+        correct image must still be matched so the summary is classified as permanent.
+
+        Stale echo at index 0; summary at index 3 (start = max(0, 3-2) = 1, so
+        back_start = 0 < start = 1).  Regression for PRRT_kwDOSJAM6s6HuqsM."""
+        lines = [
+            "docker pull ghcr.io/org/app:bad 2>&1",  # stale echo with redirect
+            "some other log line",
+            "some other log line 2",
+            "docker pull failed with exit code 1",  # summary (index=3)
+            'failed to pull image "ghcr.io/org/app:bad" pull access denied',  # forward detail
+        ]
+        assert _evidence_line_is_permanent_pull_failure(3, lines) is True
