@@ -1068,13 +1068,21 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # a fresh reviewer reply. That is new, untriaged feedback the outdated-
     # resolution hygiene step refuses to auto-resolve; block here so auto-merge
     # cannot proceed over it and a human is notified instead (#473 follow-up).
+    # A second outdated case also requires a human: when ``resolve_thread``
+    # PERMANENTLY fails, the hygiene step downgrades the verdict to ``needs_human``
+    # and leaves the thread in the outdated feed. That downgrade moves the verdict
+    # OUT of ``_CLOSED_OUTDATED_THREAD_VERDICTS`` so ``_outdated_thread_has_fresh_feedback``
+    # no longer matches it — but ``needs_human`` means operator action is required,
+    # so it must block merge exactly like a non-outdated ``needs_human`` thread.
+    def _outdated_thread_blocks_merge(thread: ReviewThread) -> bool:
+        if state.threads_addressed_ids.get(thread.thread_id) == "needs_human":
+            return True
+        return _outdated_thread_has_fresh_feedback(state, thread)
+
     has_blocking_feedback = (
         any(_thread_blocks_merge(t.thread_id) for t in status.unresolved_inline_threads)
         or any(_review_comment_blocks_merge(c) for c in status.unresolved_review_comments)
-        or any(
-            _outdated_thread_has_fresh_feedback(state, t)
-            for t in status.outdated_unresolved_inline_threads
-        )
+        or any(_outdated_thread_blocks_merge(t) for t in status.outdated_unresolved_inline_threads)
     )
     if has_blocking_feedback:
         return NotifyHuman()

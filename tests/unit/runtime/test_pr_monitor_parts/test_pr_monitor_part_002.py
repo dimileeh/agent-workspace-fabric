@@ -296,6 +296,22 @@ class TestOutdatedFreshFeedbackGate:
         )
         assert isinstance(action, Merge)
 
+    @pytest.mark.unit
+    def test_outdated_needs_human_downgrade_blocks_merge(self) -> None:
+        """When ``_resolve_addressed_outdated_threads`` hits a permanent resolve
+        fault it downgrades the verdict to ``needs_human`` and the thread stays in
+        the outdated feed. ``needs_human`` means operator action is required, so
+        ``decide`` must block auto-merge on it — even though the downgrade moved the
+        verdict out of ``_CLOSED_OUTDATED_THREAD_VERDICTS`` (so the fresh-feedback
+        gate alone no longer matches it)."""
+        state = MonitorState(threads_addressed_ids={"T1": "needs_human"})
+        action = decide(
+            status=_status(outdated=(self._outdated("T1", body="bot nit"),)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
 
 class TestStateImmutability:
     @pytest.mark.unit

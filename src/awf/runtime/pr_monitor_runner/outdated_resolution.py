@@ -143,11 +143,12 @@ async def _resolve_addressed_outdated_threads(
             # merges — burning API quota and spamming logs for no benefit, since the
             # fault is permanent. This mirrors the fix-cycle's permanent-task path
             # (a non-fixable resolve fault escalates rather than retrying forever).
-            # The thread is OUTDATED and dropped from the actionable feed, so this
-            # never reaches the merge-gate blocker — it never wedges auto-merge; the
-            # ``needs_human`` audit event surfaces the unresolved-but-handled thread
-            # for an operator. ``redacted_detail()`` normalizes the human detail
-            # across forges (gh stderr / BitBucket body).
+            # The thread is OUTDATED and dropped from the actionable feed, but the
+            # ``needs_human`` downgrade DOES block auto-merge: ``decide``'s outdated
+            # gate treats an outdated ``needs_human`` thread as a merge blocker
+            # (``NotifyHuman``), so the unresolved-but-handled thread surfaces to an
+            # operator instead of being silently merged over. ``redacted_detail()``
+            # normalizes the human detail across forges (gh stderr / BitBucket body).
             _log.warning(
                 "monitor.resolve_outdated_thread_failed",
                 thread_id=tid,
