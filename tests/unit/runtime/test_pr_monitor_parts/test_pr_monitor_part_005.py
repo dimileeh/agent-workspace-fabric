@@ -770,6 +770,44 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_stale_echo_before_window_does_not_suppress_permanent_daemon_error(
+        self,
+    ) -> None:
+        """A stale ``docker pull <imageA>`` echo that precedes the evidence window
+        must not suppress a permanent daemon error for a *different* image within
+        the window.
+
+        When the only ``docker pull`` echo is outside the
+        ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` (e.g. a successful setup pull from
+        an earlier step), ``preceding_pull_image`` must be left as ``None`` so the
+        backward probe is not gated on the stale image identity.  Previously the
+        stale ``postgres:16`` echo was extracted and the ``pull access denied for
+        private-app`` daemon error was rejected because it did not mention
+        ``postgres:16``, causing the summary to be misclassified as transient and
+        a ``RerunTransientCI`` to be dispatched instead of ``ReportCiFailure``
+        (PRRT_kwDOSJAM6s6HtCmc)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"  # line 0 — stale echo, outside window
+                "Error response from daemon: pull access denied for private-app\n"  # line 1
+                "context deadline exceeded\n"  # line 2 — unrelated timeout
+                "Docker pull failed with exit code 1"  # line 3 — summary (index=3, start=1)
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_backward_daemon_error_different_image_does_not_make_summary_permanent(
         self,
     ) -> None:

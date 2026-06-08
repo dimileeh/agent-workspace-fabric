@@ -439,7 +439,9 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
         # (PRRT_kwDOSJAM6s6Hr82p, PRRT_kwDOSJAM6s6Hs7GB).
         preceding_pull_image: str | None = None
         if (
-            _CI_DOCKER_PULL_COMMAND_MARKER in lines[back_start]
+            back_start
+            >= start  # stale echo before the evidence window must not constrain image matching (PRRT_kwDOSJAM6s6HtCmc)
+            and _CI_DOCKER_PULL_COMMAND_MARKER in lines[back_start]
             and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[back_start]
         ):
             pull_tokens = lines[back_start].split()
