@@ -159,6 +159,10 @@ class LocalSecretLeaseMountResolver:
         satisfied_legacy_targets: set[str] = set()
         satisfied_legacy_providers: set[str] = set()
         skipped_unresolved_count = 0
+        # Whether a bitbucket git-token lease was injected. The agent-side
+        # askpass wiring decision is deferred until after the loop (below) so it
+        # observes the *final* resolved env and is independent of secret ordering.
+        bitbucket_git_token_injected = False
 
         for secret in profile.secrets:
             provider = _normalized_provider(secret)
@@ -217,26 +221,11 @@ class LocalSecretLeaseMountResolver:
                 lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
-                if (
-                    pair[0] == _BITBUCKET_GIT_TOKEN_TARGET
-                    and "GIT_ASKPASS" not in env
-                    and not profile_presets_git_askpass
-                ):
-                    # The git token was injected: wire agent-side git-over-HTTPS
-                    # auth (askpass file + insteadOf). Gated on GIT_ASKPASS being
-                    # absent from both the lease env (so a duplicate token lease
-                    # cannot mount the script twice) and the profile's effective
-                    # agent env (so a profile-provided GIT_ASKPASS, which the
-                    # StackLauncher merge keeps, is not contradicted by insteadOf
-                    # rewrites that only the AWF askpass can satisfy). The email
-                    # lease (REST basic auth) is independent and does not trigger
-                    # this.
-                    self._materialize_bitbucket_agent_askpass(
-                        env,
-                        mounts,
-                        workspace_id=workspace_id,
-                        token_env_var=pair[0],
-                    )
+                # Record the git-token injection; the askpass wiring runs once
+                # after the loop (the email lease, REST basic auth, is independent
+                # and does not trigger it).
+                if pair[0] == _BITBUCKET_GIT_TOKEN_TARGET:
+                    bitbucket_git_token_injected = True
                 continue
 
             if provider in _LOCAL_FILE_PROVIDERS:
@@ -266,6 +255,29 @@ class LocalSecretLeaseMountResolver:
                 satisfied_legacy_targets.add(mount.target)
             if mount.target == "/home/agent/.config/gh":
                 satisfied_legacy_providers.add("github")
+
+        if (
+            bitbucket_git_token_injected
+            and "GIT_ASKPASS" not in env
+            and not profile_presets_git_askpass
+        ):
+            # Wire agent-side git-over-HTTPS auth (askpass file + insteadOf) once,
+            # AFTER every lease is resolved, so the gate observes the final agent
+            # env. Deferring past the loop makes the decision independent of secret
+            # ordering: a profile that declares its own GIT_ASKPASS — whether in
+            # runtime.environment (``profile_presets_git_askpass``) OR via an env
+            # lease (``target: GIT_ASKPASS``, now reflected in ``env`` regardless
+            # of where it sits relative to the token lease) — owns askpass, and
+            # AWF must not contradict it with insteadOf rewrites that only the AWF
+            # askpass can satisfy (issue #466). Gating on GIT_ASKPASS being absent
+            # from the resolved lease env also means a duplicate token lease cannot
+            # mount the script twice.
+            self._materialize_bitbucket_agent_askpass(
+                env,
+                mounts,
+                workspace_id=workspace_id,
+                token_env_var=_BITBUCKET_GIT_TOKEN_TARGET,
+            )
 
         metadata: dict[str, Any] = {
             "schema": "secret_lease_mount_metadata.v1",
