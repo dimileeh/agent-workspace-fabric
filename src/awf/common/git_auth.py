@@ -480,26 +480,37 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
         )
     parsed = urlsplit(repo_url.strip())
     # Reject a non-canonical (mixed-case) bitbucket.org host such as
-    # ``https://Bitbucket.org/ws/repo.git``. ``RepoRef.from_url`` classifies the
-    # repo as bitbucket by lowercasing the parsed host, but the agent-side
-    # ``insteadOf`` rewrites and the askpass host gate are case-sensitive literal
-    # ``bitbucket.org`` matches. A mixed-case host slips past classification yet
-    # never gets the sentinel username injected (``insteadOf`` is a literal-prefix
-    # match) and never satisfies the askpass host check, so the agent's token is
-    # withheld and private fetch/push fails opaquely. (``urlsplit().hostname``
-    # lowercases the host, so the case-preserving ``netloc`` authority is used to
-    # detect the original casing.) Require the canonical lowercase host so both the
+    # ``https://Bitbucket.org/ws/repo.git`` or an unsupported port such as
+    # ``https://bitbucket.org:8443/ws/repo.git``. ``RepoRef.from_url`` classifies the
+    # repo as bitbucket by lowercasing the parsed host and ignoring the port, but the
+    # agent-side ``insteadOf`` rewrites and the askpass host gate are case-sensitive
+    # literal matches. A mixed-case host slips past classification yet never gets the
+    # sentinel username injected (``insteadOf`` is a literal-prefix match) and never
+    # satisfies the askpass host check, so the agent's token is withheld and private
+    # fetch/push fails opaquely. The port is constrained the same way the SSH check
+    # constrains it: the rewrites cover only the no-port ``https://bitbucket.org/`` and
+    # explicit-default ``https://bitbucket.org:443/`` prefixes, so a non-default port
+    # (``:8443``) is never rewritten — git leaves the remote un-rewritten and the
+    # host-gated askpass answers the username prompt with the token, authenticating as
+    # ``token/token`` and failing opaquely. (``urlsplit().hostname`` lowercases the host
+    # and ``urlsplit().port`` would raise on a malformed port, so the case-preserving
+    # ``netloc`` authority is split manually to detect the original casing and the raw
+    # port.) Require the canonical lowercase host with no port or ``:443`` so both the
     # rewrite and the askpass fire.
     raw_authority = parsed.netloc.rsplit("@", 1)[-1]
-    raw_host = raw_authority.rsplit(":", 1)[0] if ":" in raw_authority else raw_authority
-    if raw_host != BITBUCKET_GIT_HOST:
+    if ":" in raw_authority:
+        raw_host, raw_port = raw_authority.rsplit(":", 1)
+    else:
+        raw_host, raw_port = raw_authority, ""
+    if raw_host != BITBUCKET_GIT_HOST or raw_port not in ("", "443"):
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
             message=(
                 "BitBucket git authentication requires the canonical lowercase host "
-                f"{BITBUCKET_GIT_HOST!r}: a mixed-case host slips past forge detection "
-                "but the agent-side insteadOf rewrites and askpass host check are "
-                "case-sensitive, so the API token is withheld. Use "
+                f"{BITBUCKET_GIT_HOST!r} with no port or :443: a mixed-case host or an "
+                "unsupported port slips past forge detection but the agent-side "
+                "insteadOf rewrites and askpass host check are case-sensitive and cover "
+                "only the no-port and :443 prefixes, so the API token is withheld. Use "
                 "https://bitbucket.org/<workspace>/<repo>.git."
             ),
         )
