@@ -524,7 +524,7 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             )
             and (
                 preceding_pull_image is None
-                or preceding_pull_image in lines[probe_index].split()
+                or any(t.rstrip(",.;:") == preceding_pull_image for t in lines[probe_index].split())
                 or _image_ref_matches_daemon_url(preceding_pull_image, lines[probe_index])
             )
             and not any(
@@ -554,7 +554,7 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             )
             and (
                 preceding_pull_image is None
-                or preceding_pull_image in lines[probe_index].split()
+                or any(t.rstrip(",.;:") == preceding_pull_image for t in lines[probe_index].split())
                 or _image_ref_matches_daemon_url(preceding_pull_image, lines[probe_index])
             )
             and not any(

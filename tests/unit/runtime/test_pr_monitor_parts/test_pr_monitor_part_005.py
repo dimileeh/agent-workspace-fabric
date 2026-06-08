@@ -370,6 +370,37 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_docker_pull_access_denied_with_trailing_comma_reports_ci_failure(
+        self,
+    ) -> None:
+        """Docker Hub appends a comma directly to the image name in access-denied messages:
+        ``pull access denied for postgres:16, repository does not exist...``
+        The split token ``"postgres:16,"`` must still match ``preceding_pull_image``
+        so the failure is not silently skipped and misclassified as transient
+        (PRRT_kwDOSJAM6s6HtPhs)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "Docker pull failed with exit code 1\n"
+                "Error response from daemon: pull access denied for postgres:16,"
+                " repository does not exist or may require 'docker login': denied: denied\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_docker_pull_no_such_image_near_unrelated_timeout_reports_ci_failure(
         self,
     ) -> None:
@@ -689,6 +720,36 @@ class TestCiFailure:
                 "/usr/bin/docker pull --quiet postgres:16\n"
                 "Docker pull failed with exit code 1\n"
                 "Error response from daemon: pull access denied for postgres:16\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_forward_daemon_denied_with_trailing_comma_in_daemon_error_reports_ci_failure(
+        self,
+    ) -> None:
+        """Docker Hub appends a comma to the image name in access-denied messages when
+        emitted after the pull summary (forward probe ordering).  The token
+        ``"postgres:16,"`` must match ``preceding_pull_image = "postgres:16"`` so
+        the permanent failure is not misclassified as transient (PRRT_kwDOSJAM6s6HtPhs)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "Docker pull failed with exit code 1\n"
+                "Error response from daemon: pull access denied for postgres:16,"
+                " repository does not exist or may require 'docker login': denied: denied\n"
                 "context deadline exceeded"
             ),
             run_id="27091023772",
