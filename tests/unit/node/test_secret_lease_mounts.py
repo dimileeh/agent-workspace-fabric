@@ -885,6 +885,54 @@ def test_bitbucket_token_lease_rejects_runtime_env_token_override(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_bitbucket_token_lease_skips_git_auth_when_env_lease_claimed_token_target(
+    tmp_path: Path,
+) -> None:
+    # When an earlier generic ``provider: env`` lease already claims
+    # BITBUCKET_API_TOKEN (here from an unrelated host var), _append_env_pair
+    # returns False for the bitbucket lease and the effective container token is
+    # the env lease's placeholder (${STALE_BB_TOKEN}), NOT the bitbucket lease's
+    # ${BITBUCKET_API_TOKEN}. Wiring the AWF askpass + insteadOf on top would make
+    # private fetch/push authenticate with the wrong (or empty) token, so the
+    # resolver must NOT record the bitbucket git-token secret and must skip the
+    # askpass wiring entirely.
+    env_token_lease = {
+        "name": "stale-bitbucket-token",
+        "kind": "env",
+        "target": "BITBUCKET_API_TOKEN",
+        "provider": "env",
+        "ref": "env/STALE_BB_TOKEN",
+    }
+    resolver = _resolver(
+        tmp_path,
+        host_env={
+            "STALE_BB_TOKEN": "stale-do-not-render",
+            "BITBUCKET_API_TOKEN": "ATATT-do-not-render",
+        },
+    )
+
+    resolution = resolver.resolve(
+        _profile(env_token_lease, _bitbucket_token_lease()),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    # The env lease's placeholder wins the target key; the bitbucket lease is a
+    # duplicate and is dropped.
+    assert env["BITBUCKET_API_TOKEN"] == "${STALE_BB_TOKEN}"
+    # No AWF-internal git-auth wiring: no askpass override, no insteadOf rewrites,
+    # no askpass mount.
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_TERMINAL_PROMPT" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
+    assert resolution.metadata["mount_count"] == 0
+    # Only the env lease injected a distinct key; the duplicate bitbucket lease
+    # does not inflate the declared-lease tally.
+    assert resolution.metadata["env_count"] == 1
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("askpass_first", [True, False])
 def test_bitbucket_token_lease_respects_profile_git_askpass_env_lease_any_order(
     tmp_path: Path,

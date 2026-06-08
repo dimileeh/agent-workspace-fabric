@@ -224,14 +224,23 @@ class LocalSecretLeaseMountResolver:
                 )
                 if pair is None:
                     continue
-                if _append_env_pair(env, pair):
+                injected = _append_env_pair(env, pair)
+                if injected:
                     lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
-                # Record the git-token injection; the askpass wiring runs once
-                # after the loop (the email lease, REST basic auth, is independent
-                # and does not trigger it).
-                if pair[0] == _BITBUCKET_GIT_TOKEN_TARGET:
+                # Record the git-token injection only when THIS lease actually
+                # claimed the target key. If an earlier lease (e.g. a generic
+                # ``provider: env`` lease targeting BITBUCKET_API_TOKEN from a
+                # stale/unrelated host var) already set the key, _append_env_pair
+                # returns False and the effective container token is that earlier
+                # placeholder, NOT this bitbucket lease's ${BITBUCKET_API_TOKEN}.
+                # Wiring the askpass on top would then authenticate with the wrong
+                # token, so leave bitbucket_git_token_secret unset and let the
+                # post-loop block skip the askpass wiring. The askpass wiring runs
+                # once after the loop (the email lease, REST basic auth, is
+                # independent and does not trigger it).
+                if injected and pair[0] == _BITBUCKET_GIT_TOKEN_TARGET:
                     bitbucket_git_token_secret = secret
                 continue
 
