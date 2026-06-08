@@ -589,6 +589,33 @@ def _review_thread_needs_attention(state: MonitorState, thread: ReviewThread) ->
     ) != _review_thread_body_hash(thread)
 
 
+# Verdicts that mean "AWF closed this thread; it should stay resolved". Mirrors
+# the outdated-resolution step's ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``
+# (``_RESOLVABLE_THREAD_VERDICTS`` minus ``defer``); duplicated here as a small
+# literal rather than imported, because that constant lives in the runner layer
+# (``fix_cycle``) which already imports this pure core — importing back would
+# cycle.
+_CLOSED_OUTDATED_THREAD_VERDICTS = frozenset({"false_positive", "fix_committed"})
+
+
+def _outdated_thread_has_fresh_feedback(state: MonitorState, thread: ReviewThread) -> bool:
+    """True when an AWF-closed OUTDATED thread has gained fresh reviewer feedback.
+
+    Both forge clients drop OUTDATED threads from ``unresolved_inline_threads``
+    (they are non-blocking for merge), so ``decide``'s comment and merge gates
+    never see them. When such a thread was already closed by AWF
+    (``fix_committed`` / ``false_positive``) and a reviewer then replies, its body
+    hash diverges from the recorded snapshot — new, untriaged feedback. The
+    outdated-resolution hygiene step deliberately refuses to auto-resolve it (it
+    would close feedback nothing re-handled), so without this gate the monitor
+    would silently auto-merge over it. Restricted to the closed-verdict set so a
+    never-addressed outdated thread (the #473 "addressed by an edit elsewhere"
+    case) stays non-blocking as designed."""
+    if state.threads_addressed_ids.get(thread.thread_id) not in _CLOSED_OUTDATED_THREAD_VERDICTS:
+        return False
+    return _review_thread_needs_attention(state, thread)
+
+
 def _is_bot_review_thread(thread: ReviewThread) -> bool:
     authors = (
         [comment.author for comment in thread.comments] if thread.comments else [thread.author]
@@ -1036,9 +1063,19 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return True
         return verdict == "defer" and not _is_bot_author(comment.author)
 
-    has_blocking_feedback = any(
-        _thread_blocks_merge(t.thread_id) for t in status.unresolved_inline_threads
-    ) or any(_review_comment_blocks_merge(c) for c in status.unresolved_review_comments)
+    # OUTDATED threads are excluded from ``unresolved_inline_threads`` above, so
+    # the two checks miss an AWF-closed thread that went outdated and then gained
+    # a fresh reviewer reply. That is new, untriaged feedback the outdated-
+    # resolution hygiene step refuses to auto-resolve; block here so auto-merge
+    # cannot proceed over it and a human is notified instead (#473 follow-up).
+    has_blocking_feedback = (
+        any(_thread_blocks_merge(t.thread_id) for t in status.unresolved_inline_threads)
+        or any(_review_comment_blocks_merge(c) for c in status.unresolved_review_comments)
+        or any(
+            _outdated_thread_has_fresh_feedback(state, t)
+            for t in status.outdated_unresolved_inline_threads
+        )
+    )
     if has_blocking_feedback:
         return NotifyHuman()
 

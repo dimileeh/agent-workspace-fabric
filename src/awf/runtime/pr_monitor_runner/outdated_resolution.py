@@ -86,7 +86,10 @@ async def _resolve_addressed_outdated_threads(
         # change its body hash. Resolving it here would close feedback the monitor
         # never re-handled — and because outdated threads are dropped from the
         # actionable feed, the fix cycle never re-addresses them either. Leave such
-        # a thread open so the new feedback stays visible to a human.
+        # a thread open AND let ``decide()`` block auto-merge on it:
+        # ``_outdated_thread_has_fresh_feedback`` matches this exact condition
+        # (closed verdict + changed body) so the new feedback is surfaced to a
+        # human via ``NotifyHuman`` instead of being silently merged over.
         if _review_thread_needs_attention(state, thread):
             continue
         try:
