@@ -420,13 +420,22 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         # matches any registry (PRRT_kwDOSJAM6s6HtNI4).
         return _is_registry_host or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
     # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
-    # URLs as /v2/library/<name>/ rather than /v2/<name>/.
+    # URLs as /v2/library/<name>/ rather than /v2/<name>/.  Apply the same
+    # Docker Hub registry-host guard as the non-library branches above: for
+    # unqualified Docker Hub refs, require a known Docker Hub host in the line
+    # so a permanent error from a different registry (e.g. ghcr.io) that
+    # happens to embed the same library path is not attributed to an in-flight
+    # Docker Hub pull (PRRT_kwDOSJAM6s6HtQiD).
     if "/" not in repo_path:
         lib_prefix = f"/v2/library/{repo_path}/manifests/"
         if lib_prefix in line:
+            if not _is_registry_host and not any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS):
+                return False
             effective_ref = manifest_ref if manifest_ref is not None else "latest"
             return f"{lib_prefix}{effective_ref}" in line
-        return f"/v2/library/{repo_path}/" in line
+        lib_repo_prefix = f"/v2/library/{repo_path}/"
+        if lib_repo_prefix in line:
+            return _is_registry_host or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
     return False
 
 

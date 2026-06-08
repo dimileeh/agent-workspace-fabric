@@ -1060,6 +1060,43 @@ class TestImageRefMatchesDaemonUrl:
         assert _image_ref_matches_daemon_url("postgres", bad_line) is False
 
     @pytest.mark.unit
+    def test_implicit_docker_hub_library_image_wrong_registry_does_not_match(self) -> None:
+        """An unqualified Docker Hub library image ref must NOT match a daemon
+        error URL from a different registry that embeds the same library path.
+
+        When ``docker pull postgres:16`` is an implicit Docker Hub pull and an
+        unrelated permanent error ``Head
+        "https://ghcr.io/v2/library/postgres/manifests/16": denied`` appears in
+        the same log window, the helper must return False — the daemon URL belongs
+        to ghcr.io, not Docker Hub, and must not suppress a legitimate
+        transient-timeout rerun.
+
+        Without the Docker Hub host guard the hostless
+        ``/v2/library/postgres/manifests/16`` fragment matches the ghcr.io URL as
+        a substring, causing _log_shows_docker_registry_timeout() to treat the
+        transient Docker Hub timeout as permanent and skip the rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtQiD."""
+        ghcr_line = 'Head "https://ghcr.io/v2/library/postgres/manifests/16": denied'
+        assert _image_ref_matches_daemon_url("postgres:16", ghcr_line) is False
+
+        other_line = 'Head "https://registry.example.com/v2/library/postgres/manifests/16": denied'
+        assert _image_ref_matches_daemon_url("postgres:16", other_line) is False
+
+    @pytest.mark.unit
+    def test_implicit_docker_hub_library_image_matches_docker_hub_daemon_url(self) -> None:
+        """An unqualified Docker Hub library image ref must match a daemon error
+        URL from the Docker Hub registry.
+
+        Counterpart to the cross-registry false-positive regression: a permanent
+        denial from ``registry-1.docker.io`` for ``postgres:16`` must still be
+        attributed to the same pull and suppress a rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtQiD."""
+        hub_line = 'Head "https://registry-1.docker.io/v2/library/postgres/manifests/16": denied'
+        assert _image_ref_matches_daemon_url("postgres:16", hub_line) is True
+
+    @pytest.mark.unit
     def test_different_registry_same_repo_and_tag_does_not_match_daemon_url(self) -> None:
         """A daemon error from a different registry must NOT match the preceding
         pull image ref even when the repo path and tag are identical.
