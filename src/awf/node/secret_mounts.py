@@ -352,9 +352,16 @@ class LocalSecretLeaseMountResolver:
         host-equal convention used for the other auth-mount sources.
         """
         # Defense in depth: ``workspace_id`` is internal AWF data (``ws_`` + hex),
-        # but it is used here to build a filesystem path. Reject path separators or
-        # traversal segments so a future source change cannot escape ``work_dir``.
-        if "/" in workspace_id or "\\" in workspace_id or workspace_id in (".", ".."):
+        # but it is used here to build a filesystem path. Reject empty ids, path
+        # separators, or traversal segments so a future source change cannot escape
+        # ``work_dir`` or collide on a shared parent (an empty id would collapse
+        # ``work_dir / subdir / ""`` to ``work_dir / subdir``).
+        if (
+            not workspace_id
+            or "/" in workspace_id
+            or "\\" in workspace_id
+            or workspace_id in (".", "..")
+        ):
             raise ValueError(f"Invalid workspace_id for askpass materialization: {workspace_id!r}")
         script_dir = self.work_dir / _SECRET_LEASE_MATERIALIZATION_SUBDIR / workspace_id
         script_dir.mkdir(parents=True, exist_ok=True)

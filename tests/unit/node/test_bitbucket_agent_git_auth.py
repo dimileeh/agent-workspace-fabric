@@ -184,10 +184,12 @@ def test_insteadof_does_not_loop_on_already_rewritten_url(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("bad_workspace_id", ["../escape", "..", ".", "a/b", "a\\b"])
+@pytest.mark.parametrize("bad_workspace_id", ["", "../escape", "..", ".", "a/b", "a\\b"])
 def test_traversal_workspace_id_is_rejected(tmp_path: Path, bad_workspace_id: str) -> None:
-    # Defense in depth: a ``workspace_id`` carrying a path separator or traversal
-    # segment must not be used to build the askpass materialization dir.
+    # Defense in depth: a ``workspace_id`` that is empty or carries a path separator
+    # or traversal segment must not be used to build the askpass materialization dir.
+    # An empty id would collapse ``work_dir / subdir / ""`` to ``work_dir / subdir``,
+    # colliding on a shared parent path across workspaces.
     resolver = LocalSecretLeaseMountResolver(
         host_home=tmp_path / "host-home",
         work_dir=tmp_path / "work",
