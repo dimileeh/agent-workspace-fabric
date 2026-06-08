@@ -536,3 +536,34 @@ def test_verify_bitbucket_git_auth_allows_sentinel_userinfo() -> None:
         "https://x-bitbucket-api-token-auth@bitbucket.org/ws/repo.git",
         {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_EMAIL": _EMAIL},
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "https://Bitbucket.org/ws/repo.git",
+        "https://BITBUCKET.ORG/ws/repo.git",
+        "https://Bitbucket.org:443/ws/repo.git",
+        "https://x-bitbucket-api-token-auth@Bitbucket.org/ws/repo.git",
+    ],
+)
+def test_verify_bitbucket_git_auth_rejects_mixed_case_host(repo_url: str) -> None:
+    # ``RepoRef.from_url`` accepts a mixed-case host as bitbucket (it lowercases
+    # the host), but the agent-side ``insteadOf`` rewrites and the askpass host
+    # gate are case-sensitive literal ``bitbucket.org`` matches. A mixed-case host
+    # therefore never gets the sentinel username injected nor satisfies the askpass
+    # host check, so the token is silently withheld and private fetch/push fails.
+    # The preflight must reject it with a fast, diagnosable error instead.
+    with pytest.raises(GitAuthNotConfiguredError) as raised:
+        verify_bitbucket_git_auth(
+            repo_url,
+            {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_EMAIL": _EMAIL},
+        )
+
+    assert raised.value.reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED
+    message = str(raised.value)
+    # Names the canonical host and never echoes a secret value.
+    assert "bitbucket.org" in message
+    assert _TOKEN not in message
+    assert _EMAIL not in message

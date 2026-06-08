@@ -323,6 +323,15 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     only the missing env var(s) — never any value — turning an otherwise opaque
     clone failure (or TTY hang) into a fast, diagnosable error.
 
+    Also rejects an HTTPS bitbucket.org URL whose host is **not** the canonical
+    lowercase ``bitbucket.org`` (e.g. ``https://Bitbucket.org/ws/repo.git``).
+    ``RepoRef.from_url`` accepts it as bitbucket by lowercasing the host, but the
+    agent-side ``insteadOf`` rewrites and the askpass host gate are case-sensitive
+    literal ``bitbucket.org`` matches: a mixed-case host never gets the sentinel
+    username injected nor satisfies the askpass host check, so the token is
+    withheld and private fetch/push fails opaquely. Requiring the canonical host
+    turns that silent failure into a fast, diagnosable error.
+
     Also rejects an HTTPS bitbucket.org URL that embeds a **non-sentinel**
     username (e.g. ``https://alice@bitbucket.org/ws/repo.git``). Atlassian
     API-token auth over HTTPS requires the fixed sentinel username
@@ -357,6 +366,30 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
             ),
         )
     parsed = urlsplit(repo_url.strip())
+    # Reject a non-canonical (mixed-case) bitbucket.org host such as
+    # ``https://Bitbucket.org/ws/repo.git``. ``RepoRef.from_url`` classifies the
+    # repo as bitbucket by lowercasing the parsed host, but the agent-side
+    # ``insteadOf`` rewrites and the askpass host gate are case-sensitive literal
+    # ``bitbucket.org`` matches. A mixed-case host slips past classification yet
+    # never gets the sentinel username injected (``insteadOf`` is a literal-prefix
+    # match) and never satisfies the askpass host check, so the agent's token is
+    # withheld and private fetch/push fails opaquely. (``urlsplit().hostname``
+    # lowercases the host, so the case-preserving ``netloc`` authority is used to
+    # detect the original casing.) Require the canonical lowercase host so both the
+    # rewrite and the askpass fire.
+    raw_authority = parsed.netloc.rsplit("@", 1)[-1]
+    raw_host = raw_authority.rsplit(":", 1)[0] if ":" in raw_authority else raw_authority
+    if raw_host != BITBUCKET_GIT_HOST:
+        raise GitAuthNotConfiguredError(
+            reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
+            message=(
+                "BitBucket git authentication requires the canonical lowercase host "
+                f"{BITBUCKET_GIT_HOST!r}: a mixed-case host slips past forge detection "
+                "but the agent-side insteadOf rewrites and askpass host check are "
+                "case-sensitive, so the API token is withheld. Use "
+                "https://bitbucket.org/<workspace>/<repo>.git."
+            ),
+        )
     embedded_user = parsed.username
     # Reject any embedded password outright (even under the sentinel username):
     # git clones with the URL verbatim, so the password would be used/stored as
