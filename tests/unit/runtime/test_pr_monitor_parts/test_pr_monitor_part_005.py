@@ -1114,3 +1114,72 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_permanent_pull_detail_before_summary_reports_ci_failure(
+        self,
+    ) -> None:
+        """A permanent ``failed to pull image "<ref>": manifest unknown`` detail
+        that appears *before* the ``docker pull failed`` summary must prevent the
+        summary from anchoring a transient rerun, even when an unrelated
+        ``context deadline exceeded`` is nearby.
+
+        Before the fix, the backward probe only considered daemon-error lines.
+        The detail was classified as permanent evidence on its own line but the
+        *summary* line was not marked permanent, leaving a nearby timeout free to
+        anchor a spurious RerunTransientCI (PRRT_kwDOSJAM6s6HvFgf)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull myapp:missing\n"  # line 0 — pull echo
+                'Failed to pull image "myapp:missing": manifest unknown\n'  # line 1 — backward detail
+                "Docker pull failed with exit code 1\n"  # line 2 — summary
+                "context deadline exceeded"  # line 3 — unrelated timeout
+            ),
+            run_id="27091023775",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_permanent_detail_for_earlier_pull_before_summary_does_not_block_rerun(
+        self,
+    ) -> None:
+        """A permanent ``failed to pull image`` detail for a *different, earlier*
+        pull that is separated from the current summary by a new ``docker pull``
+        command echo must not make the summary permanent.
+
+        The backward detail probe's no-intervening-pull guard must reject the
+        detail when a new pull echo appears between the detail and the summary —
+        that echo marks the start of the current (transient) pull, so the earlier
+        pull's permanent detail does not influence the current summary
+        (PRRT_kwDOSJAM6s6HvFgf)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull other:bad\n"  # line 0 — first pull echo
+                'Failed to pull image "other:bad": manifest unknown\n'  # line 1 — permanent for first pull
+                "/usr/bin/docker pull myapp:latest\n"  # line 2 — second pull echo (intervening)
+                "context deadline exceeded\n"  # line 3 — transient timeout for myapp
+                "Docker pull failed with exit code 1\n"  # line 4 — summary for myapp
+            ),
+            run_id="27091023776",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)

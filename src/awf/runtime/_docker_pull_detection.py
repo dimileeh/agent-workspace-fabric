@@ -616,10 +616,10 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     Returns True when the evidence line itself, any adjacent daemon-error line
     within ``_CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW`` *before* the evidence line, or
     (for ``docker pull failed`` summaries) any ``failed to pull image`` detail
-    within the window *after* the summary contains a permanent pull-error phrase
-    (access-denied, no-such-image, manifest-unknown, etc.).  Permanent errors
-    cannot succeed on a retry, so their evidence lines must not anchor
-    transient-timeout attribution.
+    within the window in *either direction* around the summary contains a permanent
+    pull-error phrase (access-denied, no-such-image, manifest-unknown, etc.).
+    Permanent errors cannot succeed on a retry, so their evidence lines must not
+    anchor transient-timeout attribution.
 
     Backward daemon-error probe: Docker CLI always emits the daemon error before
     the ``docker pull failed`` summary for the same pull, so a daemon-error line
@@ -628,6 +628,13 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     pull echo is known, the daemon error must also carry the same image ref — an
     unrelated daemon error for a different image (e.g. an interleaved kubelet event)
     must not misattribute permanence to this summary.
+
+    Backward detail probe: some log streams emit the containerd/kubelet
+    ``failed to pull image "<ref>": <permanent-reason>`` detail *before* the
+    ``docker pull failed`` summary (opposite of the typical ordering).  A permanent
+    detail that precedes the summary without an intervening new ``docker pull``
+    command echo belongs to the same pull and makes it non-retryable
+    (PRRT_kwDOSJAM6s6HvFgf).
 
     Forward detail probe: Docker sometimes emits the ``docker pull failed``
     summary *before* the containerd/kubelet ``failed to pull image "<ref>":
@@ -774,6 +781,33 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                 _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
                 and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
                 for k in range(probe_index + 1, index)
+            )
+            for probe_index in range(start, index)
+        ):
+            return True
+        # Backward detail probe: a ``failed to pull image "<ref>": <reason>``
+        # detail with a permanent marker that appears *before* the "docker pull
+        # failed" summary belongs to the same pull and makes it non-retryable.
+        # Reuse ``_forward_detail_ref_matches_pull`` for image-ref matching —
+        # it searches ``lines[back_start:index]`` for a pull echo, which covers
+        # the backward window (PRRT_kwDOSJAM6s6HvFgf).
+        if any(
+            _CI_DOCKER_IMAGE_PULL_FAILURE_MARKER in lines[probe_index]
+            and any(
+                marker in re.sub(r'"[^"]*"', "", lines[probe_index])
+                for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS
+            )
+            and not any(
+                _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
+                and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
+                for k in range(probe_index + 1, index)
+            )
+            and _forward_detail_ref_matches_pull(
+                lines[probe_index],
+                back_start,
+                index,
+                lines,
+                stale_guard_image,
             )
             for probe_index in range(start, index)
         ):
