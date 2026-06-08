@@ -14,6 +14,7 @@ import pytest
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import (
     GitHubClient,
+    GitHubClientError,
     RepoRef,
 )
 from awf.runtime.pr_monitor import CheckState
@@ -182,3 +183,19 @@ class TestFetchPrStatusCiSignal:
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
         )
         assert status.no_checks_observed is False
+
+    @pytest.mark.unit
+    async def test_fetch_failure_raises_not_no_checks(self) -> None:
+        # A non-zero ``gh`` exit while fetching PR status MUST raise
+        # GitHubClientError, never degrade to a mergeable no-checks PRStatus that
+        # the require_ci opt-out could then merge blind (#469 safety regression).
+        # ``_graphql`` raises before ``no_checks_observed`` is ever computed; this
+        # mirrors the BitBucket
+        # ``test_fetch_pr_status_statuses_fetch_failure_raises_not_no_checks``.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="rate limited")
+        client = GitHubClient(fake)
+        with pytest.raises(GitHubClientError):
+            await client.fetch_pr_status(
+                repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+            )
