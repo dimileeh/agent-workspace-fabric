@@ -199,6 +199,25 @@ def test_bitbucket_askpass_script_references_exactly_the_injected_env_name() -> 
     assert "BITBUCKET_API_TOKEN" not in script
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        'MYVAR"; evil_cmd; echo "',  # shell metacharacters / command injection
+        "1LEADING_DIGIT",  # must start with a letter or underscore
+        "HAS SPACE",
+        "HAS-DASH",
+        "WITH$DOLLAR",
+        "",
+    ],
+)
+def test_bitbucket_askpass_script_rejects_non_env_name(bad_name: str) -> None:
+    # The name is interpolated into the shell script body, so anything that is not
+    # a valid POSIX env-var name is rejected rather than smuggled into the script.
+    with pytest.raises(ValueError, match="invalid token env-var name"):
+        bitbucket_askpass_script(bad_name)
+
+
 def _run_askpass(prompt: str, *, token: str = _TOKEN) -> str:
     """Execute the generated askpass script for ``prompt`` and return its stdout.
 

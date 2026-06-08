@@ -44,6 +44,7 @@ There are **two** BitBucket git-auth paths because they cross different layers:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
@@ -143,6 +144,12 @@ def bitbucket_git_config_entries() -> tuple[tuple[str, str], ...]:
 _BITBUCKET_AGENT_GIT_URL = f"https://{_BITBUCKET_GIT_USERNAME}@bitbucket.org/"
 _BITBUCKET_AGENT_INSTEADOF_KEY = f"url.{_BITBUCKET_AGENT_GIT_URL}.insteadOf"
 
+# A valid POSIX shell environment-variable name: a leading letter/underscore
+# followed by letters, digits, or underscores. ``bitbucket_askpass_script``
+# interpolates ``token_env_var`` straight into a shell script body, so anything
+# outside this character set could smuggle shell metacharacters into the script.
+_ASKPASS_TOKEN_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def bitbucket_askpass_script(token_env_var: str) -> str:
     """Return the **static** ``GIT_ASKPASS`` script body for agent-side bitbucket auth.
@@ -174,7 +181,16 @@ def bitbucket_askpass_script(token_env_var: str) -> str:
 
     The script is materialized to a per-workspace file and mounted read-only +
     executable into the agent (see ``node.secret_mounts``).
+
+    ``token_env_var`` is interpolated verbatim into the shell script body, so it
+    must be a valid POSIX environment-variable name; anything else (shell
+    metacharacters, whitespace, ``$``/quotes) is rejected with ``ValueError``
+    rather than risking arbitrary code in the generated script. The production
+    call site always passes the validated constant ``BITBUCKET_API_TOKEN``; this
+    guard keeps the public function safe for any caller.
     """
+    if not _ASKPASS_TOKEN_ENV_RE.match(token_env_var):
+        raise ValueError(f"invalid token env-var name: {token_env_var!r}")
     host = BITBUCKET_GIT_HOST
     # POSIX-sh host parse of git's ``Password for 'URL': `` prompt. ``\\'`` is a
     # literal single quote (git wraps the URL in '…'); the expansions peel the
