@@ -234,19 +234,96 @@ def _endpoint_url(endpoint: ProfileAppEndpoint, path: str) -> str:
     return urlunsplit((endpoint.scheme, f"{endpoint.service}:{endpoint.port}", path, "", ""))
 
 
+_GIT_CONFIG_COUNT_KEY = "GIT_CONFIG_COUNT"
+_GIT_CONFIG_KEY_PREFIX = "GIT_CONFIG_KEY_"
+_GIT_CONFIG_VALUE_PREFIX = "GIT_CONFIG_VALUE_"
+
+
+def _is_git_config_protocol_key(key: str) -> bool:
+    return (
+        key == _GIT_CONFIG_COUNT_KEY
+        or key.startswith(_GIT_CONFIG_KEY_PREFIX)
+        or key.startswith(_GIT_CONFIG_VALUE_PREFIX)
+    )
+
+
+def _git_config_count(pairs: tuple[tuple[str, str], ...]) -> int:
+    for key, value in pairs:
+        if key == _GIT_CONFIG_COUNT_KEY:
+            try:
+                return int(value)
+            except ValueError:
+                return 0
+    return 0
+
+
+def _split_git_config_entries(
+    pairs: tuple[tuple[str, str], ...],
+) -> tuple[list[tuple[str, str]], tuple[tuple[str, str], ...]]:
+    """Split env pairs into ordered git-config (key, value) entries and the rest.
+
+    The git-config entries are returned in index order (``0..GIT_CONFIG_COUNT-1``);
+    every ``GIT_CONFIG_COUNT``/``GIT_CONFIG_KEY_n``/``GIT_CONFIG_VALUE_n`` var is
+    stripped from the second tuple so the protocol can be re-emitted contiguously
+    by the caller without leaking stray indices.
+    """
+    mapping = dict(pairs)
+    entries: list[tuple[str, str]] = []
+    for index in range(_git_config_count(pairs)):
+        config_key = mapping.get(f"{_GIT_CONFIG_KEY_PREFIX}{index}")
+        config_value = mapping.get(f"{_GIT_CONFIG_VALUE_PREFIX}{index}")
+        if config_key is None or config_value is None:
+            continue
+        entries.append((config_key, config_value))
+    others = tuple((k, v) for k, v in pairs if not _is_git_config_protocol_key(k))
+    return entries, others
+
+
 def merge_agent_environment(
     base_environment: tuple[tuple[str, str], ...],
     additions: tuple[tuple[str, str], ...],
 ) -> tuple[tuple[str, str], ...]:
-    """Merge agent environment pairs without overwriting existing keys."""
+    """Merge agent environment pairs without overwriting existing keys.
 
+    Non-git-config keys keep "first writer wins" semantics (the base value is
+    preserved). The ``GIT_CONFIG_KEY_n/VALUE_n/COUNT`` protocol is merged
+    specially: the additions' git-config entries are re-indexed to append onto
+    the base's ``GIT_CONFIG_COUNT`` and the counts are summed. The lease resolver
+    always emits its bitbucket ``insteadOf`` entries starting at index 0, so a
+    profile that already declares indexed ``GIT_CONFIG_*`` in
+    ``runtime.environment`` would otherwise either collide on index 0 (dropped by
+    the skip-existing rule) or sit above the effective count and never reach git,
+    breaking private Bitbucket HTTPS in the agent. Re-indexing keeps both blocks
+    reachable.
+    """
+
+    addition_entries, addition_others = _split_git_config_entries(additions)
     merged: list[tuple[str, str]] = list(base_environment)
     existing = {key for key, _ in merged}
-    for key, value in additions:
+    for key, value in addition_others:
         if key not in existing:
             merged.append((key, value))
             existing.add(key)
-    return tuple(merged)
+    if not addition_entries:
+        return tuple(merged)
+
+    base_count = _git_config_count(base_environment)
+    for offset, (config_key, config_value) in enumerate(addition_entries):
+        index = base_count + offset
+        merged.append((f"{_GIT_CONFIG_KEY_PREFIX}{index}", config_key))
+        merged.append((f"{_GIT_CONFIG_VALUE_PREFIX}{index}", config_value))
+    total = base_count + len(addition_entries)
+    counted: list[tuple[str, str]] = []
+    count_emitted = False
+    for key, value in merged:
+        if key == _GIT_CONFIG_COUNT_KEY:
+            counted.append((key, str(total)))
+            count_emitted = True
+        else:
+            counted.append((key, value))
+    if not count_emitted:
+        counted.append((_GIT_CONFIG_COUNT_KEY, str(total)))
+    return tuple(counted)
 
 
 def agent_environment_with_declared_secret_leases(
