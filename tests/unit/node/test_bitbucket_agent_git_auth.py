@@ -131,8 +131,10 @@ def test_rendered_compose_mounts_askpass_read_only_and_sets_env(tmp_path: Path) 
     "remote",
     [
         "https://bitbucket.org/ws/repo.git",
+        "https://bitbucket.org:443/ws/repo.git",
         "git@bitbucket.org:ws/repo.git",
         "ssh://git@bitbucket.org/ws/repo.git",
+        "ssh://git@bitbucket.org:22/ws/repo.git",
     ],
 )
 def test_insteadof_rewrites_all_remote_forms_to_sentinel_https(
@@ -140,7 +142,10 @@ def test_insteadof_rewrites_all_remote_forms_to_sentinel_https(
     remote: str,
 ) -> None:
     # (b)+(c): the rendered GIT_CONFIG_* env rewrites every bitbucket.org remote
-    # form (HTTPS + both SSH-form shapes) to the sentinel-username HTTPS URL.
+    # form (HTTPS + both SSH-form shapes, bare and explicit default port) to the
+    # sentinel-username HTTPS URL. The explicit-port shapes (``:443`` HTTPS,
+    # ``:22`` SSH) are required because insteadOf matches literal prefixes; git
+    # leaves them unrewritten without their own source entries (regression).
     # ``git ls-remote --get-url`` expands ``insteadOf`` offline (no network).
     resolution = _resolve(tmp_path, _bitbucket_profile())
     env = dict(resolution.environment)  # type: ignore[attr-defined]

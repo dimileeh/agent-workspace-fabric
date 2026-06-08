@@ -270,14 +270,16 @@ def test_bitbucket_agent_git_config_entries_rewrite_all_remote_forms() -> None:
     assert all(key == _AGENT_INSTEADOF_KEY for key, _ in entries)
     values = [value for _, value in entries]
     # HTTPS form (bare + explicit :443 port) + both SSH-form shapes
-    # RepoRef.from_url accepts. The :443 entry is required because insteadOf
-    # matches sources as literal prefixes, so the bare HTTPS rule does not cover
-    # the explicit-port shape (regression: token/token auth on :443 remotes).
+    # RepoRef.from_url accepts (bare + explicit :22 port). The explicit-port
+    # entries are required because insteadOf matches sources as literal prefixes,
+    # so the bare rules do not cover the explicit-port shapes (regression:
+    # token/token auth on :443 remotes; SSH fallback on :22 remotes).
     assert values == [
         "https://bitbucket.org/",
         "https://bitbucket.org:443/",
         "git@bitbucket.org:",
         "ssh://git@bitbucket.org/",
+        "ssh://git@bitbucket.org:22/",
     ]
     # No token, no shell metacharacters (plain URLs only).
     assert all(_TOKEN not in value for value in values)
@@ -319,6 +321,23 @@ def test_bitbucket_agent_rewrite_covers_explicit_default_port_https() -> None:
 
 
 @pytest.mark.unit
+def test_bitbucket_agent_rewrite_covers_explicit_default_port_ssh() -> None:
+    # Regression: an SSH remote with the explicit default port
+    # ``ssh://git@bitbucket.org:22/…`` must be rewritten to the sentinel-username
+    # HTTPS form. RepoRef.from_url classifies it as bitbucket (it parses the host
+    # without the port), but insteadOf matches sources as literal prefixes, so the
+    # bare ``ssh://git@bitbucket.org/`` source does not cover the ``:22`` shape.
+    # Without the ``:22`` source git would leave the URL as SSH and the token-only
+    # agent container would fail private fetches/pushes.
+    entries = bitbucket_agent_git_config_entries()
+    rewritten = _apply_instead_of("ssh://git@bitbucket.org:22/ws/repo.git", entries)
+    assert rewritten == "https://x-bitbucket-api-token-auth@bitbucket.org/ws/repo.git"
+    # The rewritten URL carries the sentinel prefix, so it never re-matches any
+    # source rule (no rewrite loop).
+    assert _apply_instead_of(rewritten, entries) == rewritten
+
+
+@pytest.mark.unit
 def test_apply_bitbucket_agent_git_auth_sets_askpass_and_terminal_prompt() -> None:
     env: dict[str, str] = {}
 
@@ -332,6 +351,7 @@ def test_apply_bitbucket_agent_git_auth_sets_askpass_and_terminal_prompt() -> No
     assert (_AGENT_INSTEADOF_KEY, "https://bitbucket.org:443/") in rendered
     assert (_AGENT_INSTEADOF_KEY, "git@bitbucket.org:") in rendered
     assert (_AGENT_INSTEADOF_KEY, "ssh://git@bitbucket.org/") in rendered
+    assert (_AGENT_INSTEADOF_KEY, "ssh://git@bitbucket.org:22/") in rendered
     # No token value anywhere in the agent git env.
     assert all(_TOKEN not in value for value in env.values())
 
@@ -349,8 +369,8 @@ def test_apply_bitbucket_agent_git_auth_accumulates_onto_existing_git_config() -
 
     apply_bitbucket_agent_git_auth(env, askpass_path=_ASKPASS_PATH)
 
-    # Exact final indexed layout: the four insteadOf rewrites land at 2, 3, 4, 5.
-    assert env["GIT_CONFIG_COUNT"] == "6"
+    # Exact final indexed layout: the five insteadOf rewrites land at 2, 3, 4, 5, 6.
+    assert env["GIT_CONFIG_COUNT"] == "7"
     assert env["GIT_CONFIG_KEY_2"] == _AGENT_INSTEADOF_KEY
     assert env["GIT_CONFIG_VALUE_2"] == "https://bitbucket.org/"
     assert env["GIT_CONFIG_KEY_3"] == _AGENT_INSTEADOF_KEY
@@ -359,6 +379,8 @@ def test_apply_bitbucket_agent_git_auth_accumulates_onto_existing_git_config() -
     assert env["GIT_CONFIG_VALUE_4"] == "git@bitbucket.org:"
     assert env["GIT_CONFIG_KEY_5"] == _AGENT_INSTEADOF_KEY
     assert env["GIT_CONFIG_VALUE_5"] == "ssh://git@bitbucket.org/"
+    assert env["GIT_CONFIG_KEY_6"] == _AGENT_INSTEADOF_KEY
+    assert env["GIT_CONFIG_VALUE_6"] == "ssh://git@bitbucket.org:22/"
     # Pre-existing entries are preserved untouched.
     assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
     assert env["GIT_CONFIG_VALUE_0"] == "*"

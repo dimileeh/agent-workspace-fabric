@@ -186,14 +186,16 @@ def bitbucket_agent_git_config_entries() -> tuple[tuple[str, str], ...]:
     HTTPS form, the scp-like ``git@bitbucket.org:ws/repo.git`` form, and the
     ``ssh://git@bitbucket.org/ws/repo.git`` form — is rewritten to the
     sentinel-username HTTPS base URL (``insteadOf`` is multi-valued). The
-    explicit-default-port HTTPS form ``https://bitbucket.org:443/…`` is rewritten
-    too: ``insteadOf`` matches the source as a literal prefix, so the bare
-    ``https://bitbucket.org/`` rule does **not** cover the ``:443`` shape, and
-    without this entry git would leave that URL unrewritten, prompt for a
-    *username* (no sentinel in the URL), and — because the askpass host gate
-    matches the ``//bitbucket.org:`` port boundary — answer that username prompt
-    with the token, authenticating as ``token/token`` instead of the required
-    ``sentinel/token`` and failing private clones/fetches. The entries
+    explicit-default-port shapes ``https://bitbucket.org:443/…`` and
+    ``ssh://git@bitbucket.org:22/…`` are rewritten too: ``insteadOf`` matches the
+    source as a literal prefix, so the bare ``https://bitbucket.org/`` /
+    ``ssh://git@bitbucket.org/`` rules do **not** cover the explicit-port shapes,
+    and ``RepoRef.from_url`` still classifies them as bitbucket (it parses the
+    host without the port). Without these entries git would leave such a URL
+    unrewritten and either prompt for a *username* on the HTTPS ``:443`` shape
+    (the host-gated askpass answers it with the token, authenticating as
+    ``token/token``) or fall back to SSH on the ``:22`` shape — both failing
+    private clones/fetches in token-only agent containers. The entries
     contain **no token** and **no shell syntax** — plain URLs only — so they are
     safe to render through the compose ``GIT_CONFIG_*`` env layer. The token is
     supplied separately at runtime by the mounted askpass script.
@@ -203,6 +205,7 @@ def bitbucket_agent_git_config_entries() -> tuple[tuple[str, str], ...]:
         (_BITBUCKET_AGENT_INSTEADOF_KEY, "https://bitbucket.org:443/"),
         (_BITBUCKET_AGENT_INSTEADOF_KEY, "git@bitbucket.org:"),
         (_BITBUCKET_AGENT_INSTEADOF_KEY, "ssh://git@bitbucket.org/"),
+        (_BITBUCKET_AGENT_INSTEADOF_KEY, "ssh://git@bitbucket.org:22/"),
     )
 
 
