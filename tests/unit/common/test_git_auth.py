@@ -57,9 +57,15 @@ def test_bitbucket_git_config_entries_reference_env_names_not_token() -> None:
     # Host-scoped to bitbucket.org only (GitHub path stays untouched).
     assert all("bitbucket.org" in key for key in entries)
     helper = entries["credential.https://bitbucket.org.helper"]
-    # The helper expands env var *names* at git call time, never literals.
-    assert "$BITBUCKET_EMAIL" in helper
+    # The git username for an Atlassian API token over HTTPS is the fixed
+    # account-agnostic sentinel ``x-bitbucket-api-token-auth`` — NOT the email.
+    # BitBucket's git endpoint rejects the email with 401 (the REST API accepts
+    # email:token, but git over HTTPS does not). See issue #467.
+    assert "x-bitbucket-api-token-auth" in helper
+    # The token is still expanded from its env var *name* at git call time.
     assert "$BITBUCKET_API_TOKEN" in helper
+    # The email is NOT used for git auth (only the REST ForgeClient uses it).
+    assert "$BITBUCKET_EMAIL" not in helper
     # No literal secret in any config value.
     assert all(_TOKEN not in value for value in entries.values())
     assert all(_EMAIL not in value for value in entries.values())

@@ -9,10 +9,13 @@ Security contract (mirrors how the GitHub token reaches git):
 
 - The Atlassian API token is **never** embedded in a clone/push URL, in
   git-config text, or in a log/error message.
-- The host-scoped credential helper references the env var *names* only
-  (``$BITBUCKET_EMAIL`` / ``$BITBUCKET_API_TOKEN``). git invokes the helper and
-  reads the secret values from the process environment on demand, exactly like
-  the GitHub ``!gh auth git-credential`` helper.
+- The git username is the fixed, account-agnostic sentinel
+  ``x-bitbucket-api-token-auth`` (BitBucket rejects the email as the git
+  username with 401 — only the REST API accepts ``email:token``; see #467).
+- The host-scoped credential helper references the token env var *name* only
+  (``$BITBUCKET_API_TOKEN``). git invokes the helper and reads the secret value
+  from the process environment on demand, exactly like the GitHub
+  ``!gh auth git-credential`` helper.
 - The helper is scoped to ``https://bitbucket.org`` so it can only ever fire for
   bitbucket.org URLs — GitHub git auth is byte-for-byte unchanged.
 """
@@ -30,13 +33,18 @@ BITBUCKET_GIT_HOST = "bitbucket.org"
 _BITBUCKET_TOKEN_ENV = "BITBUCKET_API_TOKEN"
 _BITBUCKET_EMAIL_ENV = "BITBUCKET_EMAIL"
 
-# Host-scoped credential helper. ``$BITBUCKET_EMAIL`` / ``$BITBUCKET_API_TOKEN``
-# are expanded by the shell git spawns for the helper at call time — the literal
-# token never appears in this string, in git-config, or in any log.
+# Host-scoped credential helper. The git username for an Atlassian API token over
+# HTTPS is the fixed, account-agnostic sentinel ``x-bitbucket-api-token-auth`` —
+# **not** the account email. BitBucket's git endpoint rejects the email with 401
+# (the REST API accepts ``email:token`` Basic auth, but git over HTTPS does not;
+# see issue #467). Only ``$BITBUCKET_API_TOKEN`` is expanded — by the shell git
+# spawns for the helper at call time — so the literal token never appears in this
+# string, in git-config, or in any log.
+_BITBUCKET_GIT_USERNAME = "x-bitbucket-api-token-auth"
 _BITBUCKET_CREDENTIAL_HELPER = (
     '!f() { test "$1" = get && '
-    "printf 'username=%s\\npassword=%s\\n' "
-    '"$BITBUCKET_EMAIL" "$BITBUCKET_API_TOKEN"; }; f'
+    f"printf 'username={_BITBUCKET_GIT_USERNAME}\\npassword=%s\\n' "
+    '"$BITBUCKET_API_TOKEN"; }; f'
 )
 
 
