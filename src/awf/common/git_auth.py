@@ -321,9 +321,15 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     URL's username verbatim and the ``insteadOf`` rewrites — which match a bare
     ``https://bitbucket.org/`` prefix — never fire), so the credential helper /
     askpass token would authenticate under the wrong username and private
-    clone/fetch/push fails opaquely. The sentinel username itself is allowed (it
-    is exactly what token auth needs). The message names the required sentinel
-    but never echoes the embedded userinfo, which may carry a secret password.
+    clone/fetch/push fails opaquely. An **embedded password** is also rejected
+    even under the sentinel username (``https://x-bitbucket-api-token-auth:<pw>@
+    bitbucket.org/…``): git would clone with that URL verbatim, using/storing the
+    embedded password as the remote instead of AWF's lease-provided token —
+    breaking configured-token clones if it is stale and defeating the
+    no-secrets-in-URLs contract if it is real. The bare sentinel username (no
+    password) is allowed (it is exactly what token auth needs). The message names
+    the required sentinel but never echoes the embedded userinfo, which may carry
+    a secret password.
     """
     if not is_bitbucket_repo(repo_url) or _is_ssh_transport(repo_url):
         return
@@ -343,8 +349,13 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
         )
     parsed = urlsplit(repo_url.strip())
     embedded_user = parsed.username
-    if (embedded_user is not None or parsed.password is not None) and (
-        embedded_user != _BITBUCKET_GIT_USERNAME
+    # Reject any embedded password outright (even under the sentinel username):
+    # git clones with the URL verbatim, so the password would be used/stored as
+    # the remote instead of AWF's lease-provided token — breaking configured-token
+    # clones if stale and defeating the no-secrets-in-URLs contract if real.
+    # A non-sentinel username is also rejected (it shadows the fixed sentinel).
+    if parsed.password is not None or (
+        embedded_user is not None and embedded_user != _BITBUCKET_GIT_USERNAME
     ):
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,

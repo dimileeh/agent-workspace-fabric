@@ -493,6 +493,22 @@ def test_verify_bitbucket_git_auth_rejects_non_sentinel_userinfo(repo_url: str) 
 
 
 @pytest.mark.unit
+def test_verify_bitbucket_git_auth_rejects_embedded_password_under_sentinel() -> None:
+    # Even with the correct sentinel username, an embedded password must be
+    # rejected: git would clone with the URL verbatim, using/storing the embedded
+    # password as the remote instead of AWF's lease-provided token.
+    with pytest.raises(GitAuthNotConfiguredError) as raised:
+        verify_bitbucket_git_auth(
+            "https://x-bitbucket-api-token-auth:stale-secret@bitbucket.org/ws/repo.git",
+            {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_EMAIL": _EMAIL},
+        )
+
+    assert raised.value.reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED
+    # Never echoes the embedded secret.
+    assert "stale-secret" not in str(raised.value)
+
+
+@pytest.mark.unit
 def test_verify_bitbucket_git_auth_allows_sentinel_userinfo() -> None:
     # The sentinel username already in the URL is exactly what token auth needs,
     # so it must NOT be rejected.
