@@ -382,6 +382,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
             else None
         ),
         pr_url=ws.pr_url,
+        pr_number=ws.pr_number,
         failure_reason=ws.failure_reason,
         failure_message=ws.failure_message,
         created_at=ws.created_at,

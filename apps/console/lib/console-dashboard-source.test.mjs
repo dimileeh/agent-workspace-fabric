@@ -7,6 +7,7 @@ const dashboardSource = {
   overview: readFileSync(new URL("../components/console-dashboard-overview.tsx", import.meta.url), "utf8"),
   capacity: readFileSync(new URL("../components/console-dashboard-capacity.tsx", import.meta.url), "utf8"),
   shared: readFileSync(new URL("../components/console-dashboard-shared.tsx", import.meta.url), "utf8"),
+  logs: readFileSync(new URL("../components/console-dashboard-logs.tsx", import.meta.url), "utf8"),
   detail: readFileSync(
     new URL("../components/console-dashboard-workspace-detail.tsx", import.meta.url),
     "utf8",
@@ -81,6 +82,43 @@ test("operator action state is guarded by current workspace selection", () => {
   assert.match(dashboard, /operatorIdempotencyKey\(action, workspaceId\)/);
   assert.match(dashboard, /operatorActionPath\(action, workspaceId\)/);
   assert.match(dashboard, /selectedIdRef\.current !== workspaceId/);
+});
+
+test("extractPrNumberFromHref regex is forge-neutral (GitHub + BitBucket)", () => {
+  assert.match(dashboardSource.shared, /pull\(\?:-requests\)\?/);
+});
+
+// Plain-JS mirror of extractPrNumberFromHref (console-dashboard-shared.tsx) for runtime
+// extraction tests. The source-text test above keeps the regex pattern in sync.
+function extractPrNumberFromHref(href) {
+  const match = href.match(/\/pull(?:-requests)?\/(\d+)(?:[/?#]|$)/);
+  if (!match) return null;
+  const number = Number(match[1]);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+test("extractPrNumberFromHref extracts PR number from GitHub and Bitbucket URLs", () => {
+  assert.equal(extractPrNumberFromHref("https://github.com/org/repo/pull/42"), 42);
+  assert.equal(extractPrNumberFromHref("https://github.com/org/repo/pull/42/"), 42);
+  assert.equal(extractPrNumberFromHref("https://github.com/org/repo/pull/42?foo=bar"), 42);
+  assert.equal(extractPrNumberFromHref("https://github.com/org/repo/pull/42#comment-1"), 42);
+  assert.equal(extractPrNumberFromHref("https://bitbucket.org/org/repo/pull-requests/42"), 42);
+  assert.equal(extractPrNumberFromHref("https://bitbucket.org/org/repo/pull-requests/42/"), 42);
+});
+
+test("extractPrNumberFromHref returns null for non-PR URLs and edge cases", () => {
+  assert.equal(extractPrNumberFromHref("https://github.com/org/repo/issues/42"), null);
+  assert.equal(extractPrNumberFromHref("https://github.com/org/repo/pull/"), null);
+  assert.equal(extractPrNumberFromHref("https://github.com/org/repo/pull/0"), null);
+  assert.equal(extractPrNumberFromHref(""), null);
+});
+
+test("formatPrLinkLabel in logs view passes pr_number", () => {
+  assert.match(dashboardSource.logs, /formatPrLinkLabel\(workspace\.pr_url,\s*workspace\.pr_number\)/);
+});
+
+test("formatPrLinkLabel in detail view passes pr_number", () => {
+  assert.match(dashboardSource.detail, /formatPrLinkLabel\(overview\.pr_url,\s*overview\.pr_number\)/);
 });
 
 function extractFunctionSource(functionName) {

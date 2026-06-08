@@ -38,6 +38,7 @@ from awf.common.config import Settings
 from awf.db.enums import AgentRuntime
 from awf.db.repositories import EgressAuditRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service.workspace_observability import list_workspace_overview_response
 from tests.postgres import postgres_test_engine
 
 
@@ -447,6 +448,34 @@ class TestGetDirect:
         assert exc.value.status_code == 404
         assert exc.value.detail["error_code"] == "NOT_FOUND"
 
+    @pytest.mark.unit
+    async def test_pr_number_in_workspace_response(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """WorkspaceResponse must include pr_number so the console can show it for BitBucket PRs."""
+        created = await create_workspace(
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="bitbucket pr number",
+            ),
+            idempotency_key=None,
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(created.workspace_id)
+        assert ws is not None
+        ws.pr_url = "https://bitbucket.org/org/repo/pull-requests/2"
+        ws.pr_number = 2
+        await session.commit()
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.pr_number == 2
+
 
 class TestListDirect:
     @pytest.mark.unit
@@ -469,6 +498,31 @@ class TestListDirect:
         await session.flush()
         results = await _list_workspace_responses(session, limit=10)
         assert len(results) == 2
+
+    @pytest.mark.unit
+    async def test_pr_number_in_overview_response(self, session: AsyncSession) -> None:
+        """WorkspaceOverviewResponse must include pr_number so the console list view can show it."""
+        created = await create_workspace(
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="overview pr number",
+            ),
+            idempotency_key=None,
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(created.workspace_id)
+        assert ws is not None
+        ws.pr_url = "https://bitbucket.org/org/repo/pull-requests/7"
+        ws.pr_number = 7
+        await session.flush()
+
+        overview = await list_workspace_overview_response(session, limit=10)
+
+        assert len(overview.items) == 1
+        assert overview.items[0].pr_number == 7
 
 
 class TestPayloadsMatch:
