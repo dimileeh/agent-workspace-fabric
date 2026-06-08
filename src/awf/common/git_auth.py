@@ -109,6 +109,49 @@ def _is_ssh_transport(repo_url: str) -> bool:
     return urlsplit(value).scheme.lower() == "ssh"
 
 
+def _reject_non_canonical_bitbucket_ssh(repo_url: str) -> None:
+    """Reject a bitbucket.org SSH URL whose scheme/host casing is non-canonical.
+
+    A canonical SSH bitbucket URL (``git@bitbucket.org:…`` or
+    ``ssh://git@bitbucket.org[:22]/…``) is rewritten onto the sentinel-username HTTPS
+    base URL by the agent-side ``insteadOf`` rules, so a token-only agent container
+    (no SSH key) authenticates over HTTPS. Those rewrites are case-sensitive
+    literal-prefix matches, so a non-canonical scheme casing
+    (``SSH://git@bitbucket.org/…``) or a mixed-case host
+    (``ssh://git@Bitbucket.org/…``) slips past ``RepoRef.from_url`` — which lowercases
+    the parsed scheme/host — yet is never rewritten: git then falls back to real SSH
+    and fails opaquely where no key is mounted. Require the canonical lowercase form
+    so the misconfiguration surfaces as the same fast, diagnosable error the HTTPS
+    scheme/host checks raise.
+
+    The scp-like ``git@bitbucket.org:…`` shape only classifies as bitbucket with the
+    canonical lowercase host (``RepoRef.from_url`` matches it case-sensitively), so
+    anything reaching here without a ``://`` separator is already canonical.
+    """
+    stripped = repo_url.strip()
+    if "://" not in stripped:
+        return
+    raw_scheme = stripped.split("://", 1)[0]
+    # ``urlsplit().hostname`` lowercases the host, so use the case-preserving
+    # ``netloc`` authority to recover the original casing (mirrors the HTTPS host
+    # check in ``verify_bitbucket_git_auth``).
+    raw_authority = urlsplit(stripped).netloc.rsplit("@", 1)[-1]
+    raw_host = raw_authority.rsplit(":", 1)[0] if ":" in raw_authority else raw_authority
+    if raw_scheme == "ssh" and raw_host == BITBUCKET_GIT_HOST:
+        return
+    raise GitAuthNotConfiguredError(
+        reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
+        message=(
+            "BitBucket git authentication requires the canonical lowercase SSH form "
+            f"ssh://git@{BITBUCKET_GIT_HOST}/<workspace>/<repo>.git: a non-canonical "
+            "scheme or host casing slips past forge detection but the agent-side "
+            "insteadOf rewrites that map SSH bitbucket URLs onto the HTTPS token path "
+            "are case-sensitive, so the token is withheld and a token-only agent "
+            "falls back to SSH and fails. Use the canonical lowercase URL."
+        ),
+    )
+
+
 def bitbucket_git_config_entries() -> tuple[tuple[str, str], ...]:
     """Return host-scoped git-config entries wiring the BitBucket credential helper.
 
@@ -324,9 +367,16 @@ def apply_bitbucket_git_auth(env: dict[str, str], source_env: Mapping[str, str])
 def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     """Raise a reason-coded error if a bitbucket.org repo lacks git credentials.
 
-    No-op for non-bitbucket repos (GitHub git auth is unaffected) and for SSH
-    bitbucket URLs (``git@bitbucket.org:…`` / ``ssh://git@bitbucket.org/…``), which
-    authenticate with SSH keys rather than the HTTPS credential helper. Rejects a
+    No-op for non-bitbucket repos (GitHub git auth is unaffected) and for canonical
+    SSH bitbucket URLs (``git@bitbucket.org:…`` / ``ssh://git@bitbucket.org[:22]/…``),
+    which authenticate with SSH keys rather than the HTTPS credential helper. A
+    **non-canonical** SSH bitbucket URL (uppercase scheme ``SSH://git@bitbucket.org/…``
+    or mixed-case host ``ssh://git@Bitbucket.org/…``) is instead rejected via
+    :func:`_reject_non_canonical_bitbucket_ssh`: ``RepoRef.from_url`` accepts it as
+    bitbucket SSH (``urlsplit`` lowercases the scheme/host), but the agent-side
+    ``insteadOf`` rules that rewrite SSH bitbucket URLs onto the HTTPS token path are
+    case-sensitive, so the URL is never rewritten and a token-only agent (no SSH key)
+    falls back to real SSH and fails opaquely. Rejects a
     bitbucket.org URL whose scheme is not the canonical lowercase ``https`` — both a
     non-HTTPS scheme (e.g. ``http://``) and a non-canonical casing (e.g.
     ``HTTPS://bitbucket.org/…``). ``RepoRef.from_url`` still classifies it as bitbucket
@@ -366,7 +416,10 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     the required sentinel but never echoes the embedded userinfo, which may carry
     a secret password.
     """
-    if not is_bitbucket_repo(repo_url) or _is_ssh_transport(repo_url):
+    if not is_bitbucket_repo(repo_url):
+        return
+    if _is_ssh_transport(repo_url):
+        _reject_non_canonical_bitbucket_ssh(repo_url)
         return
     # Reject a non-HTTPS bitbucket.org URL (e.g. ``http://bitbucket.org/ws/repo.git``).
     # ``RepoRef.from_url`` classifies http:// bitbucket remotes as bitbucket, and the

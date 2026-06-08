@@ -468,12 +468,52 @@ def test_verify_bitbucket_git_auth_noop_for_github_repo() -> None:
     [
         "git@bitbucket.org:ws/repo.git",
         "ssh://git@bitbucket.org/ws/repo.git",
+        "ssh://git@bitbucket.org:22/ws/repo.git",
     ],
 )
 def test_verify_bitbucket_git_auth_noop_for_ssh_bitbucket_repo(repo_url: str) -> None:
     # SSH clones authenticate with SSH keys, not the HTTPS credential helper, so
     # the preflight must not fail fast even when the HTTPS env vars are absent.
+    # Canonical SSH bitbucket shapes are covered by the agent-side ``insteadOf``
+    # rewrites onto the HTTPS token path, so they must remain a no-op.
     verify_bitbucket_git_auth(repo_url, {})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "SSH://git@bitbucket.org/ws/repo.git",
+        "Ssh://git@bitbucket.org/ws/repo.git",
+        "ssh://git@Bitbucket.org/ws/repo.git",
+        "ssh://git@BITBUCKET.ORG/ws/repo.git",
+        "SSH://git@bitbucket.org:22/ws/repo.git",
+        "ssh://git@Bitbucket.org:22/ws/repo.git",
+    ],
+)
+def test_verify_bitbucket_git_auth_rejects_non_canonical_ssh(repo_url: str) -> None:
+    # ``urlsplit`` lowercases the parsed scheme and host, so ``RepoRef.from_url``
+    # classifies an SSH bitbucket URL with a non-canonical scheme casing
+    # (``SSH://git@bitbucket.org/…``) or a mixed-case host
+    # (``ssh://git@Bitbucket.org/…``) as bitbucket and ``_is_ssh_transport`` skips
+    # the HTTPS preflight. But the agent-side ``insteadOf`` rules that rewrite SSH
+    # bitbucket URLs onto the HTTPS token path are case-sensitive literal-prefix
+    # matches, so such a URL is never rewritten: a token-only agent (no SSH key)
+    # then falls back to real SSH and fails opaquely. The preflight must reject the
+    # non-canonical casing with a fast, diagnosable error — even with the HTTPS env
+    # vars present, since the failure is the unrewritten SSH form, not missing creds.
+    with pytest.raises(GitAuthNotConfiguredError) as raised:
+        verify_bitbucket_git_auth(
+            repo_url,
+            {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_EMAIL": _EMAIL},
+        )
+
+    assert raised.value.reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED
+    message = str(raised.value)
+    # Names the canonical lowercase SSH form and never echoes a secret value.
+    assert "bitbucket.org" in message
+    assert _TOKEN not in message
+    assert _EMAIL not in message
 
 
 @pytest.mark.unit
