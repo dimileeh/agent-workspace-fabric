@@ -963,3 +963,37 @@ class TestImageRefMatchesDaemonUrl:
         Regression for PRRT_kwDOSJAM6s6HtGA_."""
         line = 'Head "https://ghcr.io/v2/org/app/manifests/good": denied'
         assert _image_ref_matches_daemon_url("ghcr.io/org/app:good", line) is True
+
+    @pytest.mark.unit
+    def test_untagged_pull_matches_latest_manifest_daemon_url(self) -> None:
+        """An untagged image ref (e.g. ``ghcr.io/org/app``) must only match daemon
+        URLs for ``:latest`` — not for an arbitrary tag.
+
+        Docker treats an untagged pull as ``:latest``.  Before the fix, the
+        missing ``manifest_ref`` caused the code to return True for any
+        ``/manifests/<tag>`` URL of the same repo, so a permanent daemon denial
+        for ``.../manifests/bad`` could be falsely attributed to the untagged
+        pull and prevent a legitimate transient-timeout rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtImz."""
+        latest_line = 'Head "https://ghcr.io/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app", latest_line) is True
+
+        bad_line = 'Head "https://ghcr.io/v2/org/app/manifests/bad": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app", bad_line) is False
+
+    @pytest.mark.unit
+    def test_untagged_library_pull_matches_latest_manifest_daemon_url(self) -> None:
+        """Same as above but for Docker Hub library (single-component) images.
+
+        An untagged ``postgres`` pull defaults to ``:latest`` and must only match
+        daemon URLs for ``/v2/library/postgres/manifests/latest``.
+
+        Regression for PRRT_kwDOSJAM6s6HtImz."""
+        latest_line = (
+            'Head "https://registry-1.docker.io/v2/library/postgres/manifests/latest": denied'
+        )
+        assert _image_ref_matches_daemon_url("postgres", latest_line) is True
+
+        bad_line = 'Head "https://registry-1.docker.io/v2/library/postgres/manifests/bad": denied'
+        assert _image_ref_matches_daemon_url("postgres", bad_line) is False

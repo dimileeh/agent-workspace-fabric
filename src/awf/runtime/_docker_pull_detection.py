@@ -384,13 +384,13 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         return False
     manifests_prefix = f"/v2/{repo_path}/manifests/"
     if manifests_prefix in line:
-        # Daemon URL is a manifest request; require tag/digest to match when
-        # known so same-repo but different-tag errors are not conflated.
-        if manifest_ref is not None:
-            return f"{manifests_prefix}{manifest_ref}" in line
-        # No explicit tag/digest — accept the repo-level match (Docker
-        # defaults to "latest" when no tag is given).
-        return True
+        # Daemon URL is a manifest request; require tag/digest to match so
+        # same-repo but different-tag errors are not conflated.  When no
+        # explicit tag/digest is present, Docker defaults to "latest"
+        # (https://docs.docker.com/reference/cli/docker/image/pull/), so use
+        # that as the effective ref rather than accepting any manifest tag.
+        effective_ref = manifest_ref if manifest_ref is not None else "latest"
+        return f"{manifests_prefix}{effective_ref}" in line
     if f"/v2/{repo_path}/" in line:
         return True
     # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
@@ -398,9 +398,8 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     if "/" not in repo_path:
         lib_prefix = f"/v2/library/{repo_path}/manifests/"
         if lib_prefix in line:
-            if manifest_ref is not None:
-                return f"{lib_prefix}{manifest_ref}" in line
-            return True
+            effective_ref = manifest_ref if manifest_ref is not None else "latest"
+            return f"{lib_prefix}{effective_ref}" in line
         return f"/v2/library/{repo_path}/" in line
     return False
 
