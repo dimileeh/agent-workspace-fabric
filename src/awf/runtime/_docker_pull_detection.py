@@ -383,15 +383,21 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     if not repo_path:
         return False
     manifests_prefix = f"/v2/{repo_path}/manifests/"
-    if manifests_prefix in line:
+    # When the image ref carries an explicit registry host, scope the daemon
+    # URL check to that host — a permanent error from a different registry
+    # for the same repo path and tag must not be attributed to an in-flight
+    # pull from the expected registry (PRRT_kwDOSJAM6s6HtKzI).
+    url_manifests_prefix = f"{_host}{manifests_prefix}" if _is_registry_host else manifests_prefix
+    if url_manifests_prefix in line:
         # Daemon URL is a manifest request; require tag/digest to match so
         # same-repo but different-tag errors are not conflated.  When no
         # explicit tag/digest is present, Docker defaults to "latest"
         # (https://docs.docker.com/reference/cli/docker/image/pull/), so use
         # that as the effective ref rather than accepting any manifest tag.
         effective_ref = manifest_ref if manifest_ref is not None else "latest"
-        return f"{manifests_prefix}{effective_ref}" in line
-    if f"/v2/{repo_path}/" in line:
+        return f"{url_manifests_prefix}{effective_ref}" in line
+    url_repo_prefix = f"{_host}/v2/{repo_path}/" if _is_registry_host else f"/v2/{repo_path}/"
+    if url_repo_prefix in line:
         return True
     # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
     # URLs as /v2/library/<name>/ rather than /v2/<name>/.

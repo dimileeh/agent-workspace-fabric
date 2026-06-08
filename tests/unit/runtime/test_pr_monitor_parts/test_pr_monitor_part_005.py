@@ -997,3 +997,32 @@ class TestImageRefMatchesDaemonUrl:
 
         bad_line = 'Head "https://registry-1.docker.io/v2/library/postgres/manifests/bad": denied'
         assert _image_ref_matches_daemon_url("postgres", bad_line) is False
+
+    @pytest.mark.unit
+    def test_different_registry_same_repo_and_tag_does_not_match_daemon_url(self) -> None:
+        """A daemon error from a different registry must NOT match the preceding
+        pull image ref even when the repo path and tag are identical.
+
+        When ``docker pull ghcr.io/org/app:latest`` times out and an unrelated
+        permanent daemon error ``Head
+        "https://registry.example.com/v2/org/app/manifests/latest": denied``
+        appears in the same log window, the helper must return False — the daemon
+        URL belongs to a different registry and must not anchor transient-timeout
+        attribution for the ghcr.io pull.
+
+        Without the registry-host check only the ``/v2/org/app/manifests/latest``
+        fragment is compared, which matches both registries and causes AWF to
+        report a permanent CI failure instead of scheduling a rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtKzI."""
+        line = 'Head "https://registry.example.com/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is False
+
+    @pytest.mark.unit
+    def test_correct_registry_same_repo_and_tag_still_matches_daemon_url(self) -> None:
+        """Counterpart to the different-registry regression: a daemon error from
+        the *same* registry must still match.
+
+        Regression for PRRT_kwDOSJAM6s6HtKzI."""
+        line = 'Head "https://ghcr.io/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is True
