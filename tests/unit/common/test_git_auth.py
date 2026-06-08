@@ -442,3 +442,42 @@ def test_verify_bitbucket_git_auth_raises_reason_coded_when_missing(
     assert "BITBUCKET_API_TOKEN" in message or "BITBUCKET_EMAIL" in message
     assert _TOKEN not in message
     assert _EMAIL not in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "https://alice@bitbucket.org/ws/repo.git",
+        "https://alice:secret@bitbucket.org/ws/repo.git",
+        "https://alice@bitbucket.org:443/ws/repo.git",
+    ],
+)
+def test_verify_bitbucket_git_auth_rejects_non_sentinel_userinfo(repo_url: str) -> None:
+    # A username embedded in the HTTPS URL shadows the fixed sentinel username:
+    # git uses the embedded name and only asks the askpass/helper for the
+    # password, so the API token authenticates under the wrong username and
+    # private fetch/push fails opaquely. The preflight must reject it instead.
+    with pytest.raises(GitAuthNotConfiguredError) as raised:
+        verify_bitbucket_git_auth(
+            repo_url,
+            {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_EMAIL": _EMAIL},
+        )
+
+    assert raised.value.reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED
+    message = str(raised.value)
+    # Names the required sentinel username but never echoes the embedded
+    # userinfo (which may carry a secret password).
+    assert "x-bitbucket-api-token-auth" in message
+    assert "alice" not in message
+    assert "secret" not in message
+
+
+@pytest.mark.unit
+def test_verify_bitbucket_git_auth_allows_sentinel_userinfo() -> None:
+    # The sentinel username already in the URL is exactly what token auth needs,
+    # so it must NOT be rejected.
+    verify_bitbucket_git_auth(
+        "https://x-bitbucket-api-token-auth@bitbucket.org/ws/repo.git",
+        {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_EMAIL": _EMAIL},
+    )

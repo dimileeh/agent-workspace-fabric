@@ -297,6 +297,17 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     ``reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED`` and a message that names
     only the missing env var(s) — never any value — turning an otherwise opaque
     clone failure (or TTY hang) into a fast, diagnosable error.
+
+    Also rejects an HTTPS bitbucket.org URL that embeds a **non-sentinel**
+    username (e.g. ``https://alice@bitbucket.org/ws/repo.git``). Atlassian
+    API-token auth over HTTPS requires the fixed sentinel username
+    ``x-bitbucket-api-token-auth``; an embedded username shadows it (git uses the
+    URL's username verbatim and the ``insteadOf`` rewrites — which match a bare
+    ``https://bitbucket.org/`` prefix — never fire), so the credential helper /
+    askpass token would authenticate under the wrong username and private
+    clone/fetch/push fails opaquely. The sentinel username itself is allowed (it
+    is exactly what token auth needs). The message names the required sentinel
+    but never echoes the embedded userinfo, which may carry a secret password.
     """
     if not is_bitbucket_repo(repo_url) or _is_ssh_transport(repo_url):
         return
@@ -305,13 +316,28 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
         for name in (_BITBUCKET_TOKEN_ENV, _BITBUCKET_EMAIL_ENV)
         if not (env.get(name) or "").strip()
     ]
-    if not missing:
-        return
-    raise GitAuthNotConfiguredError(
-        reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
-        message=(
-            "BitBucket git authentication is not configured for a bitbucket.org "
-            f"repository: missing {', '.join(missing)}. Set these in the AWF "
-            "service environment so git can authenticate over HTTPS."
-        ),
-    )
+    if missing:
+        raise GitAuthNotConfiguredError(
+            reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
+            message=(
+                "BitBucket git authentication is not configured for a bitbucket.org "
+                f"repository: missing {', '.join(missing)}. Set these in the AWF "
+                "service environment so git can authenticate over HTTPS."
+            ),
+        )
+    parsed = urlsplit(repo_url.strip())
+    embedded_user = parsed.username
+    if (embedded_user is not None or parsed.password is not None) and (
+        embedded_user != _BITBUCKET_GIT_USERNAME
+    ):
+        raise GitAuthNotConfiguredError(
+            reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
+            message=(
+                "BitBucket git authentication cannot use the credentials embedded "
+                "in the bitbucket.org repository URL: Atlassian API-token auth over "
+                f"HTTPS requires the fixed username {_BITBUCKET_GIT_USERNAME!r}. "
+                "Remove the userinfo from the repo URL (use "
+                "https://bitbucket.org/<workspace>/<repo>.git) so AWF can supply the "
+                "API token under the correct username."
+            ),
+        )
