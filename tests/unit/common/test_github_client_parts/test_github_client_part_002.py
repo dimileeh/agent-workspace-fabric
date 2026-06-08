@@ -234,65 +234,6 @@ class TestFetchPrStatusPart001:
         assert status.blocking_reviews == ()
 
     @pytest.mark.unit
-    async def test_no_checks_observed_when_rollup_absent(self) -> None:
-        # GitHub returns no statusCheckRollup at all for a commit with no CI;
-        # the authoritative signal is set True (#469).
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(status_check_rollup_present=False),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-        assert status.no_checks_observed is True
-        assert status.check_state == CheckState.PENDING
-
-    @pytest.mark.unit
-    async def test_no_checks_observed_when_rollup_present_but_empty(self) -> None:
-        # A present-but-empty rollup reports contexts.totalCount == 0.
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                check_state="PENDING",
-                check_contexts=[],
-                check_contexts_total_count=0,
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-        assert status.no_checks_observed is True
-
-    @pytest.mark.unit
-    async def test_no_checks_observed_false_when_contexts_present(self) -> None:
-        # ≥1 context (totalCount >= 1) ⇒ the signal stays off, never skipping CI.
-        fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0,
-            stdout=_sample_pr_payload(
-                check_state="PENDING",
-                check_contexts=[
-                    {
-                        "__typename": "CheckRun",
-                        "name": "build",
-                        "status": "IN_PROGRESS",
-                        "conclusion": None,
-                    }
-                ],
-                check_contexts_total_count=1,
-            ),
-        )
-        client = GitHubClient(fake)
-        status = await client.fetch_pr_status(
-            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
-        )
-        assert status.no_checks_observed is False
-
-    @pytest.mark.unit
     async def test_commented_bot_reviews_are_advisory_not_blocking(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

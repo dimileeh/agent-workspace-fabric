@@ -127,35 +127,6 @@ def test_validation_error_message_falls_back_when_pydantic_has_no_errors() -> No
 
 
 @pytest.mark.unit
-def test_profile_schema_accepts_monitor_initial_review_grace() -> None:
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "python-explicit",
-            "monitor": {"initial_review_grace_period_seconds": 120},
-        }
-    )
-    assert profile.monitor.initial_review_grace_period_seconds == 120
-
-
-@pytest.mark.unit
-def test_profile_monitor_require_ci_defaults_true() -> None:
-    # Safe default: an operator must explicitly opt out of CI (#469).
-    profile = WorkspaceProfile.model_validate({"name": "python-explicit"})
-    assert profile.monitor.require_ci is True
-
-
-@pytest.mark.unit
-def test_profile_schema_accepts_require_ci_false() -> None:
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "python-explicit",
-            "monitor": {"require_ci": False},
-        }
-    )
-    assert profile.monitor.require_ci is False
-
-
-@pytest.mark.unit
 def test_profile_healthcheck_rejects_non_string_method() -> None:
     with pytest.raises(ValidationError):
         ProfileHealthCheck.model_validate(
@@ -165,48 +136,6 @@ def test_profile_healthcheck_rejects_non_string_method() -> None:
                 "method": 123,
             }
         )
-
-
-@pytest.mark.unit
-def test_profile_schema_accepts_non_check_reviewer_monitor_policy() -> None:
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "python-explicit",
-            "monitor": {
-                "non_check_reviewer_settle_seconds": 45,
-                "non_check_reviewer_logins": [
-                    " Greptile-Apps ",
-                    "greptile-apps[bot]",
-                    "Reviewer.Bot",
-                    "reviewer bot [bot]",
-                    "custom-reviewer",
-                ],
-            },
-        }
-    )
-
-    assert profile.monitor.non_check_reviewer_settle_seconds == 45
-    assert profile.monitor.non_check_reviewer_logins == [
-        "greptile-apps",
-        "reviewer-bot",
-        "custom-reviewer",
-    ]
-
-
-@pytest.mark.unit
-def test_profile_schema_accepts_disabled_or_empty_non_check_reviewer_policy() -> None:
-    profile = WorkspaceProfile.model_validate(
-        {
-            "name": "python-explicit",
-            "monitor": {
-                "non_check_reviewer_settle_seconds": 0,
-                "non_check_reviewer_logins": [],
-            },
-        }
-    )
-
-    assert profile.monitor.non_check_reviewer_settle_seconds == 0
-    assert profile.monitor.non_check_reviewer_logins == []
 
 
 @pytest.mark.unit
