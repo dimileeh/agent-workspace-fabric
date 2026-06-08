@@ -514,7 +514,15 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
             ):
                 return False
             effective_ref = manifest_ref if manifest_ref is not None else "latest"
-            return f"{lib_prefix}{effective_ref}" in line
+            fragment = f"{lib_prefix}{effective_ref}"
+            idx = line.find(fragment)
+            if idx == -1:
+                return False
+            after = idx + len(fragment)
+            # Require a URL boundary after the ref so a tag that is a strict
+            # prefix of another (e.g. "v1" vs "v10") does not falsely match
+            # (PRRT_kwDOSJAM6s6HubRs).
+            return after >= len(line) or not (line[after].isalnum() or line[after] in "._-")
         lib_repo_prefix = f"/v2/library/{repo_path}/"
         if lib_repo_prefix in line:
             # Same Docker Hub host guard as lib_prefix above: for unqualified refs and
