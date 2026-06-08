@@ -483,6 +483,46 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_forward_daemon_denied_via_v2_url_with_preceding_pull_echo_reports_ci_failure(
+        self,
+    ) -> None:
+        """Forward daemon probe must detect a permanent `: denied` response even
+        when the daemon error embeds the image ref as a registry API URL rather
+        than quoting it directly.
+
+        Daemon auth/manifest errors commonly take the form::
+
+            Error response from daemon: Head "https://ghcr.io/v2/org/app/manifests/latest": denied
+
+        When a ``docker pull ghcr.io/org/app:latest`` echo precedes the summary,
+        ``preceding_pull_image`` is set to ``ghcr.io/org/app:latest``.  That ref
+        is not a whitespace-delimited token in the daemon line (``split()`` yields
+        the quoted URL as one token), so the token check alone fails and the
+        summary is incorrectly treated as transient.  The fix also checks the
+        ``/v2/<repo>/`` URL fragment derived from the image ref
+        (PRRT_kwDOSJAM6s6HsvOj)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/app:latest\n"
+                "Docker pull failed with exit code 1\n"
+                'Error response from daemon: Head "https://ghcr.io/v2/org/app/manifests/latest": denied\n'
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_forward_permanent_detail_beyond_timeout_window_reports_ci_failure(
         self,
     ) -> None:

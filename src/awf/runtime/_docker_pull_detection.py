@@ -330,6 +330,25 @@ def _forward_detail_ref_matches_pull(
     )
 
 
+def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
+    """Whether a daemon error line's quoted URL is attributable to *image_ref*.
+
+    Daemon auth/manifest errors commonly embed the image location as a registry
+    distribution-API URL rather than quoting the image ref directly — e.g.
+    ``Error response from daemon: Head
+    "https://ghcr.io/v2/org/app/manifests/latest": denied``.  The image ref
+    ``ghcr.io/org/app:latest`` is not a whitespace-delimited token on such a
+    line, but the repository path ``org/app`` appears in the URL after ``/v2/``.
+    This function strips the registry host prefix from the image ref, constructs
+    the expected ``/v2/<repo>/`` fragment, and checks whether it appears anywhere
+    in *line* (including inside the quoted URL that permanent-marker checks strip).
+    """
+    ref_no_tag, _, _ = image_ref.partition(":")
+    slash = ref_no_tag.find("/")
+    repo_path = ref_no_tag[slash + 1 :] if slash != -1 and "." in ref_no_tag[:slash] else ref_no_tag
+    return bool(repo_path) and f"/v2/{repo_path}/" in line
+
+
 def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bool:
     """Whether a Docker pull-failure evidence line represents a permanent error.
 
@@ -430,7 +449,11 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                 marker in re.sub(r'"[^"]*"', "", lines[probe_index])
                 for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS
             )
-            and (preceding_pull_image is None or preceding_pull_image in lines[probe_index].split())
+            and (
+                preceding_pull_image is None
+                or preceding_pull_image in lines[probe_index].split()
+                or _image_ref_matches_daemon_url(preceding_pull_image, lines[probe_index])
+            )
             and not any(
                 _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
                 and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
