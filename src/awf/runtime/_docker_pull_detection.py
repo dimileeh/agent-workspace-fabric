@@ -340,8 +340,12 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     ``ghcr.io/org/app:latest`` is not a whitespace-delimited token on such a
     line, but the repository path ``org/app`` appears in the URL after ``/v2/``.
     This function strips the registry host prefix from the image ref, constructs
-    the expected ``/v2/<repo>/`` fragment, and checks whether it appears anywhere
-    in *line* (including inside the quoted URL that permanent-marker checks strip).
+    the expected ``/v2/<repo>/manifests/<tag-or-digest>`` fragment, and checks
+    whether it appears anywhere in *line*.  When the daemon URL contains a
+    ``/manifests/`` path and the image ref carries an explicit tag or digest, both
+    the repository and the manifest ref must match — a permanent error for
+    ``ghcr.io/org/app:bad`` must not be attributed to a pull of
+    ``ghcr.io/org/app:good`` (PRRT_kwDOSJAM6s6HtGA_).
 
     Docker Hub official/library images (single-component names such as
     ``postgres`` or ``ubuntu``) are served under ``/v2/library/<name>/`` in
@@ -350,16 +354,25 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     """
     # Strip any @digest suffix (e.g. @sha256:abc) before tag/registry
     # processing.  A digest colon would otherwise be mistaken for a tag
-    # separator, leaving the algorithm suffix in repo_path.
+    # separator, leaving the algorithm suffix in repo_path.  Save the digest
+    # so it can be used to narrow the manifests URL match.
+    manifest_ref: str | None = None
     at_sign = image_ref.find("@")
     if at_sign != -1:
+        manifest_ref = image_ref[at_sign + 1 :]  # e.g. "sha256:abc123"
         image_ref = image_ref[:at_sign]
     # Strip the image tag (last ":tag") without confusing a registry port
     # ("registry.host:5000/image:tag") with a tag separator.  A colon is a
     # tag separator only when nothing after it contains a "/" — a registry
-    # port is always followed by a "/" (the image path component).
+    # port is always followed by a "/" (the image path component).  Save the
+    # tag so it can be used to narrow the manifests URL match.
     colon = image_ref.rfind(":")
-    ref_no_tag = image_ref[:colon] if colon != -1 and "/" not in image_ref[colon:] else image_ref
+    if colon != -1 and "/" not in image_ref[colon:]:
+        if manifest_ref is None:
+            manifest_ref = image_ref[colon + 1 :]  # e.g. "latest"
+        ref_no_tag = image_ref[:colon]
+    else:
+        ref_no_tag = image_ref
     slash = ref_no_tag.find("/")
     # The first path component is a registry host when it contains a "."
     # (dotted hostname), a ":" (host:port, e.g. localhost:5000), or is the
@@ -369,11 +382,25 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     repo_path = ref_no_tag[slash + 1 :] if slash != -1 and _is_registry_host else ref_no_tag
     if not repo_path:
         return False
+    manifests_prefix = f"/v2/{repo_path}/manifests/"
+    if manifests_prefix in line:
+        # Daemon URL is a manifest request; require tag/digest to match when
+        # known so same-repo but different-tag errors are not conflated.
+        if manifest_ref is not None:
+            return f"{manifests_prefix}{manifest_ref}" in line
+        # No explicit tag/digest — accept the repo-level match (Docker
+        # defaults to "latest" when no tag is given).
+        return True
     if f"/v2/{repo_path}/" in line:
         return True
     # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
     # URLs as /v2/library/<name>/ rather than /v2/<name>/.
     if "/" not in repo_path:
+        lib_prefix = f"/v2/library/{repo_path}/manifests/"
+        if lib_prefix in line:
+            if manifest_ref is not None:
+                return f"{lib_prefix}{manifest_ref}" in line
+            return True
         return f"/v2/library/{repo_path}/" in line
     return False
 

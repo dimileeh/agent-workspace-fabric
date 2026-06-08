@@ -936,3 +936,30 @@ class TestImageRefMatchesDaemonUrl:
         """A bare ``localhost/myapp:latest`` ref (no port) must also match."""
         line = 'Head "http://localhost/v2/myapp/manifests/latest": denied'
         assert _image_ref_matches_daemon_url("localhost/myapp:latest", line) is True
+
+    @pytest.mark.unit
+    def test_different_tag_same_repo_does_not_match_daemon_url(self) -> None:
+        """A daemon error for a different tag of the same repository must NOT
+        match the preceding pull image ref.
+
+        When ``docker pull ghcr.io/org/app:good`` precedes a daemon error
+        ``Head "https://ghcr.io/v2/org/app/manifests/bad": denied``, the two
+        refer to different manifests and must not be conflated.  Without the
+        tag/digest check, the repo-only fragment ``/v2/org/app/`` appears in
+        both URLs and the mismatch goes undetected, causing AWF to skip a
+        legitimate rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtGA_."""
+        line = 'Head "https://ghcr.io/v2/org/app/manifests/bad": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:good", line) is False
+
+    @pytest.mark.unit
+    def test_same_tag_same_repo_matches_daemon_url(self) -> None:
+        """A daemon error for the same tag of the same repository must match.
+
+        Counterpart to the different-tag regression: ensure the fix does not
+        over-reject same-repo, same-tag daemon errors.
+
+        Regression for PRRT_kwDOSJAM6s6HtGA_."""
+        line = 'Head "https://ghcr.io/v2/org/app/manifests/good": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:good", line) is True
