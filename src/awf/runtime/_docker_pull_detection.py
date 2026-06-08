@@ -376,7 +376,10 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     Backward daemon-error probe: Docker CLI always emits the daemon error before
     the ``docker pull failed`` summary for the same pull, so a daemon-error line
     appearing after the summary belongs to a different pull operation and must not
-    influence permanence classification for this evidence line.
+    influence permanence classification for this evidence line.  When the preceding
+    pull echo is known, the daemon error must also carry the same image ref — an
+    unrelated daemon error for a different image (e.g. an interleaved kubelet event)
+    must not misattribute permanence to this summary.
 
     Forward detail probe: Docker sometimes emits the ``docker pull failed``
     summary *before* the containerd/kubelet ``failed to pull image "<ref>":
@@ -396,30 +399,10 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
     if any(marker in clean_current for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS):
         return True
     start = max(0, index - _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW)
-    # Backward probe: daemon error always precedes the "docker pull failed"
-    # summary; a daemon error after the summary is from a different pull.
-    # Restrict to "docker pull failed" summary lines only — when the evidence
-    # line is itself a daemon-error timeout, a preceding daemon error for a
-    # *different* image must not make it permanent (PRRT_kwDOSJAM6s6HsNGM).
-    if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in lines[index] and any(
-        _CI_DOCKER_DAEMON_ERROR_MARKER in lines[probe_index]
-        and any(
-            marker in re.sub(r'"[^"]*"', "", lines[probe_index])
-            for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS
-        )
-        and not any(
-            _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
-            and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
-            for k in range(probe_index + 1, index)
-        )
-        for probe_index in range(start, index)
-    ):
-        return True
-    # Forward probe: when the evidence line is a "docker pull failed" summary,
-    # look forward for a daemon permanent error or a "failed to pull image"
-    # detail with a permanent marker that belongs to this pull.
+    # Both backward and forward daemon probes are restricted to "docker pull
+    # failed" summary lines.  Extract the preceding pull echo and image ref
+    # once so both probes can check image identity.
     if _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in lines[index]:
-        end = min(len(lines), index + _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW + 1)
         # Narrow the backward ref-match search to the most recent docker pull
         # echo before the summary: starting from 0 would let a stale echo for
         # an earlier image pair with a detail for that image, wrongly marking
@@ -432,11 +415,12 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             ):
                 back_start = k
                 break
-        # Extract the image ref from the most-recent preceding pull echo so the
-        # forward daemon probe can confirm the daemon error is for the same image.
-        # When the preceding echo is known, a daemon error for a *different* image
-        # that appears after the summary belongs to a different pull operation and
-        # must not make this summary permanent (PRRT_kwDOSJAM6s6Hr82p).
+        # Extract the image ref from the most-recent preceding pull echo so
+        # both backward and forward daemon probes can confirm a daemon error
+        # belongs to this pull.  When the preceding echo is known, a daemon
+        # error for a *different* image must not influence permanence
+        # classification for this summary
+        # (PRRT_kwDOSJAM6s6Hr82p, PRRT_kwDOSJAM6s6Hs7GB).
         preceding_pull_image: str | None = None
         if (
             _CI_DOCKER_PULL_COMMAND_MARKER in lines[back_start]
@@ -453,6 +437,38 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                     preceding_pull_image = non_flags[-1]
             except StopIteration:
                 pass
+        # Backward probe: daemon error always precedes the "docker pull failed"
+        # summary for the same pull; a daemon error after the summary is from a
+        # different pull.  Restrict to "docker pull failed" summary lines only —
+        # when the evidence line is itself a daemon-error timeout, a preceding
+        # daemon error for a *different* image must not make it permanent
+        # (PRRT_kwDOSJAM6s6HsNGM).  Require image-identity match when the
+        # preceding pull echo is known so an unrelated daemon error for a
+        # different image (e.g. an interleaved kubelet event) does not
+        # misattribute permanence to this summary (PRRT_kwDOSJAM6s6Hs7GB).
+        if any(
+            _CI_DOCKER_DAEMON_ERROR_MARKER in lines[probe_index]
+            and any(
+                marker in re.sub(r'"[^"]*"', "", lines[probe_index])
+                for marker in _CI_DOCKER_PERMANENT_PULL_ERROR_MARKERS
+            )
+            and (
+                preceding_pull_image is None
+                or preceding_pull_image in lines[probe_index].split()
+                or _image_ref_matches_daemon_url(preceding_pull_image, lines[probe_index])
+            )
+            and not any(
+                _CI_DOCKER_PULL_COMMAND_MARKER in lines[k]
+                and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[k]
+                for k in range(probe_index + 1, index)
+            )
+            for probe_index in range(start, index)
+        ):
+            return True
+        # Forward probe: look forward for a daemon permanent error or a
+        # "failed to pull image" detail with a permanent marker that belongs
+        # to this pull.
+        end = min(len(lines), index + _CI_DOCKER_TIMEOUT_EVIDENCE_WINDOW + 1)
         # Forward daemon probe: some log streams emit the summary before the
         # daemon error line (opposite of the typical CLI ordering). A daemon
         # permanent error appearing after the summary and before any new pull

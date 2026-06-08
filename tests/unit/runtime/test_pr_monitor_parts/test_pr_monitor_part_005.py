@@ -767,3 +767,40 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_backward_daemon_error_different_image_does_not_make_summary_permanent(
+        self,
+    ) -> None:
+        """An unrelated daemon permanent error appearing immediately before a
+        'docker pull failed' summary must not mark it permanent when the preceding
+        pull echo identifies a different image.
+
+        Mixed-image step logs can contain a daemon error for image-B (e.g. a
+        concurrent kubelet event) within the evidence window of a transient
+        'docker pull failed' summary for image-A.  The no-intervening-echo guard
+        alone cannot distinguish this from a genuine same-pull error when no new
+        pull echo sits between the daemon error and the summary.  The backward probe
+        must also check image identity against the preceding pull echo so that
+        RerunTransientCI is still dispatched for the real registry timeout
+        (PRRT_kwDOSJAM6s6Hs7GB)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "Error response from daemon: pull access denied for unrelated-app\n"
+                "Docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)
