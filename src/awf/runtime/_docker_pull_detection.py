@@ -485,7 +485,12 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         # not the registry host itself — accept either.
         if _host in _DOCKER_HUB_REGISTRY_HOSTS:
             return "auth.docker.io" in line or _host in line
-        return _host in line
+        # Use "//<host>/" as the URL-boundary delimiter so a hostname that is a
+        # suffix of another host (e.g. "registry.example.com" inside
+        # "prod.registry.example.com") does not falsely match.  Token-service
+        # URLs always carry a "/" after the host ("/<path>?<query>"), so the
+        # trailing "/" is always present (PRRT_kwDOSJAM6s6HtfLR).
+        return f"//{_host}/" in line
     # Docker Hub library images (single-word names like "postgres") appear in
     # token requests as scope=repository%3alibrary%2f<name>%3a rather than
     # scope=repository%3a<name>%3a — mirrors the /v2/library/ treatment above.

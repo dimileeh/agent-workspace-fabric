@@ -1406,3 +1406,37 @@ class TestImageRefMatchesDaemonUrl:
         assert (
             _image_ref_matches_daemon_url("registry.example.com/org/app:latest", own_line) is True
         )
+
+    @pytest.mark.unit
+    def test_token_endpoint_hostname_suffix_does_not_match_longer_registry_host(
+        self,
+    ) -> None:
+        """A token-service URL from a longer host that shares the pull-image host
+        as a suffix must NOT be attributed to the pull.
+
+        When ``docker pull registry.example.com/org/app:latest`` is in flight and
+        a token-service denial from
+        ``https://prod.registry.example.com/token?scope=repository%3aorg%2fapp%3apull``
+        appears in the log window, the raw-substring ``_host in line`` check
+        returns True because ``registry.example.com`` is contained inside
+        ``prod.registry.example.com``.  The token URL host must be compared at
+        URL-boundary granularity ("//<host>/") so the unrelated denial does not
+        suppress a legitimate transient-timeout rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtfLR."""
+        unrelated_line = (
+            'get "https://prod.registry.example.com/token?'
+            'scope=repository%3aorg%2fapp%3apull": denied'
+        )
+        assert (
+            _image_ref_matches_daemon_url("registry.example.com/org/app:latest", unrelated_line)
+            is False
+        )
+
+        # Sanity: the pull's own registry token URL still matches
+        own_line = (
+            'get "https://registry.example.com/token?scope=repository%3aorg%2fapp%3apull": denied'
+        )
+        assert (
+            _image_ref_matches_daemon_url("registry.example.com/org/app:latest", own_line) is True
+        )
