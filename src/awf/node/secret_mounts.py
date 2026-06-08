@@ -150,10 +150,13 @@ class LocalSecretLeaseMountResolver:
         mounts: list[AuthMount] = []
         providers: list[str] = []
         targets: list[str] = []
-        # Counts only profile-declared lease env pairs. AWF-internal git-auth env
-        # vars (GIT_ASKPASS/GIT_CONFIG_* injected by the bitbucket askpass wiring)
-        # land in ``env`` too, so ``len(env)`` over-counts declared leases; this
-        # keeps ``env_count`` a faithful declared-lease proxy.
+        # Counts the distinct profile-declared lease env vars actually injected.
+        # AWF-internal git-auth env vars (GIT_ASKPASS/GIT_CONFIG_* injected by the
+        # bitbucket askpass wiring) land in ``env`` too, so ``len(env)``
+        # over-counts declared leases; this keeps ``env_count`` a faithful
+        # declared-lease proxy. Only increment when ``_append_env_pair`` injects a
+        # new key, so two leases resolving to the same target key count once (the
+        # second is skipped as a duplicate) rather than inflating the tally.
         lease_env_count = 0
         omitted_optional: list[dict[str, str]] = []
         satisfied_legacy_targets: set[str] = set()
@@ -185,8 +188,8 @@ class LocalSecretLeaseMountResolver:
                 )
                 if pair is None:
                     continue
-                _append_env_pair(env, pair)
-                lease_env_count += 1
+                if _append_env_pair(env, pair):
+                    lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
                 continue
@@ -201,8 +204,8 @@ class LocalSecretLeaseMountResolver:
                 if not pairs:
                     continue
                 for pair in pairs:
-                    _append_env_pair(env, pair)
-                    lease_env_count += 1
+                    if _append_env_pair(env, pair):
+                        lease_env_count += 1
                     _append_unique(targets, pair[0])
                 _append_unique(providers, provider)
                 satisfied_legacy_providers.add("github")
@@ -217,8 +220,8 @@ class LocalSecretLeaseMountResolver:
                 )
                 if pair is None:
                     continue
-                _append_env_pair(env, pair)
-                lease_env_count += 1
+                if _append_env_pair(env, pair):
+                    lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
                 # Record the git-token injection; the askpass wiring runs once
@@ -571,10 +574,18 @@ def _known_local_auth_targets() -> frozenset[str]:
     return frozenset(target for _, target in _KNOWN_LOCAL_AUTH_REFS.values())
 
 
-def _append_env_pair(env: dict[str, str], pair: tuple[str, str]) -> None:
+def _append_env_pair(env: dict[str, str], pair: tuple[str, str]) -> bool:
+    """Inject ``pair`` into ``env`` unless its key is already present.
+
+    Returns ``True`` when a new key was injected and ``False`` when a prior
+    lease already claimed the target key, so callers can count only the
+    distinct env vars actually set rather than every resolved lease.
+    """
     key, value = pair
-    if key not in env:
-        env[key] = value
+    if key in env:
+        return False
+    env[key] = value
+    return True
 
 
 def _append_unique(items: list[str], value: str) -> None:

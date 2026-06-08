@@ -88,6 +88,39 @@ def test_env_provider_exposes_placeholder_without_secret_value(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_duplicate_env_target_counts_once(tmp_path: Path) -> None:
+    # Two env leases resolving to the same target key only inject one env var
+    # (the second is skipped as a duplicate), so ``env_count`` must not
+    # double-count it — it stays a faithful distinct-declared-lease proxy.
+    resolver = _resolver(tmp_path, host_env={"OPENAI_API_KEY": "sk-secret"})
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "openai-primary",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            },
+            {
+                "name": "openai-duplicate",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+            },
+        ),
+        workspace_id="ws_secret",
+    )
+
+    assert resolution.environment == (("OPENAI_API_KEY", "${OPENAI_API_KEY}"),)
+    assert resolution.metadata["env_count"] == 1
+    assert resolution.metadata["total_env_count"] == 1
+    assert resolution.metadata["targets"] == ["OPENAI_API_KEY"]
+
+
+@pytest.mark.unit
 def test_resolution_metadata_cannot_be_mutated_after_creation(tmp_path: Path) -> None:
     resolver = _resolver(tmp_path)
 
