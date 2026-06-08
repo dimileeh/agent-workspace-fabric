@@ -239,6 +239,7 @@ export type LogWorkspaceTarget = Pick<
   | "agent_effort_source"
   | "status"
   | "pr_url"
+  | "pr_number"
 >;
 
 export type RetryActionState =
@@ -415,7 +416,7 @@ export function formatPrLinkLabel(href: string, prNumber?: number | null) {
 }
 
 export function extractPrNumberFromHref(href: string): number | null {
-  const match = href.match(/\/pull\/(\d+)(?:[/?#]|$)/);
+  const match = href.match(/\/pull(?:-requests)?\/(\d+)(?:[/?#]|$)/);
   if (!match) {
     return null;
   }
@@ -864,6 +865,7 @@ export function toLogWorkspaceTarget(workspaceId: string, overview: WorkspaceOve
     agent_effort_source: "unavailable",
     status: "running",
     pr_url: null,
+    pr_number: null,
   };
 }
 

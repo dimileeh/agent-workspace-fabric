@@ -9207,6 +9207,17 @@
             "title": "Owned Paths",
             "type": "array"
           },
+          "pr_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Number"
+          },
           "pr_url": {
             "anyOf": [
               {
@@ -10411,6 +10422,17 @@
             },
             "title": "Policy Findings",
             "type": "array"
+          },
+          "pr_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Number"
           },
           "pr_url": {
             "anyOf": [

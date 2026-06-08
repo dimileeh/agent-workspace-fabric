@@ -447,6 +447,34 @@ class TestGetDirect:
         assert exc.value.status_code == 404
         assert exc.value.detail["error_code"] == "NOT_FOUND"
 
+    @pytest.mark.unit
+    async def test_pr_number_in_workspace_response(
+        self,
+        session: AsyncSession,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """WorkspaceResponse must include pr_number so the console can show it for BitBucket PRs."""
+        created = await create_workspace(
+            payload=_payload(
+                provider_readiness_override=True,
+                task_title="bitbucket pr number",
+            ),
+            idempotency_key=None,
+            settings=_route_settings(),
+            session=session,
+        )
+        assert isinstance(created, WorkspaceAcceptedResponse)
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(created.workspace_id)
+        assert ws is not None
+        ws.pr_url = "https://bitbucket.org/org/repo/pull-requests/2"
+        ws.pr_number = 2
+        await session.commit()
+
+        result = await get_workspace(created.workspace_id, session_factory=session_factory)
+
+        assert result.pr_number == 2
+
 
 class TestListDirect:
     @pytest.mark.unit
