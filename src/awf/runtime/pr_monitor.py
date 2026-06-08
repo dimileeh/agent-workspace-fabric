@@ -40,7 +40,10 @@ from enum import StrEnum
 from typing import Literal
 
 from awf.runtime._docker_pull_detection import _log_shows_docker_registry_timeout
-from awf.runtime.monitor_state_keys import _merge_method_blocked_key
+from awf.runtime.monitor_state_keys import (
+    _merge_method_blocked_key,
+    _outdated_resolve_requeued_key,
+)
 
 # ── Wire-shape dataclasses — what the runner assembles after polling GH ────
 
@@ -1074,8 +1077,17 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # OUT of ``_CLOSED_OUTDATED_THREAD_VERDICTS`` so ``_outdated_thread_has_fresh_feedback``
     # no longer matches it — but ``needs_human`` means operator action is required,
     # so it must block merge exactly like a non-outdated ``needs_human`` thread.
+    # A third case: when ``resolve_thread`` hits a TRANSIENT fault, the hygiene step
+    # leaves the fix verdict intact (so the next poll retries) and flags the thread
+    # requeued. That fix verdict alone does not block merge, and the hygiene step
+    # runs in this same iteration right before ``decide`` — so without honoring the
+    # flag ``decide`` would merge over the addressed-but-unresolved thread on this
+    # very poll, never giving the promised retry a chance. Block until the resolve
+    # lands (flag cleared) or escalates to ``needs_human``.
     def _outdated_thread_blocks_merge(thread: ReviewThread) -> bool:
         if state.threads_addressed_ids.get(thread.thread_id) == "needs_human":
+            return True
+        if state.threads_addressed_ids.get(_outdated_resolve_requeued_key(thread.thread_id)):
             return True
         return _outdated_thread_has_fresh_feedback(state, thread)
 

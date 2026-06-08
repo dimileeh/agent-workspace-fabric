@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from awf.runtime.monitor_state_keys import _merge_method_blocked_key
+from awf.runtime.monitor_state_keys import (
+    _merge_method_blocked_key,
+    _outdated_resolve_requeued_key,
+)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -305,6 +308,29 @@ class TestOutdatedFreshFeedbackGate:
         verdict out of ``_CLOSED_OUTDATED_THREAD_VERDICTS`` (so the fresh-feedback
         gate alone no longer matches it)."""
         state = MonitorState(threads_addressed_ids={"T1": "needs_human"})
+        action = decide(
+            status=_status(outdated=(self._outdated("T1", body="bot nit"),)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_outdated_transient_requeue_flag_blocks_merge(self, verdict: str) -> None:
+        """When ``_resolve_addressed_outdated_threads`` hits a TRANSIENT resolve
+        fault it keeps the fix verdict (so the next poll retries) and flags the
+        thread requeued. Because that step runs in the same iteration right before
+        ``decide``, the fix verdict alone would let ``decide`` return ``Merge`` on
+        this very poll — merging over the addressed-but-unresolved outdated thread
+        before the retry runs. The requeue flag must make ``decide`` hold at
+        ``NotifyHuman`` instead."""
+        state = MonitorState(
+            threads_addressed_ids={
+                "T1": verdict,
+                _outdated_resolve_requeued_key("T1"): "requeued",
+            }
+        )
         action = decide(
             status=_status(outdated=(self._outdated("T1", body="bot nit"),)),
             state=state,

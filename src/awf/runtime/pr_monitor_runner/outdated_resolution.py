@@ -25,6 +25,7 @@ from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
@@ -68,15 +69,19 @@ async def _resolve_addressed_outdated_threads(
     ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``. Error handling mirrors the fix-cycle
     resolve loop and is fully self-contained so a forge fault never escapes into
     the monitor's outer loop: a transient fault waits then leaves the thread for
-    the next poll (the resolvable verdict is preserved so it is retried); a
-    permanent fault is logged + audited and the verdict is downgraded to
-    ``needs_human`` so the next poll skips it instead of re-issuing the same
-    failing resolve every cycle (a retry storm against a non-fixable fault). The
-    thread is non-blocking for merge and dropped from the actionable feed, so
-    neither path wedges auto-merge. A successful resolve needs no ``state``
-    mutation: the thread drops out of the outdated feed on the next fetch. The
-    permanent-fault downgrade IS persisted before returning, so it survives a
-    subsequent transient ``_execute`` fault (which skips ``_persist_state``).
+    the next poll (the resolvable verdict is preserved so it is retried, and the
+    thread is flagged requeued so ``decide`` — which runs this same iteration —
+    blocks merge instead of merging over it before the retry runs); a permanent
+    fault is logged + audited and the verdict is downgraded to ``needs_human`` so
+    the next poll skips it instead of re-issuing the same failing resolve every
+    cycle (a retry storm against a non-fixable fault). Neither path wedges
+    auto-merge: a persistently transient fault eventually exhausts its retry budget
+    and escalates to the permanent ``needs_human`` path, and a successful resolve
+    clears the flag. A successful resolve otherwise needs no ``state`` mutation: the
+    thread drops out of the outdated feed on the next fetch. The permanent-fault
+    downgrade IS persisted before returning, so it survives a subsequent transient
+    ``_execute`` fault (which skips ``_persist_state``); the transient requeue flag
+    is in-memory only, matching the rest of the transient path.
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
     for thread in status.outdated_unresolved_inline_threads:
@@ -134,6 +139,19 @@ async def _resolve_addressed_outdated_threads(
                         "error_message": str(exc),
                     },
                 )
+                # Flag the thread requeued so ``decide`` (which runs THIS iteration,
+                # right after this step) blocks merge on it instead of merging over
+                # the addressed-but-unresolved outdated thread before the promised
+                # next-poll retry runs. The fix verdict stays intact so the retry
+                # still fires; the flag only gates merge until it lands. Set
+                # in-memory only — like the rest of the transient path, this is not
+                # persisted, so the next poll reloads clean state and re-attempts the
+                # resolve (which re-sets the flag if it faults again, or clears it on
+                # success). A persistently transient fault eventually exhausts the
+                # retry budget and escalates to the permanent ``needs_human`` path,
+                # which keeps blocking — so this never silently merges over the
+                # thread, and never wedges either.
+                state.threads_addressed_ids[_outdated_resolve_requeued_key(tid)] = "requeued"
                 continue
             # Permanent fault: log + audit, then downgrade the recorded verdict to
             # ``needs_human`` so the next poll SKIPS this thread (``needs_human`` is
@@ -155,6 +173,10 @@ async def _resolve_addressed_outdated_threads(
                 stderr=exc.redacted_detail(),
             )
             state.mark_addressed(tid, "needs_human")
+            # Clear any prior transient requeue flag for this thread: ``needs_human``
+            # now blocks merge on its own, so the flag is redundant and would only
+            # leave stale state behind.
+            state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(tid), None)
             # Persist the downgrade immediately. This step runs BEFORE ``decide`` /
             # ``_execute`` in the runner loop, and ``_execute`` skips ``_persist_state``
             # when it hits a transient ``ForgeClientError`` (continuing to the next
@@ -184,6 +206,9 @@ async def _resolve_addressed_outdated_threads(
                 },
             )
             continue
+        # Resolve landed — clear any transient requeue flag from a prior poll so
+        # ``decide`` no longer holds this thread at ``NotifyHuman``.
+        state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(tid), None)
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
             event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,

@@ -27,15 +27,19 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     _CLOSED_OUTDATED_THREAD_VERDICTS,
     CheckState,
     MergeableState,
     MergeStateStatus,
+    MonitorConfig,
     MonitorState,
+    NotifyHuman,
     PRStatus,
     ReviewThread,
     _mark_review_thread_addressed,
+    decide,
 )
 from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
 from awf.runtime.pr_monitor_runner.outdated_resolution import (
@@ -174,6 +178,42 @@ async def test_outdated_addressed_thread_is_resolved(
         succeeded = _resolution_events(ws, outcome="succeeded")
         assert len(succeeded) == 1
         assert succeeded[0].reason_code == "COMMENT_REPAIR"
+
+
+@pytest.mark.unit
+async def test_successful_resolve_clears_prior_transient_requeue_flag(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A resolve that lands after an earlier poll's transient fault must clear the
+    requeue flag so ``decide`` stops holding the thread at ``NotifyHuman`` — the
+    block exists only until the resolve succeeds."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("T_outdated")
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+    # Simulate a requeue flag left by a prior poll's transient fault.
+    state.threads_addressed_ids[_outdated_resolve_requeued_key("T_outdated")] = "requeued"
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == ["T_outdated"]
+    assert _outdated_resolve_requeued_key("T_outdated") not in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -431,6 +471,8 @@ async def test_transient_resolve_error_is_requeued_not_failed(
     assert gh.resolved == []
     # The addressed marker is preserved so the next poll retries the resolve.
     assert state.threads_addressed_ids["T_transient"] == "fix_committed"
+    # The thread is flagged requeued so decide() blocks merge this iteration.
+    assert state.threads_addressed_ids[_outdated_resolve_requeued_key("T_transient")] == "requeued"
     assert sleep_fn.calls  # the transient handler waited before re-polling
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
@@ -438,6 +480,45 @@ async def test_transient_resolve_error_is_requeued_not_failed(
         requeued = _resolution_events(ws, outcome="requeued")
         assert len(requeued) == 1
         assert requeued[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+
+
+@pytest.mark.unit
+async def test_transient_resolve_error_blocks_merge_same_iteration(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(e1) The promised next-poll retry is only meaningful if merge does not race
+    it. ``_resolve_addressed_outdated_threads`` runs in the same iteration right
+    before ``decide``; after a transient resolve fault the fix verdict survives
+    (non-blocking) but the requeue flag must make ``decide`` hold the merge-ready
+    PR at ``NotifyHuman`` so the addressed-but-unresolved outdated thread is not
+    merged over before the retry runs."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    transient = GitHubClientError(
+        operation="resolve_thread",
+        returncode=1,
+        stderr="HTTP 503: service unavailable",
+    )
+    gh = _RecordingGitHub(cmd, error=transient)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("T_transient")
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+    status = _status_with_outdated(thread)
+
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    # The merge-ready snapshot would merge but for the requeue flag.
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
 
 
 @pytest.mark.unit
@@ -473,6 +554,10 @@ async def test_permanent_resolve_error_downgrades_to_needs_human(
     bb_id = "bb:workspace/repo#42:100"
     thread = _outdated_thread(bb_id)
     _mark_review_thread_addressed(state, thread, "fix_committed")
+    # A prior poll's transient fault left a requeue flag; the permanent downgrade
+    # must clear it (``needs_human`` blocks on its own — leaving the flag would be
+    # redundant stale state).
+    state.threads_addressed_ids[_outdated_resolve_requeued_key(bb_id)] = "requeued"
 
     await _call_resolve(
         runner,
@@ -484,6 +569,7 @@ async def test_permanent_resolve_error_downgrades_to_needs_human(
     assert gh.resolved == []
     # Verdict downgraded so the next poll skips it (not in the resolvable set).
     assert state.threads_addressed_ids[bb_id] == "needs_human"
+    assert _outdated_resolve_requeued_key(bb_id) not in state.threads_addressed_ids
     assert "needs_human" not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS
     assert sleep_fn.calls == []  # permanent fault does not wait/retry
     async with factory() as s:
