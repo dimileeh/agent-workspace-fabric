@@ -402,15 +402,25 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     if not repo_path:
         return False
     manifests_prefix = f"/v2/{repo_path}/manifests/"
-    # When the image ref carries an explicit registry host, scope the daemon
-    # URL check to that host — a permanent error from a different registry
-    # for the same repo path and tag must not be attributed to an in-flight
-    # pull from the expected registry (PRRT_kwDOSJAM6s6HtKzI).
+    # Docker Hub alias hosts (docker.io, index.docker.io) are resolved by the
+    # daemon to registry-1.docker.io, so daemon URLs always carry the resolved
+    # host rather than the alias.  Treat them like unqualified Docker Hub refs:
+    # use the unscoped path and guard with a Docker Hub registry host in the
+    # line (PRRT_kwDOSJAM6s6Htl06).
+    _is_docker_hub_alias = _is_registry_host and _host in _DOCKER_HUB_REGISTRY_HOSTS
+    # When the image ref carries an explicit non-Docker-Hub registry host, scope
+    # the daemon URL check to that host — a permanent error from a different
+    # registry for the same repo path and tag must not be attributed to an
+    # in-flight pull from the expected registry (PRRT_kwDOSJAM6s6HtKzI).
     # Use "//<host>" as the URL-boundary delimiter so that a hostname that is a
     # suffix of another host (e.g. "registry.example.com" inside
     # "prod.registry.example.com") does not falsely match.  In daemon URLs the
     # registry host is always preceded by "://" (PRRT_kwDOSJAM6s6HtZng).
-    url_manifests_prefix = f"//{_host}{manifests_prefix}" if _is_registry_host else manifests_prefix
+    url_manifests_prefix = (
+        f"//{_host}{manifests_prefix}"
+        if _is_registry_host and not _is_docker_hub_alias
+        else manifests_prefix
+    )
     if url_manifests_prefix in line:
         # Daemon URL is a manifest request; require tag/digest to match so
         # same-repo but different-tag errors are not conflated.  When no
@@ -418,21 +428,30 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         # (https://docs.docker.com/reference/cli/docker/image/pull/), so use
         # that as the effective ref rather than accepting any manifest tag.
         #
-        # For unqualified Docker Hub refs (no explicit registry host), the
-        # /v2/<repo>/manifests/ fragment is not registry-scoped — the same path
-        # appears in daemon URLs from any registry hosting that repo path.  Require
-        # a known Docker Hub registry host in the line so a permanent error from a
-        # different registry (e.g. ghcr.io) for the same path is not attributed to
-        # an in-flight Docker Hub pull (PRRT_kwDOSJAM6s6HtNI4).
-        if not _is_registry_host and not any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS):
+        # For unqualified Docker Hub refs (no explicit registry host) and for
+        # Docker Hub alias refs, the /v2/<repo>/manifests/ fragment is not
+        # registry-scoped — the same path appears in daemon URLs from any
+        # registry hosting that repo path.  Require a known Docker Hub registry
+        # host in the line so a permanent error from a different registry (e.g.
+        # ghcr.io) for the same path is not attributed to an in-flight Docker
+        # Hub pull (PRRT_kwDOSJAM6s6HtNI4, PRRT_kwDOSJAM6s6Htl06).
+        if (not _is_registry_host or _is_docker_hub_alias) and not any(
+            h in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+        ):
             return False
         effective_ref = manifest_ref if manifest_ref is not None else "latest"
         return f"{url_manifests_prefix}{effective_ref}" in line
-    url_repo_prefix = f"//{_host}/v2/{repo_path}/" if _is_registry_host else f"/v2/{repo_path}/"
+    url_repo_prefix = (
+        f"//{_host}/v2/{repo_path}/"
+        if _is_registry_host and not _is_docker_hub_alias
+        else f"/v2/{repo_path}/"
+    )
     if url_repo_prefix in line:
         # Same Docker Hub scoping as above: /v2/<repo>/ without a host prefix
-        # matches any registry (PRRT_kwDOSJAM6s6HtNI4).
-        return _is_registry_host or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
+        # matches any registry (PRRT_kwDOSJAM6s6HtNI4, PRRT_kwDOSJAM6s6Htl06).
+        return (_is_registry_host and not _is_docker_hub_alias) or any(
+            h in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+        )
     # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
     # URLs as /v2/library/<name>/ rather than /v2/<name>/.  Apply the same
     # Docker Hub registry-host guard as the non-library branches above: for

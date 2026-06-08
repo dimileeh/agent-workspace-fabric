@@ -1470,3 +1470,71 @@ class TestImageRefMatchesDaemonUrl:
         assert (
             _image_ref_matches_daemon_url("registry.example.com/org/app:latest", own_line) is True
         )
+
+    @pytest.mark.unit
+    def test_explicit_docker_io_org_image_matches_docker_hub_manifest_url(self) -> None:
+        """A ``docker.io/``-prefixed non-library Docker Hub image must match a
+        daemon error URL from ``registry-1.docker.io``.
+
+        ``docker pull docker.io/org/app:bad`` is an explicit Docker Hub pull.
+        Docker resolves the alias to ``registry-1.docker.io``, so the daemon
+        error reports
+        ``https://registry-1.docker.io/v2/org/app/manifests/bad``.  Before the
+        fix the code built ``//docker.io/v2/org/app/manifests/`` as the scoped
+        prefix, which is not a substring of the daemon URL, so the function
+        returned False — the permanent denial was not attributed to the pull and
+        AWF burned a rerun.
+
+        Regression for PRRT_kwDOSJAM6s6Htl06."""
+        hub_line = 'Head "https://registry-1.docker.io/v2/org/app/manifests/bad": denied'
+        assert _image_ref_matches_daemon_url("docker.io/org/app:bad", hub_line) is True
+
+    @pytest.mark.unit
+    def test_explicit_docker_io_org_image_wrong_registry_does_not_match(self) -> None:
+        """A ``docker.io/``-prefixed non-library Docker Hub image must NOT match
+        a daemon error URL from a different registry.
+
+        Counterpart to the positive regression: a permanent denial from ghcr.io
+        for the same path must not be attributed to a ``docker.io/org/app:bad``
+        pull.
+
+        Regression for PRRT_kwDOSJAM6s6Htl06."""
+        ghcr_line = 'Head "https://ghcr.io/v2/org/app/manifests/bad": denied'
+        assert _image_ref_matches_daemon_url("docker.io/org/app:bad", ghcr_line) is False
+
+        other_line = 'Head "https://registry.example.com/v2/org/app/manifests/bad": denied'
+        assert _image_ref_matches_daemon_url("docker.io/org/app:bad", other_line) is False
+
+    @pytest.mark.unit
+    def test_explicit_docker_io_org_image_permanent_failure_reports_ci_failure(
+        self,
+    ) -> None:
+        """``decide()`` must classify a permanent denial for a ``docker.io/``-
+        prefixed non-library Docker Hub image as a non-retryable CI failure.
+
+        Before the fix the permanence probe could not attribute the daemon URL
+        to the pull (host mismatch: alias vs resolved host), leaving the error
+        in the transient set and producing RerunTransientCI instead of
+        ReportCiFailure.
+
+        Regression for PRRT_kwDOSJAM6s6Htl06."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull docker.io/org/app:bad\n"
+                'Error response from daemon: Head "https://registry-1.docker.io/v2/org/app/manifests/bad": denied\n'
+                "docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="99000000004",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
