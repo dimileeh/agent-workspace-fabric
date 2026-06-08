@@ -1,0 +1,12 @@
+{
+  "status": "needs_iteration",
+  "summary": "All planned implementation changes are present and correct: pr_number added to WorkspaceResponse and WorkspaceOverviewResponse in schemas.py; pr_number added to Workspace and WorkspaceOverview in types.ts; extractPrNumberFromHref regex updated to forge-neutral pattern; both call sites in logs.tsx and detail.tsx pass workspace.pr_number/overview.pr_number to formatPrLinkLabel; Python regression test added; console source-inspection tests added; openapi.json regenerated with pr_number in both schema sections. No implementation gaps remain. Validation evidence is missing — AWF must run the validation phase to confirm all gates pass.",
+  "gaps": [
+    "AWF validation required: run pytest tests/unit/api/test_workspaces_direct.py and full unit suite to confirm test_pr_number_in_workspace_response passes and coverage gate holds.",
+    "AWF validation required: run ruff check and ruff format --check to confirm schema.py and any touched Python files are lint-clean.",
+    "AWF validation required: run mypy to confirm pr_number field additions are type-correct.",
+    "AWF validation required: run python scripts/generate_openapi.py --check to confirm openapi.json drift gate passes (file was regenerated in the commit but gate must be confirmed by AWF).",
+    "AWF validation required: run npm --prefix apps/console run lint, typecheck, build, and test:browser to confirm console changes are type-safe, build-clean, and source-inspection tests pass."
+  ],
+  "reason_code": "CONFORMANCE_REQUIRES_AWF_VALIDATION"
+}

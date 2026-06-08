@@ -795,6 +795,7 @@ class WorkspaceResponse(BaseModel):
     compose_file_path: str | None
 
     pr_url: str | None
+    pr_number: int | None = None
     failure_reason: str | None
     failure_message: str | None
     failure_details: WorkspaceFailureDetailsResponse | None = None
@@ -992,6 +993,8 @@ class TaskAttemptListResponse(BaseModel):
 
 
 class WorkspaceOverviewResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     workspace_id: str
     task_id: str
     title: str
@@ -1025,6 +1028,7 @@ class WorkspaceOverviewResponse(BaseModel):
     active_operation: str | None
     last_event: WorkspaceEventResponse | None
     pr_url: str | None
+    pr_number: int | None = None
     failure_reason: str | None
     failure_message: str | None
     created_at: datetime

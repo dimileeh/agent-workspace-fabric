@@ -250,7 +250,7 @@ export function WorkspaceSummary({
             </button>
           ) : null}
           {overview.pr_url ? (
-            <ExternalAnchor href={overview.pr_url} label={formatPrLinkLabel(overview.pr_url)} />
+            <ExternalAnchor href={overview.pr_url} label={formatPrLinkLabel(overview.pr_url, overview.pr_number)} />
           ) : null}
         </div>
       }

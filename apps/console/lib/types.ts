@@ -203,6 +203,7 @@ export interface WorkspaceOverview {
   active_operation: string | null;
   last_event: WorkspaceEvent | null;
   pr_url: string | null;
+  pr_number?: number | null;
   failure_reason: string | null;
   failure_message: string | null;
   latest_queue_decision?: QueueDecisionSummary | null;
@@ -502,6 +503,7 @@ export interface Workspace {
   compose_project_name: string | null;
   compose_file_path: string | null;
   pr_url: string | null;
+  pr_number?: number | null;
   failure_reason: string | null;
   failure_message: string | null;
   secret_leases: WorkspaceSecretLease[];

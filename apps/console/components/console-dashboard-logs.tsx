@@ -454,7 +454,7 @@ export function WorkspaceLogColumn({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {workspace.pr_url ? (
-            <SmallExternalAnchor href={workspace.pr_url} label={formatPrLinkLabel(workspace.pr_url)} />
+            <SmallExternalAnchor href={workspace.pr_url} label={formatPrLinkLabel(workspace.pr_url, workspace.pr_number)} />
           ) : null}
           <button
             type="button"
