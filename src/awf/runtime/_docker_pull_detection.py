@@ -526,9 +526,14 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     # URL percent-encoding uses uppercase hex by convention (RFC 3986), but the
     # log text is lowercased before splitting (see _log_shows_docker_registry_timeout),
     # so the encoded sequences arrive as lowercase: %3a (:) and %2f (/).
+    # Docker also emits the scope unencoded in some contexts (e.g. timeout
+    # fixtures use scope=repository:org/app:pull without percent-encoding).
+    # Match both forms so a permanent denial with either encoding is attributed
+    # to the in-flight pull (PRRT_kwDOSJAM6s6HuFH6).
     encoded_repo = repo_path.replace("/", "%2f")
     token_scope = f"scope=repository%3a{encoded_repo}%3a"
-    if token_scope in line:
+    unencoded_token_scope = f"scope=repository:{repo_path}:"
+    if token_scope in line or unencoded_token_scope in line:
         if not _is_registry_host:
             # Unqualified Docker Hub ref: require a Docker Hub auth or registry
             # host in the token URL so an error from a different registry is
@@ -550,9 +555,11 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     # Same Docker Hub scoping as the manifest URL block: skip this for explicit
     # non-Docker-Hub refs so a Docker Hub token denial is not attributed to a
     # pull of e.g. ``ghcr.io/postgres:16`` (PRRT_kwDOSJAM6s6HtWjC).
+    # Match both encoded and unencoded scope forms (PRRT_kwDOSJAM6s6HuFH6).
     if "/" not in repo_path and (not _is_registry_host or _host in _DOCKER_HUB_REGISTRY_HOSTS):
         lib_token_scope = f"scope=repository%3alibrary%2f{repo_path}%3a"
-        if lib_token_scope in line:
+        unencoded_lib_token_scope = f"scope=repository:library/{repo_path}:"
+        if lib_token_scope in line or unencoded_lib_token_scope in line:
             return "auth.docker.io" in line or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
     return False
 

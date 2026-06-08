@@ -664,6 +664,97 @@ class TestImageRefMatchesDaemonUrl:
         assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)
 
+    @pytest.mark.unit
+    def test_token_endpoint_auth_failure_unencoded_scope_matches_registry_image(self) -> None:
+        """A permanent token-service denial with an *unencoded* scope parameter
+        must still be attributed to the in-flight image ref.
+
+        Docker daemons sometimes emit the OAuth scope unencoded —
+        ``scope=repository:org/app:pull`` — rather than in the percent-encoded
+        form ``scope=repository%3aorg%2fapp%3a``.  The helper must match both
+        forms so that a permanent auth failure from ``ghcr.io`` is correctly
+        identified and suppresses an erroneous rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HuFH6."""
+        line = 'get "https://ghcr.io/token?service=ghcr.io&scope=repository:org/app:pull": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is True
+
+    @pytest.mark.unit
+    def test_token_endpoint_auth_failure_unencoded_scope_wrong_registry_does_not_match(
+        self,
+    ) -> None:
+        """An unencoded-scope token denial from a *different* registry must NOT
+        match the in-flight pull.
+
+        Counterpart to the positive regression: the host-boundary guard must
+        still apply when the scope is unencoded.
+
+        Regression for PRRT_kwDOSJAM6s6HuFH6."""
+        line = (
+            'get "https://other.registry.io/token?service=other.registry.io'
+            '&scope=repository:org/app:pull": denied'
+        )
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is False
+
+    @pytest.mark.unit
+    def test_docker_hub_library_image_token_endpoint_unencoded_scope_matches(self) -> None:
+        """An unqualified Docker Hub library image must match a token-service
+        denial that uses the *unencoded* ``library/<name>`` scope form.
+
+        Regression for PRRT_kwDOSJAM6s6HuFH6."""
+        line = (
+            'get "https://auth.docker.io/token'
+            '?service=registry.docker.io&scope=repository:library/postgres:pull": denied'
+        )
+        assert _image_ref_matches_daemon_url("postgres:16", line) is True
+
+    @pytest.mark.unit
+    def test_docker_hub_library_image_token_endpoint_unencoded_scope_wrong_registry_does_not_match(
+        self,
+    ) -> None:
+        """An unencoded-scope Docker Hub library token denial from a non-Docker-Hub
+        registry must NOT match an unqualified Docker Hub library pull.
+
+        Regression for PRRT_kwDOSJAM6s6HuFH6."""
+        line = 'get "https://ghcr.io/token?scope=repository:library/postgres:pull": denied'
+        assert _image_ref_matches_daemon_url("postgres:16", line) is False
+
+    @pytest.mark.unit
+    def test_unencoded_token_scope_permanent_denial_with_pull_echo_reports_ci_failure(
+        self,
+    ) -> None:
+        """``decide()`` must classify a permanent token-service denial with an
+        unencoded scope as a non-retryable CI failure even when a pull echo is
+        present.
+
+        Log order: pull echo → unencoded-scope token denial → adjacent
+        ``context deadline exceeded``.  Without the unencoded-scope fix
+        ``_image_ref_matches_daemon_url`` returns False (it only matched the
+        percent-encoded form), the permanence probe cannot attribute the denial
+        to the pull, and AWF incorrectly returns RerunTransientCI.
+
+        Regression for PRRT_kwDOSJAM6s6HuFH6."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/app:v1\n"
+                'Error response from daemon: Get "https://ghcr.io/token'
+                '?service=ghcr.io&scope=repository:org/app:pull": denied\n'
+                "context deadline exceeded"
+            ),
+            run_id="99000001005",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
 
 class TestStripImageTag:
     """Unit tests for ``_strip_image_tag``."""
