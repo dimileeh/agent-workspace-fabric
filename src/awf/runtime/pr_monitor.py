@@ -222,6 +222,16 @@ class PRStatus:
 
     ci_failures: tuple[CheckFailure, ...] = ()
     checks: tuple[CheckTiming, ...] = ()
+    no_checks_observed: bool = False
+    """Forge authoritatively reported an EMPTY check/status set for this head.
+
+    Set ``True`` only when the client fetched the rollup/commit-statuses and
+    that authoritative set was empty — never inferred from ``len(checks)`` (a
+    parse/pagination bug or a transient post-push window could empty ``checks``
+    while real CI exists). The default ``False`` is the SAFE value ("checks may
+    exist → do NOT skip the pending-checks wait"), so a forgotten populate can
+    never enable an unsafe no-CI merge. Consumed only by ``decide`` gate 6 in
+    combination with ``MonitorConfig.require_ci``."""
     changed_paths: tuple[str, ...] = ()
     closed: bool = False
     merged: bool = False
@@ -319,6 +329,15 @@ class MonitorConfig:
     only a live wait state for branch-protection and human-defer."""
 
     auto_merge: bool = True  # False = release-PR variant
+    require_ci: bool = True
+    """Whether a PR must observe at least one check/status before auto-merge.
+
+    Default ``True`` preserves today's behavior: a PENDING/empty check state
+    keeps the monitor in ``WaitForCI`` forever. Operators opt out per-profile
+    (``monitor.require_ci: false``) for repos that intentionally run NO CI (for
+    example a BitBucket repo with Pipelines disabled), letting ``decide`` skip
+    the pending-checks wait — but only when the forge affirmatively reports an
+    empty check set (``PRStatus.no_checks_observed``)."""
     # Only used by the RUNNER, not decide(); listed here so the full config
     # travels in one object.
     poll_interval_seconds: float = 60.0
@@ -941,7 +960,13 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return ReportCiFailure(failures=status.ci_failures)
 
     # 6. CI still running, or GitHub is still computing state → passive wait.
-    if status.check_state == CheckState.PENDING:
+    # Skip the pending-checks wait ONLY when the operator opted out of CI
+    # (require_ci=False) AND the forge authoritatively reported zero checks
+    # (no_checks_observed); the signal defaults False so a forgotten populate
+    # never bypasses this gate.
+    if status.check_state == CheckState.PENDING and (
+        config.require_ci or not status.no_checks_observed
+    ):
         return WaitForCI(reason="pending_checks")
     if (
         status.mergeable == MergeableState.UNKNOWN

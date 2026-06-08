@@ -2989,6 +2989,11 @@
             "minimum": 0.0,
             "title": "Non Check Reviewer Settle Seconds",
             "type": "number"
+          },
+          "require_ci": {
+            "default": true,
+            "title": "Require Ci",
+            "type": "boolean"
           }
         },
         "title": "ProfileMonitor",
