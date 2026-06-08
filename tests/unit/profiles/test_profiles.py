@@ -178,6 +178,36 @@ def test_merge_environment_normalizes_base_indexed_keys_without_count() -> None:
 
 
 @pytest.mark.unit
+def test_merge_environment_preserves_non_indexed_git_config_prefixed_keys() -> None:
+    # ``GIT_CONFIG_KEY_n``/``GIT_CONFIG_VALUE_n`` is git's numerically-indexed
+    # protocol. A profile env var that merely shares the prefix but carries a
+    # non-numeric suffix (e.g. ``GIT_CONFIG_KEY_THRESHOLD``) is NOT a protocol
+    # entry: it must flow through the regular first-writer-wins merge. The old
+    # broad prefix match stripped it from ``others`` yet, lacking a numeric index,
+    # never re-emitted it — silently dropping the variable from the container.
+    base = (
+        ("GIT_CONFIG_KEY_THRESHOLD", "5"),
+        ("GIT_CONFIG_VALUE_CUSTOM", "x"),
+    )
+    additions = (
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "url.https://x@bitbucket.org/.insteadOf"),
+        ("GIT_CONFIG_VALUE_0", "https://bitbucket.org/"),
+    )
+
+    merged = dict(merge_agent_environment(base, additions))
+
+    # The non-protocol vars survive unchanged...
+    assert merged["GIT_CONFIG_KEY_THRESHOLD"] == "5"
+    assert merged["GIT_CONFIG_VALUE_CUSTOM"] == "x"
+    # ...and the genuine indexed lease block is still re-emitted contiguously.
+    assert merged["GIT_CONFIG_COUNT"] == "1"
+    assert _git_config_pairs(merged) == {
+        ("url.https://x@bitbucket.org/.insteadOf", "https://bitbucket.org/")
+    }
+
+
+@pytest.mark.unit
 def test_merge_environment_appends_git_config_when_base_has_none() -> None:
     # When the base carries no git-config protocol vars the additions keep their
     # own contiguous 0-based indexing (unchanged from the pre-fix behavior).

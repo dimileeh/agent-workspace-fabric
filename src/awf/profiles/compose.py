@@ -240,11 +240,18 @@ _GIT_CONFIG_VALUE_PREFIX = "GIT_CONFIG_VALUE_"
 
 
 def _is_git_config_protocol_key(key: str) -> bool:
-    return (
-        key == _GIT_CONFIG_COUNT_KEY
-        or key.startswith(_GIT_CONFIG_KEY_PREFIX)
-        or key.startswith(_GIT_CONFIG_VALUE_PREFIX)
-    )
+    # Only the numerically-indexed protocol vars (``GIT_CONFIG_KEY_<n>`` /
+    # ``GIT_CONFIG_VALUE_<n>``) and ``GIT_CONFIG_COUNT`` belong to the block that is
+    # split out and re-emitted contiguously. A key that merely shares the prefix but
+    # has a non-numeric suffix (e.g. ``GIT_CONFIG_KEY_THRESHOLD``) is not a protocol
+    # entry: matching it here would strip it from ``others`` yet, lacking a numeric
+    # index, it would never be re-emitted — silently dropping it from the merged env.
+    if key == _GIT_CONFIG_COUNT_KEY:
+        return True
+    for prefix in (_GIT_CONFIG_KEY_PREFIX, _GIT_CONFIG_VALUE_PREFIX):
+        if key.startswith(prefix):
+            return key[len(prefix) :].isdigit()
+    return False
 
 
 def _git_config_count(pairs: tuple[tuple[str, str], ...]) -> int:
