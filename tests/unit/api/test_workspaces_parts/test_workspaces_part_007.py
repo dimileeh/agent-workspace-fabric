@@ -751,7 +751,8 @@ class TestWorkspaceDirectRoutes:
             events=events,
             operations=[],
             status=WorkspaceStatus.requested.value,
-            pr_url=None,
+            pr_url="https://github.com/example/app/pull/7",
+            pr_number=7,
             failure_reason=None,
             failure_message=None,
             created_at=base,
@@ -780,6 +781,8 @@ class TestWorkspaceDirectRoutes:
         assert item.last_event is not None
         assert item.last_event.event_type == "workspace.test_marker"
         assert events.iterations == 1
+        assert item.pr_number == 7
+        assert item.pr_url == "https://github.com/example/app/pull/7"
 
     @pytest.mark.unit
     async def test_existing_events_stale_reasons_get_retry_and_list_routes_directly(
