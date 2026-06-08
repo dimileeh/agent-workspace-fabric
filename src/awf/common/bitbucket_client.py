@@ -44,6 +44,7 @@ from awf.common.bitbucket_client_errors import (
     BITBUCKET_API_ERROR,
     BITBUCKET_AUTH_FAILED,
     BITBUCKET_AUTH_NOT_CONFIGURED,
+    BITBUCKET_COMMIT_RESOLVE_FAILED,
     BITBUCKET_ISSUE_CAPTURE_FAILED,
     BITBUCKET_ISSUE_TRACKER_DISABLED,
     BITBUCKET_MERGE_IN_PROGRESS,
@@ -104,6 +105,7 @@ __all__ = [
     "BITBUCKET_API_ERROR",
     "BITBUCKET_AUTH_FAILED",
     "BITBUCKET_AUTH_NOT_CONFIGURED",
+    "BITBUCKET_COMMIT_RESOLVE_FAILED",
     "BITBUCKET_ISSUE_CAPTURE_FAILED",
     "BITBUCKET_ISSUE_TRACKER_DISABLED",
     "BITBUCKET_MERGE_IN_PROGRESS",
@@ -293,7 +295,6 @@ class BitBucketClient:
                 status=None,
                 body=f"PR {repo.slug()}#{pr_number} not found",
             )
-        self._remember_pr(repo, pr_number, pr)
         head_sha = self._pr_head_sha(pr)
         if head_sha is None:
             raise BitBucketClientError(
@@ -301,6 +302,15 @@ class BitBucketClient:
                 status=None,
                 body=f"PR {repo.slug()}#{pr_number} has no source commit hash",
             )
+        # BitBucket Cloud serves ``source.commit.hash`` in the abbreviated 12-char
+        # form, but AWF's pre-merge validation-provenance gate matches the PR head
+        # against the full 40-char ``ValidationRun.target_head_sha`` by exact
+        # equality (#477). Resolve the full hash here so an abbreviated SHA never
+        # escapes the adapter: it is what lands on ``PRStatus.head_sha``, keys the
+        # commit-statuses fetch below, and is remembered as the rerun pipeline
+        # target — all consistently full (the per-commit endpoint accepts both).
+        head_sha = await self._resolve_full_commit_sha(repo, head_sha)
+        self._remember_pr(repo, pr_number, pr, head_sha=head_sha)
         source_branch = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
         )
@@ -1058,8 +1068,16 @@ class BitBucketClient:
         self._account_id_fetched = self._account_id is not None
         return self._account_id
 
-    def _remember_pr(self, repo: RepoRef, pr_number: int, pr: dict[str, Any]) -> None:
-        """Capture per-repo PR context for the repo-less Protocol methods."""
+    def _remember_pr(
+        self, repo: RepoRef, pr_number: int, pr: dict[str, Any], *, head_sha: str
+    ) -> None:
+        """Capture per-repo PR context for the repo-less Protocol methods.
+
+        ``head_sha`` is the already-resolved full 40-char source commit SHA, not
+        the abbreviated ``source.commit.hash`` on the raw payload — it is stored as
+        ``source_sha`` so ``rerun_failed_workflow_jobs`` reconstructs the pipeline
+        target with the full hash, consistent with ``PRStatus.head_sha`` (#477).
+        """
         source = _as_dict(pr.get("source"))
         destination = _as_dict(pr.get("destination"))
         dest_branch = _as_dict(destination.get("branch"))
@@ -1067,12 +1085,45 @@ class BitBucketClient:
         self._pr_context[repo.slug()] = _PRContext(
             pr_number=pr_number,
             source_branch=_clean_optional_str(_as_dict(source.get("branch")).get("name")),
-            source_sha=_clean_optional_str(_as_dict(source.get("commit")).get("hash")),
+            source_sha=head_sha,
             dest_branch=_clean_optional_str(dest_branch.get("name")),
             dest_sha=_clean_optional_str(_as_dict(destination.get("commit")).get("hash")),
             merge_strategies=merge_strategies if isinstance(merge_strategies, list) else None,
             default_merge_strategy=_clean_optional_str(dest_branch.get("default_merge_strategy")),
         )
+
+    async def _resolve_full_commit_sha(self, repo: RepoRef, sha: str) -> str:
+        """Resolve an abbreviated BitBucket commit hash to its full 40-char SHA.
+
+        BitBucket Cloud's PR GET serves ``source.commit.hash`` abbreviated (e.g.
+        12 chars), but AWF assumes full 40-char SHAs everywhere it matches a head
+        (the pre-merge validation-provenance gate compares by exact equality). A
+        hash already ``>= 40`` chars is returned unchanged with NO HTTP call; an
+        abbreviated one is resolved via the per-commit endpoint (one cached GET),
+        which echoes the full ``hash`` and accepts either form. A non-dict /
+        missing / too-short payload raises a deterministic reason-coded error
+        rather than silently falling back to the abbreviated hash (#477).
+        """
+        if len(sha) >= 40:
+            return sha
+        data = await self._request_json(
+            "GET",
+            f"{self._repo_path(repo)}/commit/{quote(sha, safe='')}",
+            operation="bitbucket resolve_commit_sha",
+            cache=True,
+        )
+        resolved = _clean_optional_str(_as_dict(data).get("hash"))
+        if resolved is None or len(resolved) < 40:
+            raise BitBucketClientError(
+                operation="bitbucket resolve_commit_sha",
+                status=None,
+                body=(
+                    f"commit {sha} in {repo.slug()} resolved to an unusable hash "
+                    f"{resolved!r}; expected a full 40-char commit SHA"
+                ),
+                reason_code=BITBUCKET_COMMIT_RESOLVE_FAILED,
+            )
+        return resolved
 
     @staticmethod
     def _pr_head_sha(pr: dict[str, Any]) -> str | None:

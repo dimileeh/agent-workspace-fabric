@@ -11,6 +11,7 @@ import pytest
 
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
+    BITBUCKET_COMMIT_RESOLVE_FAILED,
     BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_MERGE_METHOD_UNSUPPORTED,
     BITBUCKET_MERGE_TASK_TIMEOUT,
@@ -25,6 +26,10 @@ pytestmark = pytest.mark.unit
 _HEAD = "s" * 40
 _REPO = "/2.0/repositories/workspace/repo"
 _PR = f"{_REPO}/pullrequests/42"
+# BitBucket Cloud serves ``source.commit.hash`` in the abbreviated 12-char form;
+# the commit endpoint resolves it to the full 40-char SHA AWF assumes (#477).
+_ABBREV_HEAD = "a59f411ce4c4"
+_FULL_HEAD = "a59f411ce4c403fe6185df79df05f9b51743c084"
 
 
 def _seed_fetch_status(
@@ -247,6 +252,105 @@ async def test_paginate_propagates_cache_to_subsequent_pages() -> None:
     # Only a propagated ``cache=True`` stores the page-2 ETag on pass one and sends
     # it back as ``If-None-Match`` on pass two.
     assert page2_requests[-1].headers.get("If-None-Match") == "p2"
+
+
+def _seed_resolve_fetch_status(
+    fake: FakeBitBucket,
+    *,
+    abbrev: str,
+    full: str,
+    statuses: list[dict] | None = None,
+) -> None:
+    """Seed a fetch_pr_status whose head SHA is abbreviated and resolved to ``full``.
+
+    The commit-resolve GET (``commit/{abbrev}`` → ``{"hash": full}``) is enqueued
+    BEFORE the commit-statuses page, which is keyed on the FULL hash because the
+    adapter resolves the head before fetching its statuses (#477).
+    """
+    fake.enqueue("GET", _PR, json=pr_payload(source_sha=abbrev))
+    fake.enqueue("GET", f"{_REPO}/commit/{abbrev}", json={"hash": full})
+    fake.page("GET", f"{_REPO}/commit/{full}/statuses", values=statuses or [])
+    fake.page("GET", f"{_PR}/comments", values=[])
+    fake.page("GET", f"{_PR}/diffstat", values=[])
+    fake.page("GET", f"{_PR}/tasks", values=[])
+    fake.enqueue("GET", "/2.0/user", json={"account_id": "viewer"})
+
+
+async def test_fetch_pr_status_resolves_abbreviated_head_sha_to_full() -> None:
+    # (a) BitBucket serves an abbreviated 12-char head; the adapter resolves it to
+    # the full 40-char SHA so the pre-merge validation-provenance gate matches.
+    fake = FakeBitBucket()
+    _seed_resolve_fetch_status(fake, abbrev=_ABBREV_HEAD, full=_FULL_HEAD)
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.head_sha == _FULL_HEAD
+    assert len(status.head_sha) == 40
+    # The commit-statuses fetch was issued against the FULL hash path, not the
+    # abbreviated one the PR GET returned.
+    status_paths = [r.url.path for r in fake.calls("GET")]
+    assert f"{_REPO}/commit/{_FULL_HEAD}/statuses" in status_paths
+    assert f"{_REPO}/commit/{_ABBREV_HEAD}/statuses" not in status_paths
+    # (c) prefix sanity: the abbreviated input is a strict prefix of the resolution.
+    assert _FULL_HEAD.startswith(_ABBREV_HEAD)
+    assert len(_FULL_HEAD) > len(_ABBREV_HEAD)
+
+
+async def test_fetch_pr_status_full_head_sha_makes_no_resolve_call() -> None:
+    # (b) A PR already reporting a full 40-char hash incurs NO extra resolve GET.
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake)
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.head_sha == _HEAD
+    # No bare ``commit/{sha}`` resolve request (the statuses fetch carries a
+    # ``/statuses`` suffix; the resolve call would not).
+    resolve_calls = [r for r in fake.calls("GET") if r.url.path == f"{_REPO}/commit/{_HEAD}"]
+    assert resolve_calls == []
+
+
+async def test_resolve_full_commit_sha_full_input_skips_http() -> None:
+    # The unit-level early return: a 40-char hash is returned verbatim with zero
+    # HTTP calls, protecting the "no extra call" optimization.
+    fake = FakeBitBucket()
+    client = make_client(fake)
+    resolved = await client._resolve_full_commit_sha(repo(), _HEAD)
+    assert resolved == _HEAD
+    assert fake.calls("GET") == []
+
+
+async def test_fetch_pr_status_resolve_http_failure_propagates_not_silent() -> None:
+    # (e) A failing commit-resolve GET must surface a BitBucketClientError — never
+    # silently fall back to the abbreviated hash (which would re-block the merge).
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload(source_sha=_ABBREV_HEAD))
+    fake.enqueue("GET", f"{_REPO}/commit/{_ABBREV_HEAD}", status=500, json={"type": "error"})
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError):
+        await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+
+
+async def test_fetch_pr_status_resolve_short_hash_raises_resolve_failed() -> None:
+    # (e) A 200 commit-resolve whose ``hash`` is too short to be a full SHA is an
+    # unusable payload: raise the deterministic reason code rather than degrade.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload(source_sha=_ABBREV_HEAD))
+    fake.enqueue("GET", f"{_REPO}/commit/{_ABBREV_HEAD}", json={"hash": "abc"})
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert excinfo.value.reason_code == BITBUCKET_COMMIT_RESOLVE_FAILED
+
+
+async def test_fetch_pr_status_resolve_non_dict_raises_resolve_failed() -> None:
+    # (e) A non-dict commit-resolve body carries no ``hash`` at all → deterministic
+    # BITBUCKET_COMMIT_RESOLVE_FAILED rather than a silent abbreviated fallback.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload(source_sha=_ABBREV_HEAD))
+    fake.enqueue("GET", f"{_REPO}/commit/{_ABBREV_HEAD}", json=["unexpected"])
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert excinfo.value.reason_code == BITBUCKET_COMMIT_RESOLVE_FAILED
 
 
 def _general_comment(comment_id: int, body: str) -> dict:
