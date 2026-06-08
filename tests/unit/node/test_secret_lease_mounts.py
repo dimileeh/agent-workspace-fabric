@@ -24,6 +24,19 @@ def _profile(*secrets: dict[str, object]) -> WorkspaceProfile:
     )
 
 
+def _profile_with_runtime_env(
+    runtime_environment: dict[str, str],
+    *secrets: dict[str, object],
+) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "lease-profile",
+            "secrets": list(secrets),
+            "runtime": {"environment": runtime_environment},
+        }
+    )
+
+
 def _resolver(
     tmp_path: Path,
     *,
@@ -757,6 +770,43 @@ def test_bitbucket_email_only_lease_does_not_wire_agent_git_auth(tmp_path: Path)
     assert resolution.metadata["env_count"] == 1
     assert resolution.metadata["total_env_count"] == 1
     assert resolution.metadata["mount_count"] == 0
+
+
+@pytest.mark.unit
+def test_bitbucket_token_lease_skips_git_auth_when_profile_presets_git_askpass(
+    tmp_path: Path,
+) -> None:
+    # When the profile already declares GIT_ASKPASS in runtime.environment, the
+    # StackLauncher merge keeps the profile's value (merge_agent_environment does
+    # not clobber existing keys). If the resolver still wired its own askpass +
+    # insteadOf rewrites, Git would rewrite bitbucket.org URLs to require an
+    # askpass password but invoke the profile's unrelated GIT_ASKPASS, breaking
+    # private Bitbucket fetch/push. So when the profile presets GIT_ASKPASS the
+    # resolver must NOT wire the agent git-auth block (no GIT_ASKPASS override,
+    # no insteadOf rewrites, no askpass mount) — it leaves the token placeholder
+    # for the profile's own askpass to consume.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    resolution = resolver.resolve(
+        _profile_with_runtime_env(
+            {"GIT_ASKPASS": "/profile/askpass.sh"},
+            _bitbucket_token_lease(),
+        ),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    # The token lease placeholder is still emitted for the profile's askpass.
+    assert env == {"BITBUCKET_API_TOKEN": "${BITBUCKET_API_TOKEN}"}
+    # No AWF-internal git-auth wiring: the resolver did not override GIT_ASKPASS,
+    # emit insteadOf rewrites, or mount the bitbucket askpass script.
+    assert "GIT_ASKPASS" not in env
+    assert "GIT_TERMINAL_PROMPT" not in env
+    assert "GIT_CONFIG_COUNT" not in env
+    assert resolution.mounts == ()
+    assert resolution.metadata["mount_count"] == 0
+    assert resolution.metadata["env_count"] == 1
+    assert resolution.metadata["total_env_count"] == 1
 
 
 @pytest.mark.unit

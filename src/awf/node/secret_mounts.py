@@ -138,6 +138,14 @@ class LocalSecretLeaseMountResolver:
         workspace_id: str,
     ) -> LocalSecretLeaseResolution:
         source_env = os.environ if self.host_env is None else self.host_env
+        # When a profile already declares GIT_ASKPASS in its runtime environment,
+        # StackLauncher merges the lease env on top WITHOUT clobbering it
+        # (``merge_agent_environment``), so the profile's GIT_ASKPASS wins in the
+        # container. Wiring the bitbucket askpass block in that case would emit
+        # ``insteadOf`` rewrites that force an askpass password while Git invokes
+        # the profile's unrelated script — breaking private Bitbucket fetch/push.
+        # Detect it here so the auth block stays gated on the effective agent env.
+        profile_presets_git_askpass = "GIT_ASKPASS" in profile.runtime.environment
         env: dict[str, str] = {}
         mounts: list[AuthMount] = []
         providers: list[str] = []
@@ -209,12 +217,20 @@ class LocalSecretLeaseMountResolver:
                 lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
-                if pair[0] == _BITBUCKET_GIT_TOKEN_TARGET and "GIT_ASKPASS" not in env:
+                if (
+                    pair[0] == _BITBUCKET_GIT_TOKEN_TARGET
+                    and "GIT_ASKPASS" not in env
+                    and not profile_presets_git_askpass
+                ):
                     # The git token was injected: wire agent-side git-over-HTTPS
                     # auth (askpass file + insteadOf). Gated on GIT_ASKPASS being
-                    # absent so a duplicate token lease cannot mount the script
-                    # twice. The email lease (REST basic auth) is independent and
-                    # does not trigger this.
+                    # absent from both the lease env (so a duplicate token lease
+                    # cannot mount the script twice) and the profile's effective
+                    # agent env (so a profile-provided GIT_ASKPASS, which the
+                    # StackLauncher merge keeps, is not contradicted by insteadOf
+                    # rewrites that only the AWF askpass can satisfy). The email
+                    # lease (REST basic auth) is independent and does not trigger
+                    # this.
                     self._materialize_bitbucket_agent_askpass(
                         env,
                         mounts,
