@@ -426,7 +426,16 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     # so a permanent error from a different registry (e.g. ghcr.io) that
     # happens to embed the same library path is not attributed to an in-flight
     # Docker Hub pull (PRRT_kwDOSJAM6s6HtQiD).
-    if "/" not in repo_path:
+    # The library/ URL form is a Docker Hub convention — only apply it for
+    # unqualified refs (no explicit host) or refs that name a Docker Hub host
+    # explicitly.  An explicit non-Docker-Hub ref such as ``ghcr.io/postgres:16``
+    # has a single-component repo path just like an unqualified library image, but
+    # its daemon URLs never contain ``/v2/library/<name>/`` — that path belongs to
+    # Docker Hub.  Without this guard a nearby Docker Hub denial for
+    # ``registry-1.docker.io/v2/library/postgres/manifests/16`` would be
+    # incorrectly attributed to a ``ghcr.io/postgres:16`` pull, suppressing a
+    # legitimate transient-timeout rerun (PRRT_kwDOSJAM6s6HtWjC).
+    if "/" not in repo_path and (not _is_registry_host or _host in _DOCKER_HUB_REGISTRY_HOSTS):
         lib_prefix = f"/v2/library/{repo_path}/manifests/"
         if lib_prefix in line:
             if not _is_registry_host and not any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS):
@@ -463,7 +472,10 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     # Docker Hub library images (single-word names like "postgres") appear in
     # token requests as scope=repository%3alibrary%2f<name>%3a rather than
     # scope=repository%3a<name>%3a — mirrors the /v2/library/ treatment above.
-    if "/" not in repo_path:
+    # Same Docker Hub scoping as the manifest URL block: skip this for explicit
+    # non-Docker-Hub refs so a Docker Hub token denial is not attributed to a
+    # pull of e.g. ``ghcr.io/postgres:16`` (PRRT_kwDOSJAM6s6HtWjC).
+    if "/" not in repo_path and (not _is_registry_host or _host in _DOCKER_HUB_REGISTRY_HOSTS):
         lib_token_scope = f"scope=repository%3alibrary%2f{repo_path}%3a"
         if lib_token_scope in line:
             return "auth.docker.io" in line or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)

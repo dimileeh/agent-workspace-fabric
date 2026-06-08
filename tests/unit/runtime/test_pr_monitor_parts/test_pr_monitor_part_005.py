@@ -1220,6 +1220,52 @@ class TestImageRefMatchesDaemonUrl:
         assert _image_ref_matches_daemon_url("postgres:16", line) is False
 
     @pytest.mark.unit
+    def test_explicit_non_docker_hub_library_path_ref_does_not_match_docker_hub_manifest_url(
+        self,
+    ) -> None:
+        """An explicit non-Docker-Hub ref with a single-component path must NOT
+        match a Docker Hub library manifest URL.
+
+        ``docker pull ghcr.io/postgres:16`` resolves to a single-component
+        repo path (``postgres``) with an explicit non-Docker-Hub host.  When a
+        nearby unrelated daemon denial for
+        ``https://registry-1.docker.io/v2/library/postgres/manifests/16``
+        appears in the same log window, ``_image_ref_matches_daemon_url`` must
+        return False — the library/ URL belongs to Docker Hub, not ghcr.io,
+        and must not be attributed to the ghcr.io pull.
+
+        Without the Docker Hub host guard on the library/ block the single-
+        component path triggers the library fallback, the hostless
+        ``/v2/library/postgres/manifests/16`` fragment matches the Docker Hub
+        URL, and AWF falsely suppresses a legitimate transient-timeout rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtWjC."""
+        hub_line = 'Head "https://registry-1.docker.io/v2/library/postgres/manifests/16": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/postgres:16", hub_line) is False
+
+        other_line = 'Head "https://registry.example.com/v2/library/postgres/manifests/16": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/postgres:16", other_line) is False
+
+    @pytest.mark.unit
+    def test_explicit_non_docker_hub_library_path_ref_does_not_match_docker_hub_token_url(
+        self,
+    ) -> None:
+        """An explicit non-Docker-Hub ref with a single-component path must NOT
+        match a Docker Hub library token-service denial.
+
+        ``docker pull ghcr.io/postgres:16`` must not be attributed to an
+        ``auth.docker.io`` token denial that embeds
+        ``scope=repository%3alibrary%2fpostgres%3a``.  That token endpoint
+        belongs to Docker Hub, not ghcr.io.
+
+        Regression for PRRT_kwDOSJAM6s6HtWjC."""
+        line = (
+            'get "https://auth.docker.io/token?scope=repository%3alibrary%2fpostgres%3apull":'
+            " denied"
+        )
+        assert _image_ref_matches_daemon_url("ghcr.io/postgres:16", line) is False
+
+    @pytest.mark.unit
     def test_token_endpoint_permanent_auth_failure_reports_ci_failure(self) -> None:
         """``decide()`` must classify a token-service auth denial as a permanent
         CI failure (ReportCiFailure), not a transient rerun.
