@@ -67,6 +67,8 @@ def test_env_provider_exposes_placeholder_without_secret_value(tmp_path: Path) -
     )
     assert raw_secret not in rendered
     assert resolution.metadata["env_count"] == 1
+    # No AWF-internal env vars here, so the full env count matches the lease count.
+    assert resolution.metadata["total_env_count"] == 1
     assert resolution.metadata["mount_count"] == 0
     assert resolution.metadata["providers"] == ["env"]
     assert resolution.metadata["targets"] == ["OPENAI_API_KEY"]
@@ -704,6 +706,13 @@ def test_bitbucket_provider_exposes_token_and_email_placeholders(tmp_path: Path)
     # mount is reflected by ``mount_count`` only, not as a declared target.
     assert resolution.metadata["targets"] == ["BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL"]
     assert resolution.metadata["mount_count"] == 1
+    # ``env_count`` stays a faithful declared-lease proxy (the two token/email
+    # leases) and excludes the AWF-internal git-auth env vars (GIT_ASKPASS,
+    # GIT_TERMINAL_PROMPT, and the GIT_CONFIG_* insteadOf entries), which inflate
+    # ``total_env_count`` only.
+    assert resolution.metadata["env_count"] == 2
+    assert resolution.metadata["total_env_count"] == len(env)
+    assert resolution.metadata["total_env_count"] > resolution.metadata["env_count"]
 
 
 @pytest.mark.unit
@@ -744,6 +753,9 @@ def test_bitbucket_email_only_lease_does_not_wire_agent_git_auth(tmp_path: Path)
     assert "GIT_ASKPASS" not in env
     assert "GIT_CONFIG_COUNT" not in env
     assert resolution.mounts == ()
+    # No git wiring, so the declared-lease count equals the full env count.
+    assert resolution.metadata["env_count"] == 1
+    assert resolution.metadata["total_env_count"] == 1
     assert resolution.metadata["mount_count"] == 0
 
 

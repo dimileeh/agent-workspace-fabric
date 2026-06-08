@@ -142,6 +142,11 @@ class LocalSecretLeaseMountResolver:
         mounts: list[AuthMount] = []
         providers: list[str] = []
         targets: list[str] = []
+        # Counts only profile-declared lease env pairs. AWF-internal git-auth env
+        # vars (GIT_ASKPASS/GIT_CONFIG_* injected by the bitbucket askpass wiring)
+        # land in ``env`` too, so ``len(env)`` over-counts declared leases; this
+        # keeps ``env_count`` a faithful declared-lease proxy.
+        lease_env_count = 0
         omitted_optional: list[dict[str, str]] = []
         satisfied_legacy_targets: set[str] = set()
         satisfied_legacy_providers: set[str] = set()
@@ -169,6 +174,7 @@ class LocalSecretLeaseMountResolver:
                 if pair is None:
                     continue
                 _append_env_pair(env, pair)
+                lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
                 continue
@@ -184,6 +190,7 @@ class LocalSecretLeaseMountResolver:
                     continue
                 for pair in pairs:
                     _append_env_pair(env, pair)
+                    lease_env_count += 1
                     _append_unique(targets, pair[0])
                 _append_unique(providers, provider)
                 satisfied_legacy_providers.add("github")
@@ -199,6 +206,7 @@ class LocalSecretLeaseMountResolver:
                 if pair is None:
                     continue
                 _append_env_pair(env, pair)
+                lease_env_count += 1
                 _append_unique(providers, provider)
                 _append_unique(targets, pair[0])
                 if pair[0] == _BITBUCKET_GIT_TOKEN_TARGET and "GIT_ASKPASS" not in env:
@@ -246,7 +254,8 @@ class LocalSecretLeaseMountResolver:
         metadata: dict[str, Any] = {
             "schema": "secret_lease_mount_metadata.v1",
             "mount_plan": "profile_declared_secret_leases",
-            "env_count": len(env),
+            "env_count": lease_env_count,
+            "total_env_count": len(env),
             "mount_count": len(mounts),
             "providers": providers,
             "targets": targets,
