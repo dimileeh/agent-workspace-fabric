@@ -34,7 +34,6 @@ import json
 import os
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -63,6 +62,7 @@ from awf.common.bitbucket_client_parsing import (
     _as_dict,
     _clean_optional_str,
     _FrozenParams,
+    _PRContext,
     _tail,
     bb_merge_strategy_for_method,
     build_blocking_reviews,
@@ -70,6 +70,7 @@ from awf.common.bitbucket_client_parsing import (
     build_unresolved_task_threads,
     decode_task_id,
     decode_thread_id,
+    effective_merge_strategies,
     extract_diffstat_paths,
     freeze_params,
     html_href,
@@ -143,31 +144,6 @@ _DEFAULT_MAX_REDIRECTS = 5
 # that poll loop so a stuck task cannot hang the monitor.
 _DEFAULT_MAX_MERGE_POLLS = 30
 _DEFAULT_MERGE_POLL_DELAY_SECONDS = 2.0
-
-
-@dataclass(frozen=True)
-class _PRContext:
-    """Per-repo PR context remembered so repo-less Protocol methods can act."""
-
-    pr_number: int
-    source_branch: str | None
-    source_sha: str | None
-    dest_branch: str | None
-    dest_sha: str | None
-    merge_strategies: list[str] | None
-    default_merge_strategy: str | None
-
-    def is_rerunnable(self) -> bool:
-        """True only when a PR pipeline target can be safely reconstructed."""
-        return all(
-            value is not None
-            for value in (
-                self.source_branch,
-                self.dest_branch,
-                self.source_sha,
-                self.dest_sha,
-            )
-        )
 
 
 class BitBucketClient:
@@ -640,22 +616,6 @@ class BitBucketClient:
         # has no guaranteed link to the specific issue).
         return html_href(data) or self._issue_url_from_id(data, repo) or self._issues_page_url(repo)
 
-    @staticmethod
-    def _effective_merge_strategies(ctx: _PRContext) -> list[str] | None:
-        """Resolve the destination branch's merge strategies, defaulting if needed.
-
-        BitBucket may expose only ``destination.branch.default_merge_strategy`` while
-        omitting or leaving ``merge_strategies`` empty. The default strategy is by
-        definition an enabled one, so treat it as the sole allowed strategy in that
-        case rather than reporting an empty policy that would wedge the merge gate.
-        Returns ``None`` when neither field is present (genuinely unconstrained).
-        """
-        if ctx.merge_strategies:
-            return ctx.merge_strategies
-        if ctx.default_merge_strategy is not None:
-            return [ctx.default_merge_strategy]
-        return None
-
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return enabled merge methods from the remembered PR destination branch.
 
@@ -673,7 +633,7 @@ class BitBucketClient:
                 repo=repo.slug(),
             )
             return ()
-        return map_bb_merge_methods(self._effective_merge_strategies(ctx))
+        return map_bb_merge_methods(effective_merge_strategies(ctx))
 
     async def fetch_branch_pull_request_allowed_merge_methods(
         self,
@@ -691,7 +651,7 @@ class BitBucketClient:
         ctx = self._pr_context.get(repo.slug())
         if ctx is None:
             return None
-        strategies = self._effective_merge_strategies(ctx)
+        strategies = effective_merge_strategies(ctx)
         if strategies is None:
             return None
         return map_bb_merge_methods(strategies)
