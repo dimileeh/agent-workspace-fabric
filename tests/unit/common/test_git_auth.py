@@ -199,6 +199,65 @@ def test_bitbucket_askpass_script_references_exactly_the_injected_env_name() -> 
     assert "BITBUCKET_API_TOKEN" not in script
 
 
+def _run_askpass(prompt: str, *, token: str = _TOKEN) -> str:
+    """Execute the generated askpass script for ``prompt`` and return its stdout.
+
+    Drives the *real* POSIX-sh host gate so a regression in the ``case`` pattern
+    (e.g. dropping the host scope and leaking the token to every prompt) fails
+    loudly instead of passing a string-shape assertion.
+    """
+    import subprocess
+    import tempfile
+
+    script = bitbucket_askpass_script("BITBUCKET_API_TOKEN")
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+        handle.write(script)
+        path = handle.name
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell, test-only
+        ["/bin/sh", path, prompt],
+        capture_output=True,
+        text=True,
+        env={"BITBUCKET_API_TOKEN": token},
+        check=True,
+    )
+    return result.stdout
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # The sentinel-username password prompt git actually issues after the
+        # insteadOf rewrite, plus the bare-host, path, and port shapes.
+        "Password for 'https://x-bitbucket-api-token-auth@bitbucket.org': ",
+        "Password for 'https://bitbucket.org/ws/repo.git': ",
+        "Username for 'https://bitbucket.org': ",
+        "Password for 'https://bitbucket.org:443/ws/repo': ",
+    ],
+)
+def test_bitbucket_askpass_script_emits_token_only_for_bitbucket_host(prompt: str) -> None:
+    assert _run_askpass(prompt) == _TOKEN
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # GIT_ASKPASS is process-wide: a foreign HTTPS host that prompts for
+        # credentials must NOT receive the BitBucket token.
+        "Password for 'https://github.com': ",
+        "Password for 'https://x@github.com': ",
+        "Password for 'https://gitlab.com/foo': ",
+        # Look-alike hosts must not match the bitbucket.org host gate.
+        "Password for 'https://bitbucket.org.evil.com/ws/repo': ",
+        "Password for 'https://user@bitbucket.org.evil.com': ",
+        "Password for 'https://notbitbucket.org/foo': ",
+    ],
+)
+def test_bitbucket_askpass_script_withholds_token_from_other_hosts(prompt: str) -> None:
+    assert _run_askpass(prompt) == ""
+
+
 @pytest.mark.unit
 def test_bitbucket_agent_git_config_entries_rewrite_all_remote_forms() -> None:
     entries = bitbucket_agent_git_config_entries()

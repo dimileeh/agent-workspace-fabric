@@ -153,10 +153,30 @@ def bitbucket_askpass_script(token_env_var: str) -> str:
     the sentinel username is supplied via the ``insteadOf`` URL rewrite, git only
     ever asks the askpass for the *password*, so the script just prints the token.
 
+    ``GIT_ASKPASS`` is **process-wide**: git invokes it for *every* credential
+    prompt, not just bitbucket.org ones, so an unconditional script would hand the
+    BitBucket token to any other HTTPS remote that happens to prompt for
+    credentials (e.g. a later ``git fetch`` against a different host that 401s).
+    The script therefore gates on the prompt host — git's askpass prompt embeds
+    the target URL (``Password for 'https://…@bitbucket.org': ``) — and emits the
+    token only when that URL's host is exactly ``bitbucket.org``. The host is
+    matched at a delimiter boundary (preceded by ``//`` or ``@`` user-info, and
+    followed by a port ``:``, a path ``/``, or git's closing ``'``) so a
+    look-alike host such as ``bitbucket.org.evil.com`` never matches. For any
+    other host the script emits nothing and git falls back as if no askpass
+    answered.
+
     The script is materialized to a per-workspace file and mounted read-only +
     executable into the agent (see ``node.secret_mounts``).
     """
-    return f"#!/bin/sh\nprintf '%s' \"${token_env_var}\"\n"
+    host = BITBUCKET_GIT_HOST
+    patterns = "|".join(
+        f"*{prefix}{host}{suffix}*"
+        for prefix in ("//", "@")
+        # ``\\'`` matches a literal single quote (git wraps the URL in '…').
+        for suffix in ("/", ":", "\\'")
+    )
+    return f'#!/bin/sh\ncase "$1" in\n{patterns})\n  printf \'%s\' "${token_env_var}" ;;\nesac\n'
 
 
 def bitbucket_agent_git_config_entries() -> tuple[tuple[str, str], ...]:
