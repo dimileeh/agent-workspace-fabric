@@ -348,6 +348,12 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     daemon API URLs, not ``/v2/<name>/``, so both fragments are checked when
     the resolved repo path contains no slash.
     """
+    # Strip any @digest suffix (e.g. @sha256:abc) before tag/registry
+    # processing.  A digest colon would otherwise be mistaken for a tag
+    # separator, leaving the algorithm suffix in repo_path.
+    at_sign = image_ref.find("@")
+    if at_sign != -1:
+        image_ref = image_ref[:at_sign]
     # Strip the image tag (last ":tag") without confusing a registry port
     # ("registry.host:5000/image:tag") with a tag separator.  A colon is a
     # tag separator only when nothing after it contains a "/" — a registry

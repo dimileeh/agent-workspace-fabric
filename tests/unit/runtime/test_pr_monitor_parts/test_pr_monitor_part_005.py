@@ -856,3 +856,25 @@ class TestImageRefMatchesDaemonUrl:
 
         assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_digest_pinned_ref_matches_daemon_url(self) -> None:
+        """A digest-pinned image ref (``@sha256:...``) must match the daemon URL.
+
+        Before the fix, ``rfind(":")`` found the colon inside ``sha256:bad``,
+        leaving ``ref_no_tag = ghcr.io/org/app@sha256`` and therefore
+        ``repo_path = org/app@sha256``.  The ``/v2/org/app/`` fragment check
+        then failed and the pull was misclassified as transient.
+
+        Regression for PRRT_kwDOSJAM6s6HtAGv."""
+        line = 'Head "https://ghcr.io/v2/org/app/manifests/sha256:bad": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app@sha256:bad", line) is True
+
+    @pytest.mark.unit
+    def test_digest_pinned_ref_no_registry_matches_daemon_url(self) -> None:
+        """A digest-pinned official (library) image must resolve to
+        ``/v2/library/<name>/`` even when the ref uses a digest, not a tag."""
+        line = (
+            'Head "https://registry-1.docker.io/v2/library/postgres/manifests/sha256:abc": denied'
+        )
+        assert _image_ref_matches_daemon_url("postgres@sha256:abc", line) is True
