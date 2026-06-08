@@ -787,6 +787,30 @@ def test_bitbucket_askpass_script_materialized_read_only_executable_and_static(
 
 
 @pytest.mark.unit
+def test_bitbucket_askpass_rematerializes_after_chmod_on_reprovision(
+    tmp_path: Path,
+) -> None:
+    # The first materialization writes the script and marks it 0o555 (no write
+    # bits). A later resolve for the same workspace (reprovision / stack
+    # relaunch) must rewrite the read-only script in place rather than raising
+    # PermissionError, matching the idempotent ``mkdir(exist_ok=True)`` intent.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+    profile = _profile(_bitbucket_token_lease())
+
+    first = resolver.resolve(profile, workspace_id="ws_secret")
+    script_path = Path(
+        next(m for m in first.mounts if m.target == "/run/awf/secrets/bb-askpass.sh").source
+    )
+    assert (script_path.stat().st_mode & 0o777) == 0o555
+
+    # Second resolve must not raise even though the file is non-writable.
+    second = resolver.resolve(profile, workspace_id="ws_secret")
+    assert any(m.target == "/run/awf/secrets/bb-askpass.sh" for m in second.mounts)
+    assert (script_path.stat().st_mode & 0o777) == 0o555
+    assert script_path.read_text(encoding="utf-8").startswith("#!/bin/sh")
+
+
+@pytest.mark.unit
 def test_non_bitbucket_lease_does_not_wire_agent_git_auth(tmp_path: Path) -> None:
     # A non-bitbucket (env/OpenAI) lease yields none of the agent git wiring.
     resolver = _resolver(tmp_path, host_env={"OPENAI_API_KEY": "sk-live-do-not-render"})

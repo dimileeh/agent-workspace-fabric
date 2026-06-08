@@ -359,6 +359,11 @@ class LocalSecretLeaseMountResolver:
         script_dir = self.work_dir / _SECRET_LEASE_MATERIALIZATION_SUBDIR / workspace_id
         script_dir.mkdir(parents=True, exist_ok=True)
         askpass_path = script_dir / _BITBUCKET_ASKPASS_FILENAME
+        # Idempotent re-materialization (reprovision / stack relaunch): a prior
+        # run leaves the script at 0o555 with no write bits, so ``write_text``
+        # would raise ``PermissionError`` when not running as root. Drop any
+        # existing file first so the rewrite always succeeds.
+        askpass_path.unlink(missing_ok=True)
         askpass_path.write_text(bitbucket_askpass_script(token_env_var), encoding="utf-8")
         # World read+execute: a non-secret, static script. Read-only bind mounts
         # preserve the host inode mode, so world-x lets the agent execute it
