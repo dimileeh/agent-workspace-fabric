@@ -469,9 +469,10 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         if lib_repo_prefix in line:
             # Same Docker Hub host guard as lib_prefix above: for unqualified refs and
             # Docker Hub alias hosts, require a Docker Hub host in the line.
-            return (_is_registry_host and _host not in _DOCKER_HUB_REGISTRY_HOSTS) or any(
-                h in line for h in _DOCKER_HUB_REGISTRY_HOSTS
-            )
+            # (_is_registry_host and _host not in _DOCKER_HUB_REGISTRY_HOSTS) is always
+            # False here: the outer guard at line 452 ensures that when _is_registry_host
+            # is True, _host must be in _DOCKER_HUB_REGISTRY_HOSTS.
+            return any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
     # Token-service endpoint URLs embed the repository in the OAuth scope
     # parameter as scope=repository%3A<repo>%3A<actions> (URL-encoded from
     # scope=repository:<repo>:<actions>).  A permanent auth failure at the
