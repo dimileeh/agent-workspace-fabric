@@ -1378,3 +1378,31 @@ class TestImageRefMatchesDaemonUrl:
 
         assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_hostname_suffix_does_not_match_longer_registry_host(self) -> None:
+        """A pull from ``registry.example.com`` must not match a daemon error URL
+        from ``prod.registry.example.com`` just because the former hostname is a
+        raw substring of the latter.
+
+        Without URL-boundary anchoring the prefix
+        ``registry.example.com/v2/org/app/manifests/`` is a substring of
+        ``prod.registry.example.com/v2/org/app/manifests/``, causing an unrelated
+        transient timeout to be mis-classified as a permanent denial and the
+        rerun to be skipped.
+
+        Regression for PRRT_kwDOSJAM6s6HtZng."""
+        # Line comes from a *different* registry (prod.registry.example.com)
+        unrelated_line = (
+            'Head "https://prod.registry.example.com/v2/org/app/manifests/latest": denied'
+        )
+        assert (
+            _image_ref_matches_daemon_url("registry.example.com/org/app:latest", unrelated_line)
+            is False
+        )
+
+        # Sanity: the pull's own registry host still matches
+        own_line = 'Head "https://registry.example.com/v2/org/app/manifests/latest": denied'
+        assert (
+            _image_ref_matches_daemon_url("registry.example.com/org/app:latest", own_line) is True
+        )

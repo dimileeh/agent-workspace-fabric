@@ -396,7 +396,11 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     # URL check to that host — a permanent error from a different registry
     # for the same repo path and tag must not be attributed to an in-flight
     # pull from the expected registry (PRRT_kwDOSJAM6s6HtKzI).
-    url_manifests_prefix = f"{_host}{manifests_prefix}" if _is_registry_host else manifests_prefix
+    # Use "//<host>" as the URL-boundary delimiter so that a hostname that is a
+    # suffix of another host (e.g. "registry.example.com" inside
+    # "prod.registry.example.com") does not falsely match.  In daemon URLs the
+    # registry host is always preceded by "://" (PRRT_kwDOSJAM6s6HtZng).
+    url_manifests_prefix = f"//{_host}{manifests_prefix}" if _is_registry_host else manifests_prefix
     if url_manifests_prefix in line:
         # Daemon URL is a manifest request; require tag/digest to match so
         # same-repo but different-tag errors are not conflated.  When no
@@ -414,7 +418,7 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
             return False
         effective_ref = manifest_ref if manifest_ref is not None else "latest"
         return f"{url_manifests_prefix}{effective_ref}" in line
-    url_repo_prefix = f"{_host}/v2/{repo_path}/" if _is_registry_host else f"/v2/{repo_path}/"
+    url_repo_prefix = f"//{_host}/v2/{repo_path}/" if _is_registry_host else f"/v2/{repo_path}/"
     if url_repo_prefix in line:
         # Same Docker Hub scoping as above: /v2/<repo>/ without a host prefix
         # matches any registry (PRRT_kwDOSJAM6s6HtNI4).
