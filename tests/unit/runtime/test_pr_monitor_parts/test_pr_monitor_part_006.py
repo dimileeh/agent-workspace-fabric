@@ -720,6 +720,23 @@ class TestImageRefMatchesDaemonUrl:
         assert _image_ref_matches_daemon_url("postgres:16", line) is False
 
     @pytest.mark.unit
+    def test_tag_prefix_does_not_match_longer_tag(self) -> None:
+        """A pulled tag that is a prefix of another tag for the same repo must
+        NOT be attributed to a daemon URL for the longer tag.
+
+        With ``docker pull ghcr.io/org/app:v1`` in flight, a permanent denial
+        for ``https://ghcr.io/v2/org/app/manifests/v10`` must not match — the
+        raw substring ``/manifests/v1`` is contained in ``/manifests/v10``, so a
+        boundary check after the ref is required.
+
+        Regression for PRRT_kwDOSJAM6s6HuMAx."""
+        longer_tag_line = 'Head "https://ghcr.io/v2/org/app/manifests/v10": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:v1", longer_tag_line) is False
+
+        own_line = 'Head "https://ghcr.io/v2/org/app/manifests/v1": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:v1", own_line) is True
+
+    @pytest.mark.unit
     def test_unencoded_token_scope_permanent_denial_with_pull_echo_reports_ci_failure(
         self,
     ) -> None:
