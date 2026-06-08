@@ -74,7 +74,9 @@ async def _resolve_addressed_outdated_threads(
     failing resolve every cycle (a retry storm against a non-fixable fault). The
     thread is non-blocking for merge and dropped from the actionable feed, so
     neither path wedges auto-merge. A successful resolve needs no ``state``
-    mutation: the thread drops out of the outdated feed on the next fetch.
+    mutation: the thread drops out of the outdated feed on the next fetch. The
+    permanent-fault downgrade IS persisted before returning, so it survives a
+    subsequent transient ``_execute`` fault (which skips ``_persist_state``).
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
     for thread in status.outdated_unresolved_inline_threads:
@@ -152,6 +154,16 @@ async def _resolve_addressed_outdated_threads(
                 stderr=exc.redacted_detail(),
             )
             state.mark_addressed(tid, "needs_human")
+            # Persist the downgrade immediately. This step runs BEFORE ``decide`` /
+            # ``_execute`` in the runner loop, and ``_execute`` skips ``_persist_state``
+            # when it hits a transient ``ForgeClientError`` (continuing to the next
+            # poll, which reloads clean state from the DB). Without persisting here the
+            # in-memory ``needs_human`` downgrade would be lost on that path, and the
+            # next poll would re-issue the same known-permanent resolve — the exact
+            # retry storm this downgrade exists to stop. The mutation is safe to flush
+            # now: state was loaded fresh this iteration and carries no unconfirmed
+            # fix-cycle markers yet (those only appear inside ``_execute``).
+            await self._persist_state(workspace_id, state)
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,

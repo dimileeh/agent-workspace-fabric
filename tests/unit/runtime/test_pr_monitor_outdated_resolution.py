@@ -538,6 +538,60 @@ async def test_permanent_resolve_error_is_not_retried_next_poll(
 
 
 @pytest.mark.unit
+async def test_permanent_resolve_downgrade_survives_state_reload(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(e3) The ``needs_human`` downgrade must be PERSISTED, not just held in
+    memory. This step runs before ``_execute``, which skips ``_persist_state`` on
+    a transient fault and reloads clean state from the DB next poll. If the
+    downgrade lived only in memory it would be lost on that path, and the next
+    poll would re-issue the same known-permanent resolve — the retry storm the
+    downgrade exists to prevent. Unlike (e2), which reused one in-memory ``state``
+    across both polls, this reloads state from the DB between polls to mirror the
+    real loop (``state = self._load_state(ws)``)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    permanent = BitBucketClientError(
+        operation="bitbucket resolve_thread",
+        status=403,
+        body="thread resolution is not permitted for this token",
+        reason_code=BITBUCKET_API_ERROR,
+    )
+    gh = _RecordingGitHub(cmd, error=permanent)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    bb_id = "bb:workspace/repo#42:100"
+    thread = _outdated_thread(bb_id)
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+    status = _status_with_outdated(thread)
+
+    # First poll: permanent fault, one attempt, downgrade to needs_human (persisted).
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    # Next poll mirrors the loop: reload state from the DB rather than reusing the
+    # in-memory object. The persisted downgrade must come back as needs_human.
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        reloaded = runner._load_state(ws)  # type: ignore[attr-defined]
+    assert reloaded.threads_addressed_ids[bb_id] == "needs_human"
+
+    # Second poll with the reloaded state: the verdict is needs_human, so the step
+    # skips it without a second forge call (no retry storm).
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=reloaded)
+
+    assert gh.attempts == [bb_id]  # exactly one resolve attempt across both polls
+
+
+@pytest.mark.unit
 def test_outdated_resolvable_verdicts_exclude_defer() -> None:
     """The outdated-resolution verdict set is the fix-cycle's resolvable set MINUS
     ``defer`` — defer's resolution is gated on durable capture this hygiene step
