@@ -818,6 +818,64 @@ class TestImageRefMatchesDaemonUrl:
         assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)
 
+    @pytest.mark.unit
+    def test_non_manifest_blob_url_same_repo_does_not_match(self) -> None:
+        """A daemon error URL for a non-manifest path (blob) of the same repo must
+        NOT be attributed to the in-flight pull.
+
+        Blob URLs (``/v2/<repo>/blobs/<digest>``) are content-addressed and carry
+        no tag, so the same repository path appears for blobs of *any* tag.  A
+        permanent ``not found`` blob error for a different image/tag must not
+        suppress a legitimate transient-timeout rerun by matching solely on the
+        ``/v2/<repo>/`` prefix.
+
+        Regression for PRRT_kwDOSJAM6s6Huzsy."""
+        blob_line = 'get "https://ghcr.io/v2/org/app/blobs/sha256:bad": not found'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:good", blob_line) is False
+
+    @pytest.mark.unit
+    def test_library_non_manifest_blob_url_does_not_match(self) -> None:
+        """A daemon error URL for a non-manifest blob path of a Docker Hub library
+        image must NOT be attributed to the in-flight pull.
+
+        The same content-addressed blob path applies regardless of tag, so
+        ``/v2/library/<name>/blobs/<digest>`` must not match a pull of
+        ``<name>:<tag>`` without manifest-level ref verification.
+
+        Regression for PRRT_kwDOSJAM6s6Huzsy."""
+        blob_line = (
+            'get "https://registry-1.docker.io/v2/library/postgres/blobs/sha256:bad": not found'
+        )
+        assert _image_ref_matches_daemon_url("postgres:16", blob_line) is False
+
+    @pytest.mark.unit
+    def test_non_manifest_blob_error_does_not_suppress_transient_rerun(self) -> None:
+        """A transient registry pull (context deadline exceeded) must still trigger
+        a rerun when the only nearby daemon error is a non-manifest (blob) permanent
+        error for the same repository.
+
+        Scenario: ``docker pull ghcr.io/org/app:good`` times out, but an unrelated
+        permanent blob error ``Error response from daemon: Get
+        "https://ghcr.io/v2/org/app/blobs/sha256:bad": not found`` appears in the
+        same window (e.g. from a concurrent docker operation for a different tag).
+        Before the fix, ``_image_ref_matches_daemon_url`` returned True for the
+        blob URL solely on the ``/v2/org/app/`` prefix, the permanence probe
+        misclassified the summary as permanent, and AWF reported a CI failure
+        instead of scheduling a rerun.
+
+        Regression for PRRT_kwDOSJAM6s6Huzsy."""
+        from awf.runtime._docker_pull_detection import _log_shows_docker_registry_timeout
+
+        log = "\n".join(
+            [
+                "/usr/bin/docker pull ghcr.io/org/app:good",
+                'error response from daemon: get "https://ghcr.io/v2/org/app/blobs/sha256:bad": not found',
+                "docker pull failed with exit code 1",
+                "context deadline exceeded",
+            ]
+        )
+        assert _log_shows_docker_registry_timeout(log) is True
+
 
 class TestStripImageTag:
     """Unit tests for ``_strip_image_tag``."""
@@ -1028,22 +1086,33 @@ class TestImageRefMatchesDaemonUrlEdgeCases:
         )
 
     @pytest.mark.unit
-    def test_repo_prefix_without_manifests_matches(self) -> None:
-        """A daemon URL with the ``/v2/<repo>/`` prefix but without the full
-        ``/manifests/`` path must still be attributed to the in-flight pull
-        (line 483).
-        """
+    def test_repo_prefix_without_manifests_does_not_match(self) -> None:
+        """A daemon URL with the ``/v2/<repo>/`` prefix but without a
+        ``/manifests/<ref>`` path must NOT be attributed to the in-flight pull.
+
+        Non-manifest paths (e.g. ``/tags/list``, ``/blobs/<digest>``) are
+        content- or operation-addressed and carry no tag, so the same repository
+        prefix appears for operations on *any* tag.  A permanent error on such a
+        path for a different image/tag must not suppress a legitimate
+        transient-timeout rerun.
+
+        Regression for PRRT_kwDOSJAM6s6Huzsy."""
         line = 'Head "https://ghcr.io/v2/org/app/tags/list": denied'
-        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is True
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is False
 
     @pytest.mark.unit
-    def test_library_repo_prefix_without_manifests_matches_docker_hub(self) -> None:
+    def test_library_repo_prefix_without_manifests_does_not_match_docker_hub(self) -> None:
         """A Docker Hub daemon URL with ``/v2/library/<name>/`` but no
-        ``/manifests/`` suffix must match an unqualified Docker Hub image ref
-        when a known Docker Hub host is present (line 533).
-        """
+        ``/manifests/<ref>`` suffix must NOT match an unqualified Docker Hub image
+        ref.
+
+        Same reasoning as the non-library branch: non-manifest paths cannot be
+        attributed by tag/digest, so returning False is the safe choice to avoid
+        suppressing a transient rerun.
+
+        Regression for PRRT_kwDOSJAM6s6Huzsy."""
         line = 'Head "https://registry-1.docker.io/v2/library/postgres/tags/list": denied'
-        assert _image_ref_matches_daemon_url("postgres:16", line) is True
+        assert _image_ref_matches_daemon_url("postgres:16", line) is False
 
     @pytest.mark.unit
     def test_unqualified_docker_hub_ref_token_scope_matches_hub_host(self) -> None:

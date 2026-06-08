@@ -399,6 +399,15 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     ``ghcr.io/org/app:bad`` must not be attributed to a pull of
     ``ghcr.io/org/app:good`` (PRRT_kwDOSJAM6s6HtGA_).
 
+    Non-manifest registry paths (blob URLs ``/v2/<repo>/blobs/<digest>``, tags
+    list ``/v2/<repo>/tags/list``, etc.) are intentionally **not** matched.
+    Blob URLs are content-addressed and carry no tag, so the same path appears
+    for blobs of any tag in that repository.  A permanent ``not found`` blob
+    error for a *different* image would share the same ``/v2/<repo>/`` prefix
+    and would incorrectly be attributed to the in-flight pull, preventing a
+    legitimate transient-timeout rerun (PRRT_kwDOSJAM6s6Huzsy).  Only manifest
+    and token-service URLs carry enough information for safe attribution.
+
     Docker Hub official/library images (single-component names such as
     ``postgres`` or ``ubuntu``) are served under ``/v2/library/<name>/`` in
     daemon API URLs, not ``/v2/<name>/``, so both fragments are checked when
@@ -482,17 +491,6 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         # strict prefix of another (e.g. "v1" vs "v10") does not falsely match
         # (PRRT_kwDOSJAM6s6HuMAx).
         return after >= len(line) or not (line[after].isalnum() or line[after] in "._-")
-    url_repo_prefix = (
-        f"//{_host}/v2/{repo_path}/"
-        if _is_registry_host and not _is_docker_hub_alias
-        else f"/v2/{repo_path}/"
-    )
-    if url_repo_prefix in line:
-        # Same Docker Hub scoping as above: /v2/<repo>/ without a host prefix
-        # matches any registry (PRRT_kwDOSJAM6s6HtNI4, PRRT_kwDOSJAM6s6Htl06).
-        return (_is_registry_host and not _is_docker_hub_alias) or any(
-            f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
-        )
     # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
     # URLs as /v2/library/<name>/ rather than /v2/<name>/.  Apply the same
     # Docker Hub registry-host guard as the non-library branches above: for
@@ -533,14 +531,6 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
             # prefix of another (e.g. "v1" vs "v10") does not falsely match
             # (PRRT_kwDOSJAM6s6HubRs).
             return after >= len(line) or not (line[after].isalnum() or line[after] in "._-")
-        lib_repo_prefix = f"/v2/library/{repo_path}/"
-        if lib_repo_prefix in line:
-            # Same Docker Hub host guard as lib_prefix above: for unqualified refs and
-            # Docker Hub alias hosts, require a Docker Hub host in the line.
-            # (_is_registry_host and _host not in _DOCKER_HUB_REGISTRY_HOSTS) is always
-            # False here: the outer guard at line 452 ensures that when _is_registry_host
-            # is True, _host must be in _DOCKER_HUB_REGISTRY_HOSTS.
-            return any(f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
     # Token-service endpoint URLs embed the repository in the OAuth scope
     # parameter as scope=repository%3A<repo>%3A<actions> (URL-encoded from
     # scope=repository:<repo>:<actions>).  A permanent auth failure at the
