@@ -12,6 +12,7 @@ import pytest
 from awf.common.git_auth import (
     BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
     GitAuthNotConfiguredError,
+    add_git_config_entries,
     apply_bitbucket_agent_git_auth,
     apply_bitbucket_git_auth,
     bitbucket_agent_git_config_entries,
@@ -429,6 +430,21 @@ def test_apply_bitbucket_agent_git_auth_accumulates_onto_existing_git_config() -
     assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
     assert env["GIT_CONFIG_VALUE_0"] == "*"
     assert env["GIT_CONFIG_KEY_1"] == "credential.helper"
+
+
+@pytest.mark.unit
+def test_add_git_config_entries_tolerates_malformed_existing_count() -> None:
+    # A prior env lease may inject a non-integer GIT_CONFIG_COUNT into the resolver
+    # env. Accumulating must not raise a bare ValueError (which would escape the
+    # structured lease-error path); the malformed count is treated as 0 and the
+    # new entries are emitted as a fresh contiguous block.
+    env: dict[str, str] = {"GIT_CONFIG_COUNT": "not-a-number"}
+
+    add_git_config_entries(env, bitbucket_agent_git_config_entries())
+
+    assert env["GIT_CONFIG_COUNT"] == "5"
+    assert env["GIT_CONFIG_KEY_0"] == _AGENT_INSTEADOF_KEY
+    assert env["GIT_CONFIG_VALUE_0"] == "https://bitbucket.org/"
 
 
 @pytest.mark.unit

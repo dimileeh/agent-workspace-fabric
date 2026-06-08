@@ -276,8 +276,18 @@ def add_git_config_entries(
 
     Appends onto any existing ``GIT_CONFIG_COUNT`` so multiple callers (e.g. the
     GitHub block then the BitBucket block) compose without clobbering each other.
+
+    A malformed (non-integer) existing ``GIT_CONFIG_COUNT`` — which a profile env
+    lease could inject into the resolver env before this runs — is tolerated as
+    ``0`` (matching the compose-layer merge in ``profiles/compose.py``) rather than
+    raising a bare ``ValueError`` that would escape the structured lease-error path.
+    git rejects any block with holes or a mismatched count anyway, so the malformed
+    count is normalized rather than honoured.
     """
-    start_index = int(env.get("GIT_CONFIG_COUNT", "0"))
+    try:
+        start_index = int(env.get("GIT_CONFIG_COUNT", "0"))
+    except ValueError:
+        start_index = 0
     for offset, (key, value) in enumerate(entries):
         index = start_index + offset
         env[f"GIT_CONFIG_KEY_{index}"] = key
