@@ -248,6 +248,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
                 profile.monitor.non_check_reviewer_settle_seconds
             ),
             "non_check_reviewer_logins": profile.monitor.non_check_reviewer_logins,
+            "require_ci": profile.monitor.require_ci,
             "log_store": log_store,
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,

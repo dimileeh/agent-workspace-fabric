@@ -74,6 +74,8 @@ def _sample_pr_payload(
     check_state: str = "SUCCESS",
     check_contexts: list[dict] | None = None,
     check_contexts_has_next_page: bool = False,
+    check_contexts_total_count: int | None = None,
+    status_check_rollup_present: bool = True,
     threads: list[dict] | None = None,
     threads_has_next_page: bool = False,
     threads_end_cursor: str | None = None,
@@ -108,15 +110,20 @@ def _sample_pr_payload(
                             "nodes": [
                                 {
                                     "commit": {
-                                        "statusCheckRollup": {
-                                            "state": check_state,
-                                            "contexts": {
-                                                "nodes": check_contexts or [],
-                                                "pageInfo": {
-                                                    "hasNextPage": check_contexts_has_next_page
+                                        "statusCheckRollup": (
+                                            {
+                                                "state": check_state,
+                                                "contexts": {
+                                                    "nodes": check_contexts or [],
+                                                    "totalCount": check_contexts_total_count,
+                                                    "pageInfo": {
+                                                        "hasNextPage": check_contexts_has_next_page
+                                                    },
                                                 },
-                                            },
-                                        },
+                                            }
+                                            if status_check_rollup_present
+                                            else None
+                                        ),
                                         "committedDate": committed_date,
                                     }
                                 }
@@ -225,6 +232,65 @@ class TestFetchPrStatusPart001:
 
         assert status.unresolved_review_comments == ()
         assert status.blocking_reviews == ()
+
+    @pytest.mark.unit
+    async def test_no_checks_observed_when_rollup_absent(self) -> None:
+        # GitHub returns no statusCheckRollup at all for a commit with no CI;
+        # the authoritative signal is set True (#469).
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(status_check_rollup_present=False),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+        assert status.no_checks_observed is True
+        assert status.check_state == CheckState.PENDING
+
+    @pytest.mark.unit
+    async def test_no_checks_observed_when_rollup_present_but_empty(self) -> None:
+        # A present-but-empty rollup reports contexts.totalCount == 0.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                check_state="PENDING",
+                check_contexts=[],
+                check_contexts_total_count=0,
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+        assert status.no_checks_observed is True
+
+    @pytest.mark.unit
+    async def test_no_checks_observed_false_when_contexts_present(self) -> None:
+        # ≥1 context (totalCount >= 1) ⇒ the signal stays off, never skipping CI.
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                check_state="PENDING",
+                check_contexts=[
+                    {
+                        "__typename": "CheckRun",
+                        "name": "build",
+                        "status": "IN_PROGRESS",
+                        "conclusion": None,
+                    }
+                ],
+                check_contexts_total_count=1,
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+        assert status.no_checks_observed is False
 
     @pytest.mark.unit
     async def test_commented_bot_reviews_are_advisory_not_blocking(self) -> None:

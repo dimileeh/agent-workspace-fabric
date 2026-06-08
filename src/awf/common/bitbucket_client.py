@@ -361,6 +361,10 @@ class BitBucketClient:
             merge_state_status=merge_state_status_for(merged=merged, closed=closed),
             ci_failures=(),  # populated by fetch_failing_check_logs when needed
             checks=parse_check_timings(statuses),
+            # Authoritative "no checks observed": the commit-statuses list was
+            # fully paginated above, so an empty list means BitBucket reported
+            # zero commit statuses for this head (for example Pipelines disabled).
+            no_checks_observed=not statuses,
             changed_paths=extract_diffstat_paths(diffstat),
             closed=closed,
             merged=merged,

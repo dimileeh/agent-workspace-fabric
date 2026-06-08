@@ -33,6 +33,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
             statusCheckRollup {
               state
               contexts(first: 100) {
+                totalCount
                 nodes {
                   __typename
                   ... on CheckRun {

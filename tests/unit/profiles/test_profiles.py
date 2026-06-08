@@ -138,6 +138,24 @@ def test_profile_schema_accepts_monitor_initial_review_grace() -> None:
 
 
 @pytest.mark.unit
+def test_profile_monitor_require_ci_defaults_true() -> None:
+    # Safe default: an operator must explicitly opt out of CI (#469).
+    profile = WorkspaceProfile.model_validate({"name": "python-explicit"})
+    assert profile.monitor.require_ci is True
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_require_ci_false() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "python-explicit",
+            "monitor": {"require_ci": False},
+        }
+    )
+    assert profile.monitor.require_ci is False
+
+
+@pytest.mark.unit
 def test_profile_healthcheck_rejects_non_string_method() -> None:
     with pytest.raises(ValidationError):
         ProfileHealthCheck.model_validate(

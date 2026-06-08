@@ -16,6 +16,7 @@ from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.forge import ForgeNotSupportedError, concrete_forge_for_repo, make_forge_client
 from awf.common.github_client import (
     GitHubClientError,
+    PullRequestAdoptionMetadata,
     PullRequestMetadataError,
     RepoRef,
 )
@@ -29,6 +30,7 @@ from awf.control.executor.constants import (
     _RELEASE_SYNC_REPO_INVALID_REASON_CODE,
 )
 from awf.control.executor.helpers import (
+    _extract_pr_number,
     _missing_sync_feature_pr_adoption_metadata,
     _release_sync_source_branch,
     _release_sync_target_branch,
@@ -56,6 +58,20 @@ from awf.runtime.release_pr_sync import (
     release_pr_body,
     release_pr_title,
 )
+
+
+def _resolve_handoff_pr_number(metadata: PullRequestAdoptionMetadata) -> int | None:
+    """Resolve the PR number forge-neutrally for handoff persistence.
+
+    GitHub adoption metadata carries an explicit ``number``; the BitBucket
+    ForgeClient ``create_pull_request`` returns only a web URL, so
+    ``metadata.number`` is unset there. Fall back to parsing the forge-neutral
+    PR URL (``/pull/<n>`` or ``/pull-requests/<n>``) so ``workspace.pr_number``
+    lands populated on either forge (#468). Mirrors the
+    ``persisted.pr_number or _metadata_int(...)`` recovery seam — ONE resolution
+    path, not duplicated per call site. GitHub is unchanged: its ``number`` is
+    populated, so the ``or``-fallback is inert."""
+    return metadata.number or _extract_pr_number(metadata.url)
 
 
 async def _handoff_sync_release_pr_monitor(
@@ -311,12 +327,16 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
 
+    # Resolve the PR number forge-neutrally once; BitBucket leaves
+    # ``metadata.number`` unset and only carries a web URL (#468).
+    pr_number = _resolve_handoff_pr_number(metadata)
+
     _log.info(
         "release_pr_sync.pr_ready",
         repo=repo.slug(),
         source_branch=source_branch,
         target_branch=target_branch,
-        pr_number=metadata.number,
+        pr_number=pr_number,
         created=created,
         commits_ahead=commits_ahead,
     )
@@ -353,7 +373,7 @@ async def _handoff_sync_release_pr_monitor(
             return
 
         persisted.pr_url = metadata.url
-        persisted.pr_number = metadata.number
+        persisted.pr_number = pr_number
         persisted.remote_push_branch = source_branch
         persisted.monitor_last_commit_sha = metadata.head_sha
         persisted.base_commit = metadata.base_sha
@@ -367,7 +387,7 @@ async def _handoff_sync_release_pr_monitor(
             event_type=_PR_MONITOR_ADOPTED_EVENT,
             reason_code=_PR_MONITOR_ADOPTED_REASON_CODE,
             payload={
-                "pr_number": metadata.number,
+                "pr_number": pr_number,
                 "pr_url": metadata.url,
                 "head_ref": metadata.head_ref,
                 "base_ref": metadata.base_ref,
@@ -390,7 +410,7 @@ async def _handoff_sync_release_pr_monitor(
             to=WorkspaceStatus.monitoring_pr,
             reason_code=_PR_MONITOR_ADOPTED_REASON_CODE,
             payload={
-                "pr_number": metadata.number,
+                "pr_number": pr_number,
                 "pr_url": metadata.url,
                 "head_sha": metadata.head_sha,
                 "base_sha": metadata.base_sha,
