@@ -731,3 +731,39 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_forward_daemon_denied_via_hub_library_v2_url_reports_ci_failure(
+        self,
+    ) -> None:
+        """Forward daemon probe must detect a permanent denial when the daemon error
+        embeds a Docker Hub library image as a ``/v2/library/<name>/`` URL.
+
+        Docker Hub official images (e.g. ``postgres:16``) have no registry host or
+        namespace in the image ref, but the daemon emits distribution-API URLs of the
+        form ``/v2/library/postgres/manifests/16``.  When the daemon error is
+        URL-style (not a whitespace token), ``_image_ref_matches_daemon_url`` must
+        also probe the ``/v2/library/<name>/`` fragment; otherwise the pull is
+        misclassified as transient and triggers an unnecessary RerunTransientCI.
+
+        Regression for PRRT_kwDOSJAM6s6Hs3NB."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"
+                "Docker pull failed with exit code 1\n"
+                'Error response from daemon: Head "https://registry-1.docker.io/v2/library/postgres/manifests/16": denied\n'
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)

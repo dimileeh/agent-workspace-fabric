@@ -342,11 +342,24 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     This function strips the registry host prefix from the image ref, constructs
     the expected ``/v2/<repo>/`` fragment, and checks whether it appears anywhere
     in *line* (including inside the quoted URL that permanent-marker checks strip).
+
+    Docker Hub official/library images (single-component names such as
+    ``postgres`` or ``ubuntu``) are served under ``/v2/library/<name>/`` in
+    daemon API URLs, not ``/v2/<name>/``, so both fragments are checked when
+    the resolved repo path contains no slash.
     """
     ref_no_tag, _, _ = image_ref.partition(":")
     slash = ref_no_tag.find("/")
     repo_path = ref_no_tag[slash + 1 :] if slash != -1 and "." in ref_no_tag[:slash] else ref_no_tag
-    return bool(repo_path) and f"/v2/{repo_path}/" in line
+    if not repo_path:
+        return False
+    if f"/v2/{repo_path}/" in line:
+        return True
+    # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
+    # URLs as /v2/library/<name>/ rather than /v2/<name>/.
+    if "/" not in repo_path:
+        return f"/v2/library/{repo_path}/" in line
+    return False
 
 
 def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bool:
