@@ -54,6 +54,21 @@ def _merge_method_blocked_key(*, pr_number: int, head_sha: str) -> str:
     return f"__awf_merge_method_blocked__:{pr_number}:{head_sha}"
 
 
+def _outdated_resolve_requeued_key(thread_id: str) -> str:
+    """Build state key flagging an addressed-OUTDATED thread whose resolve was
+    requeued after a TRANSIENT forge fault on this poll.
+
+    The transient resolve path keeps the fix verdict (``fix_committed`` /
+    ``false_positive``) intact so the next poll retries — but those verdicts do
+    NOT block merge, and ``_resolve_addressed_outdated_threads`` runs immediately
+    before ``decide`` in the same iteration. Without this flag ``decide`` could
+    return ``Merge`` on that very poll, merging over the addressed-but-unresolved
+    outdated thread before the promised retry runs. The flag makes ``decide`` hold
+    that thread at ``NotifyHuman`` until the resolve succeeds (flag cleared) or a
+    permanent fault escalates the verdict to ``needs_human``."""
+    return f"__awf_outdated_resolve_requeued__:{thread_id}"
+
+
 def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
     return f"{started_wall_seconds:.6f}"
 

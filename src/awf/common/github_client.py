@@ -582,6 +582,11 @@ class GitHubClient:
 
         # ── Review threads: inline ─────────────────────────────────────
         inline: list[ReviewThread] = []
+        # Threads the forge marks OUTDATED but still unresolved. Kept out of the
+        # actionable ``inline`` feed (they are non-blocking for merge) but
+        # surfaced separately so the monitor can resolve the ones it addressed
+        # before they linger on a merged PR (#473).
+        outdated_unresolved: list[ReviewThread] = []
         thread_nodes = await self._fetch_paginated_pr_connection_nodes(
             repo=repo,
             pr_number=pr_number,
@@ -609,7 +614,12 @@ class GitHubClient:
                     current_source=latest_review_activity_source,
                 )
             )
-            if is_resolved or is_outdated:
+            # Resolved threads are dropped from both feeds — there is nothing
+            # left to action or to resolve. An OUTDATED-but-unresolved thread is
+            # still dropped from the actionable ``inline`` feed (non-blocking for
+            # merge) but routed to ``outdated_unresolved`` so the monitor can
+            # resolve it if it already addressed the underlying feedback (#473).
+            if is_resolved:
                 continue
             comments = tuple(comment for comment in all_comments if not comment.viewer_did_author)
             if not comments:
@@ -617,19 +627,18 @@ class GitHubClient:
             first_comment = comments[0] if comments else None
             body = (first_comment.body if first_comment is not None else "")[:400]
             author = first_comment.author if first_comment is not None else None
-            inline.append(
-                ReviewThread(
-                    thread_id=thread_id,
-                    path=node.get("path"),
-                    line=node.get("line"),
-                    body_excerpt=body,
-                    author=author,
-                    is_resolved=is_resolved,
-                    comments=comments,
-                    url=first_comment.url if first_comment is not None else None,
-                    is_outdated=is_outdated,
-                )
+            thread = ReviewThread(
+                thread_id=thread_id,
+                path=node.get("path"),
+                line=node.get("line"),
+                body_excerpt=body,
+                author=author,
+                is_resolved=is_resolved,
+                comments=comments,
+                url=first_comment.url if first_comment is not None else None,
+                is_outdated=is_outdated,
             )
+            (outdated_unresolved if is_outdated else inline).append(thread)
 
         # ── Review-level (outside-diff) comments ───────────────────────
         # A "review" is a top-level object that may or may not carry a
@@ -734,6 +743,7 @@ class GitHubClient:
             latest_external_review_activity_source=latest_review_activity_source,
             quiet_period_anchor_at=quiet_anchor_at,
             quiet_period_anchor_source=quiet_anchor_source,
+            outdated_unresolved_inline_threads=tuple(outdated_unresolved),
         )
 
     async def _fetch_paginated_pr_connection_nodes(

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from awf.runtime.monitor_state_keys import _merge_method_blocked_key
+from awf.runtime.monitor_state_keys import (
+    _merge_method_blocked_key,
+    _outdated_resolve_requeued_key,
+)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -73,6 +76,7 @@ def _status(
     ci_failures: tuple[CheckFailure, ...] = (),
     closed: bool = False,
     merged: bool = False,
+    outdated: tuple[ReviewThread, ...] = (),
 ) -> PRStatus:
     return PRStatus(
         number=42,
@@ -91,6 +95,7 @@ def _status(
         ci_failures=ci_failures,
         closed=closed,
         merged=merged,
+        outdated_unresolved_inline_threads=outdated,
     )
 
 
@@ -229,6 +234,109 @@ class TestDeferredFeedbackGate:
         )
 
         assert _review_thread_needs_attention(state, changed) is True
+
+
+class TestOutdatedFreshFeedbackGate:
+    """An AWF-closed thread that went OUTDATED then gained fresh reviewer
+    feedback must block auto-merge.
+
+    Both forge clients drop outdated threads from ``unresolved_inline_threads``,
+    so the comment/merge gates never see them. The outdated-resolution hygiene
+    step deliberately refuses to auto-resolve a closed-but-changed thread; without
+    a decide() gate the monitor would silently merge over the fresh feedback
+    (#473 follow-up)."""
+
+    @staticmethod
+    def _outdated(tid: str, *, body: str) -> ReviewThread:
+        return ReviewThread(
+            thread_id=tid,
+            path="src/x.py",
+            line=10,
+            body_excerpt=body,
+            author=None,
+            is_outdated=True,
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_outdated_closed_thread_with_fresh_reply_blocks_merge(self, verdict: str) -> None:
+        state = MonitorState()
+        original = self._outdated("T1", body="bot nit")
+        _mark_review_thread_addressed(state, original, verdict)
+        # Same thread, still outdated, but a fresh reviewer reply changed the body
+        # so the recorded body hash no longer matches.
+        with_reply = self._outdated("T1", body="actually this is still broken")
+        action = decide(
+            status=_status(outdated=(with_reply,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_outdated_closed_thread_without_new_feedback_merges(self) -> None:
+        """The common case — a closed outdated thread with no fresh reply — must
+        NOT block: the hygiene step resolves it and merge proceeds."""
+        state = MonitorState()
+        thread = self._outdated("T1", body="bot nit")
+        _mark_review_thread_addressed(state, thread, "fix_committed")
+        action = decide(
+            status=_status(outdated=(thread,)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_unaddressed_outdated_thread_does_not_block(self) -> None:
+        """A never-addressed outdated thread (the #473 'addressed by an edit
+        elsewhere' case) stays non-blocking — only AWF-closed threads gate."""
+        state = MonitorState()
+        action = decide(
+            status=_status(outdated=(self._outdated("T9", body="stale anchor"),)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_outdated_needs_human_downgrade_blocks_merge(self) -> None:
+        """When ``_resolve_addressed_outdated_threads`` hits a permanent resolve
+        fault it downgrades the verdict to ``needs_human`` and the thread stays in
+        the outdated feed. ``needs_human`` means operator action is required, so
+        ``decide`` must block auto-merge on it — even though the downgrade moved the
+        verdict out of ``_CLOSED_OUTDATED_THREAD_VERDICTS`` (so the fresh-feedback
+        gate alone no longer matches it)."""
+        state = MonitorState(threads_addressed_ids={"T1": "needs_human"})
+        action = decide(
+            status=_status(outdated=(self._outdated("T1", body="bot nit"),)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("verdict", ("fix_committed", "false_positive"))
+    def test_outdated_transient_requeue_flag_blocks_merge(self, verdict: str) -> None:
+        """When ``_resolve_addressed_outdated_threads`` hits a TRANSIENT resolve
+        fault it keeps the fix verdict (so the next poll retries) and flags the
+        thread requeued. Because that step runs in the same iteration right before
+        ``decide``, the fix verdict alone would let ``decide`` return ``Merge`` on
+        this very poll — merging over the addressed-but-unresolved outdated thread
+        before the retry runs. The requeue flag must make ``decide`` hold at
+        ``NotifyHuman`` instead."""
+        state = MonitorState(
+            threads_addressed_ids={
+                "T1": verdict,
+                _outdated_resolve_requeued_key("T1"): "requeued",
+            }
+        )
+        action = decide(
+            status=_status(outdated=(self._outdated("T1", body="bot nit"),)),
+            state=state,
+            config=MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
 
 
 class TestStateImmutability:

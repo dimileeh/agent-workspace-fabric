@@ -33,6 +33,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -507,6 +508,9 @@ def test_changed_review_thread_history_requeues_private_verdict() -> None:
         ),
     )
     _mark_review_thread_addressed(state, original, "false_positive")
+    # A stale outdated-resolve requeue flag from a prior poll must also be wiped
+    # when the thread's addressed state is fully reset for re-triage.
+    state.threads_addressed_ids[_outdated_resolve_requeued_key("T_handled")] = "requeued"
     status = PRStatus(
         number=42,
         head_sha="new-head-after-thread-reply",
@@ -543,6 +547,7 @@ def test_changed_review_thread_history_requeues_private_verdict() -> None:
     assert changed is True
     assert "T_handled" not in state.threads_addressed_ids
     assert _review_thread_body_state_key("T_handled") not in state.threads_addressed_ids
+    assert _outdated_resolve_requeued_key("T_handled") not in state.threads_addressed_ids
 
 
 @pytest.mark.unit

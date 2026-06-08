@@ -57,6 +57,9 @@ from awf.runtime.monitor_state_keys import (
 from awf.runtime.monitor_state_keys import (
     _non_check_reviewer_settle_started_prefix as _non_check_reviewer_settle_started_prefix,
 )
+from awf.runtime.monitor_state_keys import (
+    _outdated_resolve_requeued_key as _outdated_resolve_requeued_key,
+)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckTiming,
@@ -318,6 +321,7 @@ def _clear_addressed_state_by_id(state: MonitorState, item_id: str) -> None:
     state.threads_addressed_ids.pop(_review_comment_body_state_key(item_id), None)
     state.threads_addressed_ids.pop(_needs_human_reason_state_key(item_id), None)
     state.threads_addressed_ids.pop(_defer_reason_state_key(item_id), None)
+    state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(item_id), None)
 
 
 def _drop_stale_review_thread_addressed_state(

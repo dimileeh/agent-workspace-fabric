@@ -24,7 +24,7 @@ Neutral-type contract is owned by ``runtime.pr_monitor`` (do NOT change it). We 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -344,19 +344,22 @@ def _resolve_thread_root_id(comment: dict[str, Any], by_id: dict[str, dict[str, 
         current = by_id[parent_id]
 
 
-def build_review_threads(
+def _iter_unresolved_inline_threads(
     comments: list[dict[str, Any]],
     *,
     repo: RepoRef,
     pr_number: int,
     account_id: str | None,
-) -> tuple[ReviewThread, ...]:
-    """Reconstruct inline review threads from BitBucket's flat comment list.
+) -> Iterator[ReviewThread]:
+    """Yield every unresolved inline thread with its ``is_outdated`` flag set.
 
-    Mirrors the GitHub assembly: resolved threads and viewer-authored comments are
-    dropped, and a thread with no remaining external comments is skipped. The
-    neutral ``thread_id`` encodes repo/PR/comment so ``resolve_thread`` can recover
-    BitBucket context from the Protocol's repo-less signature.
+    Shared core for the actionable feed (``build_review_threads``, which keeps
+    only ``is_outdated=False``) and the outdated-resolution feed
+    (``build_outdated_unresolved_review_threads``, which keeps the rest, #473).
+    Resolved threads, viewer-authored-only threads, and threads with no remaining
+    external comment are dropped from both — exactly as the GitHub path does. The
+    neutral ``thread_id`` encodes repo/PR/comment so ``resolve_thread`` can
+    recover BitBucket context from the Protocol's repo-less signature.
     """
     inline = [
         comment
@@ -374,7 +377,6 @@ def build_review_threads(
         if root_id == str(comment["id"]):
             roots[root_id] = comment
 
-    threads: list[ReviewThread] = []
     for root_id, members in grouped.items():
         root = roots.get(root_id, members[0])
         if any(_comment_is_resolved(member) for member in members):
@@ -396,32 +398,97 @@ def build_review_threads(
             continue
         first = external[0]
         inline_meta = root.get("inline") if isinstance(root.get("inline"), dict) else {}
-        # Mirror the GitHub path (github_client.py): an inline comment BitBucket
-        # marks ``outdated`` after a new push no longer describes the current
-        # diff. Downstream gates treat every unresolved thread as actionable and
-        # never consult ``is_outdated``, so keeping it here would drive needless
-        # fix cycles and block merges. Drop it as GitHub drops ``isOutdated``.
-        if isinstance(inline_meta, dict) and bool(inline_meta.get("outdated")):
-            continue
+        # An inline comment BitBucket marks ``outdated`` after a new push no
+        # longer describes the current diff (the feedback was addressed by an
+        # edit elsewhere). Mirror the GitHub path: such threads are non-blocking
+        # for merge, so they are kept out of the actionable feed but still
+        # surfaced (flagged ``is_outdated``) for resolve hygiene (#473).
+        outdated = isinstance(inline_meta, dict) and bool(inline_meta.get("outdated"))
         line = inline_meta.get("to") if isinstance(inline_meta, dict) else None
         if line is None and isinstance(inline_meta, dict):
             line = inline_meta.get("from")
-        threads.append(
-            ReviewThread(
-                thread_id=encode_thread_id(repo=repo, pr_number=pr_number, comment_id=root_id),
-                path=_clean_optional_str(inline_meta.get("path"))
-                if isinstance(inline_meta, dict)
-                else None,
-                line=line if isinstance(line, int) else None,
-                body_excerpt=(first.body or "")[:400],
-                author=first.author,
-                is_resolved=False,
-                comments=external,
-                url=first.url,
-                is_outdated=False,
-            )
+        yield ReviewThread(
+            thread_id=encode_thread_id(repo=repo, pr_number=pr_number, comment_id=root_id),
+            path=_clean_optional_str(inline_meta.get("path"))
+            if isinstance(inline_meta, dict)
+            else None,
+            line=line if isinstance(line, int) else None,
+            body_excerpt=(first.body or "")[:400],
+            author=first.author,
+            is_resolved=False,
+            comments=external,
+            url=first.url,
+            is_outdated=outdated,
         )
-    return tuple(threads)
+
+
+def partition_inline_review_threads(
+    comments: list[dict[str, Any]],
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    account_id: str | None,
+) -> tuple[tuple[ReviewThread, ...], tuple[ReviewThread, ...]]:
+    """Split the unresolved inline threads into ``(actionable, outdated)`` in one pass.
+
+    ``_iter_unresolved_inline_threads`` is the expensive part (grouping, sorting,
+    and mapping every inline comment). The status poll needs both feeds — the
+    actionable threads that gate the merge and the outdated-but-unresolved threads
+    the monitor resolves for hygiene (#473) — so iterate the shared core once and
+    route each thread by its ``is_outdated`` flag, mirroring the single-pass split
+    the GitHub client does inline. ``build_review_threads`` /
+    ``build_outdated_unresolved_review_threads`` remain as thin selectors over this.
+    """
+    actionable: list[ReviewThread] = []
+    outdated: list[ReviewThread] = []
+    for thread in _iter_unresolved_inline_threads(
+        comments, repo=repo, pr_number=pr_number, account_id=account_id
+    ):
+        (outdated if thread.is_outdated else actionable).append(thread)
+    return tuple(actionable), tuple(outdated)
+
+
+def build_review_threads(
+    comments: list[dict[str, Any]],
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    account_id: str | None,
+) -> tuple[ReviewThread, ...]:
+    """Reconstruct the ACTIONABLE inline review threads (drops outdated).
+
+    Mirrors the GitHub assembly: resolved threads and viewer-authored comments are
+    dropped, a thread with no remaining external comments is skipped, and
+    ``outdated`` threads are excluded (they are non-blocking for merge and would
+    otherwise drive needless fix cycles). The outdated ones are surfaced for
+    resolve hygiene by ``build_outdated_unresolved_review_threads`` instead.
+    """
+    actionable, _outdated = partition_inline_review_threads(
+        comments, repo=repo, pr_number=pr_number, account_id=account_id
+    )
+    return actionable
+
+
+def build_outdated_unresolved_review_threads(
+    comments: list[dict[str, Any]],
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    account_id: str | None,
+) -> tuple[ReviewThread, ...]:
+    """Reconstruct ONLY the inline threads BitBucket marks ``outdated`` (#473).
+
+    ``build_review_threads`` drops these from the actionable feed because they no
+    longer describe the current diff and are non-blocking for merge. The monitor
+    still needs to resolve the ones it already addressed, so this mirror returns
+    exactly those dropped-for-outdated threads — still unresolved, still carrying
+    an external comment — each flagged ``is_outdated=True``. Resolved threads are
+    excluded; reviewer *tasks* have no outdated concept and are never included.
+    """
+    _actionable, outdated = partition_inline_review_threads(
+        comments, repo=repo, pr_number=pr_number, account_id=account_id
+    )
+    return outdated
 
 
 def _task_is_resolved(task: dict[str, Any]) -> bool:

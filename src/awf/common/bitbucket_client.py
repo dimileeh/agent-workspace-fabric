@@ -66,7 +66,6 @@ from awf.common.bitbucket_client_parsing import (
     bb_merge_strategy_for_method,
     build_blocking_reviews,
     build_general_review_comments,
-    build_review_threads,
     build_unresolved_task_threads,
     decode_task_id,
     decode_thread_id,
@@ -83,6 +82,7 @@ from awf.common.bitbucket_client_parsing import (
     parse_check_state,
     parse_check_timings,
     parse_pr_terminal_state,
+    partition_inline_review_threads,
     pipeline_has_ref_info,
     pipeline_targets_branch,
     pipeline_targets_pr,
@@ -338,6 +338,13 @@ class BitBucketClient:
             pr_updated_at=parse_bb_datetime(pr.get("updated_on")),
             head_committed_at=None,
         )
+        # Single pass over the inline comments yields both feeds: the actionable
+        # threads that gate the merge and the outdated-but-unresolved ones the
+        # monitor resolves for hygiene (#473). Building them separately would run
+        # the group/sort/map pipeline twice per poll.
+        actionable_inline_threads, outdated_inline_threads = partition_inline_review_threads(
+            comments, repo=repo, pr_number=pr_number, account_id=account_id
+        )
         return PRStatus(
             number=int(pr.get("id") or pr_number),
             head_sha=head_sha,
@@ -347,9 +354,7 @@ class BitBucketClient:
             # gate routes every item to AddressComments regardless of author and
             # resolves through ``resolve_thread`` — which dispatches the ``bbtask:``
             # id to the task PUT. This makes open tasks block merge until addressed.
-            unresolved_inline_threads=build_review_threads(
-                comments, repo=repo, pr_number=pr_number, account_id=account_id
-            )
+            unresolved_inline_threads=actionable_inline_threads
             + build_unresolved_task_threads(
                 tasks, repo=repo, pr_number=pr_number, account_id=account_id
             ),
@@ -373,6 +378,11 @@ class BitBucketClient:
             latest_external_review_activity_source=latest_review_source,
             quiet_period_anchor_at=quiet_anchor_at,
             quiet_period_anchor_source=quiet_anchor_source,
+            # Outdated-but-unresolved inline threads (addressed elsewhere) are
+            # dropped from the actionable feed above; surface them so the monitor
+            # can resolve the ones it addressed (#473). Reviewer tasks have no
+            # outdated concept, so they are intentionally not included here.
+            outdated_unresolved_inline_threads=outdated_inline_threads,
         )
 
     async def fetch_failing_check_logs(
