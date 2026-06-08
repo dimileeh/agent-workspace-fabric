@@ -28,6 +28,7 @@ from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
+    _CLOSED_OUTDATED_THREAD_VERDICTS,
     CheckState,
     MergeableState,
     MergeStateStatus,
@@ -600,3 +601,7 @@ def test_outdated_resolvable_verdicts_exclude_defer() -> None:
     assert "defer" not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS
     assert frozenset({"fix_committed", "false_positive"}) == (_OUTDATED_RESOLVABLE_THREAD_VERDICTS)
     assert _OUTDATED_RESOLVABLE_THREAD_VERDICTS < _RESOLVABLE_THREAD_VERDICTS
+    # Guard the hand-written literal in pr_monitor.py against future drift: the two
+    # constants are documented to mirror each other (same verdicts, different
+    # derivation paths), so any new verdict added to one must reach the other.
+    assert _CLOSED_OUTDATED_THREAD_VERDICTS == _OUTDATED_RESOLVABLE_THREAD_VERDICTS
