@@ -277,16 +277,24 @@ class LocalSecretLeaseMountResolver:
             and "GIT_ASKPASS" not in env
             and not profile_presets_git_askpass
         ):
-            if _BITBUCKET_GIT_TOKEN_TARGET in profile.runtime.environment:
-                # runtime.environment already defines the token target, so
-                # StackLauncher's first-writer-wins merge (merge_agent_environment)
-                # keeps the profile's literal value and drops the lease placeholder
-                # (``${BITBUCKET_API_TOKEN}``). The AWF askpass would then read the
-                # profile's stale/blank token at git call time instead of the
-                # resolved lease, silently breaking private Bitbucket fetch/push
-                # despite a configured lease. Reject the conflict here — on the
-                # effective agent env — so the operator removes the runtime override
-                # (or the lease) rather than shipping broken auth (issue #466).
+            runtime_token_override = profile.runtime.environment.get(_BITBUCKET_GIT_TOKEN_TARGET)
+            if (
+                runtime_token_override is not None
+                and runtime_token_override != env[_BITBUCKET_GIT_TOKEN_TARGET]
+            ):
+                # runtime.environment already defines the token target with a
+                # DIFFERENT value, so StackLauncher's first-writer-wins merge
+                # (merge_agent_environment) keeps the profile's literal value and
+                # drops the lease placeholder (``${BITBUCKET_API_TOKEN}``). The AWF
+                # askpass would then read the profile's stale/blank token at git call
+                # time instead of the resolved lease, silently breaking private
+                # Bitbucket fetch/push despite a configured lease. Reject the
+                # conflict here — on the effective agent env — so the operator
+                # removes the runtime override (or the lease) rather than shipping
+                # broken auth (issue #466). A runtime override that is BYTE-IDENTICAL
+                # to the lease placeholder is not a conflict: the merge keeps a value
+                # equal to what the lease would inject, so the askpass still reads the
+                # resolved lease token. Wiring proceeds normally in that case.
                 self._raise(
                     SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT,
                     bitbucket_git_token_secret,

@@ -885,6 +885,34 @@ def test_bitbucket_token_lease_rejects_runtime_env_token_override(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_bitbucket_token_lease_allows_runtime_env_matching_placeholder(
+    tmp_path: Path,
+) -> None:
+    # A runtime.environment override that is BYTE-IDENTICAL to the lease placeholder
+    # (``${BITBUCKET_API_TOKEN}``) is NOT a conflict: StackLauncher's first-writer-wins
+    # merge keeps a value equal to what the lease would inject, so the AWF askpass
+    # still reads the resolved lease token. The resolver must accept it and wire the
+    # agent-side git auth normally rather than rejecting a valid, non-overriding config.
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    resolution = resolver.resolve(
+        _profile_with_runtime_env(
+            {"BITBUCKET_API_TOKEN": "${BITBUCKET_API_TOKEN}"},
+            _bitbucket_token_lease(),
+        ),
+        workspace_id="ws_secret",
+    )
+
+    env = dict(resolution.environment)
+    assert env["BITBUCKET_API_TOKEN"] == "${BITBUCKET_API_TOKEN}"
+    # The non-conflicting passthrough still wires the agent-side git-over-HTTPS auth.
+    assert env["GIT_ASKPASS"] == "/run/awf/secrets/bb-askpass.sh"
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert "GIT_CONFIG_COUNT" in env
+    assert resolution.metadata["mount_count"] == 1
+
+
+@pytest.mark.unit
 def test_bitbucket_token_lease_skips_git_auth_when_env_lease_claimed_token_target(
     tmp_path: Path,
 ) -> None:
