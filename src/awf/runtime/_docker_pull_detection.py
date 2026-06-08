@@ -361,7 +361,12 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     colon = image_ref.rfind(":")
     ref_no_tag = image_ref[:colon] if colon != -1 and "/" not in image_ref[colon:] else image_ref
     slash = ref_no_tag.find("/")
-    repo_path = ref_no_tag[slash + 1 :] if slash != -1 and "." in ref_no_tag[:slash] else ref_no_tag
+    # The first path component is a registry host when it contains a "."
+    # (dotted hostname), a ":" (host:port, e.g. localhost:5000), or is the
+    # literal "localhost" — matching Docker's own name-parsing convention.
+    _host = ref_no_tag[:slash] if slash != -1 else ""
+    _is_registry_host = "." in _host or ":" in _host or _host == "localhost"
+    repo_path = ref_no_tag[slash + 1 :] if slash != -1 and _is_registry_host else ref_no_tag
     if not repo_path:
         return False
     if f"/v2/{repo_path}/" in line:

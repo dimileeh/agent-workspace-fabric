@@ -878,3 +878,23 @@ class TestImageRefMatchesDaemonUrl:
             'Head "https://registry-1.docker.io/v2/library/postgres/manifests/sha256:abc": denied'
         )
         assert _image_ref_matches_daemon_url("postgres@sha256:abc", line) is True
+
+    @pytest.mark.unit
+    def test_localhost_port_registry_matches_daemon_url(self) -> None:
+        """A local registry ref (localhost:5000/myapp:latest) must match the daemon
+        distribution-API URL.
+
+        Before the fix, ``"." in ref_no_tag[:slash]`` evaluated False for
+        ``localhost:5000`` (no dot), so ``repo_path`` was set to
+        ``localhost:5000/myapp`` and the ``/v2/myapp/`` fragment check failed,
+        causing the pull to be misclassified as transient.
+
+        Regression for PRRT_kwDOSJAM6s6HtAGx."""
+        line = 'Head "http://localhost:5000/v2/myapp/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("localhost:5000/myapp:latest", line) is True
+
+    @pytest.mark.unit
+    def test_bare_localhost_registry_matches_daemon_url(self) -> None:
+        """A bare ``localhost/myapp:latest`` ref (no port) must also match."""
+        line = 'Head "http://localhost/v2/myapp/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("localhost/myapp:latest", line) is True
