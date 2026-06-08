@@ -256,6 +256,11 @@ def test_bitbucket_askpass_script_emits_token_only_for_bitbucket_host(prompt: st
         "Password for 'https://bitbucket.org.evil.com/ws/repo': ",
         "Password for 'https://user@bitbucket.org.evil.com': ",
         "Password for 'https://notbitbucket.org/foo': ",
+        # bitbucket.org embedded in another host's user-info or path must NOT
+        # satisfy the gate (a substring match would leak the token; the script
+        # parses the real host instead). See PR #471 thread PRRT_kwDOSJAM6s6H1x5T.
+        "Password for 'https://user@github.com/foo@bitbucket.org/repo': ",
+        "Password for 'https://user@evil.com/https://bitbucket.org/repo': ",
     ],
 )
 def test_bitbucket_askpass_script_withholds_token_from_other_hosts(prompt: str) -> None:

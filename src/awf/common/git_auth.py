@@ -159,24 +159,43 @@ def bitbucket_askpass_script(token_env_var: str) -> str:
     credentials (e.g. a later ``git fetch`` against a different host that 401s).
     The script therefore gates on the prompt host — git's askpass prompt embeds
     the target URL (``Password for 'https://…@bitbucket.org': ``) — and emits the
-    token only when that URL's host is exactly ``bitbucket.org``. The host is
-    matched at a delimiter boundary (preceded by ``//`` or ``@`` user-info, and
-    followed by a port ``:``, a path ``/``, or git's closing ``'``) so a
-    look-alike host such as ``bitbucket.org.evil.com`` never matches. For any
-    other host the script emits nothing and git falls back as if no askpass
-    answered.
+    token only when that URL's host is exactly ``bitbucket.org``. Rather than
+    substring-matching ``bitbucket.org`` anywhere in the prompt (which a foreign
+    remote could satisfy by embedding the string in its user-info or path — e.g.
+    ``https://x@github.com/foo@bitbucket.org/repo`` or
+    ``https://evil.com/https://bitbucket.org/repo`` — leaking the token to the
+    other host), the script **parses the host out of the URL**: it extracts the
+    text between git's single quotes, takes the authority after ``://``, drops the
+    user-info before the first ``@`` and any ``:port`` / ``/path`` tail, then
+    compares the remaining host verbatim. A look-alike host such as
+    ``bitbucket.org.evil.com`` therefore never matches. For any other host (or a
+    prompt without a URL) the script emits nothing and git falls back as if no
+    askpass answered.
 
     The script is materialized to a per-workspace file and mounted read-only +
     executable into the agent (see ``node.secret_mounts``).
     """
     host = BITBUCKET_GIT_HOST
-    patterns = "|".join(
-        f"*{prefix}{host}{suffix}*"
-        for prefix in ("//", "@")
-        # ``\\'`` matches a literal single quote (git wraps the URL in '…').
-        for suffix in ("/", ":", "\\'")
+    # POSIX-sh host parse of git's ``Password for 'URL': `` prompt. ``\\'`` is a
+    # literal single quote (git wraps the URL in '…'); the expansions peel the
+    # URL, then its authority, user-info, and ``:port`` to recover git's real
+    # target host. Substring matching is unsafe — see the docstring.
+    return (
+        "#!/bin/sh\n"
+        "url=${1#*\\'}\n"
+        "url=${url%%\\'*}\n"
+        'case "$url" in\n'
+        "  *://*) ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+        "authority=${url#*://}\n"
+        "authority=${authority%%/*}\n"
+        "host=${authority#*@}\n"
+        "host=${host%%:*}\n"
+        f'if [ "$host" = "{host}" ]; then\n'
+        f"  printf '%s' \"${token_env_var}\"\n"
+        "fi\n"
     )
-    return f'#!/bin/sh\ncase "$1" in\n{patterns})\n  printf \'%s\' "${token_env_var}" ;;\nesac\n'
 
 
 def bitbucket_agent_git_config_entries() -> tuple[tuple[str, str], ...]:
