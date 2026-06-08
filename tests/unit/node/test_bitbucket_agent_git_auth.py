@@ -184,6 +184,20 @@ def test_insteadof_does_not_loop_on_already_rewritten_url(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("bad_workspace_id", ["../escape", "..", ".", "a/b", "a\\b"])
+def test_traversal_workspace_id_is_rejected(tmp_path: Path, bad_workspace_id: str) -> None:
+    # Defense in depth: a ``workspace_id`` carrying a path separator or traversal
+    # segment must not be used to build the askpass materialization dir.
+    resolver = LocalSecretLeaseMountResolver(
+        host_home=tmp_path / "host-home",
+        work_dir=tmp_path / "work",
+        host_env={"BITBUCKET_API_TOKEN": _TOKEN_SENTINEL, "BITBUCKET_EMAIL": "agent@example.com"},
+    )
+    with pytest.raises(ValueError, match="Invalid workspace_id"):
+        resolver.resolve(_bitbucket_profile(), workspace_id=bad_workspace_id)
+
+
+@pytest.mark.unit
 def test_non_bitbucket_lease_renders_no_agent_git_auth(tmp_path: Path) -> None:
     # (d): a non-bitbucket lease yields none of GIT_ASKPASS / GIT_CONFIG_* / the
     # askpass mount, and the existing agent env is otherwise unchanged.
