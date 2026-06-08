@@ -25,7 +25,11 @@ from awf.common.bitbucket_client import BitBucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
-from awf.runtime.pr_monitor import MonitorState, PRStatus
+from awf.runtime.pr_monitor import (
+    MonitorState,
+    PRStatus,
+    _review_thread_needs_attention,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
     _BITBUCKET_TRANSIENT_RETRY_REASON,
@@ -74,6 +78,14 @@ async def _resolve_addressed_outdated_threads(
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
         if state.threads_addressed_ids.get(tid) not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+            continue
+        # Mirror the fix-cycle's stale-thread guard (#305): an outdated thread can
+        # still gain fresh reviewer replies after its verdict was recorded, which
+        # change its body hash. Resolving it here would close feedback the monitor
+        # never re-handled — and because outdated threads are dropped from the
+        # actionable feed, the fix cycle never re-addresses them either. Leave such
+        # a thread open so the new feedback stays visible to a human.
+        if _review_thread_needs_attention(state, thread):
             continue
         try:
             await self._deps.gh.resolve_thread(thread_id=tid)

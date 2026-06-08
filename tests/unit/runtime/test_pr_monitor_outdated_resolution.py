@@ -34,6 +34,7 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
     ReviewThread,
+    _mark_review_thread_addressed,
 )
 from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
 from awf.runtime.pr_monitor_runner.outdated_resolution import (
@@ -76,12 +77,17 @@ class _RecordingGitHub(DefaultMergeMethodGitHubClient):
         self.resolved.append(thread_id)
 
 
-def _outdated_thread(tid: str, *, path: str = "src/anchor.py") -> ReviewThread:
+def _outdated_thread(
+    tid: str,
+    *,
+    path: str = "src/anchor.py",
+    body_excerpt: str = "please fix this finding",
+) -> ReviewThread:
     return ReviewThread(
         thread_id=tid,
         path=path,
         line=7,
-        body_excerpt="please fix this finding",
+        body_excerpt=body_excerpt,
         author="greptile",
         is_resolved=False,
         is_outdated=True,
@@ -150,12 +156,13 @@ async def test_outdated_addressed_thread_is_resolved(
         gh=gh,
     )
     state = MonitorState()
-    state.mark_addressed("T_outdated", "fix_committed")
+    thread = _outdated_thread("T_outdated")
+    _mark_review_thread_addressed(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
         workspace_id=workspace_id,
-        status=_status_with_outdated(_outdated_thread("T_outdated")),
+        status=_status_with_outdated(thread),
         state=state,
     )
 
@@ -187,12 +194,13 @@ async def test_false_positive_outdated_thread_is_resolved(
         gh=gh,
     )
     state = MonitorState()
-    state.mark_addressed("T_fp", "false_positive")
+    thread = _outdated_thread("T_fp")
+    _mark_review_thread_addressed(state, thread, "false_positive")
 
     await _call_resolve(
         runner,
         workspace_id=workspace_id,
-        status=_status_with_outdated(_outdated_thread("T_fp")),
+        status=_status_with_outdated(thread),
         state=state,
     )
 
@@ -312,6 +320,44 @@ async def test_unaddressed_outdated_thread_is_not_resolved(
 
 
 @pytest.mark.unit
+async def test_outdated_thread_with_fresh_reply_is_not_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A ``fix_committed`` outdated thread that gained a NEW reviewer reply after
+    the verdict (its body hash changed) is left open — mirroring the fix-cycle's
+    stale-thread guard. Resolving it would close feedback the monitor never
+    re-handled: outdated threads are dropped from the actionable feed, so the fix
+    cycle never re-addresses them either."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    addressed = _outdated_thread("T_reply")
+    _mark_review_thread_addressed(state, addressed, "fix_committed")
+    # A new reviewer reply lands on the now-outdated thread: same id + verdict,
+    # but a changed body, so the recorded body hash no longer matches.
+    with_reply = _outdated_thread("T_reply", body_excerpt="actually this is still broken")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(with_reply),
+        state=state,
+    )
+
+    assert gh.attempts == []
+
+
+@pytest.mark.unit
 async def test_bitbucket_outdated_thread_resolves_via_resolve_thread(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -332,12 +378,13 @@ async def test_bitbucket_outdated_thread_resolves_via_resolve_thread(
     )
     state = MonitorState()
     bb_id = "bb:workspace/repo#42:100"
-    state.mark_addressed(bb_id, "fix_committed")
+    thread = _outdated_thread(bb_id)
+    _mark_review_thread_addressed(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
         workspace_id=workspace_id,
-        status=_status_with_outdated(_outdated_thread(bb_id)),
+        status=_status_with_outdated(thread),
         state=state,
     )
 
@@ -370,12 +417,13 @@ async def test_transient_resolve_error_is_requeued_not_failed(
         gh=gh,
     )
     state = MonitorState()
-    state.mark_addressed("T_transient", "fix_committed")
+    thread = _outdated_thread("T_transient")
+    _mark_review_thread_addressed(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
         workspace_id=workspace_id,
-        status=_status_with_outdated(_outdated_thread("T_transient")),
+        status=_status_with_outdated(thread),
         state=state,
     )
 
@@ -419,12 +467,13 @@ async def test_permanent_resolve_error_is_tolerated(
     )
     state = MonitorState()
     bb_id = "bb:workspace/repo#42:100"
-    state.mark_addressed(bb_id, "fix_committed")
+    thread = _outdated_thread(bb_id)
+    _mark_review_thread_addressed(state, thread, "fix_committed")
 
     await _call_resolve(
         runner,
         workspace_id=workspace_id,
-        status=_status_with_outdated(_outdated_thread(bb_id)),
+        status=_status_with_outdated(thread),
         state=state,
     )
 
