@@ -9,6 +9,8 @@ from __future__ import annotations
 import pytest
 
 from awf.runtime._docker_pull_detection import (
+    _evidence_line_is_permanent_pull_failure,
+    _forward_detail_ref_matches_pull,
     _image_ref_matches_daemon_url,
     _strip_image_tag,
 )
@@ -1000,3 +1002,146 @@ class TestTaglessDaemonDenialMatchesTaggedPull:
 
         assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)
+
+
+class TestImageRefMatchesDaemonUrlEdgeCases:
+    """Coverage tests for edge-case branches in ``_image_ref_matches_daemon_url``."""
+
+    @pytest.mark.unit
+    def test_ref_with_both_digest_and_tag_uses_digest_as_manifest_ref(self) -> None:
+        """When an image ref carries both a digest and a tag (e.g.
+        ``ghcr.io/org/app:v1@sha256:abc``), the digest is extracted first (setting
+        ``manifest_ref``); the tag-stripping ``if manifest_ref is None`` branch is
+        skipped but ``ref_no_tag`` is still set from the tag colon (branch 413->415).
+        The manifest URL must match using the digest.
+        """
+        line = 'Head "https://ghcr.io/v2/org/app/manifests/sha256:abc123": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:v1@sha256:abc123", line) is True
+
+    @pytest.mark.unit
+    def test_empty_repo_path_returns_false(self) -> None:
+        """A malformed ref that resolves to an empty repo path must return False
+        (line 426) rather than building a bare ``/v2//manifests/`` fragment.
+        """
+        assert (
+            _image_ref_matches_daemon_url("registry.example.com/", "any daemon error line") is False
+        )
+
+    @pytest.mark.unit
+    def test_repo_prefix_without_manifests_matches(self) -> None:
+        """A daemon URL with the ``/v2/<repo>/`` prefix but without the full
+        ``/manifests/`` path must still be attributed to the in-flight pull
+        (line 483).
+        """
+        line = 'Head "https://ghcr.io/v2/org/app/tags/list": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is True
+
+    @pytest.mark.unit
+    def test_library_repo_prefix_without_manifests_matches_docker_hub(self) -> None:
+        """A Docker Hub daemon URL with ``/v2/library/<name>/`` but no
+        ``/manifests/`` suffix must match an unqualified Docker Hub image ref
+        when a known Docker Hub host is present (line 533).
+        """
+        line = 'Head "https://registry-1.docker.io/v2/library/postgres/tags/list": denied'
+        assert _image_ref_matches_daemon_url("postgres:16", line) is True
+
+    @pytest.mark.unit
+    def test_unqualified_docker_hub_ref_token_scope_matches_hub_host(self) -> None:
+        """An unqualified Docker Hub user/org image ref must match a token-service
+        denial whose URL carries a Docker Hub registry host (line 557).
+        """
+        line = (
+            'get "https://registry-1.docker.io/token?scope=repository%3aorg%2fapp%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("org/app:latest", line) is True
+
+    @pytest.mark.unit
+    def test_docker_hub_alias_host_ref_token_scope_matches_auth_host(self) -> None:
+        """A ``docker.io/``-prefixed Docker Hub image ref must match an
+        ``auth.docker.io`` token-service denial with the encoded scope (line 563).
+        """
+        line = 'get "https://auth.docker.io/token?scope=repository%3aorg%2fapp%3apull": denied'
+        assert _image_ref_matches_daemon_url("docker.io/org/app:bad", line) is True
+
+
+class TestForwardDetailRefMatchesPull:
+    """Coverage tests for ``_forward_detail_ref_matches_pull``."""
+
+    @pytest.mark.unit
+    def test_detail_line_without_quoted_ref_returns_false(self) -> None:
+        """When the detail line does not contain a quoted image ref matching
+        ``failed to pull image "<ref>"``, the function must return False immediately
+        (line 347).
+        """
+        result = _forward_detail_ref_matches_pull(
+            "failed to pull image: some unquoted error",
+            back_start=0,
+            summary_index=1,
+            lines=["some prior line", "docker pull failed"],
+        )
+        assert result is False
+
+
+class TestEvidenceLinePullImageExtractionEdgeCases:
+    """Coverage tests for pull-image extraction edge cases in
+    ``_evidence_line_is_permanent_pull_failure`` (lines 684->694, 686-687,
+    706->735, 724-725).
+    """
+
+    @pytest.mark.unit
+    def test_pull_echo_with_only_flags_leaves_preceding_image_none(self) -> None:
+        """When the pull echo preceding the summary contains only option flags and
+        no image argument, ``non_flags`` is empty (branch 684->694) and
+        ``preceding_pull_image`` stays None.  The function must not raise.
+        """
+        lines = [
+            "docker pull --quiet",  # pull echo: no image arg
+            "docker pull failed",  # summary (index=1, start=0)
+        ]
+        assert _evidence_line_is_permanent_pull_failure(1, lines) is False
+
+    @pytest.mark.unit
+    def test_pull_echo_no_exact_pull_token_raises_stopiteration_gracefully(self) -> None:
+        """When the pull-echo line contains ``docker pull`` as a substring but the
+        split token is not the exact word ``pull`` (e.g. ``pull.``), ``next(...)``
+        raises StopIteration; the except clause must swallow it gracefully
+        (lines 686-687).
+        """
+        lines = [
+            "docker pull.",  # "docker pull" substring; "pull." is not "pull"
+            "docker pull failed",  # summary (index=1, start=0)
+        ]
+        assert _evidence_line_is_permanent_pull_failure(1, lines) is False
+
+    @pytest.mark.unit
+    def test_stale_pull_echo_with_only_flags_leaves_stale_guard_none(self) -> None:
+        """When a stale pull echo (before the evidence window) contains only option
+        flags, ``stale_non_flags`` is empty (branch 706->735) and
+        ``stale_guard_image`` stays None.  The function must not raise.
+
+        Stale echo is at index 0; summary at index 3 so
+        ``start = max(0, 3-2) = 1`` and ``back_start = 0 < start``.
+        """
+        lines = [
+            "docker pull --quiet",  # stale echo (index 0 < start=1)
+            "some other log line",
+            "some other log line 2",
+            "docker pull failed",  # summary (index=3)
+        ]
+        assert _evidence_line_is_permanent_pull_failure(3, lines) is False
+
+    @pytest.mark.unit
+    def test_stale_pull_echo_no_exact_pull_token_raises_stopiteration_gracefully(self) -> None:
+        """When the stale pull-echo line contains ``docker pull`` as a substring but
+        no exact ``pull`` token, StopIteration is raised in stale-guard extraction
+        and the except clause handles it gracefully (lines 724-725).
+
+        Stale echo is at index 0; summary at index 3 so ``back_start = 0 < start = 1``.
+        """
+        lines = [
+            "docker pull.",  # stale: "docker pull" substring; "pull." != "pull"
+            "some other log line",
+            "some other log line 2",
+            "docker pull failed",  # summary (index=3)
+        ]
+        assert _evidence_line_is_permanent_pull_failure(3, lines) is False
