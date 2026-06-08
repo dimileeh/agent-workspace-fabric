@@ -24,6 +24,7 @@ SECRET_LEASE_SOURCE_INVALID = "SECRET_LEASE_SOURCE_INVALID"
 SECRET_LEASE_TARGET_MISMATCH = "SECRET_LEASE_TARGET_MISMATCH"
 SECRET_LEASE_TARGET_KIND_MISMATCH = "SECRET_LEASE_TARGET_KIND_MISMATCH"
 SECRET_LEASE_WRITABLE_UNSUPPORTED = "SECRET_LEASE_WRITABLE_UNSUPPORTED"
+SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT = "SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT"
 
 _ENV_PROVIDERS = frozenset(("env",))
 _GITHUB_PROVIDERS = frozenset(("github",))
@@ -162,10 +163,13 @@ class LocalSecretLeaseMountResolver:
         satisfied_legacy_targets: set[str] = set()
         satisfied_legacy_providers: set[str] = set()
         skipped_unresolved_count = 0
-        # Whether a bitbucket git-token lease was injected. The agent-side
-        # askpass wiring decision is deferred until after the loop (below) so it
-        # observes the *final* resolved env and is independent of secret ordering.
-        bitbucket_git_token_injected = False
+        # The bitbucket git-token lease secret, captured when its placeholder is
+        # injected (``None`` until then). The agent-side askpass wiring decision is
+        # deferred until after the loop (below) so it observes the *final* resolved
+        # env and is independent of secret ordering; keeping the secret (not just a
+        # bool) lets the post-loop runtime-override conflict reject with the
+        # offending lease's identity.
+        bitbucket_git_token_secret: ProfileSecret | None = None
 
         for secret in profile.secrets:
             provider = _normalized_provider(secret)
@@ -228,7 +232,7 @@ class LocalSecretLeaseMountResolver:
                 # after the loop (the email lease, REST basic auth, is independent
                 # and does not trigger it).
                 if pair[0] == _BITBUCKET_GIT_TOKEN_TARGET:
-                    bitbucket_git_token_injected = True
+                    bitbucket_git_token_secret = secret
                 continue
 
             if provider in _LOCAL_FILE_PROVIDERS:
@@ -260,10 +264,25 @@ class LocalSecretLeaseMountResolver:
                 satisfied_legacy_providers.add("github")
 
         if (
-            bitbucket_git_token_injected
+            bitbucket_git_token_secret is not None
             and "GIT_ASKPASS" not in env
             and not profile_presets_git_askpass
         ):
+            if _BITBUCKET_GIT_TOKEN_TARGET in profile.runtime.environment:
+                # runtime.environment already defines the token target, so
+                # StackLauncher's first-writer-wins merge (merge_agent_environment)
+                # keeps the profile's literal value and drops the lease placeholder
+                # (``${BITBUCKET_API_TOKEN}``). The AWF askpass would then read the
+                # profile's stale/blank token at git call time instead of the
+                # resolved lease, silently breaking private Bitbucket fetch/push
+                # despite a configured lease. Reject the conflict here — on the
+                # effective agent env — so the operator removes the runtime override
+                # (or the lease) rather than shipping broken auth (issue #466).
+                self._raise(
+                    SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT,
+                    bitbucket_git_token_secret,
+                    provider="bitbucket",
+                )
             # Wire agent-side git-over-HTTPS auth (askpass file + insteadOf) once,
             # AFTER every lease is resolved, so the gate observes the final agent
             # env. Deferring past the loop makes the decision independent of secret

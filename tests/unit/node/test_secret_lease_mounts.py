@@ -856,6 +856,35 @@ def test_bitbucket_token_lease_skips_git_auth_when_profile_presets_git_askpass(
 
 
 @pytest.mark.unit
+def test_bitbucket_token_lease_rejects_runtime_env_token_override(tmp_path: Path) -> None:
+    # When runtime.environment ALSO defines BITBUCKET_API_TOKEN, StackLauncher's
+    # first-writer-wins merge (merge_agent_environment) keeps the profile's literal
+    # value and drops the lease placeholder (${BITBUCKET_API_TOKEN}). Wiring the
+    # AWF askpass on top would then read the profile's stale/blank token instead of
+    # the resolved lease, silently breaking private Bitbucket fetch/push despite a
+    # configured lease. The resolver must reject the conflict rather than emit
+    # broken auth, so the operator removes the runtime override (or the lease).
+    resolver = _resolver(tmp_path, host_env={"BITBUCKET_API_TOKEN": "ATATT-do-not-render"})
+
+    with pytest.raises(SecretLeaseResolutionError) as excinfo:
+        resolver.resolve(
+            _profile_with_runtime_env(
+                {"BITBUCKET_API_TOKEN": "stale-or-blank"},
+                _bitbucket_token_lease(),
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert excinfo.value.reason_code == "SECRET_LEASE_BITBUCKET_TOKEN_CONFLICT"
+    assert excinfo.value.target == "BITBUCKET_API_TOKEN"
+    assert excinfo.value.provider == "bitbucket"
+    # Neither the conflicting runtime value nor the host token value leaks into the
+    # structured error.
+    assert "stale-or-blank" not in str(excinfo.value)
+    assert "ATATT-do-not-render" not in str(excinfo.value)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("askpass_first", [True, False])
 def test_bitbucket_token_lease_respects_profile_git_askpass_env_lease_any_order(
     tmp_path: Path,
