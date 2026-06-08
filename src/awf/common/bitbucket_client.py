@@ -1101,7 +1101,8 @@ class BitBucketClient:
         hash already ``>= 40`` chars is returned unchanged with NO HTTP call; an
         abbreviated one is resolved via the per-commit endpoint (one cached GET),
         which echoes the full ``hash`` and accepts either form. A non-dict /
-        missing / too-short payload raises a deterministic reason-coded error
+        missing / too-short payload — or a full hash that does not extend the
+        abbreviation we asked for — raises a deterministic reason-coded error
         rather than silently falling back to the abbreviated hash (#477).
         """
         if len(sha) >= 40:
@@ -1113,13 +1114,18 @@ class BitBucketClient:
             cache=True,
         )
         resolved = _clean_optional_str(_as_dict(data).get("hash"))
-        if resolved is None or len(resolved) < 40:
+        # The resolved full SHA must extend the abbreviation we asked for. A
+        # 40-char hash that does not start with ``sha`` (an ambiguous/misresolved
+        # prefix, or a stale/mock response) would otherwise be accepted as the PR
+        # head, recording statuses and validation provenance for the WRONG commit
+        # and letting the monitor make merge decisions for a different head.
+        if resolved is None or len(resolved) < 40 or not resolved.lower().startswith(sha.lower()):
             raise BitBucketClientError(
                 operation="bitbucket resolve_commit_sha",
                 status=None,
                 body=(
                     f"commit {sha} in {repo.slug()} resolved to an unusable hash "
-                    f"{resolved!r}; expected a full 40-char commit SHA"
+                    f"{resolved!r}; expected a full 40-char commit SHA extending {sha!r}"
                 ),
                 reason_code=BITBUCKET_COMMIT_RESOLVE_FAILED,
             )

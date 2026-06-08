@@ -353,6 +353,21 @@ async def test_fetch_pr_status_resolve_non_dict_raises_resolve_failed() -> None:
     assert excinfo.value.reason_code == BITBUCKET_COMMIT_RESOLVE_FAILED
 
 
+async def test_fetch_pr_status_resolve_non_prefix_hash_raises_resolve_failed() -> None:
+    # (e) A 200 commit-resolve whose full 40-char ``hash`` does NOT start with the
+    # abbreviation we asked for (ambiguous/misresolved prefix or a stale/mock
+    # response) must not be accepted as the PR head — otherwise statuses and
+    # validation provenance would be recorded for the wrong commit. Treat the
+    # prefix mismatch as BITBUCKET_COMMIT_RESOLVE_FAILED, like missing/short hashes.
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload(source_sha=_ABBREV_HEAD))
+    fake.enqueue("GET", f"{_REPO}/commit/{_ABBREV_HEAD}", json={"hash": "b" * 40})
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError) as excinfo:
+        await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert excinfo.value.reason_code == BITBUCKET_COMMIT_RESOLVE_FAILED
+
+
 def _general_comment(comment_id: int, body: str) -> dict:
     return {
         "id": comment_id,
