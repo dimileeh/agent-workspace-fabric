@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -64,6 +65,47 @@ _AWF_TO_BB_MERGE_STRATEGY: dict[str, str] = {
 # Neutral thread-id encoding: ``bb:<owner>/<name>#<pr>:<comment_id>``. Owner/name
 # and the numeric ids never contain ``#`` or ``:``, so the parse is unambiguous.
 _THREAD_ID_RE = re.compile(r"^bb:(?P<owner>[^/]+)/(?P<name>[^#]+)#(?P<pr>\d+):(?P<comment>\d+)$")
+
+
+@dataclass(frozen=True)
+class _PRContext:
+    """Per-repo PR context remembered so repo-less Protocol methods can act."""
+
+    pr_number: int
+    source_branch: str | None
+    source_sha: str | None
+    dest_branch: str | None
+    dest_sha: str | None
+    merge_strategies: list[str] | None
+    default_merge_strategy: str | None
+
+    def is_rerunnable(self) -> bool:
+        """True only when a PR pipeline target can be safely reconstructed."""
+        return all(
+            value is not None
+            for value in (
+                self.source_branch,
+                self.dest_branch,
+                self.source_sha,
+                self.dest_sha,
+            )
+        )
+
+
+def effective_merge_strategies(ctx: _PRContext) -> list[str] | None:
+    """Resolve the destination branch's merge strategies, defaulting if needed.
+
+    BitBucket may expose only ``destination.branch.default_merge_strategy`` while
+    omitting or leaving ``merge_strategies`` empty. The default strategy is by
+    definition an enabled one, so treat it as the sole allowed strategy in that
+    case rather than reporting an empty policy that would wedge the merge gate.
+    Returns ``None`` when neither field is present (genuinely unconstrained).
+    """
+    if ctx.merge_strategies:
+        return ctx.merge_strategies
+    if ctx.default_merge_strategy is not None:
+        return [ctx.default_merge_strategy]
+    return None
 
 
 def encode_thread_id(*, repo: RepoRef, pr_number: int, comment_id: int | str) -> str:

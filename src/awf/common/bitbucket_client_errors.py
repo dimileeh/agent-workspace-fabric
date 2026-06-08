@@ -67,6 +67,15 @@ BITBUCKET_MERGE_IN_PROGRESS = "BITBUCKET_MERGE_IN_PROGRESS"
 # so ``_is_transient_bitbucket_client_error`` and ``_attempt_merge_method`` can
 # treat the timeout as an in-flight merge instead of a hard failure.
 BITBUCKET_MERGE_TASK_TIMEOUT = "BITBUCKET_MERGE_TASK_TIMEOUT"
+# The per-commit endpoint used to resolve an abbreviated head SHA to its full
+# 40-char form returned a non-dict / missing / too-short ``hash`` (#477).
+# Deterministic on purpose: a malformed resolve payload must NOT be retried (that
+# would retry-storm the same bad response) and must NOT silently fall back to the
+# abbreviated hash (that re-introduces the merge block this fix removes — the
+# pre-merge validation gate matches the full 40-char ValidationRun head by exact
+# equality). Genuine HTTP/transport faults still propagate from ``_request_json``
+# with their existing transient codes, so a network blip routes through retry.
+BITBUCKET_COMMIT_RESOLVE_FAILED = "BITBUCKET_COMMIT_RESOLVE_FAILED"
 # Lowercase substrings that mark a 409 merge-POST body as the recoverable
 # already-merged case rather than a non-recoverable conflict or merge-check
 # rejection. Each is merge-specific. Matched case-insensitively against the

@@ -34,7 +34,6 @@ import json
 import os
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -44,6 +43,7 @@ from awf.common.bitbucket_client_errors import (
     BITBUCKET_API_ERROR,
     BITBUCKET_AUTH_FAILED,
     BITBUCKET_AUTH_NOT_CONFIGURED,
+    BITBUCKET_COMMIT_RESOLVE_FAILED,
     BITBUCKET_ISSUE_CAPTURE_FAILED,
     BITBUCKET_ISSUE_TRACKER_DISABLED,
     BITBUCKET_MERGE_IN_PROGRESS,
@@ -62,6 +62,7 @@ from awf.common.bitbucket_client_parsing import (
     _as_dict,
     _clean_optional_str,
     _FrozenParams,
+    _PRContext,
     _tail,
     bb_merge_strategy_for_method,
     build_blocking_reviews,
@@ -69,6 +70,7 @@ from awf.common.bitbucket_client_parsing import (
     build_unresolved_task_threads,
     decode_task_id,
     decode_thread_id,
+    effective_merge_strategies,
     extract_diffstat_paths,
     freeze_params,
     html_href,
@@ -104,6 +106,7 @@ __all__ = [
     "BITBUCKET_API_ERROR",
     "BITBUCKET_AUTH_FAILED",
     "BITBUCKET_AUTH_NOT_CONFIGURED",
+    "BITBUCKET_COMMIT_RESOLVE_FAILED",
     "BITBUCKET_ISSUE_CAPTURE_FAILED",
     "BITBUCKET_ISSUE_TRACKER_DISABLED",
     "BITBUCKET_MERGE_IN_PROGRESS",
@@ -141,31 +144,6 @@ _DEFAULT_MAX_REDIRECTS = 5
 # that poll loop so a stuck task cannot hang the monitor.
 _DEFAULT_MAX_MERGE_POLLS = 30
 _DEFAULT_MERGE_POLL_DELAY_SECONDS = 2.0
-
-
-@dataclass(frozen=True)
-class _PRContext:
-    """Per-repo PR context remembered so repo-less Protocol methods can act."""
-
-    pr_number: int
-    source_branch: str | None
-    source_sha: str | None
-    dest_branch: str | None
-    dest_sha: str | None
-    merge_strategies: list[str] | None
-    default_merge_strategy: str | None
-
-    def is_rerunnable(self) -> bool:
-        """True only when a PR pipeline target can be safely reconstructed."""
-        return all(
-            value is not None
-            for value in (
-                self.source_branch,
-                self.dest_branch,
-                self.source_sha,
-                self.dest_sha,
-            )
-        )
 
 
 class BitBucketClient:
@@ -293,7 +271,6 @@ class BitBucketClient:
                 status=None,
                 body=f"PR {repo.slug()}#{pr_number} not found",
             )
-        self._remember_pr(repo, pr_number, pr)
         head_sha = self._pr_head_sha(pr)
         if head_sha is None:
             raise BitBucketClientError(
@@ -301,6 +278,15 @@ class BitBucketClient:
                 status=None,
                 body=f"PR {repo.slug()}#{pr_number} has no source commit hash",
             )
+        # BitBucket Cloud serves ``source.commit.hash`` in the abbreviated 12-char
+        # form, but AWF's pre-merge validation-provenance gate matches the PR head
+        # against the full 40-char ``ValidationRun.target_head_sha`` by exact
+        # equality (#477). Resolve the full hash here so an abbreviated SHA never
+        # escapes the adapter: it is what lands on ``PRStatus.head_sha``, keys the
+        # commit-statuses fetch below, and is remembered as the rerun pipeline
+        # target — all consistently full (the per-commit endpoint accepts both).
+        head_sha = await self._resolve_full_commit_sha(repo, head_sha)
+        self._remember_pr(repo, pr_number, pr, head_sha=head_sha)
         source_branch = _clean_optional_str(
             _as_dict(_as_dict(pr.get("source")).get("branch")).get("name")
         )
@@ -630,22 +616,6 @@ class BitBucketClient:
         # has no guaranteed link to the specific issue).
         return html_href(data) or self._issue_url_from_id(data, repo) or self._issues_page_url(repo)
 
-    @staticmethod
-    def _effective_merge_strategies(ctx: _PRContext) -> list[str] | None:
-        """Resolve the destination branch's merge strategies, defaulting if needed.
-
-        BitBucket may expose only ``destination.branch.default_merge_strategy`` while
-        omitting or leaving ``merge_strategies`` empty. The default strategy is by
-        definition an enabled one, so treat it as the sole allowed strategy in that
-        case rather than reporting an empty policy that would wedge the merge gate.
-        Returns ``None`` when neither field is present (genuinely unconstrained).
-        """
-        if ctx.merge_strategies:
-            return ctx.merge_strategies
-        if ctx.default_merge_strategy is not None:
-            return [ctx.default_merge_strategy]
-        return None
-
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return enabled merge methods from the remembered PR destination branch.
 
@@ -663,7 +633,7 @@ class BitBucketClient:
                 repo=repo.slug(),
             )
             return ()
-        return map_bb_merge_methods(self._effective_merge_strategies(ctx))
+        return map_bb_merge_methods(effective_merge_strategies(ctx))
 
     async def fetch_branch_pull_request_allowed_merge_methods(
         self,
@@ -681,7 +651,7 @@ class BitBucketClient:
         ctx = self._pr_context.get(repo.slug())
         if ctx is None:
             return None
-        strategies = self._effective_merge_strategies(ctx)
+        strategies = effective_merge_strategies(ctx)
         if strategies is None:
             return None
         return map_bb_merge_methods(strategies)
@@ -1058,8 +1028,16 @@ class BitBucketClient:
         self._account_id_fetched = self._account_id is not None
         return self._account_id
 
-    def _remember_pr(self, repo: RepoRef, pr_number: int, pr: dict[str, Any]) -> None:
-        """Capture per-repo PR context for the repo-less Protocol methods."""
+    def _remember_pr(
+        self, repo: RepoRef, pr_number: int, pr: dict[str, Any], *, head_sha: str
+    ) -> None:
+        """Capture per-repo PR context for the repo-less Protocol methods.
+
+        ``head_sha`` is the already-resolved full 40-char source commit SHA, not
+        the abbreviated ``source.commit.hash`` on the raw payload — it is stored as
+        ``source_sha`` so ``rerun_failed_workflow_jobs`` reconstructs the pipeline
+        target with the full hash, consistent with ``PRStatus.head_sha`` (#477).
+        """
         source = _as_dict(pr.get("source"))
         destination = _as_dict(pr.get("destination"))
         dest_branch = _as_dict(destination.get("branch"))
@@ -1067,12 +1045,51 @@ class BitBucketClient:
         self._pr_context[repo.slug()] = _PRContext(
             pr_number=pr_number,
             source_branch=_clean_optional_str(_as_dict(source.get("branch")).get("name")),
-            source_sha=_clean_optional_str(_as_dict(source.get("commit")).get("hash")),
+            source_sha=head_sha,
             dest_branch=_clean_optional_str(dest_branch.get("name")),
             dest_sha=_clean_optional_str(_as_dict(destination.get("commit")).get("hash")),
             merge_strategies=merge_strategies if isinstance(merge_strategies, list) else None,
             default_merge_strategy=_clean_optional_str(dest_branch.get("default_merge_strategy")),
         )
+
+    async def _resolve_full_commit_sha(self, repo: RepoRef, sha: str) -> str:
+        """Resolve an abbreviated BitBucket commit hash to its full 40-char SHA.
+
+        BitBucket Cloud's PR GET serves ``source.commit.hash`` abbreviated (e.g.
+        12 chars), but AWF assumes full 40-char SHAs everywhere it matches a head
+        (the pre-merge validation-provenance gate compares by exact equality). A
+        hash already ``>= 40`` chars is returned unchanged with NO HTTP call; an
+        abbreviated one is resolved via the per-commit endpoint (one cached GET),
+        which echoes the full ``hash`` and accepts either form. A non-dict /
+        missing / too-short payload — or a full hash that does not extend the
+        abbreviation we asked for — raises a deterministic reason-coded error
+        rather than silently falling back to the abbreviated hash (#477).
+        """
+        if len(sha) >= 40:
+            return sha
+        data = await self._request_json(
+            "GET",
+            f"{self._repo_path(repo)}/commit/{quote(sha, safe='')}",
+            operation="bitbucket resolve_commit_sha",
+            cache=True,
+        )
+        resolved = _clean_optional_str(_as_dict(data).get("hash"))
+        # The resolved full SHA must extend the abbreviation we asked for. A
+        # 40-char hash that does not start with ``sha`` (an ambiguous/misresolved
+        # prefix, or a stale/mock response) would otherwise be accepted as the PR
+        # head, recording statuses and validation provenance for the WRONG commit
+        # and letting the monitor make merge decisions for a different head.
+        if resolved is None or len(resolved) < 40 or not resolved.lower().startswith(sha.lower()):
+            raise BitBucketClientError(
+                operation="bitbucket resolve_commit_sha",
+                status=None,
+                body=(
+                    f"commit {sha} in {repo.slug()} resolved to an unusable hash "
+                    f"{resolved!r}; expected a full 40-char commit SHA extending {sha!r}"
+                ),
+                reason_code=BITBUCKET_COMMIT_RESOLVE_FAILED,
+            )
+        return resolved
 
     @staticmethod
     def _pr_head_sha(pr: dict[str, Any]) -> str | None:
