@@ -972,3 +972,40 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure), action
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_stale_echo_without_success_rejects_unrelated_forward_permanent_detail(
+        self,
+    ) -> None:
+        """A stale pull echo whose pull did NOT succeed must constrain the forward
+        detail probe so an unrelated kubelet 'failed to pull image' event for a
+        different image does not misclassify the transient timeout as permanent.
+
+        When the nearest echo is outside the evidence window and there is no
+        success marker for its image between the echo and the summary, the
+        current 'docker pull failed' likely belongs to the stale pull.
+        Previously the no-echo fallback in ``_forward_detail_ref_matches_pull``
+        accepted any permanent detail in the forward window, so a kubelet event
+        for an unrelated image caused a ReportCiFailure instead of a
+        RerunTransientCI (PRRT_kwDOSJAM6s6Ht11n)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull postgres:16\n"  # line 0 — stale echo, outside window, no success
+                "context deadline exceeded\n"  # line 1
+                "context deadline exceeded\n"  # line 2
+                "Docker pull failed with exit code 1\n"  # line 3 — summary (index=3, start=1, stale echo at 0)
+                'Failed to pull image "unrelated-app:v1": manifest unknown\n'  # line 4 — unrelated kubelet event
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, RerunTransientCI), action
+        assert action.failures == (failure,)

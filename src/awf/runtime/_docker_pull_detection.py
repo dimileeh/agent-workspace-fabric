@@ -314,7 +314,11 @@ def _docker_pull_command_succeeded(
 
 
 def _forward_detail_ref_matches_pull(
-    detail_line: str, back_start: int, summary_index: int, lines: list[str]
+    detail_line: str,
+    back_start: int,
+    summary_index: int,
+    lines: list[str],
+    stale_guard_image: str | None = None,
 ) -> bool:
     """Whether a ``failed to pull image`` detail line targets the same image as
     the preceding ``docker pull <ref>`` command echo, or whether no such echo
@@ -329,6 +333,14 @@ def _forward_detail_ref_matches_pull(
     already ensures the detail is adjacent to the summary with no new pull
     started between them.  Returns False only when the detail carries no quoted
     ref, or when a pull echo is present but its image ref does not match.
+
+    When *stale_guard_image* is provided, the no-echo fallback is constrained:
+    instead of accepting any detail, the detail's image ref must be consistent
+    with *stale_guard_image* (exact match or tagless form).  The caller sets
+    this when the nearest pull echo precedes the evidence window and its pull
+    did *not* succeed — in that case the current summary likely belongs to the
+    stale pull, so an unrelated kubelet event for a different image must not
+    make it permanent (PRRT_kwDOSJAM6s6Ht11n).
     """
     match = _CI_DOCKER_IMAGE_PULL_FAILURE_REF_PATTERN.search(detail_line)
     if match is None:
@@ -343,10 +355,21 @@ def _forward_detail_ref_matches_pull(
             echo_found = True
             if image_ref in lines[k].split():
                 return True
+    if echo_found:
+        return False
     # No pull echo exists in the backward window: the wrapper/log stream did
     # not echo the command.  The caller's "no intervening pull" guard already
-    # ensures the detail is adjacent to the summary, so accept it.
-    return not echo_found
+    # ensures the detail is adjacent to the summary.
+    if stale_guard_image is not None:
+        # A stale echo exists whose pull did not succeed — the summary likely
+        # belongs to the stale pull; only accept if the detail targets the same
+        # image (or its tagless form) so unrelated kubelet events are rejected.
+        return (
+            image_ref == stale_guard_image
+            or image_ref == _strip_image_tag(stale_guard_image)
+            or stale_guard_image == _strip_image_tag(image_ref)
+        )
+    return True
 
 
 def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
@@ -627,6 +650,30 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                     preceding_pull_image = non_flags[-1]
             except StopIteration:
                 pass
+        # When the echo is stale (before the evidence window), preceding_pull_image
+        # is left None so daemon probes are not gated on the stale image identity
+        # (PRRT_kwDOSJAM6s6HtCmc).  However, if the stale pull did NOT succeed we
+        # still need to constrain the forward detail probe's no-echo fallback so an
+        # unrelated kubelet event cannot misclassify the transient timeout as
+        # permanent (PRRT_kwDOSJAM6s6Ht11n).
+        stale_guard_image: str | None = None
+        if (
+            back_start < start
+            and _CI_DOCKER_PULL_COMMAND_MARKER in lines[back_start]
+            and _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER not in lines[back_start]
+        ):
+            stale_tokens = lines[back_start].split()
+            try:
+                stale_pull_idx = next(i for i, t in enumerate(stale_tokens) if t == "pull")
+                stale_non_flags = [
+                    t for t in stale_tokens[stale_pull_idx + 1 :] if not t.startswith("-")
+                ]
+                if stale_non_flags:
+                    _stale_img = stale_non_flags[-1]
+                    if not _docker_pull_command_succeeded(_stale_img, back_start, index, lines):
+                        stale_guard_image = _stale_img
+            except StopIteration:
+                pass
         # Backward probe: daemon error always precedes the "docker pull failed"
         # summary for the same pull; a daemon error after the summary is from a
         # different pull.  Restrict to "docker pull failed" summary lines only —
@@ -713,6 +760,7 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                 ),  # stale echo before the evidence window must not gate the detail match (PRRT_kwDOSJAM6s6HtwnG)
                 index,
                 lines,
+                stale_guard_image,  # constrain no-echo fallback when stale pull did not succeed (PRRT_kwDOSJAM6s6Ht11n)
             )
             for probe_index in range(index + 1, end)
         )
