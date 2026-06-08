@@ -440,13 +440,16 @@ async def test_transient_resolve_error_is_requeued_not_failed(
 
 
 @pytest.mark.unit
-async def test_permanent_resolve_error_is_tolerated(
+async def test_permanent_resolve_error_downgrades_to_needs_human(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """(e) A permanent resolve fault does not crash the monitor and is recorded as
-    a ``failed`` audit event carrying the forge-native reason code. The thread is
-    non-blocking, so the addressed marker is preserved (retried next poll)."""
+    """(e) A permanent resolve fault does not crash the monitor. Rather than
+    preserving the resolvable verdict (which would re-issue the same failing
+    resolve every poll — a retry storm), the verdict is downgraded to
+    ``needs_human`` and a ``needs_human`` audit event carrying the forge-native
+    reason code is recorded. The thread is non-blocking, so this never wedges
+    auto-merge; it simply stops the pointless retries."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     permanent = BitBucketClientError(
@@ -478,14 +481,60 @@ async def test_permanent_resolve_error_is_tolerated(
     )
 
     assert gh.resolved == []
-    assert state.threads_addressed_ids[bb_id] == "fix_committed"
+    # Verdict downgraded so the next poll skips it (not in the resolvable set).
+    assert state.threads_addressed_ids[bb_id] == "needs_human"
+    assert "needs_human" not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS
     assert sleep_fn.calls == []  # permanent fault does not wait/retry
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
-        failed = _resolution_events(ws, outcome="failed")
-        assert len(failed) == 1
-        assert failed[0].reason_code == BITBUCKET_API_ERROR
+        downgraded = _resolution_events(ws, outcome="needs_human")
+        assert len(downgraded) == 1
+        assert downgraded[0].reason_code == BITBUCKET_API_ERROR
+        assert (downgraded[0].payload or {}).get("evidence", {}).get(
+            "needs_human_thread_count"
+        ) == 1
+
+
+@pytest.mark.unit
+async def test_permanent_resolve_error_is_not_retried_next_poll(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(e2) After a permanent resolve fault downgrades the verdict to
+    ``needs_human``, a subsequent poll that still surfaces the outdated thread
+    must NOT re-issue the resolve — otherwise a non-fixable fault would spam the
+    forge API and logs on every cycle until the (non-blocking) PR merges."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    permanent = BitBucketClientError(
+        operation="bitbucket resolve_thread",
+        status=403,
+        body="thread resolution is not permitted for this token",
+        reason_code=BITBUCKET_API_ERROR,
+    )
+    gh = _RecordingGitHub(cmd, error=permanent)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    bb_id = "bb:workspace/repo#42:100"
+    thread = _outdated_thread(bb_id)
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+    status = _status_with_outdated(thread)
+
+    # First poll: permanent fault, one attempt, downgrade to needs_human.
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+    # Second poll: the thread is still outdated/unresolved, but the verdict is now
+    # needs_human, so the step must skip it without a second forge call.
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    assert gh.attempts == [bb_id]  # exactly one resolve attempt across both polls
 
 
 @pytest.mark.unit

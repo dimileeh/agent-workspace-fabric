@@ -68,11 +68,13 @@ async def _resolve_addressed_outdated_threads(
     ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``. Error handling mirrors the fix-cycle
     resolve loop and is fully self-contained so a forge fault never escapes into
     the monitor's outer loop: a transient fault waits then leaves the thread for
-    the next poll; a permanent fault is logged + audited and skipped. The thread
-    is non-blocking for merge, so the addressed marker is preserved either way
-    (the resolve is simply retried next poll) — there is nothing to wedge. No
-    ``state`` mutation is needed: once resolved, the thread drops out of the
-    outdated feed on the next fetch.
+    the next poll (the resolvable verdict is preserved so it is retried); a
+    permanent fault is logged + audited and the verdict is downgraded to
+    ``needs_human`` so the next poll skips it instead of re-issuing the same
+    failing resolve every cycle (a retry storm against a non-fixable fault). The
+    thread is non-blocking for merge and dropped from the actionable feed, so
+    neither path wedges auto-merge. A successful resolve needs no ``state``
+    mutation: the thread drops out of the outdated feed on the next fetch.
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
     for thread in status.outdated_unresolved_inline_threads:
@@ -128,20 +130,30 @@ async def _resolve_addressed_outdated_threads(
                     },
                 )
                 continue
-            # Permanent fault: log + audit and skip. The thread is non-blocking,
-            # so we keep the addressed marker and simply retry next poll rather
-            # than wedging the merge gate. ``redacted_detail()`` normalizes the
-            # human detail across forges (gh stderr / BitBucket body).
+            # Permanent fault: log + audit, then downgrade the recorded verdict to
+            # ``needs_human`` so the next poll SKIPS this thread (``needs_human`` is
+            # not in ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``) instead of re-issuing
+            # a known-permanent resolve every cycle. Keeping the resolvable verdict
+            # would retry the same failing forge call on every poll until the PR
+            # merges — burning API quota and spamming logs for no benefit, since the
+            # fault is permanent. This mirrors the fix-cycle's permanent-task path
+            # (a non-fixable resolve fault escalates rather than retrying forever).
+            # The thread is OUTDATED and dropped from the actionable feed, so this
+            # never reaches the merge-gate blocker — it never wedges auto-merge; the
+            # ``needs_human`` audit event surfaces the unresolved-but-handled thread
+            # for an operator. ``redacted_detail()`` normalizes the human detail
+            # across forges (gh stderr / BitBucket body).
             _log.warning(
                 "monitor.resolve_outdated_thread_failed",
                 thread_id=tid,
                 stderr=exc.redacted_detail(),
             )
+            state.mark_addressed(tid, "needs_human")
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
                 action="resolve_outdated_thread",
-                outcome="failed",
+                outcome="needs_human",
                 reason_code=exc.reason_code,
                 pr_number=pr_number,
                 status=None,
@@ -151,7 +163,7 @@ async def _resolve_addressed_outdated_threads(
                 evidence={
                     "thread_ids": [tid],
                     "resolved_thread_count": 0,
-                    "failed_thread_count": 1,
+                    "needs_human_thread_count": 1,
                     "error_message": str(exc),
                 },
             )
