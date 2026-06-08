@@ -124,6 +124,14 @@ def _reject_non_canonical_bitbucket_ssh(repo_url: str) -> None:
     so the misconfiguration surfaces as the same fast, diagnosable error the HTTPS
     scheme/host checks raise.
 
+    The SSH **port** is likewise constrained: ``RepoRef.from_url`` parses the host
+    without the port, so ``ssh://git@bitbucket.org:2222/…`` is still classified as
+    bitbucket SSH, but the agent-side ``insteadOf`` rewrites only cover the no-port
+    (``ssh://git@bitbucket.org/``) and default-port (``ssh://git@bitbucket.org:22/``)
+    prefixes. A non-default port is never rewritten, so git falls back to real SSH
+    on that port and the token-only agent fails. Require no port or the default
+    ``:22`` so the same fast, diagnosable error fires for unsupported ports.
+
     The scp-like ``git@bitbucket.org:…`` shape only classifies as bitbucket with the
     canonical lowercase host (``RepoRef.from_url`` matches it case-sensitively), so
     anything reaching here without a ``://`` separator is already canonical.
@@ -136,18 +144,22 @@ def _reject_non_canonical_bitbucket_ssh(repo_url: str) -> None:
     # ``netloc`` authority to recover the original casing (mirrors the HTTPS host
     # check in ``verify_bitbucket_git_auth``).
     raw_authority = urlsplit(stripped).netloc.rsplit("@", 1)[-1]
-    raw_host = raw_authority.rsplit(":", 1)[0] if ":" in raw_authority else raw_authority
-    if raw_scheme == "ssh" and raw_host == BITBUCKET_GIT_HOST:
+    if ":" in raw_authority:
+        raw_host, raw_port = raw_authority.rsplit(":", 1)
+    else:
+        raw_host, raw_port = raw_authority, ""
+    if raw_scheme == "ssh" and raw_host == BITBUCKET_GIT_HOST and raw_port in ("", "22"):
         return
     raise GitAuthNotConfiguredError(
         reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
         message=(
             "BitBucket git authentication requires the canonical lowercase SSH form "
-            f"ssh://git@{BITBUCKET_GIT_HOST}/<workspace>/<repo>.git: a non-canonical "
-            "scheme or host casing slips past forge detection but the agent-side "
-            "insteadOf rewrites that map SSH bitbucket URLs onto the HTTPS token path "
-            "are case-sensitive, so the token is withheld and a token-only agent "
-            "falls back to SSH and fails. Use the canonical lowercase URL."
+            f"ssh://git@{BITBUCKET_GIT_HOST}[:22]/<workspace>/<repo>.git: a "
+            "non-canonical scheme/host casing or an unsupported port slips past forge "
+            "detection but the agent-side insteadOf rewrites that map SSH bitbucket "
+            "URLs onto the HTTPS token path cover only the case-sensitive no-port and "
+            ":22 prefixes, so the token is withheld and a token-only agent falls back "
+            "to SSH and fails. Use the canonical lowercase URL with no port or :22."
         ),
     )
 

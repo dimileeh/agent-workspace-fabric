@@ -489,6 +489,12 @@ def test_verify_bitbucket_git_auth_noop_for_ssh_bitbucket_repo(repo_url: str) ->
         "ssh://git@BITBUCKET.ORG/ws/repo.git",
         "SSH://git@bitbucket.org:22/ws/repo.git",
         "ssh://git@Bitbucket.org:22/ws/repo.git",
+        # Unsupported SSH port: RepoRef.from_url parses the host without the port
+        # and still classifies these as bitbucket, but the agent-side ``insteadOf``
+        # rewrites only cover the no-port and ``:22`` prefixes, so a non-default
+        # port is never rewritten and a token-only agent falls back to SSH.
+        "ssh://git@bitbucket.org:2222/ws/repo.git",
+        "ssh://git@bitbucket.org:443/ws/repo.git",
     ],
 )
 def test_verify_bitbucket_git_auth_rejects_non_canonical_ssh(repo_url: str) -> None:
