@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import pytest
 
-from awf.runtime._docker_pull_detection import _image_ref_matches_daemon_url
+from awf.runtime._docker_pull_detection import (
+    _image_ref_matches_daemon_url,
+    _strip_image_tag,
+)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
@@ -650,6 +653,110 @@ class TestImageRefMatchesDaemonUrl:
                 "context deadline exceeded"
             ),
             run_id="99000000004",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+
+class TestStripImageTag:
+    """Unit tests for ``_strip_image_tag``."""
+
+    @pytest.mark.unit
+    def test_tagged_ref_strips_tag(self) -> None:
+        assert _strip_image_tag("ghcr.io/org/app:latest") == "ghcr.io/org/app"
+
+    @pytest.mark.unit
+    def test_tagged_ref_with_port_strips_tag(self) -> None:
+        assert (
+            _strip_image_tag("registry.example.com:5000/org/app:v1")
+            == "registry.example.com:5000/org/app"
+        )
+
+    @pytest.mark.unit
+    def test_tagless_ref_unchanged(self) -> None:
+        assert _strip_image_tag("ghcr.io/org/app") == "ghcr.io/org/app"
+
+    @pytest.mark.unit
+    def test_unqualified_tagless_ref_unchanged(self) -> None:
+        assert _strip_image_tag("postgres") == "postgres"
+
+    @pytest.mark.unit
+    def test_unqualified_tagged_ref_strips_tag(self) -> None:
+        assert _strip_image_tag("postgres:16") == "postgres"
+
+
+class TestTaglessDaemonDenialMatchesTaggedPull:
+    """Regression tests for tagless daemon denial matching (PRRT_kwDOSJAM6s6Ht1mT).
+
+    Docker access-denied errors commonly omit the tag:
+    ``pull access denied for ghcr.io/org/private, repository does not exist
+    or may require 'docker login': denied``.  When a ``docker pull
+    ghcr.io/org/private:latest`` echo is present, the daemon denial must be
+    attributed to that pull so the permanence probe returns True and the log
+    is classified as a non-retryable CI failure rather than a transient rerun.
+    """
+
+    @pytest.mark.unit
+    def test_tagless_daemon_denial_backward_probe_reports_ci_failure(self) -> None:
+        """A tagless ``pull access denied for <repo>`` daemon error preceding the
+        ``docker pull failed`` summary must suppress the transient-timeout rerun.
+
+        Log order: pull echo → daemon denial (tagless) → docker pull failed →
+        context deadline exceeded.  Without the tagless-match fix the daemon
+        line carries ``ghcr.io/org/private`` (no ``:latest`` token), so the
+        exact-token comparison fails and the log is mis-classified as transient.
+
+        Regression for PRRT_kwDOSJAM6s6Ht1mT."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/private:latest\n"
+                "Error response from daemon: pull access denied for ghcr.io/org/private,"
+                " repository does not exist or may require 'docker login': denied\n"
+                "docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="99000001001",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_tagless_daemon_denial_forward_probe_reports_ci_failure(self) -> None:
+        """A tagless ``pull access denied for <repo>`` daemon error *following* the
+        ``docker pull failed`` summary must also suppress the transient-timeout rerun.
+
+        Log order: pull echo → docker pull failed → daemon denial (tagless) →
+        context deadline exceeded.  The forward daemon probe must match the
+        tagless ref the same way the backward probe does.
+
+        Regression for PRRT_kwDOSJAM6s6Ht1mT."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/private:latest\n"
+                "docker pull failed with exit code 1\n"
+                "Error response from daemon: pull access denied for ghcr.io/org/private,"
+                " repository does not exist or may require 'docker login': denied\n"
+                "context deadline exceeded"
+            ),
+            run_id="99000001002",
         )
 
         action = decide(

@@ -534,6 +534,22 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     return False
 
 
+def _strip_image_tag(image_ref: str) -> str:
+    """Return *image_ref* without its tag suffix, for tagless daemon error matching.
+
+    Docker access-denied errors commonly omit the tag: ``pull access denied for
+    ghcr.io/org/app, repository does not exist or may require 'docker login':
+    denied``.  Stripping the tag from the pull-echo image ref lets the token
+    comparison match the tagless ref that appears in such daemon errors even when
+    the echo carries an explicit tag like ``:latest``.  When the ref has no tag,
+    returns it unchanged so callers need not special-case the tagless case.
+    """
+    colon = image_ref.rfind(":")
+    if colon != -1 and "/" not in image_ref[colon:]:
+        return image_ref[:colon]
+    return image_ref
+
+
 def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bool:
     """Whether a Docker pull-failure evidence line represents a permanent error.
 
@@ -629,6 +645,10 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             and (
                 preceding_pull_image is None
                 or any(t.rstrip(",.;:") == preceding_pull_image for t in lines[probe_index].split())
+                or any(
+                    t.rstrip(",.;:") == _strip_image_tag(preceding_pull_image)
+                    for t in lines[probe_index].split()
+                )
                 or _image_ref_matches_daemon_url(preceding_pull_image, lines[probe_index])
             )
             and not any(
@@ -659,6 +679,10 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             and (
                 preceding_pull_image is None
                 or any(t.rstrip(",.;:") == preceding_pull_image for t in lines[probe_index].split())
+                or any(
+                    t.rstrip(",.;:") == _strip_image_tag(preceding_pull_image)
+                    for t in lines[probe_index].split()
+                )
                 or _image_ref_matches_daemon_url(preceding_pull_image, lines[probe_index])
             )
             and not any(
