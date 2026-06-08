@@ -373,8 +373,13 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     # an https:// prompt. Without this gate such a URL clears the preflight yet both
     # mechanisms silently decline to authenticate and git fails opaquely. Require the
     # https scheme so the misconfiguration surfaces as the same fast, diagnosable error.
+    # ``scheme`` is always ``http`` or ``https`` here: ``RepoRef.from_url`` only
+    # classifies a URL as bitbucket via its scheme-bearing http(s)/ssh branch (the
+    # bare ``owner/repo`` slug defaults to GitHub), and the ssh shapes returned
+    # early above. Gate on ``!= "https"`` so the guard self-documents the HTTPS-only
+    # contract rather than tolerating an unreachable empty scheme.
     scheme = urlsplit(repo_url.strip()).scheme.lower()
-    if scheme not in ("", "https"):
+    if scheme != "https":
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
             message=(
