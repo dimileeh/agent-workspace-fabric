@@ -697,6 +697,30 @@ class TestImageRefMatchesDaemonUrl:
         assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is False
 
     @pytest.mark.unit
+    def test_docker_hub_host_alias_substring_in_unrelated_registry_does_not_match(
+        self,
+    ) -> None:
+        """A daemon error URL from a registry whose hostname merely *contains* a
+        Docker Hub alias as a suffix must NOT match an unqualified Docker Hub
+        image ref.
+
+        ``docker pull org/app:latest`` is an implicit Docker Hub pull.  When a
+        nearby permanent daemon error from ``evil-docker.io`` appears in the same
+        log window, the bare substring check ``"docker.io" in line`` returns True
+        because ``"docker.io"`` is a suffix of ``"evil-docker.io"``.  The Docker
+        Hub host guard must use URL-host boundary parsing (``"//<host>/"`` rather
+        than a bare substring) so the unrelated denial does not suppress a
+        legitimate transient-timeout rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HubRp."""
+        evil_line = 'head "https://evil-docker.io/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("org/app:latest", evil_line) is False
+
+        # Sanity: a real Docker Hub URL still matches.
+        hub_line = 'head "https://registry-1.docker.io/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("org/app:latest", hub_line) is True
+
+    @pytest.mark.unit
     def test_docker_hub_library_image_token_endpoint_unencoded_scope_matches(self) -> None:
         """An unqualified Docker Hub library image must match a token-service
         denial that uses the *unencoded* ``library/<name>`` scope form.

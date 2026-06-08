@@ -459,7 +459,7 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         # ghcr.io) for the same path is not attributed to an in-flight Docker
         # Hub pull (PRRT_kwDOSJAM6s6HtNI4, PRRT_kwDOSJAM6s6Htl06).
         if (not _is_registry_host or _is_docker_hub_alias) and not any(
-            h in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+            f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
         ):
             return False
         effective_ref = manifest_ref if manifest_ref is not None else "latest"
@@ -481,7 +481,7 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         # Same Docker Hub scoping as above: /v2/<repo>/ without a host prefix
         # matches any registry (PRRT_kwDOSJAM6s6HtNI4, PRRT_kwDOSJAM6s6Htl06).
         return (_is_registry_host and not _is_docker_hub_alias) or any(
-            h in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+            f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
         )
     # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
     # URLs as /v2/library/<name>/ rather than /v2/<name>/.  Apply the same
@@ -510,7 +510,7 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
             # ghcr.io/v2/library/<name>/...) from being incorrectly attributed to a
             # docker.io pull (PRRT_kwDOSJAM6s6HtZne).
             if (not _is_registry_host or _host in _DOCKER_HUB_REGISTRY_HOSTS) and not any(
-                h in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+                f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
             ):
                 return False
             effective_ref = manifest_ref if manifest_ref is not None else "latest"
@@ -522,7 +522,7 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
             # (_is_registry_host and _host not in _DOCKER_HUB_REGISTRY_HOSTS) is always
             # False here: the outer guard at line 452 ensures that when _is_registry_host
             # is True, _host must be in _DOCKER_HUB_REGISTRY_HOSTS.
-            return any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
+            return any(f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
     # Token-service endpoint URLs embed the repository in the OAuth scope
     # parameter as scope=repository%3A<repo>%3A<actions> (URL-encoded from
     # scope=repository:<repo>:<actions>).  A permanent auth failure at the
@@ -546,11 +546,13 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
             # Unqualified Docker Hub ref: require a Docker Hub auth or registry
             # host in the token URL so an error from a different registry is
             # not attributed to a Docker Hub pull (mirrors PRRT_kwDOSJAM6s6HtNI4).
-            return "auth.docker.io" in line or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
+            return "auth.docker.io" in line or any(
+                f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+            )
         # Docker Hub registry hosts use auth.docker.io as their token service,
         # not the registry host itself — accept either.
         if _host in _DOCKER_HUB_REGISTRY_HOSTS:
-            return "auth.docker.io" in line or _host in line
+            return "auth.docker.io" in line or f"//{_host}/" in line
         # Use "//<host>/" as the URL-boundary delimiter so a hostname that is a
         # suffix of another host (e.g. "registry.example.com" inside
         # "prod.registry.example.com") does not falsely match.  Token-service
@@ -568,7 +570,9 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         lib_token_scope = f"scope=repository%3alibrary%2f{repo_path}%3a"
         unencoded_lib_token_scope = f"scope=repository:library/{repo_path}:"
         if lib_token_scope in line or unencoded_lib_token_scope in line:
-            return "auth.docker.io" in line or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
+            return "auth.docker.io" in line or any(
+                f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
+            )
     return False
 
 
