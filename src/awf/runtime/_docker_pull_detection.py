@@ -685,7 +685,21 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
                 ]
                 if stale_non_flags:
                     _stale_img = stale_non_flags[-1]
-                    if not _docker_pull_command_succeeded(_stale_img, back_start, index, lines):
+                    # The stale guard constrains the no-echo fallback only when
+                    # the current summary is plausibly the stale pull's own
+                    # summary.  When a prior "docker pull failed" line already
+                    # appeared between the stale echo and the current summary,
+                    # the stale pull is already accounted for — the current
+                    # summary belongs to a different pull (a different image),
+                    # so gating on the stale image ref would reject the
+                    # permanent detail for the actual failing image instead
+                    # (PRRT_kwDOSJAM6s6HuLfZ).
+                    if not _docker_pull_command_succeeded(
+                        _stale_img, back_start, index, lines
+                    ) and not any(
+                        _CI_DOCKER_SELF_EVIDENT_PULL_FAILURE_MARKER in lines[k]
+                        for k in range(back_start + 1, index)
+                    ):
                         stale_guard_image = _stale_img
             except StopIteration:
                 pass

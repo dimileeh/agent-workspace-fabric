@@ -974,6 +974,50 @@ class TestCiFailure:
         assert action.failures == (failure,)
 
     @pytest.mark.unit
+    def test_stale_echo_for_different_image_does_not_block_permanent_detail(
+        self,
+    ) -> None:
+        """A stale pull echo for a *different* image must not block the permanent
+        detail for the actual failing image when the stale pull's own summary
+        already appeared between the stale echo and the current summary.
+
+        When the stale echo is for image A (which already emitted its own
+        "docker pull failed" summary earlier in the log), a later "docker pull
+        failed" summary for image B (no echo in window) must not have its
+        permanent forward detail rejected because image B does not match the
+        stale image A.  Previously stale_guard_image was set to image A
+        regardless of whether image A had a prior summary, so the no-echo
+        fallback in ``_forward_detail_ref_matches_pull`` rejected image B's
+        manifest-unknown detail and misclassified the failure as transient,
+        triggering RerunTransientCI instead of ReportCiFailure
+        (PRRT_kwDOSJAM6s6HuLfZ)."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "docker pull stale-image:v1\n"  # line 0 — stale echo for a DIFFERENT image
+                # line 1: stale image already summarised with a permanent marker; its
+                # "docker pull failed" presence proves the stale pull is accounted for,
+                # so the current summary (line 4) belongs to a different pull.
+                "docker pull failed with exit code 1, pull access denied\n"
+                "context deadline exceeded\n"  # line 2 — timeout (in window [2,4] for line 4)
+                "context deadline exceeded\n"  # line 3 — timeout
+                "docker pull failed with exit code 1\n"  # line 4 — summary (index=4, start=2)
+                'failed to pull image "actual-image:v2": manifest unknown\n'  # line 5 — permanent
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
     def test_stale_echo_without_success_rejects_unrelated_forward_permanent_detail(
         self,
     ) -> None:
