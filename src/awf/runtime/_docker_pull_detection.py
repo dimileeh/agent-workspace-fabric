@@ -436,6 +436,37 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         lib_repo_prefix = f"/v2/library/{repo_path}/"
         if lib_repo_prefix in line:
             return _is_registry_host or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
+    # Token-service endpoint URLs embed the repository in the OAuth scope
+    # parameter as scope=repository%3A<repo>%3A<actions> (URL-encoded from
+    # scope=repository:<repo>:<actions>).  A permanent auth failure at the
+    # token service — e.g. ``Get
+    # "https://ghcr.io/token?scope=repository%3Aorg%2Fapp%3Apull": denied``
+    # — carries no /v2/ manifest path and is not recognised by the checks
+    # above, so the permanence probe fails to attribute it to the in-flight
+    # pull and the adjacent transient marker is incorrectly left non-permanent.
+    # URL percent-encoding uses uppercase hex by convention (RFC 3986), but the
+    # log text is lowercased before splitting (see _log_shows_docker_registry_timeout),
+    # so the encoded sequences arrive as lowercase: %3a (:) and %2f (/).
+    encoded_repo = repo_path.replace("/", "%2f")
+    token_scope = f"scope=repository%3a{encoded_repo}%3a"
+    if token_scope in line:
+        if not _is_registry_host:
+            # Unqualified Docker Hub ref: require a Docker Hub auth or registry
+            # host in the token URL so an error from a different registry is
+            # not attributed to a Docker Hub pull (mirrors PRRT_kwDOSJAM6s6HtNI4).
+            return "auth.docker.io" in line or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
+        # Docker Hub registry hosts use auth.docker.io as their token service,
+        # not the registry host itself — accept either.
+        if _host in _DOCKER_HUB_REGISTRY_HOSTS:
+            return "auth.docker.io" in line or _host in line
+        return _host in line
+    # Docker Hub library images (single-word names like "postgres") appear in
+    # token requests as scope=repository%3alibrary%2f<name>%3a rather than
+    # scope=repository%3a<name>%3a — mirrors the /v2/library/ treatment above.
+    if "/" not in repo_path:
+        lib_token_scope = f"scope=repository%3alibrary%2f{repo_path}%3a"
+        if lib_token_scope in line:
+            return "auth.docker.io" in line or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
     return False
 
 

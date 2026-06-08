@@ -1159,3 +1159,99 @@ class TestImageRefMatchesDaemonUrl:
         Regression for PRRT_kwDOSJAM6s6HtNI4."""
         hub_line = 'Head "https://registry-1.docker.io/v2/org/app/manifests/latest": denied'
         assert _image_ref_matches_daemon_url("org/app:latest", hub_line) is True
+
+    @pytest.mark.unit
+    def test_token_endpoint_auth_failure_matches_registry_image(self) -> None:
+        """A permanent auth failure at the token service endpoint must match the
+        in-flight image ref.
+
+        When Docker pulls ``ghcr.io/org/app:latest`` and the registry token
+        service returns a denial — ``Get
+        "https://ghcr.io/token?scope=repository%3aorg%2fapp%3apull": denied``
+        — the daemon error carries no ``/v2/manifests/`` path.  The URL-encoded
+        scope fragment ``scope=repository%3aorg%2fapp%3a`` must be recognised
+        so the permanence probe can attribute the error to the in-flight pull.
+
+        Lines are lowercased before being passed to this helper (see
+        ``_log_shows_docker_registry_timeout``), so percent-encoding digits
+        arrive as lowercase (%3a, %2f).
+
+        Regression for PRRT_kwDOSJAM6s6HtSvu."""
+        line = 'get "https://ghcr.io/token?scope=repository%3aorg%2fapp%3apull": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is True
+
+    @pytest.mark.unit
+    def test_token_endpoint_auth_failure_wrong_registry_does_not_match(self) -> None:
+        """A token-service denial from a *different* registry must NOT match the
+        in-flight image ref even when the repo path is identical.
+
+        A permanent denial ``Get
+        "https://registry.example.com/token?scope=repository%3aorg%2fapp%3apull":
+        denied`` must not be attributed to a ``ghcr.io/org/app:latest`` pull —
+        the registry host does not match.
+
+        Regression for PRRT_kwDOSJAM6s6HtSvu."""
+        line = (
+            'get "https://registry.example.com/token?scope=repository%3aorg%2fapp%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is False
+
+    @pytest.mark.unit
+    def test_docker_hub_library_image_token_endpoint_matches(self) -> None:
+        """An unqualified Docker Hub library image must match a token-service
+        denial that uses the ``library/<name>`` scope encoding.
+
+        Docker Hub token requests encode a bare image name like ``postgres``
+        as ``scope=repository%3alibrary%2fpostgres%3apull``.  The helper must
+        recognise this encoding so a permanent auth failure at the Docker Hub
+        token service suppresses a rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtSvu."""
+        line = 'get "https://auth.docker.io/token?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        assert _image_ref_matches_daemon_url("postgres:16", line) is True
+
+    @pytest.mark.unit
+    def test_docker_hub_library_image_token_endpoint_wrong_registry_does_not_match(self) -> None:
+        """An unqualified Docker Hub library image must NOT match a token denial
+        from a different registry that happens to embed the same library scope.
+
+        Regression for PRRT_kwDOSJAM6s6HtSvu."""
+        line = 'get "https://ghcr.io/token?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        assert _image_ref_matches_daemon_url("postgres:16", line) is False
+
+    @pytest.mark.unit
+    def test_token_endpoint_permanent_auth_failure_reports_ci_failure(self) -> None:
+        """``decide()`` must classify a token-service auth denial as a permanent
+        CI failure (ReportCiFailure), not a transient rerun.
+
+        When Docker encounters ``Get
+        "https://ghcr.io/token?scope=repository%3Aorg%2Fapp%3Apull": denied``
+        followed by ``docker pull failed`` and an adjacent ``context deadline
+        exceeded``, the preceding token-service denial is permanent and must
+        suppress the transient-timeout classification.
+
+        Before the fix, ``_image_ref_matches_daemon_url`` did not recognise
+        token-service URLs, so the permanence probe failed to attribute the
+        denial to the in-flight pull, and AWF burned a rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtSvu."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/app:latest\n"
+                'Error response from daemon: Get "https://ghcr.io/token?scope=repository%3Aorg%2Fapp%3Apull": denied\n'
+                "docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="99000000002",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
