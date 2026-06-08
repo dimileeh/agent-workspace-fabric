@@ -123,6 +123,61 @@ def test_merge_environment_skips_additions_index_gap_above_real_entries() -> Non
 
 
 @pytest.mark.unit
+def test_merge_environment_normalizes_base_count_overstating_entries() -> None:
+    # A profile base whose GIT_CONFIG_COUNT overstates the present entries (holes
+    # at indices 1..N-1) must not leave those holes in the merged block: git
+    # rejects a block whose count exceeds the contiguous entries, so the lease
+    # insteadOf rules would never reach git. The base is normalized to its
+    # present entries and the lease entries land contiguously above it.
+    base = (
+        ("GIT_CONFIG_COUNT", "5"),
+        ("GIT_CONFIG_KEY_0", "user.name"),
+        ("GIT_CONFIG_VALUE_0", "Profile Bot"),
+        # indices 1..4 declared by the count but absent.
+    )
+    additions = (
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "url.https://x@bitbucket.org/.insteadOf"),
+        ("GIT_CONFIG_VALUE_0", "https://bitbucket.org/"),
+    )
+
+    merged = dict(merge_agent_environment(base, additions))
+
+    # Count matches the present entries (no holes) and _git_config_pairs (which
+    # reads every index < count) does not raise on a missing index.
+    assert merged["GIT_CONFIG_COUNT"] == "2"
+    assert _git_config_pairs(merged) == {
+        ("user.name", "Profile Bot"),
+        ("url.https://x@bitbucket.org/.insteadOf", "https://bitbucket.org/"),
+    }
+    assert "GIT_CONFIG_KEY_2" not in merged
+
+
+@pytest.mark.unit
+def test_merge_environment_normalizes_base_indexed_keys_without_count() -> None:
+    # A profile base with indexed GIT_CONFIG_KEY_n entries but no GIT_CONFIG_COUNT
+    # must not collide with the lease entries (which start at index 0) nor leave a
+    # mismatched count. Orphan keys without a count never reach git, so dropping
+    # them while the lease entries claim a clean 0-based block is correct.
+    base = (
+        ("GIT_CONFIG_KEY_0", "user.name"),
+        ("GIT_CONFIG_VALUE_0", "Profile Bot"),
+    )
+    additions = (
+        ("GIT_CONFIG_COUNT", "1"),
+        ("GIT_CONFIG_KEY_0", "url.https://x@bitbucket.org/.insteadOf"),
+        ("GIT_CONFIG_VALUE_0", "https://bitbucket.org/"),
+    )
+
+    merged = dict(merge_agent_environment(base, additions))
+
+    assert merged["GIT_CONFIG_COUNT"] == "1"
+    assert _git_config_pairs(merged) == {
+        ("url.https://x@bitbucket.org/.insteadOf", "https://bitbucket.org/")
+    }
+
+
+@pytest.mark.unit
 def test_merge_environment_appends_git_config_when_base_has_none() -> None:
     # When the base carries no git-config protocol vars the additions keep their
     # own contiguous 0-based indexing (unchanged from the pre-fix behavior).

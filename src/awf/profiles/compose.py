@@ -287,43 +287,37 @@ def merge_agent_environment(
 
     Non-git-config keys keep "first writer wins" semantics (the base value is
     preserved). The ``GIT_CONFIG_KEY_n/VALUE_n/COUNT`` protocol is merged
-    specially: the additions' git-config entries are re-indexed to append onto
-    the base's ``GIT_CONFIG_COUNT`` and the counts are summed. The lease resolver
-    always emits its bitbucket ``insteadOf`` entries starting at index 0, so a
-    profile that already declares indexed ``GIT_CONFIG_*`` in
+    specially: both the base and the additions are split into their *present*
+    git-config entries, concatenated in order, and re-emitted as a single
+    contiguous ``0..N-1`` block with a matching ``GIT_CONFIG_COUNT``. The lease
+    resolver always emits its bitbucket ``insteadOf`` entries starting at index
+    0, so a profile that already declares indexed ``GIT_CONFIG_*`` in
     ``runtime.environment`` would otherwise either collide on index 0 (dropped by
     the skip-existing rule) or sit above the effective count and never reach git,
-    breaking private Bitbucket HTTPS in the agent. Re-indexing keeps both blocks
-    reachable.
+    breaking private Bitbucket HTTPS in the agent. Re-emitting a fresh contiguous
+    block keeps both blocks reachable and tolerates a malformed base whose count
+    overstates the present entries (holes) or whose indexed keys lack a count —
+    git rejects any block with holes or a mismatched count, so the base is
+    normalized rather than passed through verbatim.
     """
 
+    base_entries, base_others = _split_git_config_entries(base_environment)
     addition_entries, addition_others = _split_git_config_entries(additions)
-    merged: list[tuple[str, str]] = list(base_environment)
+    merged: list[tuple[str, str]] = list(base_others)
     existing = {key for key, _ in merged}
     for key, value in addition_others:
         if key not in existing:
             merged.append((key, value))
             existing.add(key)
-    if not addition_entries:
+    entries = base_entries + addition_entries
+    if not entries:
         return tuple(merged)
 
-    base_count = _git_config_count(base_environment)
-    for offset, (config_key, config_value) in enumerate(addition_entries):
-        index = base_count + offset
+    for index, (config_key, config_value) in enumerate(entries):
         merged.append((f"{_GIT_CONFIG_KEY_PREFIX}{index}", config_key))
         merged.append((f"{_GIT_CONFIG_VALUE_PREFIX}{index}", config_value))
-    total = base_count + len(addition_entries)
-    counted: list[tuple[str, str]] = []
-    count_emitted = False
-    for key, value in merged:
-        if key == _GIT_CONFIG_COUNT_KEY:
-            counted.append((key, str(total)))
-            count_emitted = True
-        else:
-            counted.append((key, value))
-    if not count_emitted:
-        counted.append((_GIT_CONFIG_COUNT_KEY, str(total)))
-    return tuple(counted)
+    merged.append((_GIT_CONFIG_COUNT_KEY, str(len(entries))))
+    return tuple(merged)
 
 
 def agent_environment_with_declared_secret_leases(
