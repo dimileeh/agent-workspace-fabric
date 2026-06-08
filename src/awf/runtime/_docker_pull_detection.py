@@ -99,6 +99,15 @@ _CI_DOCKER_REGISTRY_PULL_CONTEXT_MARKERS = (
     "/token?",
 )
 
+# Docker Hub registry hosts that appear in daemon error URLs for Docker Hub image
+# pulls.  Unqualified image refs (no explicit registry such as ``org/app:latest``
+# or ``postgres:16``) resolve implicitly to Docker Hub; the daemon error URL for
+# such a pull carries one of these hostnames.  Used in
+# ``_image_ref_matches_daemon_url`` to prevent a hostless ``/v2/<repo>/manifests/``
+# fragment from matching a permanent error URL from a different registry
+# (e.g. ``ghcr.io``) that happens to host the same repo path.
+_DOCKER_HUB_REGISTRY_HOSTS = ("registry-1.docker.io", "index.docker.io")
+
 # ``failed to pull image "<ref>"`` is emitted by Docker, containerd, and the
 # Kubernetes kubelet alike. A bare kubelet/containerd ``Failed to pull image
 # "app"`` event for an *application* image in an e2e deployment is a real
@@ -394,11 +403,22 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         # explicit tag/digest is present, Docker defaults to "latest"
         # (https://docs.docker.com/reference/cli/docker/image/pull/), so use
         # that as the effective ref rather than accepting any manifest tag.
+        #
+        # For unqualified Docker Hub refs (no explicit registry host), the
+        # /v2/<repo>/manifests/ fragment is not registry-scoped — the same path
+        # appears in daemon URLs from any registry hosting that repo path.  Require
+        # a known Docker Hub registry host in the line so a permanent error from a
+        # different registry (e.g. ghcr.io) for the same path is not attributed to
+        # an in-flight Docker Hub pull (PRRT_kwDOSJAM6s6HtNI4).
+        if not _is_registry_host and not any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS):
+            return False
         effective_ref = manifest_ref if manifest_ref is not None else "latest"
         return f"{url_manifests_prefix}{effective_ref}" in line
     url_repo_prefix = f"{_host}/v2/{repo_path}/" if _is_registry_host else f"/v2/{repo_path}/"
     if url_repo_prefix in line:
-        return True
+        # Same Docker Hub scoping as above: /v2/<repo>/ without a host prefix
+        # matches any registry (PRRT_kwDOSJAM6s6HtNI4).
+        return _is_registry_host or any(h in line for h in _DOCKER_HUB_REGISTRY_HOSTS)
     # Docker Hub library images (e.g. "postgres", "ubuntu") appear in daemon
     # URLs as /v2/library/<name>/ rather than /v2/<name>/.
     if "/" not in repo_path:

@@ -1026,3 +1026,38 @@ class TestImageRefMatchesDaemonUrl:
         Regression for PRRT_kwDOSJAM6s6HtKzI."""
         line = 'Head "https://ghcr.io/v2/org/app/manifests/latest": denied'
         assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is True
+
+    @pytest.mark.unit
+    def test_implicit_docker_hub_org_image_wrong_registry_does_not_match(self) -> None:
+        """An unqualified Docker Hub user/org image ref must NOT match a daemon
+        error URL from a different registry with the same repo path and tag.
+
+        When ``docker pull org/app:latest`` is an implicit Docker Hub pull and an
+        unrelated permanent error ``Head "https://ghcr.io/v2/org/app/manifests/latest":
+        denied`` appears in the same log window, the helper must return False — the
+        daemon URL belongs to ghcr.io, not Docker Hub, and must not suppress a
+        legitimate transient-timeout rerun.
+
+        Without the Docker Hub host guard the hostless ``/v2/org/app/manifests/latest``
+        fragment matches the ghcr.io URL as a substring, causing AWF to report a
+        permanent CI failure instead of scheduling a rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtNI4."""
+        ghcr_line = 'Head "https://ghcr.io/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("org/app:latest", ghcr_line) is False
+
+        other_line = 'Head "https://registry.example.com/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("org/app:latest", other_line) is False
+
+    @pytest.mark.unit
+    def test_implicit_docker_hub_org_image_matches_docker_hub_daemon_url(self) -> None:
+        """An unqualified Docker Hub user/org image ref must match a daemon error
+        URL from the Docker Hub registry.
+
+        Counterpart to the cross-registry false-positive regression: a permanent
+        denial from ``registry-1.docker.io`` for ``org/app:latest`` must still
+        be attributed to the same pull and suppress a rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HtNI4."""
+        hub_line = 'Head "https://registry-1.docker.io/v2/org/app/manifests/latest": denied'
+        assert _image_ref_matches_daemon_url("org/app:latest", hub_line) is True
