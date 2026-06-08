@@ -380,6 +380,11 @@ class ProfileMonitor(BaseModel):
 
     initial_review_grace_period_seconds: float = Field(default=900.0, ge=0, le=86400)
     non_check_reviewer_settle_seconds: float = Field(default=900.0, ge=0, le=86400)
+    require_ci: bool = Field(default=True)
+    """Whether the PR monitor must observe at least one check/status before
+    auto-merge. Default ``True`` is today's behavior; set ``false`` only for
+    repos that intentionally run NO CI so the monitor merges a clean PR once the
+    forge confirms an empty check set (paired with ``PRStatus.no_checks_observed``)."""
     non_check_reviewer_logins: list[str] = Field(
         default_factory=lambda: ["greptile-apps", "chatgpt-codex-connector"],
         max_length=64,

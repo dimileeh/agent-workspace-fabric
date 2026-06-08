@@ -561,6 +561,11 @@ class GitHubClient:
         check_state_str = (rollup or {}).get("state") or "PENDING"
         check_state = _parse_check_state(check_state_str)
         checks = _parse_check_contexts(rollup)
+        # Authoritative "no checks observed": GitHub returns no rollup at all for
+        # a commit with no CI, and a present-but-empty rollup reports
+        # ``contexts.totalCount == 0``. Read the authoritative count, NOT
+        # ``len(checks)`` (which a 100-context page cap could understate).
+        no_checks_observed = rollup is None or _dig(rollup, "contexts", "totalCount") == 0
         if _dig(rollup, "contexts", "pageInfo", "hasNextPage") is True:
             _log.warning(
                 "github.check_contexts_truncated",
@@ -719,6 +724,7 @@ class GitHubClient:
             merge_state_status=merge_state_status,
             ci_failures=(),  # populated by fetch_failing_check_logs if needed
             checks=checks,
+            no_checks_observed=no_checks_observed,
             changed_paths=changed_paths,
             closed=bool(pr.get("closed")),
             merged=bool(pr.get("merged")),

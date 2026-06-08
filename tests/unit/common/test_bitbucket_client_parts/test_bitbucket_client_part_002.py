@@ -98,6 +98,26 @@ async def test_fetch_pr_status_open_clean() -> None:
     assert status.closed is False
     assert status.merged is False
     assert status.changed_paths == ("src/a.py",)
+    # ≥1 commit status was fetched, so the "no checks observed" signal is off.
+    assert status.no_checks_observed is False
+
+
+async def test_fetch_pr_status_no_checks_observed_when_no_statuses() -> None:
+    # A repo with Pipelines disabled returns an EMPTY commit-statuses list; the
+    # signal is set True from that authoritative fetch (#469).
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake, statuses=[])
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.no_checks_observed is True
+    # Empty statuses still parse to PENDING (the gate-6 default), so without the
+    # operator opt-out the monitor would keep waiting.
+    assert status.check_state == CheckState.PENDING
+    # A clean OPEN PR reports a KNOWN mergeable state regardless of CI presence, so
+    # with the operator opt-out the decide() path proceeds to Merge() rather than
+    # WaitForCI("unknown_mergeable_state"). Assert it explicitly (spec point 7).
+    assert status.mergeable == MergeableState.MERGEABLE
+    assert status.merge_state_status == MergeStateStatus.CLEAN
 
 
 async def test_fetch_pr_status_failed_check() -> None:
@@ -146,6 +166,18 @@ async def test_fetch_pr_status_passes_through_base_behind_count() -> None:
 async def test_fetch_pr_status_not_found_raises() -> None:
     fake = FakeBitBucket()
     fake.enqueue("GET", _PR, status=404, json={"type": "error"})
+    client = make_client(fake)
+    with pytest.raises(BitBucketClientError):
+        await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+
+
+async def test_fetch_pr_status_statuses_fetch_failure_raises_not_no_checks() -> None:
+    # A transport/HTTP failure while fetching commit statuses MUST raise
+    # ForgeClientError, never degrade to a mergeable no-checks PRStatus that the
+    # require_ci opt-out could then merge blind (#469 safety regression).
+    fake = FakeBitBucket()
+    fake.enqueue("GET", _PR, json=pr_payload())
+    fake.enqueue("GET", f"{_REPO}/commit/{_HEAD}/statuses", status=500, json={"type": "error"})
     client = make_client(fake)
     with pytest.raises(BitBucketClientError):
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)

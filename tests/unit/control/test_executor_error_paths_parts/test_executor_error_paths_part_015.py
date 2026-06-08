@@ -20,6 +20,8 @@ from awf.adapters import registry as _registry  # noqa: F401 — populate regist
 from awf.common.bitbucket_client import BITBUCKET_AUTH_NOT_CONFIGURED, BitBucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.forge import ForgeNotSupportedError
+from awf.common.github_client import PullRequestAdoptionMetadata
+from awf.control.executor.monitor_handoff_sync import _resolve_handoff_pr_number
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -168,3 +170,45 @@ class TestSyncReleasePrHandoffForgeGate:
     # ForgeNotSupportedError, not BitBucketClientError) is now closed for the
     # release handoff by
     # ``test_pr_adoption_bitbucket_auth_error_fails_cleanly_before_monitor`` above.
+
+
+def _adoption_metadata(*, number: int | None, url: str) -> PullRequestAdoptionMetadata:
+    return PullRequestAdoptionMetadata(
+        number=number,  # type: ignore[arg-type] — BitBucket leaves this unset
+        head_ref="feature/x",
+        head_repo_slug="workspace/repo",
+        base_ref="development",
+        head_sha="s" * 40,
+        base_sha="b" * 40,
+        state="OPEN",
+        is_draft=False,
+        closed=False,
+        merged=False,
+        author=None,
+        url=url,
+        title="t",
+    )
+
+
+class TestResolveHandoffPrNumber:
+    """Forge-neutral PR-number resolution at the release-sync handoff (#468)."""
+
+    @pytest.mark.unit
+    def test_github_metadata_number_is_used_directly(self) -> None:
+        metadata = _adoption_metadata(number=7, url="https://github.com/dimileeh/aira-web/pull/7")
+        assert _resolve_handoff_pr_number(metadata) == 7
+
+    @pytest.mark.unit
+    def test_bitbucket_falls_back_to_url_when_number_unset(self) -> None:
+        # BitBucket ``create_pull_request`` returns only a web URL, so
+        # ``metadata.number`` is None; the number is recovered from the URL.
+        metadata = _adoption_metadata(
+            number=None,
+            url="https://bitbucket.org/workspace/repo/pull-requests/7",
+        )
+        assert _resolve_handoff_pr_number(metadata) == 7
+
+    @pytest.mark.unit
+    def test_unset_number_and_unparseable_url_resolves_none(self) -> None:
+        metadata = _adoption_metadata(number=None, url="not-a-pr-url")
+        assert _resolve_handoff_pr_number(metadata) is None

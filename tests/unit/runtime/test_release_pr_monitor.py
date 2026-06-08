@@ -136,6 +136,7 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
         pre_merge_settle_seconds=11,
         non_check_reviewer_settle_seconds=45,
         non_check_reviewer_logins=["custom-reviewer"],
+        require_ci=False,
     )
     assert runner._config.poll_interval_seconds == 15
     assert runner._config.settle_interval_seconds == 7
@@ -143,3 +144,35 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
     assert runner._config.pre_merge_settle_seconds == 11
     assert runner._config.non_check_reviewer_settle_seconds == 45
     assert runner._config.non_check_reviewer_logins == ("custom-reviewer",)
+    assert runner._config.require_ci is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builder", [build_release_pr_monitor, build_feature_pr_monitor])
+def test_factories_require_ci_defaults_true(builder, tmp_path: Path) -> None:
+    cmd = FakeCommandRunner()
+    runner = builder(
+        session_factory=None,  # type: ignore[arg-type]
+        runner=cmd,
+        adapter=_StubAdapter(),
+        gh=GitHubClient(cmd),
+        validation=_validation(cmd, tmp_path),
+        worktrees_root=tmp_path,
+    )
+    assert runner._config.require_ci is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("builder", [build_release_pr_monitor, build_feature_pr_monitor])
+def test_factories_thread_require_ci_false(builder, tmp_path: Path) -> None:
+    cmd = FakeCommandRunner()
+    runner = builder(
+        session_factory=None,  # type: ignore[arg-type]
+        runner=cmd,
+        adapter=_StubAdapter(),
+        gh=GitHubClient(cmd),
+        validation=_validation(cmd, tmp_path),
+        worktrees_root=tmp_path,
+        require_ci=False,
+    )
+    assert runner._config.require_ci is False

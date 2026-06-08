@@ -1134,6 +1134,7 @@ class TestPrNumberExtraction:
             ("https://bitbucket.org/workspace/repo/pull-requests/7/", 7),
             ("https://bitbucket.org/workspace/repo/pull-requests/7/diff", 7),
             ("https://bitbucket.org/workspace/repo/pull-requests/7?foo=bar", 7),
+            ("https://bitbucket.org/workspace/repo/pull-requests/7#comment-1", 7),
             ("not a url", None),
             ("https://github.com/dimileeh/aira-web/issues/5", None),
         ],

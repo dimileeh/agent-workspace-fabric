@@ -366,6 +366,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             initial_review_grace_period_seconds=321,
             non_check_reviewer_settle_seconds=45,
             non_check_reviewer_logins=["custom-reviewer"],
+            require_ci=False,
         ),
     )
     monitor = created["executor_monitor_factory"](
@@ -383,6 +384,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 321
     assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 45
     assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
+    assert created["feature_monitor_kwargs"]["require_ci"] is False
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     expected_runtime_context = created["feature_monitor_kwargs"]["workspace_runtime_context"]
@@ -420,6 +422,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["release_monitor_kwargs"]["initial_review_grace_period_seconds"] == 12.5
     assert created["release_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 45
     assert created["release_monitor_kwargs"]["non_check_reviewer_logins"] == ["custom-reviewer"]
+    assert created["release_monitor_kwargs"]["require_ci"] is False
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["release_monitor_kwargs"]
