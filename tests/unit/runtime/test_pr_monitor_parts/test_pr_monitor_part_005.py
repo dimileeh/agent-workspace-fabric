@@ -671,3 +671,63 @@ class TestCiFailure:
 
         assert isinstance(action, ReportCiFailure)
         assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_forward_daemon_denied_with_quiet_flag_in_pull_echo_reports_ci_failure(
+        self,
+    ) -> None:
+        """When the pull echo uses ``--quiet`` before the image ref, the forward
+        daemon probe must still extract the correct image and classify the pull as
+        permanent.  Without flag-skipping logic, ``preceding_pull_image`` would be
+        set to ``"--quiet"`` instead of ``"postgres:16"``, causing the daemon error
+        to go unmatched and the failure to be misclassified as transient."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull --quiet postgres:16\n"
+                "Docker pull failed with exit code 1\n"
+                "Error response from daemon: pull access denied for postgres:16\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_forward_daemon_denied_with_platform_flag_in_pull_echo_reports_ci_failure(
+        self,
+    ) -> None:
+        """When the pull echo uses ``--platform linux/amd64`` before the image ref,
+        the forward daemon probe must skip both the flag and its value argument and
+        extract the correct image ``postgres:16``.  Without this, ``preceding_pull_image``
+        would be ``"linux/amd64"`` (not the image name), failing the daemon-error
+        match and causing the permanent failure to be misclassified as transient."""
+        failure = CheckFailure(
+            name="python-coverage-shards (2)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull --platform linux/amd64 postgres:16\n"
+                "Docker pull failed with exit code 1\n"
+                "Error response from daemon: pull access denied for postgres:16\n"
+                "context deadline exceeded"
+            ),
+            run_id="27091023772",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure)
+        assert action.failures == (failure,)

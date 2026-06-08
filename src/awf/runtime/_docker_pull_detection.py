@@ -432,8 +432,12 @@ def _evidence_line_is_permanent_pull_failure(index: int, lines: list[str]) -> bo
             pull_tokens = lines[back_start].split()
             try:
                 pull_idx = next(i for i, t in enumerate(pull_tokens) if t == "pull")
-                if pull_idx + 1 < len(pull_tokens):
-                    preceding_pull_image = pull_tokens[pull_idx + 1]
+                # Skip option flags (e.g. --quiet) and their values (e.g.
+                # --platform linux/amd64) that may precede the image ref; the
+                # image is always the last positional argument to docker pull.
+                non_flags = [t for t in pull_tokens[pull_idx + 1 :] if not t.startswith("-")]
+                if non_flags:
+                    preceding_pull_image = non_flags[-1]
             except StopIteration:
                 pass
         # Forward daemon probe: some log streams emit the summary before the
