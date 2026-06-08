@@ -110,6 +110,51 @@ async def test_outdated_thread_is_filtered() -> None:
     assert status.unresolved_inline_threads == ()
 
 
+async def test_fetch_pr_status_surfaces_outdated_unresolved_thread() -> None:
+    # #473: a BitBucket inline thread that went ``outdated`` (addressed elsewhere)
+    # but is still unresolved is kept out of the actionable feed yet surfaced in
+    # ``outdated_unresolved_inline_threads`` so the monitor can resolve the ones it
+    # addressed.
+    fake = FakeBitBucket()
+    _seed_fetch_status(fake, [_inline_comment(100, "stale finding", outdated=True)])
+    client = make_client(fake)
+    status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    assert status.unresolved_inline_threads == ()
+    assert [t.thread_id for t in status.outdated_unresolved_inline_threads] == [
+        "bb:workspace/repo#42:100"
+    ]
+    thread = status.outdated_unresolved_inline_threads[0]
+    assert thread.is_outdated is True
+    assert thread.is_resolved is False
+    assert thread.body_excerpt == "stale finding"
+
+
+def test_build_outdated_unresolved_review_threads_only_returns_outdated() -> None:
+    from awf.common.bitbucket_client_parsing import (
+        build_outdated_unresolved_review_threads,
+        build_review_threads,
+    )
+
+    comments = [
+        _inline_comment(100, "addressed elsewhere", outdated=True),
+        _inline_comment(101, "still current"),
+        _inline_comment(102, "resolved + outdated", outdated=True, resolved=True),
+        _inline_comment(103, "mine but outdated", account="viewer", outdated=True),
+    ]
+    outdated = build_outdated_unresolved_review_threads(
+        comments, repo=repo(), pr_number=42, account_id="viewer"
+    )
+    assert [t.thread_id for t in outdated] == ["bb:workspace/repo#42:100"]
+    assert outdated[0].is_outdated is True
+    assert outdated[0].is_resolved is False
+
+    # The actionable feed is unchanged: only the still-current, non-outdated,
+    # external thread remains.
+    actionable = build_review_threads(comments, repo=repo(), pr_number=42, account_id="viewer")
+    assert [t.thread_id for t in actionable] == ["bb:workspace/repo#42:101"]
+    assert all(t.is_outdated is False for t in actionable)
+
+
 # ── resolve_thread (POST resolves; DELETE would reopen) ───────────────────────
 
 

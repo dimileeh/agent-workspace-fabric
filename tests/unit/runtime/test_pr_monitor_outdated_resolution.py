@@ -1,0 +1,450 @@
+"""Resolve-hygiene for addressed review threads that became OUTDATED (#473).
+
+When the monitor addresses a review thread by changing code ELSEWHERE (a
+different file/line than the comment anchor), the forge marks the original
+thread ``isOutdated=true`` and both forge clients drop it from
+``PRStatus.unresolved_inline_threads`` (outdated threads are non-blocking for
+merge). The fix-cycle resolve loop only iterates that actionable feed, so the
+addressed thread is never resolved and lingers as "unresolved" on a merged PR.
+
+``_resolve_addressed_outdated_threads`` closes that gap forge-neutrally: it
+iterates ``PRStatus.outdated_unresolved_inline_threads`` and resolves only the
+threads the monitor already recorded with a fix verdict
+(``fix_committed`` / ``false_positive``). ``defer`` / ``needs_human`` /
+``agent_failed`` threads legitimately stay open.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.common.bitbucket_client import BITBUCKET_API_ERROR, BitBucketClientError
+from awf.common.commands import FakeCommandRunner
+from awf.common.github_client import GitHubClientError, RepoRef
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_session_factory
+from awf.runtime.pr_monitor import (
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    PRStatus,
+    ReviewThread,
+)
+from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
+from awf.runtime.pr_monitor_runner.outdated_resolution import (
+    _OUTDATED_RESOLVABLE_THREAD_VERDICTS,
+)
+from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    seed_monitoring_workspace,
+)
+
+
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+class _RecordingGitHub(DefaultMergeMethodGitHubClient):
+    """Forge stub that records ``resolve_thread`` calls and optionally raises.
+
+    The runner step is forge-neutral — it only calls ``gh.resolve_thread`` — so
+    a single recording stub exercises both the GitHub and BitBucket paths; the
+    POST-not-DELETE resolve semantics are covered by the client-level tests.
+    """
+
+    def __init__(self, inner: FakeCommandRunner, *, error: Exception | None = None) -> None:
+        super().__init__(inner)
+        self.resolved: list[str] = []
+        self.attempts: list[str] = []
+        self._error = error
+
+    async def resolve_thread(self, *, thread_id: str) -> None:
+        self.attempts.append(thread_id)
+        if self._error is not None:
+            raise self._error
+        self.resolved.append(thread_id)
+
+
+def _outdated_thread(tid: str, *, path: str = "src/anchor.py") -> ReviewThread:
+    return ReviewThread(
+        thread_id=tid,
+        path=path,
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+    )
+
+
+def _status_with_outdated(*outdated: ReviewThread) -> PRStatus:
+    return PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        outdated_unresolved_inline_threads=outdated,
+    )
+
+
+def _resolution_events(ws: object, *, outcome: str | None = None) -> list:
+    return [
+        event
+        for event in ws.events  # type: ignore[attr-defined]
+        if event.event_type == "workspace.audit.comment_resolution"
+        and (event.payload or {}).get("action") == "resolve_outdated_thread"
+        and (outcome is None or (event.payload or {}).get("outcome") == outcome)
+    ]
+
+
+async def _call_resolve(
+    runner: object,
+    *,
+    workspace_id: str,
+    status: PRStatus,
+    state: MonitorState,
+) -> None:
+    await runner._resolve_addressed_outdated_threads(  # type: ignore[attr-defined]
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+
+@pytest.mark.unit
+async def test_outdated_addressed_thread_is_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(a) #473 regression — a ``fix_committed`` thread that became OUTDATED (only
+    in ``outdated_unresolved_inline_threads``) IS resolved. Pins the PR #470
+    scenario: feedback addressed by an edit elsewhere, thread went outdated."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    state.mark_addressed("T_outdated", "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(_outdated_thread("T_outdated")),
+        state=state,
+    )
+
+    assert gh.resolved == ["T_outdated"]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        succeeded = _resolution_events(ws, outcome="succeeded")
+        assert len(succeeded) == 1
+        assert succeeded[0].reason_code == "COMMENT_REPAIR"
+
+
+@pytest.mark.unit
+async def test_false_positive_outdated_thread_is_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """``false_positive`` is resolvable like ``fix_committed`` — both mean the
+    thread should close with no human follow-up."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    state.mark_addressed("T_fp", "false_positive")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(_outdated_thread("T_fp")),
+        state=state,
+    )
+
+    assert gh.resolved == ["T_fp"]
+
+
+@pytest.mark.unit
+async def test_in_place_thread_is_not_double_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(b) An in-place ``fix_committed`` thread (still in the actionable feed, not
+    the outdated feed) is resolved by the existing fix-cycle path and is NOT
+    touched by this step — the step only reads the outdated feed."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    state.mark_addressed("T_inplace", "fix_committed")
+
+    # An in-place thread stays in ``unresolved_inline_threads`` and is absent
+    # from the outdated feed, so this step finds nothing to do.
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(
+            ReviewThread(
+                thread_id="T_inplace",
+                path="src/anchor.py",
+                line=7,
+                body_excerpt="please fix this finding",
+                author="greptile",
+            ),
+        ),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+    )
+
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    assert gh.attempts == []
+    assert gh.resolved == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("verdict", ["defer", "needs_human", "agent_failed"])
+async def test_keep_open_verdicts_are_not_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    verdict: str,
+) -> None:
+    """(c) Outdated threads recorded ``defer`` / ``needs_human`` / ``agent_failed``
+    are NOT resolved here — they legitimately stay open (defer is capture-gated,
+    the others need a human)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    state.mark_addressed("T_keep_open", verdict)
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(_outdated_thread("T_keep_open")),
+        state=state,
+    )
+
+    assert gh.attempts == []
+
+
+@pytest.mark.unit
+async def test_unaddressed_outdated_thread_is_not_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An outdated thread the monitor never recorded a verdict for is left alone —
+    only threads the monitor itself addressed are resolved."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(_outdated_thread("T_unknown")),
+        state=MonitorState(),
+    )
+
+    assert gh.attempts == []
+
+
+@pytest.mark.unit
+async def test_bitbucket_outdated_thread_resolves_via_resolve_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(d) Forge-neutral: a BitBucket-style addressed-outdated thread resolves via
+    ``resolve_thread`` (the client-level POST/never-DELETE semantics are covered
+    in the BitBucket client tests)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    bb_id = "bb:workspace/repo#42:100"
+    state.mark_addressed(bb_id, "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(_outdated_thread(bb_id)),
+        state=state,
+    )
+
+    assert gh.resolved == [bb_id]
+
+
+@pytest.mark.unit
+async def test_transient_resolve_error_is_requeued_not_failed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(e) A transient resolve fault waits and is left for the next poll (the
+    thread stays in the outdated set); the monitor does not crash and records a
+    ``requeued`` audit event with the forge-native retry reason code."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    transient = GitHubClientError(
+        operation="resolve_thread",
+        returncode=1,
+        stderr="HTTP 503: service unavailable",
+    )
+    gh = _RecordingGitHub(cmd, error=transient)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    state.mark_addressed("T_transient", "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(_outdated_thread("T_transient")),
+        state=state,
+    )
+
+    assert gh.resolved == []
+    # The addressed marker is preserved so the next poll retries the resolve.
+    assert state.threads_addressed_ids["T_transient"] == "fix_committed"
+    assert sleep_fn.calls  # the transient handler waited before re-polling
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        requeued = _resolution_events(ws, outcome="requeued")
+        assert len(requeued) == 1
+        assert requeued[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+
+
+@pytest.mark.unit
+async def test_permanent_resolve_error_is_tolerated(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(e) A permanent resolve fault does not crash the monitor and is recorded as
+    a ``failed`` audit event carrying the forge-native reason code. The thread is
+    non-blocking, so the addressed marker is preserved (retried next poll)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    permanent = BitBucketClientError(
+        operation="bitbucket resolve_thread",
+        status=403,
+        body="thread resolution is not permitted for this token",
+        reason_code=BITBUCKET_API_ERROR,
+    )
+    gh = _RecordingGitHub(cmd, error=permanent)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    bb_id = "bb:workspace/repo#42:100"
+    state.mark_addressed(bb_id, "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(_outdated_thread(bb_id)),
+        state=state,
+    )
+
+    assert gh.resolved == []
+    assert state.threads_addressed_ids[bb_id] == "fix_committed"
+    assert sleep_fn.calls == []  # permanent fault does not wait/retry
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        failed = _resolution_events(ws, outcome="failed")
+        assert len(failed) == 1
+        assert failed[0].reason_code == BITBUCKET_API_ERROR
+
+
+@pytest.mark.unit
+def test_outdated_resolvable_verdicts_exclude_defer() -> None:
+    """The outdated-resolution verdict set is the fix-cycle's resolvable set MINUS
+    ``defer`` — defer's resolution is gated on durable capture this hygiene step
+    cannot re-verify, so an outdated defer thread stays open."""
+    assert "defer" in _RESOLVABLE_THREAD_VERDICTS
+    assert "defer" not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS
+    assert frozenset({"fix_committed", "false_positive"}) == (_OUTDATED_RESOLVABLE_THREAD_VERDICTS)
+    assert _OUTDATED_RESOLVABLE_THREAD_VERDICTS < _RESOLVABLE_THREAD_VERDICTS

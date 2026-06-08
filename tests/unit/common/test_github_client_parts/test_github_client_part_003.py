@@ -546,6 +546,75 @@ class TestFetchPrStatusPart002:
         assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
 
     @pytest.mark.unit
+    async def test_surfaces_outdated_unresolved_threads_for_resolution(self) -> None:
+        """#473: an outdated-but-unresolved thread with external comments is kept
+        out of the actionable feed yet surfaced in
+        ``outdated_unresolved_inline_threads`` so the monitor can resolve the ones
+        it addressed. A resolved-outdated thread appears in neither feed; a live
+        thread appears only in the actionable feed."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "T_resolved_outdated",
+                        "isResolved": True,
+                        "isOutdated": True,
+                        "path": "a",
+                        "line": 1,
+                        "comments": {"nodes": [{"bodyText": "done", "author": {"login": "bot"}}]},
+                    },
+                    {
+                        "id": "T_outdated",
+                        "isResolved": False,
+                        "isOutdated": True,
+                        "path": "b",
+                        "line": 2,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "bodyText": "fixed elsewhere",
+                                    "author": {"login": "greptile"},
+                                    "url": "https://github.example/review/9",
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "id": "T_outdated_only_viewer",
+                        "isResolved": False,
+                        "isOutdated": True,
+                        "path": "c",
+                        "line": 3,
+                        "comments": {"nodes": [{"bodyText": "self note", "viewerDidAuthor": True}]},
+                    },
+                    {
+                        "id": "T_live",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "d",
+                        "line": 4,
+                        "comments": {
+                            "nodes": [{"bodyText": "fix me", "author": {"login": "alice"}}]
+                        },
+                    },
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+        assert [t.thread_id for t in status.unresolved_inline_threads] == ["T_live"]
+        assert [t.thread_id for t in status.outdated_unresolved_inline_threads] == ["T_outdated"]
+        outdated = status.outdated_unresolved_inline_threads[0]
+        assert outdated.is_outdated is True
+        assert outdated.is_resolved is False
+        assert outdated.body_excerpt == "fixed elsewhere"
+        assert outdated.url == "https://github.example/review/9"
+
+    @pytest.mark.unit
     async def test_paginates_comment_history_for_resolved_and_outdated_threads(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

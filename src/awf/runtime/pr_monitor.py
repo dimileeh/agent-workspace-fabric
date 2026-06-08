@@ -244,6 +244,17 @@ class PRStatus:
     """Timestamp that anchors the quiet-period timer used by quiet-window evaluation."""
     quiet_period_anchor_source: str | None = None
     """Reason that selected this anchor, used to explain quiet-period restarts."""
+    outdated_unresolved_inline_threads: tuple[ReviewThread, ...] = ()
+    """Inline threads the forge marks OUTDATED but still NOT resolved (#473).
+
+    Both forge clients drop outdated threads from ``unresolved_inline_threads``
+    because they are non-blocking for merge (the feedback was addressed by an
+    edit elsewhere, so the thread no longer describes the current diff). This
+    separate, default-empty feed surfaces the same threads so the monitor can
+    RESOLVE the ones it already addressed with a fix verdict — otherwise an
+    addressed thread lingers as "unresolved" on a merged PR. Non-forge
+    constructors leave it empty; only ``decide``-irrelevant resolve hygiene
+    consumes it, never the merge gate."""
 
 
 # ── State — small, serialisable, lives on the workspace row ────────────────

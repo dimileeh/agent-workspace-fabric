@@ -316,6 +316,25 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     return
 
                 remote_push_url = _remote_push_url_for_workspace(ws, base_repo=repo)
+                # Resolve threads the monitor already addressed that have since
+                # gone OUTDATED (addressed by an edit elsewhere). They drop out of
+                # ``unresolved_inline_threads`` — so ``decide()`` never re-runs the
+                # fix cycle for them — and would otherwise linger as "unresolved"
+                # on the merged PR. Running every poll (not only at merge) closes
+                # the operator-visible signal as soon as the thread goes outdated
+                # and guarantees it is resolved before the ``Merge`` cycle. The
+                # step is fully self-contained (its own ForgeClientError handling),
+                # so a forge fault cannot escape into the loop's outer arms (#473).
+                await self._resolve_addressed_outdated_threads(
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=ws.branch_base,
+                    remote_branch=remote_branch,
+                    monitor_log=monitor_log,
+                )
                 action = decide(status, state, self._config)
                 try:
                     terminal = await self._execute(

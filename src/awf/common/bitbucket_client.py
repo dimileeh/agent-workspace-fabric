@@ -66,6 +66,7 @@ from awf.common.bitbucket_client_parsing import (
     bb_merge_strategy_for_method,
     build_blocking_reviews,
     build_general_review_comments,
+    build_outdated_unresolved_review_threads,
     build_review_threads,
     build_unresolved_task_threads,
     decode_task_id,
@@ -373,6 +374,13 @@ class BitBucketClient:
             latest_external_review_activity_source=latest_review_source,
             quiet_period_anchor_at=quiet_anchor_at,
             quiet_period_anchor_source=quiet_anchor_source,
+            # Outdated-but-unresolved inline threads (addressed elsewhere) are
+            # dropped from the actionable feed above; surface them so the monitor
+            # can resolve the ones it addressed (#473). Reviewer tasks have no
+            # outdated concept, so they are intentionally not included here.
+            outdated_unresolved_inline_threads=build_outdated_unresolved_review_threads(
+                comments, repo=repo, pr_number=pr_number, account_id=account_id
+            ),
         )
 
     async def fetch_failing_check_logs(
