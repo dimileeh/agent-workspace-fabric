@@ -287,6 +287,26 @@ def test_bitbucket_askpass_script_withholds_token_from_other_hosts(prompt: str) 
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # ``RepoRef.from_url`` accepts http:// bitbucket remotes, so a plaintext
+        # HTTP prompt can reach the process-wide askpass even though the host is
+        # bitbucket.org. The script must require the https:// scheme and emit
+        # nothing for HTTP (or any non-HTTPS) scheme — otherwise it would leak
+        # BITBUCKET_API_TOKEN over the wire, violating the git-over-HTTPS/no-token-
+        # leak contract. See PR #471 thread PRRT_kwDOSJAM6s6H2gN5.
+        "Password for 'http://bitbucket.org/ws/repo.git': ",
+        "Username for 'http://bitbucket.org': ",
+        "Password for 'http://x-bitbucket-api-token-auth@bitbucket.org': ",
+        "Password for 'http://bitbucket.org:80/ws/repo': ",
+    ],
+)
+def test_bitbucket_askpass_script_requires_https_scheme(prompt: str) -> None:
+    assert _run_askpass(prompt) == ""
+
+
+@pytest.mark.unit
 def test_bitbucket_agent_git_config_entries_rewrite_all_remote_forms() -> None:
     entries = bitbucket_agent_git_config_entries()
 

@@ -164,9 +164,15 @@ def bitbucket_askpass_script(token_env_var: str) -> str:
     prompt, not just bitbucket.org ones, so an unconditional script would hand the
     BitBucket token to any other HTTPS remote that happens to prompt for
     credentials (e.g. a later ``git fetch`` against a different host that 401s).
-    The script therefore gates on the prompt host — git's askpass prompt embeds
-    the target URL (``Password for 'https://…@bitbucket.org': ``) — and emits the
-    token only when that URL's host is exactly ``bitbucket.org``. Rather than
+    The script therefore gates on both the prompt **scheme** and **host** — git's
+    askpass prompt embeds the target URL (``Password for 'https://…@bitbucket.org': ``)
+    — and emits the token only when that URL is ``https://`` *and* its host is
+    exactly ``bitbucket.org``. The scheme gate is load-bearing: ``RepoRef.from_url``
+    also accepts ``http://bitbucket.org/…`` remotes, so without it a plaintext-HTTP
+    bitbucket prompt would still match the host check and leak
+    ``BITBUCKET_API_TOKEN`` over the wire, violating the git-over-HTTPS/no-token-leak
+    contract. Requiring ``https://`` rejects such HTTP remotes before any token is
+    emitted. Rather than
     substring-matching ``bitbucket.org`` anywhere in the prompt (which a foreign
     remote could satisfy by embedding the string in its user-info or path — e.g.
     ``https://x@github.com/foo@bitbucket.org/repo`` or
@@ -195,13 +201,16 @@ def bitbucket_askpass_script(token_env_var: str) -> str:
     # POSIX-sh host parse of git's ``Password for 'URL': `` prompt. ``\\'`` is a
     # literal single quote (git wraps the URL in '…'); the expansions peel the
     # URL, then its authority, user-info, and ``:port`` to recover git's real
-    # target host. Substring matching is unsafe — see the docstring.
+    # target host. The ``case`` requires the ``https://`` scheme: an ``http://``
+    # (or any non-HTTPS) prompt exits before any token is emitted, so a plaintext
+    # bitbucket remote never receives the token. Substring matching is unsafe —
+    # see the docstring.
     return (
         "#!/bin/sh\n"
         "url=${1#*\\'}\n"
         "url=${url%%\\'*}\n"
         'case "$url" in\n'
-        "  *://*) ;;\n"
+        "  https://*) ;;\n"
         "  *) exit 0 ;;\n"
         "esac\n"
         "authority=${url#*://}\n"
