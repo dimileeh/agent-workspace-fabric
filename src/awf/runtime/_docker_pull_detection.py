@@ -558,7 +558,7 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
 
 
 def _strip_image_tag(image_ref: str) -> str:
-    """Return *image_ref* without its tag suffix, for tagless daemon error matching.
+    """Return *image_ref* without its tag or digest suffix, for tagless daemon error matching.
 
     Docker access-denied errors commonly omit the tag: ``pull access denied for
     ghcr.io/org/app, repository does not exist or may require 'docker login':
@@ -566,7 +566,15 @@ def _strip_image_tag(image_ref: str) -> str:
     comparison match the tagless ref that appears in such daemon errors even when
     the echo carries an explicit tag like ``:latest``.  When the ref has no tag,
     returns it unchanged so callers need not special-case the tagless case.
+
+    Digest-pinned refs (e.g. ``ghcr.io/org/app@sha256:abc123``) are fully
+    stripped to the bare repository name — leaving ``@sha256`` in the result
+    would prevent the tagless daemon denial token from matching
+    (PRRT_kwDOSJAM6s6HuBR5).
     """
+    at = image_ref.find("@")
+    if at != -1:
+        return image_ref[:at]
     colon = image_ref.rfind(":")
     if colon != -1 and "/" not in image_ref[colon:]:
         return image_ref[:colon]

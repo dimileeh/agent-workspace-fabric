@@ -691,6 +691,19 @@ class TestStripImageTag:
     def test_unqualified_tagged_ref_strips_tag(self) -> None:
         assert _strip_image_tag("postgres:16") == "postgres"
 
+    @pytest.mark.unit
+    def test_digest_pinned_ref_strips_to_repo(self) -> None:
+        # Regression for PRRT_kwDOSJAM6s6HuBR5: rfind(":") on a digest ref
+        # hits the colon inside "sha256:", leaving "@sha256" in the result.
+        assert _strip_image_tag("ghcr.io/org/private@sha256:abc123def456") == "ghcr.io/org/private"
+
+    @pytest.mark.unit
+    def test_digest_pinned_ref_with_port_strips_to_repo(self) -> None:
+        assert (
+            _strip_image_tag("registry.example.com:5000/org/app@sha256:deadbeef")
+            == "registry.example.com:5000/org/app"
+        )
+
 
 class TestTaglessDaemonDenialMatchesTaggedPull:
     """Regression tests for tagless daemon denial matching (PRRT_kwDOSJAM6s6Ht1mT).
@@ -757,6 +770,74 @@ class TestTaglessDaemonDenialMatchesTaggedPull:
                 "context deadline exceeded"
             ),
             run_id="99000001002",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_digest_pinned_tagless_daemon_denial_backward_probe_reports_ci_failure(
+        self,
+    ) -> None:
+        """A tagless daemon denial after a digest-pinned pull must be attributed correctly.
+
+        Log order: digest pull echo → tagless daemon denial → docker pull failed →
+        context deadline exceeded.  Without the @-digest strip in ``_strip_image_tag``
+        the comparison produces ``ghcr.io/org/private@sha256`` vs the daemon token
+        ``ghcr.io/org/private``, so the permanent denial is missed and the log is
+        mis-classified as transient.
+
+        Regression for PRRT_kwDOSJAM6s6HuBR5."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/private@sha256:abc123def456\n"
+                "Error response from daemon: pull access denied for ghcr.io/org/private,"
+                " repository does not exist or may require 'docker login': denied\n"
+                "docker pull failed with exit code 1\n"
+                "context deadline exceeded"
+            ),
+            run_id="99000001003",
+        )
+
+        action = decide(
+            _status(check_state=CheckState.FAILURE, ci_failures=(failure,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+
+        assert isinstance(action, ReportCiFailure), action
+        assert action.failures == (failure,)
+
+    @pytest.mark.unit
+    def test_digest_pinned_tagless_daemon_denial_forward_probe_reports_ci_failure(
+        self,
+    ) -> None:
+        """A tagless daemon denial *following* a digest-pinned pull summary must also match.
+
+        Log order: digest pull echo → docker pull failed → tagless daemon denial →
+        context deadline exceeded.  The forward daemon probe must apply the same
+        @-digest strip so the permanent denial suppresses the transient-timeout rerun.
+
+        Regression for PRRT_kwDOSJAM6s6HuBR5."""
+        failure = CheckFailure(
+            name="python-coverage-shards (1)",
+            conclusion="FAILURE",
+            log_excerpt=(
+                "/usr/bin/docker pull ghcr.io/org/private@sha256:abc123def456\n"
+                "docker pull failed with exit code 1\n"
+                "Error response from daemon: pull access denied for ghcr.io/org/private,"
+                " repository does not exist or may require 'docker login': denied\n"
+                "context deadline exceeded"
+            ),
+            run_id="99000001004",
         )
 
         action = decide(
