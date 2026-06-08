@@ -1132,6 +1132,39 @@ class TestImageRefMatchesDaemonUrlEdgeCases:
         line = 'get "https://auth.docker.io/token?scope=repository%3aorg%2fapp%3apull": denied'
         assert _image_ref_matches_daemon_url("docker.io/org/app:bad", line) is True
 
+    @pytest.mark.unit
+    def test_token_scope_push_only_does_not_match_pull(self) -> None:
+        """A token-service error whose scope action is ``push`` (not ``pull``) must
+        NOT be attributed to an in-flight pull for the same repository.
+
+        When a failed-step log contains a real pull timeout summary followed by an
+        unrelated docker-push auth denial for the same repo
+        (``scope=repository:org/app:push``), the permanence probe must not mark
+        the pull summary as permanent — doing so would suppress the legitimate
+        transient-timeout rerun and cause AWF to report a CI failure instead.
+
+        Regression for PRRT_kwDOSJAM6s6Hu-r8."""
+        encoded_push_line = (
+            'get "https://ghcr.io/token?scope=repository%3aorg%2fapp%3apush": denied'
+        )
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", encoded_push_line) is False
+
+        unencoded_push_line = 'get "https://ghcr.io/token?scope=repository:org/app:push": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", unencoded_push_line) is False
+
+    @pytest.mark.unit
+    def test_token_scope_pull_push_combined_matches_pull(self) -> None:
+        """A token-service error whose scope action is ``pull,push`` must still be
+        attributed to the in-flight pull, since the scope includes the pull action.
+
+        ``pull,push`` is the combined-access form Docker uses when an image requires
+        both read and write permissions; the pull is still in flight, so a permanent
+        denial must be treated as a pull failure.
+
+        Regression for PRRT_kwDOSJAM6s6Hu-r8."""
+        line = 'get "https://ghcr.io/token?scope=repository%3aorg%2fapp%3apull%2cpush": denied'
+        assert _image_ref_matches_daemon_url("ghcr.io/org/app:latest", line) is True
+
 
 class TestForwardDetailRefMatchesPull:
     """Coverage tests for ``_forward_detail_ref_matches_pull``."""

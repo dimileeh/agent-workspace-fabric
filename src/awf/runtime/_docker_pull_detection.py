@@ -545,10 +545,12 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     # Docker also emits the scope unencoded in some contexts (e.g. timeout
     # fixtures use scope=repository:org/app:pull without percent-encoding).
     # Match both forms so a permanent denial with either encoding is attributed
-    # to the in-flight pull (PRRT_kwDOSJAM6s6HuFH6).
+    # to the in-flight pull (PRRT_kwDOSJAM6s6HuFH6).  Require ``pull`` in the
+    # action part so a push-only auth error for the same repo is not mistaken
+    # for a pull failure (PRRT_kwDOSJAM6s6Hu-r8).
     encoded_repo = repo_path.replace("/", "%2f")
-    token_scope = f"scope=repository%3a{encoded_repo}%3a"
-    unencoded_token_scope = f"scope=repository:{repo_path}:"
+    token_scope = f"scope=repository%3a{encoded_repo}%3apull"
+    unencoded_token_scope = f"scope=repository:{repo_path}:pull"
     if token_scope in line or unencoded_token_scope in line:
         if not _is_registry_host:
             # Unqualified Docker Hub ref: require a Docker Hub auth or registry
@@ -575,8 +577,8 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     # pull of e.g. ``ghcr.io/postgres:16`` (PRRT_kwDOSJAM6s6HtWjC).
     # Match both encoded and unencoded scope forms (PRRT_kwDOSJAM6s6HuFH6).
     if "/" not in repo_path and (not _is_registry_host or _host in _DOCKER_HUB_REGISTRY_HOSTS):
-        lib_token_scope = f"scope=repository%3alibrary%2f{repo_path}%3a"
-        unencoded_lib_token_scope = f"scope=repository:library/{repo_path}:"
+        lib_token_scope = f"scope=repository%3alibrary%2f{repo_path}%3apull"
+        unencoded_lib_token_scope = f"scope=repository:library/{repo_path}:pull"
         if lib_token_scope in line or unencoded_lib_token_scope in line:
             return "auth.docker.io" in line or any(
                 f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
