@@ -422,6 +422,32 @@ def _iter_unresolved_inline_threads(
         )
 
 
+def partition_inline_review_threads(
+    comments: list[dict[str, Any]],
+    *,
+    repo: RepoRef,
+    pr_number: int,
+    account_id: str | None,
+) -> tuple[tuple[ReviewThread, ...], tuple[ReviewThread, ...]]:
+    """Split the unresolved inline threads into ``(actionable, outdated)`` in one pass.
+
+    ``_iter_unresolved_inline_threads`` is the expensive part (grouping, sorting,
+    and mapping every inline comment). The status poll needs both feeds — the
+    actionable threads that gate the merge and the outdated-but-unresolved threads
+    the monitor resolves for hygiene (#473) — so iterate the shared core once and
+    route each thread by its ``is_outdated`` flag, mirroring the single-pass split
+    the GitHub client does inline. ``build_review_threads`` /
+    ``build_outdated_unresolved_review_threads`` remain as thin selectors over this.
+    """
+    actionable: list[ReviewThread] = []
+    outdated: list[ReviewThread] = []
+    for thread in _iter_unresolved_inline_threads(
+        comments, repo=repo, pr_number=pr_number, account_id=account_id
+    ):
+        (outdated if thread.is_outdated else actionable).append(thread)
+    return tuple(actionable), tuple(outdated)
+
+
 def build_review_threads(
     comments: list[dict[str, Any]],
     *,
@@ -437,13 +463,10 @@ def build_review_threads(
     otherwise drive needless fix cycles). The outdated ones are surfaced for
     resolve hygiene by ``build_outdated_unresolved_review_threads`` instead.
     """
-    return tuple(
-        thread
-        for thread in _iter_unresolved_inline_threads(
-            comments, repo=repo, pr_number=pr_number, account_id=account_id
-        )
-        if not thread.is_outdated
+    actionable, _outdated = partition_inline_review_threads(
+        comments, repo=repo, pr_number=pr_number, account_id=account_id
     )
+    return actionable
 
 
 def build_outdated_unresolved_review_threads(
@@ -462,13 +485,10 @@ def build_outdated_unresolved_review_threads(
     an external comment — each flagged ``is_outdated=True``. Resolved threads are
     excluded; reviewer *tasks* have no outdated concept and are never included.
     """
-    return tuple(
-        thread
-        for thread in _iter_unresolved_inline_threads(
-            comments, repo=repo, pr_number=pr_number, account_id=account_id
-        )
-        if thread.is_outdated
+    _actionable, outdated = partition_inline_review_threads(
+        comments, repo=repo, pr_number=pr_number, account_id=account_id
     )
+    return outdated
 
 
 def _task_is_resolved(task: dict[str, Any]) -> bool:

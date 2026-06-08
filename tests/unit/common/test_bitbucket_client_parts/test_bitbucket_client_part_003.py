@@ -155,6 +155,33 @@ def test_build_outdated_unresolved_review_threads_only_returns_outdated() -> Non
     assert all(t.is_outdated is False for t in actionable)
 
 
+def test_partition_inline_review_threads_single_pass_matches_builders() -> None:
+    from awf.common.bitbucket_client_parsing import (
+        build_outdated_unresolved_review_threads,
+        build_review_threads,
+        partition_inline_review_threads,
+    )
+
+    comments = [
+        _inline_comment(100, "addressed elsewhere", outdated=True),
+        _inline_comment(101, "still current"),
+        _inline_comment(102, "resolved + outdated", outdated=True, resolved=True),
+        _inline_comment(103, "mine but outdated", account="viewer", outdated=True),
+    ]
+    actionable, outdated = partition_inline_review_threads(
+        comments, repo=repo(), pr_number=42, account_id="viewer"
+    )
+    # One pass produces exactly the same two feeds the separate selectors return.
+    assert actionable == build_review_threads(
+        comments, repo=repo(), pr_number=42, account_id="viewer"
+    )
+    assert outdated == build_outdated_unresolved_review_threads(
+        comments, repo=repo(), pr_number=42, account_id="viewer"
+    )
+    assert [t.thread_id for t in actionable] == ["bb:workspace/repo#42:101"]
+    assert [t.thread_id for t in outdated] == ["bb:workspace/repo#42:100"]
+
+
 # ── resolve_thread (POST resolves; DELETE would reopen) ───────────────────────
 
 
