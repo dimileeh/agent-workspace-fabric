@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import {
+  attachWorkspaceStreamHandlers,
   encodeSse,
-  normalizeError,
   openAwfWorkspaceSocket,
   proxyAwf,
   proxyAwfGet,
@@ -78,40 +78,8 @@ async function streamWorkspace(request: NextRequest, workspaceId: string): Promi
       };
 
       const socket = openAwfWorkspaceSocket({ workspaceId, channels, tailBytes });
-      let socketOpened = false;
 
-      socket.on("open", () => {
-        socketOpened = true;
-        send({ type: "connected", workspace_id: workspaceId });
-      });
-      socket.on("message", (data) => {
-        const text = typeof data === "string" ? data : data.toString("utf-8");
-        try {
-          send(JSON.parse(text));
-        } catch {
-          send({ type: "raw", data: text });
-        }
-      });
-      socket.on("error", (error) => {
-        send({
-          type: "error",
-          ...normalizeError(error, "AWF_STREAM_ERROR", "AWF workspace stream failed."),
-        });
-        if (!socketOpened) {
-          close();
-        }
-      });
-      socket.on("close", (code, reason) => {
-        send(
-          {
-            type: "closed",
-            workspace_id: workspaceId,
-            code,
-            reason: reason.toString("utf-8"),
-          },
-        );
-        close();
-      });
+      attachWorkspaceStreamHandlers({ socket, workspaceId, send, closeStream: close });
 
       request.signal.addEventListener("abort", () => {
         socket.close();

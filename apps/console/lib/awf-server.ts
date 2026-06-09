@@ -153,3 +153,55 @@ export function openAwfWorkspaceSocket({
     },
   );
 }
+
+type WorkspaceStreamSocket = Pick<WebSocket, "on" | "close">;
+
+/**
+ * Wire an upstream workspace WebSocket into an SSE stream.
+ *
+ * A stream error is terminal: after surfacing the error frame we close the
+ * upstream socket and end the SSE response deterministically, rather than
+ * relying on a follow-up "close" event firing. Previously a mid-stream error
+ * (socket already opened) only emitted an error frame and left the connection
+ * dangling until the upstream happened to also emit "close".
+ */
+export function attachWorkspaceStreamHandlers({
+  socket,
+  workspaceId,
+  send,
+  closeStream,
+}: {
+  socket: WorkspaceStreamSocket;
+  workspaceId: string;
+  send: (payload: unknown, event?: string) => void;
+  closeStream: () => void;
+}): void {
+  socket.on("open", () => {
+    send({ type: "connected", workspace_id: workspaceId });
+  });
+  socket.on("message", (data) => {
+    const text = typeof data === "string" ? data : data.toString("utf-8");
+    try {
+      send(JSON.parse(text));
+    } catch {
+      send({ type: "raw", data: text });
+    }
+  });
+  socket.on("error", (error) => {
+    send({
+      type: "error",
+      ...normalizeError(error, "AWF_STREAM_ERROR", "AWF workspace stream failed."),
+    });
+    socket.close();
+    closeStream();
+  });
+  socket.on("close", (code, reason) => {
+    send({
+      type: "closed",
+      workspace_id: workspaceId,
+      code,
+      reason: reason.toString("utf-8"),
+    });
+    closeStream();
+  });
+}

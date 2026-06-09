@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   AWF_STREAM_MAX_TAIL_BYTES,
+  attachWorkspaceStreamHandlers,
   proxyAwf,
   sanitizeStreamChannels,
   sanitizeTailBytes,
@@ -78,6 +79,105 @@ test("sanitizeTailBytes falls back to the cap for missing or non-numeric input",
   assert.equal(sanitizeTailBytes("not-a-number"), String(AWF_STREAM_MAX_TAIL_BYTES));
   assert.equal(sanitizeTailBytes(""), String(AWF_STREAM_MAX_TAIL_BYTES));
   assert.equal(sanitizeTailBytes("   "), String(AWF_STREAM_MAX_TAIL_BYTES));
+});
+
+function makeFakeSocket() {
+  const handlers = new Map();
+  return {
+    closed: 0,
+    on(event, handler) {
+      handlers.set(event, handler);
+      return this;
+    },
+    emit(event, ...args) {
+      const handler = handlers.get(event);
+      if (handler) {
+        handler(...args);
+      }
+    },
+    close() {
+      this.closed += 1;
+    },
+  };
+}
+
+test("attachWorkspaceStreamHandlers surfaces connected, message, and raw frames", () => {
+  const socket = makeFakeSocket();
+  const sent = [];
+  let streamClosed = 0;
+  attachWorkspaceStreamHandlers({
+    socket,
+    workspaceId: "ws-1",
+    send: (payload) => sent.push(payload),
+    closeStream: () => {
+      streamClosed += 1;
+    },
+  });
+
+  socket.emit("open");
+  socket.emit("message", Buffer.from(JSON.stringify({ type: "tick" }), "utf-8"));
+  socket.emit("message", Buffer.from("not-json", "utf-8"));
+
+  assert.deepEqual(sent, [
+    { type: "connected", workspace_id: "ws-1" },
+    { type: "tick" },
+    { type: "raw", data: "not-json" },
+  ]);
+  assert.equal(streamClosed, 0);
+});
+
+test("attachWorkspaceStreamHandlers terminates the stream on a mid-stream error", () => {
+  const socket = makeFakeSocket();
+  const sent = [];
+  let streamClosed = 0;
+  attachWorkspaceStreamHandlers({
+    socket,
+    workspaceId: "ws-2",
+    send: (payload) => sent.push(payload),
+    closeStream: () => {
+      streamClosed += 1;
+    },
+  });
+
+  // Socket already opened, then fails mid-stream: the error must be terminal,
+  // closing the upstream socket and ending the SSE response (regression for
+  // "Stream errors leave SSE open").
+  socket.emit("open");
+  socket.emit("error", new Error("boom"));
+
+  assert.deepEqual(sent, [
+    { type: "connected", workspace_id: "ws-2" },
+    {
+      type: "error",
+      ok: false,
+      error_code: "AWF_STREAM_ERROR",
+      message: "AWF workspace stream failed.",
+      detail: "boom",
+    },
+  ]);
+  assert.equal(socket.closed, 1);
+  assert.equal(streamClosed, 1);
+});
+
+test("attachWorkspaceStreamHandlers ends the stream on upstream close", () => {
+  const socket = makeFakeSocket();
+  const sent = [];
+  let streamClosed = 0;
+  attachWorkspaceStreamHandlers({
+    socket,
+    workspaceId: "ws-3",
+    send: (payload) => sent.push(payload),
+    closeStream: () => {
+      streamClosed += 1;
+    },
+  });
+
+  socket.emit("close", 1006, Buffer.from("gone", "utf-8"));
+
+  assert.deepEqual(sent, [
+    { type: "closed", workspace_id: "ws-3", code: 1006, reason: "gone" },
+  ]);
+  assert.equal(streamClosed, 1);
 });
 
 function restoreEnv(name, value) {
