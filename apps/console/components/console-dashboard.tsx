@@ -637,6 +637,7 @@ const searchParams = useSearchParams();
         terminalError = true;
         setStreamState("error");
         setError(frame.message);
+        source.close();
         return;
       }
       if (frame.type === "closed") {
