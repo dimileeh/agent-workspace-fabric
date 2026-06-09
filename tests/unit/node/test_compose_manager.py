@@ -366,6 +366,28 @@ class TestRender:
         assert "volumes" not in svc
 
     @pytest.mark.unit
+    def test_profile_service_env_file_is_escaped_against_yaml_injection(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A malicious ``env_file`` path cannot inject sibling compose keys.
+
+        ``ProfileService.env_file`` only bounds length, and ``_resolve_repo_path``
+        does not reject quotes/newlines, so the template must JSON-escape it (like
+        ``image``/``build_context``) to keep the value a single scalar.
+        """
+        malicious = '.env"\n    privileged: true\n    x: "'
+        spec = _spec(
+            tmp_path,
+            services=(ComposeService(name="svc", image="ok:latest", env_file=malicious),),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        svc = parsed["services"]["svc"]
+        assert svc["env_file"] == [malicious]
+        assert "privileged" not in svc
+
+    @pytest.mark.unit
     def test_companion_with_prebuilt_image_renders_image_not_build(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

@@ -17,7 +17,7 @@ services:
       dockerfile: {{ s.dockerfile | tojson }}
     {% endif %}{% if s.privileged %}privileged: true
     {% endif %}{% if s.env_file %}env_file:
-      - "{{ s.env_file }}"
+      - {{ s.env_file | tojson }}
     {% endif %}{% if s.environment %}environment:
       {% for k, v in s.environment %}{{ k }}: {{ v | tojson }}
       {% endfor %}
