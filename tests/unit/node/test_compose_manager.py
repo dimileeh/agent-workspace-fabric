@@ -317,6 +317,55 @@ class TestRender:
         assert "raw-secret-value" not in rendered
 
     @pytest.mark.unit
+    def test_profile_service_image_is_escaped_against_yaml_injection(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A malicious ``image`` value cannot inject sibling compose keys.
+
+        ``ProfileService`` only bounds field length, not its character set, so a
+        profile from a project repo could embed quotes/newlines. The template
+        must JSON-escape ``image`` (like ``environment``/``command``) so the
+        value renders as one scalar instead of breaking out to inject keys such
+        as ``privileged``.
+        """
+        malicious = 'evil:latest"\n    privileged: true\n    x: "'
+        spec = _spec(
+            tmp_path,
+            services=(ComposeService(name="svc", image=malicious),),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        svc = parsed["services"]["svc"]
+        assert svc["image"] == malicious
+        assert "privileged" not in svc
+
+    @pytest.mark.unit
+    def test_profile_service_build_fields_are_escaped_against_yaml_injection(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Malicious ``build_context``/``dockerfile`` values cannot inject keys."""
+        bad_context = 'ctx"\n    privileged: true\n    x: "'
+        bad_dockerfile = 'Dockerfile"\n    volumes: ["/:/host"]\n    y: "'
+        spec = _spec(
+            tmp_path,
+            services=(
+                ComposeService(
+                    name="svc",
+                    build_context=bad_context,
+                    dockerfile=bad_dockerfile,
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        svc = parsed["services"]["svc"]
+        assert svc["build"] == {"context": bad_context, "dockerfile": bad_dockerfile}
+        assert "privileged" not in svc
+        assert "volumes" not in svc
+
+    @pytest.mark.unit
     def test_companion_with_prebuilt_image_renders_image_not_build(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

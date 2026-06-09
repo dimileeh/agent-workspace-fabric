@@ -10,11 +10,11 @@ services:
   {% for s in services %}
   {{ s.name }}:
     container_name: "awf-{{ workspace_id }}-{{ s.name }}"
-    {% if s.image %}image: "{{ s.image }}"
+    {% if s.image %}image: {{ s.image | tojson }}
     {% if s.local_image %}pull_policy: never
     {% endif %}{% elif s.build_context %}build:
-      context: "{{ s.build_context }}"
-      dockerfile: "{{ s.dockerfile }}"
+      context: {{ s.build_context | tojson }}
+      dockerfile: {{ s.dockerfile | tojson }}
     {% endif %}{% if s.privileged %}privileged: true
     {% endif %}{% if s.env_file %}env_file:
       - "{{ s.env_file }}"
