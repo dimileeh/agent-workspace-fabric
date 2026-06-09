@@ -51,7 +51,7 @@ services:
     working_dir: /workspace
     environment:
       WORKSPACE_ID: "{{ workspace_id }}"
-      {% for k, v in agent_environment %}{{ k }}: {{ v | tojson }}
+      {% for k, v in agent_environment %}{{ k | tojson }}: {{ v | tojson }}
       {% endfor %}{% if git_name %}GIT_AUTHOR_NAME: "{{ git_name }}"
       GIT_COMMITTER_NAME: "{{ git_name }}"{% endif %}
       {% if git_email %}GIT_AUTHOR_EMAIL: "{{ git_email }}"

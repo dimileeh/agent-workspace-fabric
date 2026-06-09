@@ -417,6 +417,31 @@ class TestRender:
         assert "privileged" not in svc
 
     @pytest.mark.unit
+    def test_agent_environment_key_is_escaped_against_yaml_injection(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A malicious agent environment *key* cannot inject sibling compose keys.
+
+        ``ProfileRuntime.environment`` is just ``dict[str, str]`` with no key
+        pattern, and ``profile_agent_environment()`` passes those keys straight
+        into ``agent_environment``. A repository profile could supply a key
+        containing YAML syntax (e.g. a newline plus an outdented ``privileged:``).
+        The template must JSON-escape the agent key (like the value) so it renders
+        as one scalar instead of injecting service-level settings.
+        """
+        malicious_key = 'FOO"\n    privileged: true\n    x: "'
+        spec = _spec(
+            tmp_path,
+            agent_environment=((malicious_key, "bar"),),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        agent = parsed["services"]["agent"]
+        assert agent["environment"][malicious_key] == "bar"
+        assert "privileged" not in agent
+
+    @pytest.mark.unit
     def test_companion_with_prebuilt_image_renders_image_not_build(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
