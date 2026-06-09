@@ -133,12 +133,12 @@ export function ResourceCapacityPanel({
       ) : (
         <div className="grid gap-3">
           {error ? (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
               Showing last capacity snapshot. Refresh failed: {error}
             </div>
           ) : null}
           {workspaceSummaryError ? (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
               Unable to load workspace reliability metrics: {workspaceSummaryError}
             </div>
           ) : null}
@@ -159,12 +159,12 @@ export function ResourceCapacityPanel({
           </div>
           {/* Saturation-driven content dims with the saturation feed. */}
           <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
-          <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-950">
+          <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("info")}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold">Scheduler capacity source</span>
               <span className="mono">{runtimeCapacitySource}</span>
             </div>
-            <div className="mt-1 text-blue-900">
+            <div className="mt-1">
               {runtimeCapacityDetail}: {runtimeCapacityLimits}.
             </div>
           </div>
@@ -250,7 +250,7 @@ export function ResourceCapacityPanel({
                 <span className="font-semibold">Disk {saturation.disk.status}</span>
                 <span className="mono">{saturation.disk.reason}</span>
               </div>
-              <div className="mt-1 text-slate-600">
+              <div className="mt-1 text-fg-muted">
                 threshold {bytes(saturation.disk.threshold_bytes)} / checked {saturation.disk.checked_path}
               </div>
             </div>
@@ -268,11 +268,11 @@ export function ResourceCapacityPanel({
                 <span className="mono">{saturation.admission.reason}</span>
               </div>
               {saturation.admission.detail ? (
-                <div className="mt-1 text-slate-600">{saturation.admission.detail}</div>
+                <div className="mt-1 text-fg-muted">{saturation.admission.detail}</div>
               ) : null}
             </div>
           </div>
-          <div className="text-[11px] text-slate-500">
+          <div className="text-[11px] text-fg-muted">
             generated {relativeTime(saturation.generated_at)}
           </div>
           </div>
@@ -372,12 +372,12 @@ export function MergeQueuePanel({
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-2">
           {error ? (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
               Showing last merge queue snapshot. Refresh failed: {error}
             </div>
           ) : null}
           {hasMore ? (
-            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("neutral")}`}>
               Showing first {items.length} merge candidates. More are queued.
             </div>
           ) : null}
@@ -431,21 +431,21 @@ export function MergeQueueRow({
   const recovery = summarizeRecovery(item);
   const mergedAt = mergeQueueMergedAt(item);
   return (
-    <article className="grid gap-2 border-b border-slate-100 pb-2 text-xs last:border-b-0 last:pb-0">
+    <article className="grid gap-2 border-b border-line pb-2 text-xs last:border-b-0 last:pb-0">
       <div className="flex min-w-0 items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="mono shrink-0 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-500">
+            <span className="mono shrink-0 rounded-md border border-line bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-muted">
               #{position}
             </span>
-            <h3 className="truncate text-sm font-semibold text-slate-950">{item.title}</h3>
+            <h3 className="truncate text-sm font-semibold text-fg-strong">{item.title}</h3>
           </div>
-          <div className="mono mt-1 truncate text-[11px] text-slate-500">{item.workspace_id}</div>
-          <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[11px] text-slate-500">
+          <div className="mono mt-1 truncate text-[11px] text-fg-muted">{item.workspace_id}</div>
+          <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[11px] text-fg-muted">
             <span className="truncate">created {formatDateTime(item.created_at)}</span>
             <span className="truncate">merged {formatDateTime(mergedAt)}</span>
             <span className="truncate">
-              base <span className="mono text-slate-700">{item.base_branch}</span>
+              base <span className="mono text-fg">{item.base_branch}</span>
             </span>
           </div>
         </div>
@@ -457,7 +457,7 @@ export function MergeQueueRow({
             onClick={onToggle}
             aria-expanded={expanded}
             aria-controls={rowDetailsId}
-            className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+            className="inline-flex h-7 items-center gap-1 rounded-md border border-line bg-surface px-2 text-[11px] font-medium text-fg hover:bg-surface-2"
           >
             {expanded ? <ChevronUp size={13} aria-hidden /> : <ChevronDown size={13} aria-hidden />}
             {expanded ? "Hide" : "Details"}
@@ -578,12 +578,12 @@ export function MergeQueueRow({
             <QueueDatum label="Env identity" value={recovery.environmentLabel} mono />
             <QueueDatum label="Coverage" value={validation.coverageLabel} mono />
           </div>
-          <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
+          <div className="grid gap-1 text-[11px] text-fg-muted sm:grid-cols-2">
             <span className="truncate">
-              base <span className="mono text-slate-700">{item.base_branch}</span>
+              base <span className="mono text-fg">{item.base_branch}</span>
             </span>
             <span className="truncate">
-              branch <span className="mono text-slate-700">{item.branch_name ?? "none"}</span>
+              branch <span className="mono text-fg">{item.branch_name ?? "none"}</span>
             </span>
             <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
           </div>
@@ -649,10 +649,10 @@ export function MergeQueueBlockerDetails({ blockers }: { blockers: MergeQueueIte
     return null;
   }
   return (
-    <div className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5">
-      <div className="text-[10px] font-medium text-amber-900">Queue blockers</div>
+    <div className={`grid gap-1 rounded-md border px-2 py-1.5 ${toneClass("warn")}`}>
+      <div className="text-[10px] font-medium">Queue blockers</div>
       {blockers.map((blocker) => (
-        <div key={blocker.candidate_id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-950">
+        <div key={blocker.candidate_id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
           <span className="truncate font-medium">{blocker.title}</span>
           <span className="mono">{blocker.pr_number ? `#${blocker.pr_number}` : compactId(blocker.candidate_id, 10)}</span>
           <span className="mono">{blocker.blocker_state}</span>
@@ -673,10 +673,10 @@ export function MergeQueueStaleReasonDetails({ reasons }: { reasons: MergeQueueI
     return null;
   }
   return (
-    <div className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5">
-      <div className="text-[10px] font-medium text-amber-900">Active stale reasons</div>
+    <div className={`grid gap-1 rounded-md border px-2 py-1.5 ${toneClass("warn")}`}>
+      <div className="text-[10px] font-medium">Active stale reasons</div>
       {reasons.map((reason) => (
-        <div key={reason.id} className="grid min-w-0 gap-0.5 text-[11px] text-amber-950">
+        <div key={reason.id} className="grid min-w-0 gap-0.5 text-[11px]">
           <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1">
             <span className="mono font-medium">{reason.reason_code}</span>
             <span className="mono">{reason.severity}</span>
@@ -684,7 +684,7 @@ export function MergeQueueStaleReasonDetails({ reasons }: { reasons: MergeQueueI
             <span className="mono truncate">{reason.trigger_ref ?? "no trigger ref"}</span>
             <span>detected {formatDateTime(reason.detected_at)}</span>
           </div>
-          <div className="truncate text-amber-900">{reason.explanation}</div>
+          <div className="truncate">{reason.explanation}</div>
         </div>
       ))}
     </div>
@@ -696,17 +696,17 @@ export function MergeQueuePolicyFindingDetails({ findings }: { findings: MergeQu
     return null;
   }
   return (
-    <div className="grid gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1.5">
-      <div className="text-[10px] font-medium text-red-900">Policy findings</div>
+    <div className={`grid gap-1 rounded-md border px-2 py-1.5 ${toneClass("bad")}`}>
+      <div className="text-[10px] font-medium">Policy findings</div>
       {findings.map((finding) => (
-        <div key={finding.id} className="grid min-w-0 gap-0.5 text-[11px] text-red-950">
+        <div key={finding.id} className="grid min-w-0 gap-0.5 text-[11px]">
           <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1">
             <span className="mono font-medium">{finding.reason_code}</span>
             <span className="mono">{finding.severity}</span>
             <span className="mono truncate">{finding.subject_path ?? "no subject path"}</span>
             <span>detected {formatDateTime(finding.detected_at)}</span>
           </div>
-          <div className="truncate text-red-900">{finding.explanation}</div>
+          <div className="truncate">{finding.explanation}</div>
         </div>
       ))}
     </div>
@@ -997,16 +997,16 @@ export function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) 
             <Fact label="Services" value={String(services.length)} />
           </div>
           {runtime.reason ? (
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
               {runtime.reason}
             </div>
           ) : null}
           {appEndpoints.length > 0 ? (
             <EndpointTable endpoints={appEndpoints} />
           ) : null}
-          <div className="overflow-auto rounded-md border border-slate-200">
+          <div className="overflow-auto rounded-md border border-line">
             <table className="w-full min-w-full table-fixed text-left text-xs md:min-w-[720px]">
-              <thead className="bg-slate-50 text-slate-600">
+              <thead className="bg-surface-2 text-fg-muted">
                 <tr>
                   <Th>Name</Th>
                   <Th>State</Th>
@@ -1019,7 +1019,7 @@ export function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) 
               <tbody>
                 {services.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
+                    <td colSpan={6} className="px-3 py-6 text-center text-fg-muted">
                       No active containers reported.
                     </td>
                   </tr>
@@ -1037,9 +1037,9 @@ export function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) 
 
 export function EndpointTable({ endpoints }: { endpoints: WorkspaceAppEndpoint[] }) {
   return (
-    <div className="overflow-auto rounded-md border border-slate-200">
+    <div className="overflow-auto rounded-md border border-line">
       <table className="w-full min-w-full table-fixed text-left text-xs md:min-w-[680px]">
-        <thead className="bg-slate-50 text-slate-600">
+        <thead className="bg-surface-2 text-fg-muted">
           <tr>
             <Th>Name</Th>
             <Th>Service</Th>
@@ -1050,13 +1050,13 @@ export function EndpointTable({ endpoints }: { endpoints: WorkspaceAppEndpoint[]
         </thead>
         <tbody>
           {endpoints.map((endpoint) => (
-            <tr key={endpoint.name} className="border-t border-slate-100">
+            <tr key={endpoint.name} className="border-t border-line">
               <Td>
                 <div className="font-medium">{endpoint.name}</div>
               </Td>
               <Td>
                 <span className="mono">{endpoint.service}</span>
-                <span className="text-slate-500">:{endpoint.port}</span>
+                <span className="text-fg-muted">:{endpoint.port}</span>
               </Td>
               <Td>
                 <Badge value={endpoint.visibility} />
@@ -1082,14 +1082,14 @@ export function EndpointTable({ endpoints }: { endpoints: WorkspaceAppEndpoint[]
 
 export function RuntimeRow({ item }: { item: RuntimeService }) {
   return (
-    <tr className="border-t border-slate-100">
+    <tr className="border-t border-line">
       <Td>
         <div className="font-medium">{item.name}</div>
-        <div className="mono text-[11px] text-slate-500">{compactId(item.container_id, 10)}</div>
+        <div className="mono text-[11px] text-fg-muted">{compactId(item.container_id, 10)}</div>
       </Td>
       <Td>
         <Badge value={item.state} />
-        <div className="mt-1 text-slate-500">{item.status ?? "—"}</div>
+        <div className="mt-1 text-fg-muted">{item.status ?? "—"}</div>
       </Td>
       <Td>{item.health ? <Badge value={item.health} /> : "—"}</Td>
       <Td className="mono max-w-[220px] truncate">{item.image ?? "—"}</Td>
@@ -1112,21 +1112,21 @@ export function OperationsPanel({ operations }: { operations: Operation[] }) {
             return (
               <div
                 key={operation.id}
-                className="grid gap-1 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs sm:grid-cols-[1fr_auto]"
+                className="grid gap-1 rounded-md border border-line bg-surface px-3 py-2 text-xs sm:grid-cols-[1fr_auto]"
               >
                 <div>
                   <span className="font-medium">{formatOperationTitle(operation)}</span>
-                  <span className="mono ml-2 text-slate-500">{compactId(operation.id, 10)}</span>
+                  <span className="mono ml-2 text-fg-muted">{compactId(operation.id, 10)}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge value={operation.status} />
-                  <span className="text-slate-500">{formatDateTime(operation.created_at)}</span>
+                  <span className="text-fg-muted">{formatDateTime(operation.created_at)}</span>
                 </div>
-                <div className="text-slate-600 sm:col-span-2">
+                <div className="text-fg-muted sm:col-span-2">
                   {formatOperationDetail(operation)}
                 </div>
                 {operationFailure ? (
-                  <div className="text-red-700 sm:col-span-2">
+                  <div className="text-danger-text sm:col-span-2">
                     {operationFailure}
                   </div>
                 ) : null}
@@ -1163,7 +1163,7 @@ export function EventsPanel({ events }: { events: WorkspaceEvent[] }) {
         <button
           type="button"
           onClick={() => setSortDirection((current) => (current === "desc" ? "asc" : "desc"))}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-800 transition hover:bg-slate-50"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs text-fg transition hover:bg-surface-2"
           title={sortDirection === "desc" ? "Descending" : "Ascending"}
         >
           {sortDirection === "desc" ? <ArrowDown size={13} aria-hidden /> : <ArrowUp size={13} aria-hidden />}
@@ -1182,19 +1182,19 @@ export function EventsPanel({ events }: { events: WorkspaceEvent[] }) {
                 key={event.id}
                 className={`grid gap-1 border-b py-2 text-xs ${
                   reverse
-                    ? "border-amber-100 bg-amber-50/70 px-2"
-                    : "border-slate-100"
+                    ? "border-attention-border bg-attention-soft px-2"
+                    : "border-line"
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-medium">{event.event_type}</span>
-                  <span className="text-slate-500">{formatDateTime(event.occurred_at)}</span>
+                  <span className="text-fg-muted">{formatDateTime(event.occurred_at)}</span>
                 </div>
-                <div className="flex flex-wrap gap-2 text-slate-600">
+                <div className="flex flex-wrap gap-2 text-fg-muted">
                   <span>{event.old_state ?? "—"} → {event.new_state ?? "—"}</span>
                   {event.reason_code ? <span className="mono">{event.reason_code}</span> : null}
                   {reverse ? (
-                    <span className="rounded-md border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-amber-900">
+                    <span className="rounded-md border border-attention-border bg-surface px-1.5 py-0.5 text-[10px] font-medium text-attention-text">
                       step-back
                     </span>
                   ) : null}
