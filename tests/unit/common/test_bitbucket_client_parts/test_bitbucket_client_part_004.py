@@ -572,6 +572,18 @@ async def test_fetch_repo_merge_methods_falls_back_to_default_when_strategies_em
     assert methods == ("merge",)
 
 
+async def test_fetch_repo_merge_methods_defaults_to_bb_cloud_set_when_unconstrained() -> None:
+    fake = FakeBitBucket()
+    # #479 reproduction at the client boundary: an unrestricted BitBucket Cloud repo
+    # enumerates neither merge_strategies nor default_merge_strategy on the dest
+    # branch, yet allows all three native strategies — so the repo must report them.
+    _seed_fetch_status(fake, pr=pr_payload())
+    client = make_client(fake)
+    await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
+    methods = await client.fetch_repo_merge_methods(repo=repo())
+    assert methods == ("merge", "squash", "fast_forward")
+
+
 async def test_fetch_repo_merge_methods_prefers_explicit_strategies_over_default() -> None:
     fake = FakeBitBucket()
     _seed_fetch_status(
@@ -606,15 +618,18 @@ async def test_fetch_branch_merge_methods_fast_forward_only() -> None:
     assert methods == ("fast_forward",)
 
 
-async def test_fetch_branch_merge_methods_absent_returns_none() -> None:
+async def test_fetch_branch_merge_methods_absent_defaults_to_bb_cloud_set() -> None:
     fake = FakeBitBucket()
-    _seed_fetch_status(fake, pr=pr_payload())  # no merge_strategies on dest branch
+    # No merge_strategies/default on the dest branch → unrestricted BitBucket Cloud
+    # repo, which allows all three native strategies by default (#479). The branch
+    # constraint therefore reports the full BB-Cloud set rather than ``None``.
+    _seed_fetch_status(fake, pr=pr_payload())
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     methods = await client.fetch_branch_pull_request_allowed_merge_methods(
         repo=repo(), branch="development"
     )
-    assert methods is None
+    assert methods == ("merge", "squash", "fast_forward")
 
 
 # ── from_env ──────────────────────────────────────────────────────────────────

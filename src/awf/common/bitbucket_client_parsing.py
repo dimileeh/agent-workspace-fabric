@@ -62,6 +62,10 @@ _AWF_TO_BB_MERGE_STRATEGY: dict[str, str] = {
     "fast_forward": "fast_forward",
 }
 
+# BitBucket Cloud allows all three native strategies on a repo with no explicit
+# merge-strategy configuration; an unrestricted PR enumerates none of them (#479).
+_BB_CLOUD_DEFAULT_MERGE_STRATEGIES: tuple[str, ...] = ("merge_commit", "squash", "fast_forward")
+
 # Neutral thread-id encoding: ``bb:<owner>/<name>#<pr>:<comment_id>``. Owner/name
 # and the numeric ids never contain ``#`` or ``:``, so the parse is unambiguous.
 _THREAD_ID_RE = re.compile(r"^bb:(?P<owner>[^/]+)/(?P<name>[^#]+)#(?P<pr>\d+):(?P<comment>\d+)$")
@@ -99,13 +103,16 @@ def effective_merge_strategies(ctx: _PRContext) -> list[str] | None:
     omitting or leaving ``merge_strategies`` empty. The default strategy is by
     definition an enabled one, so treat it as the sole allowed strategy in that
     case rather than reporting an empty policy that would wedge the merge gate.
-    Returns ``None`` when neither field is present (genuinely unconstrained).
+    When NEITHER field is present the repo is unrestricted: BitBucket Cloud only
+    enumerates strategies once branch restrictions narrow them, so an unrestricted
+    repo allows all three native strategies. Return that default set rather than
+    ``None`` (which resolved to "no method allowed" and wedged the merge gate, #479).
     """
     if ctx.merge_strategies:
         return ctx.merge_strategies
     if ctx.default_merge_strategy is not None:
         return [ctx.default_merge_strategy]
-    return None
+    return list(_BB_CLOUD_DEFAULT_MERGE_STRATEGIES)
 
 
 def encode_thread_id(*, repo: RepoRef, pr_number: int, comment_id: int | str) -> str:

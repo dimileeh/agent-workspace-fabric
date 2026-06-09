@@ -13,8 +13,10 @@ import pytest
 
 from awf.common.bitbucket_client import BitBucketAuth, BitBucketClient
 from awf.common.bitbucket_client_parsing import (
+    _PRContext,
     bb_merge_strategy_for_method,
     decode_thread_id,
+    effective_merge_strategies,
     encode_thread_id,
     extract_diffstat_paths,
     map_bb_merge_methods,
@@ -100,6 +102,57 @@ def test_map_bb_merge_methods(strategies: list[str] | None, expected: tuple[str,
 )
 def test_bb_merge_strategy_for_method(method: str, expected: str | None) -> None:
     assert bb_merge_strategy_for_method(method) == expected
+
+
+def _merge_ctx(
+    *,
+    merge_strategies: list[str] | None = None,
+    default_merge_strategy: str | None = None,
+) -> _PRContext:
+    """Build a ``_PRContext`` carrying only the merge-strategy fields under test."""
+    return _PRContext(
+        pr_number=42,
+        source_branch=None,
+        source_sha=None,
+        dest_branch=None,
+        dest_sha=None,
+        merge_strategies=merge_strategies,
+        default_merge_strategy=default_merge_strategy,
+    )
+
+
+def test_effective_merge_strategies_defaults_to_bb_cloud_set_when_unconstrained() -> None:
+    # #479: an unrestricted BitBucket Cloud repo enumerates neither merge_strategies
+    # nor default_merge_strategy, yet allows all three native strategies. Returning
+    # ``None`` here resolved to "no method allowed" and wedged the merge gate.
+    ctx = _merge_ctx(merge_strategies=None, default_merge_strategy=None)
+    assert effective_merge_strategies(ctx) == ["merge_commit", "squash", "fast_forward"]
+
+
+def test_effective_merge_strategies_honors_explicit_restriction() -> None:
+    ctx = _merge_ctx(merge_strategies=["squash"], default_merge_strategy=None)
+    assert effective_merge_strategies(ctx) == ["squash"]
+
+
+def test_effective_merge_strategies_explicit_wins_over_default() -> None:
+    ctx = _merge_ctx(merge_strategies=["squash"], default_merge_strategy="merge_commit")
+    assert effective_merge_strategies(ctx) == ["squash"]
+
+
+def test_effective_merge_strategies_default_only() -> None:
+    ctx = _merge_ctx(merge_strategies=None, default_merge_strategy="fast_forward")
+    assert effective_merge_strategies(ctx) == ["fast_forward"]
+
+
+def test_effective_merge_strategies_default_set_maps_to_neutral_methods() -> None:
+    # The defaulted BB-native names must map through to the neutral method names the
+    # merge-loop preference order selects from, so a valid method is attempted.
+    ctx = _merge_ctx(merge_strategies=None, default_merge_strategy=None)
+    assert map_bb_merge_methods(effective_merge_strategies(ctx)) == (
+        "merge",
+        "squash",
+        "fast_forward",
+    )
 
 
 @pytest.mark.parametrize(

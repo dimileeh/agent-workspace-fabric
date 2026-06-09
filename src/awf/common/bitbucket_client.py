@@ -646,15 +646,13 @@ class BitBucketClient:
         BitBucket models this as the destination branch's ``merge_strategies`` (NOT
         branch-restrictions, which are permissions/merge-checks), falling back to
         ``default_merge_strategy`` when that list is absent or empty. Absent both →
-        ``None``.
+        BitBucket Cloud's default allowed set (an unrestricted repo enumerates no
+        strategies but allows all three, #479); ``None`` only without PR context.
         """
         ctx = self._pr_context.get(repo.slug())
         if ctx is None:
             return None
-        strategies = effective_merge_strategies(ctx)
-        if strategies is None:
-            return None
-        return map_bb_merge_methods(strategies)
+        return map_bb_merge_methods(effective_merge_strategies(ctx))
 
     async def merge_pr(
         self,
