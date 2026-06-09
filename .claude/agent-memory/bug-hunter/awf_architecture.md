@@ -4,7 +4,7 @@ description: One-paragraph map of the AWF codebase so scans know where the press
 type: project
 ---
 
-AWF (Aira Workspace Fabric) orchestrates Claude Code / Codex / Gemini inside ephemeral Docker workspaces to execute tasks. Key layers:
+AWF (Agent Workspace Fabric) orchestrates Claude Code / Codex / Gemini inside ephemeral Docker workspaces to execute tasks. Key layers:
 
 - `src/awf/runtime/pr_monitor.py` — pure decision core (`decide()`), returns one `MonitorAction` per call.
 - `src/awf/runtime/pr_monitor_runner.py` — I/O orchestrator wrapping `decide()`, handles gh calls, git, docker.

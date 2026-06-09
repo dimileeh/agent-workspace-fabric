@@ -70,8 +70,8 @@ pip install agent-workspace-fabric
 For contributors who want to modify AWF itself:
 
 ```bash
-git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
-cd aira-agent-workspace-fabric
+git clone git@github.com:dimileeh/agent-workspace-fabric.git
+cd agent-workspace-fabric
 uv tool install . --force
 uv sync
 ```
@@ -448,7 +448,7 @@ Example CLI submission:
 
 ```bash
 uv run --python 3.12 --extra dev awf workspace create \
-  --repo git@github.com:dimileeh/aira-agent-workspace-fabric.git \
+  --repo git@github.com:dimileeh/agent-workspace-fabric.git \
   --base development \
   --profile auto \
   --agent codex \

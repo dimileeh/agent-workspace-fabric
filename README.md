@@ -1,6 +1,14 @@
 # Agent Workspace Fabric (AWF)
 
-*New to AWF? See the [Quickstart](docs/QUICKSTART.md) to bootstrap a local evaluation workspace in a few commands.*
+[![CI](https://github.com/dimileeh/agent-workspace-fabric/actions/workflows/ci.yml/badge.svg)](https://github.com/dimileeh/agent-workspace-fabric/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](pyproject.toml)
+[![Coverage 99%](https://img.shields.io/badge/coverage-99%25-brightgreen.svg)](#ci-gate)
+![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
+
+![AWF — one control plane conducting an orchestra of AI coding agents, each in its own isolated workspace, producing merged pull requests](docs/assets/awf-orchestra.svg)
+
+📐 **[Interactive architecture diagram](docs/architecture.html)** &nbsp;·&nbsp; 🧭 **[Concepts &amp; glossary](docs/CONCEPTS.md)** &nbsp;·&nbsp; 🚀 **[Quickstart](docs/QUICKSTART.md)**
 
 **AWF is an industrial workspace fabric for AI coding agents.**
 

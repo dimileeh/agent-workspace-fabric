@@ -18,7 +18,7 @@ Use this checklist before tagging an AWF Core alpha release.
   `uv tool` / `pipx` or source-checkout lanes instead of a remote shell
   pipeline.
 - The repository URL still points at
-  `https://github.com/dimileeh/aira-agent-workspace-fabric` until the GitHub
+  `https://github.com/dimileeh/agent-workspace-fabric` until the GitHub
   repository is renamed.
 
 ## Required Validation
@@ -45,7 +45,7 @@ uv run --python 3.12 python scripts/generate_install_manifest.py \
   --output artifacts/release/awf-install-manifest.json \
   --version 0.1.0 \
   --tag v0.1.0 \
-  --repository-url https://github.com/dimileeh/aira-agent-workspace-fabric \
+  --repository-url https://github.com/dimileeh/agent-workspace-fabric \
   --channel auto
 docker build -t awf-control-plane:release-check -f docker/control-plane.Dockerfile .
 docker build -t awf-agent-runtime:release-check -f docker/agent-runtime.Dockerfile .
@@ -57,7 +57,7 @@ Install the built wheel from outside the source checkout before tagging:
 uv venv --python 3.12 /tmp/awf-release-install
 cd /tmp
 uv pip install --python /tmp/awf-release-install/bin/python \
-  /path/to/aira-agent-workspace-fabric/dist/*.whl
+  /path/to/agent-workspace-fabric/dist/*.whl
 /tmp/awf-release-install/bin/awf --help
 /tmp/awf-release-install/bin/awf init --help
 /tmp/awf-release-install/bin/awf service bootstrap --help
@@ -163,7 +163,7 @@ uv run --python 3.12 python scripts/generate_install_manifest.py \
   --output artifacts/release/awf-install-manifest.json \
   --version 0.1.0 \
   --tag v0.1.0 \
-  --repository-url https://github.com/dimileeh/aira-agent-workspace-fabric \
+  --repository-url https://github.com/dimileeh/agent-workspace-fabric \
   --channel auto
 ```
 
@@ -218,7 +218,7 @@ uv run --python 3.12 python scripts/check_release_artifacts.py \
   --manifest artifacts/release/awf-install-manifest.json \
   --version 0.1.0 \
   --tag v0.1.0 \
-  --repository-url https://github.com/dimileeh/aira-agent-workspace-fabric
+  --repository-url https://github.com/dimileeh/agent-workspace-fabric
 ```
 
 Installer smoke — rewrites the manifest's artifact URLs to the local `dist/`

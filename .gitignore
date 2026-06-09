@@ -92,3 +92,12 @@ query.json
 .claude/worktrees/
 .claude/hooks/*.local.*
 .gstack/
+
+# Generated dogfood/workspace artifacts (keep the canonical files only).
+# AWF writes plan/conformance/validation files here at runtime; they are not
+# part of the public source tree.
+/docs/awf-plans/*
+!/docs/awf-plans/README.md
+/plans/*
+!/plans/PLAN_EXECUTION_PROTOCOL.md
+/TODO/

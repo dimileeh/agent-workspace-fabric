@@ -32,12 +32,11 @@ The long-term model is:
 - `README.md` explains the current implementation and local service setup.
 - `docs/awf_prd_v2.2.md` is the product contract. When behavior is ambiguous,
   prefer the PRD unless the code has a clearly documented newer decision.
-- `TODO/pre-gke-industrial-readiness.md` is the backlog of completed,
-  in-progress, and to-do tasks towards completing the open source
-  version and before we can start building an AWF version ready for
-  deploying into GKE (Google Kubernetes Engine)
+- The roadmap and open work live in [GitHub Issues](https://github.com/dimileeh/agent-workspace-fabric/issues).
+  Hosted, GKE, and multi-tenant layers remain future work beyond this local Core.
 - `.awf/workspace.yml` is this repository's own AWF profile. Keep it generic
-  and project-local; do not hard-code Aira-specific assumptions into AWF core.
+  and project-local; do not hard-code project-specific assumptions into AWF core
+  (those belong in a profile, e.g. the built-in `aira` compatibility profile).
 
 ## Engineering Rules
 

@@ -1,5 +1,0 @@
-{
-  "status": "satisfied",
-  "summary": "Issue #346 implementation conforms to the saved plan. The monitor handoff path now runs existing ValidationRunner setup/pre_agent phases once before sync_feature_pr and sync_release_pr monitor handoff via monitor_handoff_setup, leaving each pre-push cycle scoped to post_agent/validate. Pre-push validation now classifies pure returncode 127 command failures as PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING, returns before the fix-pass loop consumes budget, preserves the existing fix-pass path for genuine non-127 failures, and prefers genuine failures in mixed 127/non-127 results. Failure details now include a redacted failing_command and failing_returncode, and the new reason is included in push failure outcome handling. Regression tests cover pure 127 bypass, mixed precedence, genuine failure/fix behavior, diagnostic details, remote outcome mapping, and monitor handoff setup success/failure; plans/ISSUE_346_PLAN.md and plans/ISSUE_346_VALIDATION.md document the work and focused validation evidence.",
-  "gaps": []
-}

@@ -1,7 +1,7 @@
 ---
 name: awf-scheduler
 description: |
-  Schedule a coding task on AWF (Aira Agent Workspace Fabric) — a standalone
+  Schedule a coding task on AWF (Agent Workspace Fabric) — a standalone
   execution substrate that clones a repo into an isolated Docker workspace,
   launches a coding CLI (Codex / Claude Code / Gemini), runs validation
   commands, and opens a PR. Use this when you need to dispatch work to an

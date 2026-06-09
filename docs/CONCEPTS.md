@@ -705,7 +705,7 @@ control-plane adoption and remonitor surfaces instead of legacy helper scripts:
 
 ```bash
 uv run --python 3.12 --extra dev awf workspace adopt-pr \
-  --repo dimileeh/aira-agent-workspace-fabric \
+  --repo dimileeh/agent-workspace-fabric \
   --pr 123 \
   --auto-merge \
   --format pretty

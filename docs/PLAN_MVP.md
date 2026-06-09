@@ -8,7 +8,7 @@
 
 Dmitri's primary constraint on shipping aira features is **parallel agent throughput**, not feature scope or agent capability. Today, each PR takes ~8 hours end-to-end (largely review + conflict resolution), and the workflow is serial — he babysits one PR at a time. Concurrent agent demand is 8+ but suppressed by the lack of a substrate that can isolate agents safely.
 
-**AWF (Aira Agent Workspace Fabric)** is a standalone execution service that any orchestrator (OpenClaw agents via skill, aira-agent's own supervisor, a human-triggered CLI, etc.) can call to run one coding task end-to-end in an isolated Docker workspace: check out source, launch a **coding CLI** (Codex / Claude Code / Gemini) inside the container with the repo mounted, run tests (with sidecar services like Postgres + Alembic migrations as the repo profile requires), and submit a PR against the development branch. The distinction matters: **AWF is called by orchestrators; the actual code-writing is done by the coding CLI inside the container.**
+**AWF (Agent Workspace Fabric)** is a standalone execution service that any orchestrator (OpenClaw agents via skill, aira-agent's own supervisor, a human-triggered CLI, etc.) can call to run one coding task end-to-end in an isolated Docker workspace: check out source, launch a **coding CLI** (Codex / Claude Code / Gemini) inside the container with the repo mounted, run tests (with sidecar services like Postgres + Alembic migrations as the repo profile requires), and submit a PR against the development branch. The distinction matters: **AWF is called by orchestrators; the actual code-writing is done by the coding CLI inside the container.**
 
 This MVP intentionally ships the "developer-in-a-box" primitive only. Owned paths are stored as coordination hints and stale-detection inputs; overlapping owned paths are admitted and surfaced as overlap-risk warnings. The stale-detection / auto-rebase / merge-queue / explicit exclusive-lock machinery from the full AWF v2.2 PRD is explicitly deferred to Phase 1.5, pending evidence from real parallel runs about which conflicts actually happen in practice.
 
@@ -70,7 +70,7 @@ This MVP intentionally ships the "developer-in-a-box" primitive only. Owned path
 ### Repo structure
 
 ```
-aira-agent-workspace-fabric/
+agent-workspace-fabric/
 ├── README.md
 ├── pyproject.toml
 ├── uv.lock
@@ -242,7 +242,7 @@ pytest tests/integration/ -v                # spins real Postgres via testcontai
 ```
 
 **End-to-end (local):**
-1. `cd ~/Projects/aira-agent-workspace-fabric && docker compose up control-plane postgres -d`
+1. `cd ~/Projects/agent-workspace-fabric && docker compose up control-plane postgres -d`
 2. `awf workspace create --repo git@github.com:dimileeh/aira-agent.git --base development --agent codex --title "trivial docstring" --prompt "Add a one-line docstring to src/aira_agent/api/main.py explaining the module." --test 'ruff check .' --test 'pytest tests/unit/ -q'`
 3. Poll `awf workspace show <id>` — expect `provisioning → ready → running → validating → pushing → completed`
 4. Verify PR URL returned, PR exists on GitHub targeting `development`
