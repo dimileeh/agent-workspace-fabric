@@ -79,6 +79,15 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     too — otherwise the resolve loop's ``_review_thread_needs_attention`` guard
     would skip the freshly-seeded thread.
 
+    Trade-off (accepted): the snapshot is taken HERE, at re-adoption time, not at
+    the prior instance's fix time. So if a reviewer replied to the outdated thread
+    AFTER that fix but BEFORE this re-adoption, the reply is already baked into the
+    seeded hash and ``_review_thread_needs_attention`` can never fire for it — the
+    post-fix reply is accepted as-is and the thread is resolved without being
+    re-triaged. This is deliberate: the only alternative (not seeding) leaves the
+    PR permanently BLOCKED on an invisible collapsed conversation. The guard still
+    protects against replies that arrive AFTER seeding, on subsequent polls.
+
     Best-effort and self-contained: runs only for outdated threads lacking a
     verdict (no git call in steady state), uses a bounded ``git log -n 1`` grep,
     and leaves a thread untouched on a non-``ok`` git result or no match. Never
