@@ -17,9 +17,7 @@ Use this checklist before tagging an AWF Core alpha release.
   and verified. Before that gate, README and Quickstart must route evaluators to
   `uv tool` / `pipx` or source-checkout lanes instead of a remote shell
   pipeline.
-- The repository URL still points at
-  `https://github.com/dimileeh/agent-workspace-fabric` until the GitHub
-  repository is renamed.
+- The repository URL is `https://github.com/dimileeh/agent-workspace-fabric`.
 
 ## Required Validation
 
