@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.bitbucket_client import BITBUCKET_API_ERROR, BitBucketClientError
+from awf.common.bitbucket_client import BITBUCKET_API_ERROR, BitbucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
 from awf.db.repositories import WorkspaceRepository
@@ -65,7 +65,7 @@ class _RecordingGitHub(DefaultMergeMethodGitHubClient):
     """Forge stub that records ``resolve_thread`` calls and optionally raises.
 
     The runner step is forge-neutral — it only calls ``gh.resolve_thread`` — so
-    a single recording stub exercises both the GitHub and BitBucket paths; the
+    a single recording stub exercises both the GitHub and Bitbucket paths; the
     POST-not-DELETE resolve semantics are covered by the client-level tests.
     """
 
@@ -403,9 +403,9 @@ async def test_bitbucket_outdated_thread_resolves_via_resolve_thread(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """(d) Forge-neutral: a BitBucket-style addressed-outdated thread resolves via
+    """(d) Forge-neutral: a Bitbucket-style addressed-outdated thread resolves via
     ``resolve_thread`` (the client-level POST/never-DELETE semantics are covered
-    in the BitBucket client tests)."""
+    in the Bitbucket client tests)."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     gh = _RecordingGitHub(cmd)
@@ -534,7 +534,7 @@ async def test_permanent_resolve_error_downgrades_to_needs_human(
     auto-merge; it simply stops the pointless retries."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
-    permanent = BitBucketClientError(
+    permanent = BitbucketClientError(
         operation="bitbucket resolve_thread",
         status=403,
         body="thread resolution is not permitted for this token",
@@ -594,7 +594,7 @@ async def test_permanent_resolve_error_is_not_retried_next_poll(
     forge API and logs on every cycle until the (non-blocking) PR merges."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
-    permanent = BitBucketClientError(
+    permanent = BitbucketClientError(
         operation="bitbucket resolve_thread",
         status=403,
         body="thread resolution is not permitted for this token",
@@ -639,7 +639,7 @@ async def test_permanent_resolve_downgrade_survives_state_reload(
     real loop (``state = self._load_state(ws)``)."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
-    permanent = BitBucketClientError(
+    permanent = BitbucketClientError(
         operation="bitbucket resolve_thread",
         status=403,
         body="thread resolution is not permitted for this token",

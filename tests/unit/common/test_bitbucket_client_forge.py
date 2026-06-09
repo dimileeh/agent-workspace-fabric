@@ -1,8 +1,8 @@
-"""Protocol conformance + pure-parsing tests for BitBucketClient (issue #345 Part 2).
+"""Protocol conformance + pure-parsing tests for BitbucketClient (issue #345 Part 2).
 
-Parallel to ``test_forge.py``'s GitHub conformance check: asserts ``BitBucketClient``
+Parallel to ``test_forge.py``'s GitHub conformance check: asserts ``BitbucketClient``
 satisfies the ``ForgeClient`` Protocol both structurally (``runtime_checkable``
-isinstance) and at typing level, plus focused unit tests for the pure BitBucket-JSON
+isinstance) and at typing level, plus focused unit tests for the pure Bitbucket-JSON
 assembly helpers.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from awf.common.bitbucket_client import BitBucketAuth, BitBucketClient
+from awf.common.bitbucket_client import BitbucketAuth, BitbucketClient
 from awf.common.bitbucket_client_parsing import (
     _PRContext,
     bb_merge_strategy_for_method,
@@ -34,9 +34,9 @@ from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 pytestmark = pytest.mark.unit
 
 
-def _client() -> BitBucketClient:
-    return BitBucketClient(
-        client=httpx.AsyncClient(), auth=BitBucketAuth(mode="bearer", api_token="tok-aaaa")
+def _client() -> BitbucketClient:
+    return BitbucketClient(
+        client=httpx.AsyncClient(), auth=BitbucketAuth(mode="bearer", api_token="tok-aaaa")
     )
 
 
@@ -61,7 +61,7 @@ def test_make_forge_client_bitbucket_returns_bitbucket_client(
     monkeypatch.setenv("BITBUCKET_AUTH_MODE", "bearer")
     monkeypatch.setenv("BITBUCKET_API_TOKEN", "tok")
     client = make_forge_client("bitbucket", FakeCommandRunner())
-    assert isinstance(client, BitBucketClient)
+    assert isinstance(client, BitbucketClient)
 
 
 # ── Pure parsing helpers ──────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ def _merge_ctx(
 
 
 def test_effective_merge_strategies_defaults_to_bb_cloud_set_when_unconstrained() -> None:
-    # #479: an unrestricted BitBucket Cloud repo enumerates neither merge_strategies
+    # #479: an unrestricted Bitbucket Cloud repo enumerates neither merge_strategies
     # nor default_merge_strategy, yet allows all three native strategies. Returning
     # ``None`` here resolved to "no method allowed" and wedged the merge gate.
     ctx = _merge_ctx(merge_strategies=None, default_merge_strategy=None)

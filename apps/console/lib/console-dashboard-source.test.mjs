@@ -84,7 +84,7 @@ test("operator action state is guarded by current workspace selection", () => {
   assert.match(dashboard, /selectedIdRef\.current !== workspaceId/);
 });
 
-test("extractPrNumberFromHref regex is forge-neutral (GitHub + BitBucket)", () => {
+test("extractPrNumberFromHref regex is forge-neutral (GitHub + Bitbucket)", () => {
   assert.match(dashboardSource.shared, /pull\(\?:-requests\)\?/);
 });
 

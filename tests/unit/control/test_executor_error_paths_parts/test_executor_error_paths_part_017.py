@@ -941,12 +941,12 @@ class TestSyncReleasePrHandoffRemainingBranches:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # BitBucket Cloud is a *supported* forge, so it clears the handoff's
+        # Bitbucket Cloud is a *supported* forge, so it clears the handoff's
         # unsupported-forge gate and reaches the forge-client construction — but
         # release-PR sync is GitHub-only. The concrete-client-forge guard must
         # fire *before* ``make_forge_client`` so the workspace is marked
         # RELEASE_SYNC_FORGE_NOT_SUPPORTED, not BITBUCKET_AUTH_NOT_CONFIGURED from
-        # a credential-less ``BitBucketClient.from_env()``. No forge client may be
+        # a credential-less ``BitbucketClient.from_env()``. No forge client may be
         # constructed on this unsupported path.
         fake.queue_result(returncode=0)  # initial git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # initial rev-list --count
@@ -1010,7 +1010,7 @@ class TestSyncReleasePrHandoffRemainingBranches:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # BitBucket is a globally supported forge, so it clears
+        # Bitbucket is a globally supported forge, so it clears
         # ``_gate_sync_handoff_unsupported_forge``. Release-PR sync is GitHub-only,
         # though, so even when the source branch is *zero commits ahead* the
         # workspace must fail RELEASE_SYNC_FORGE_NOT_SUPPORTED rather than silently

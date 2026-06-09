@@ -1,6 +1,6 @@
 """Forge-aware ``RepoRef`` parsing + URL builders (issue #345 Phase 1).
 
-GitHub behavior is unchanged; these tests add BitBucket host detection and
+GitHub behavior is unchanged; these tests add Bitbucket host detection and
 host-aware URL builders. The existing GitHub ``RepoRef`` suite in
 ``test_github_client_parts`` must stay green alongside these.
 """

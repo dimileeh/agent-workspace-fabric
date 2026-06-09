@@ -19,7 +19,7 @@ from typing import Any, cast
 
 from awf.adapters.base import get_adapter
 from awf.common.audit import redact_audit_text, redact_audit_value
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge import ForgeNotSupportedError
 from awf.control.executor import monitor_handoff_audit as _monitor_handoff_audit
 from awf.control.executor import monitor_handoff_companion_env as _companion_env
@@ -299,7 +299,7 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
     except ForgeNotSupportedError as exc:
         # This resume path bypasses the execute-time forge gate (execution_flow
         # only runs it for ready -> execution), so an unsupported forge (e.g.
-        # BitBucket) first surfaces here when the factory builds its forge
+        # Bitbucket) first surfaces here when the factory builds its forge
         # client. Preserve the stable FORGE_NOT_SUPPORTED reason code and its
         # doctor guidance instead of flattening it into MONITOR_RECOVERY_FAILED.
         _log.exception(
@@ -315,16 +315,16 @@ async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
             reason_code=exc.reason_code,
         )
         return
-    except BitBucketClientError as exc:
+    except BitbucketClientError as exc:
         # The factory builds its forge client via ``make_forge_client``, so a
-        # BitBucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL raises
-        # ``BitBucketClientError`` (e.g. reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
-        # from ``BitBucketClient.from_env()`` before the monitor loop exists. This
+        # Bitbucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL raises
+        # ``BitbucketClientError`` (e.g. reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
+        # from ``BitbucketClient.from_env()`` before the monitor loop exists. This
         # resume path bypasses the execute-time forge gate (execution_flow only
         # runs it for ready -> execution), so the auth failure first surfaces here.
         # Preserve that actionable reason code instead of flattening it into the
         # generic MONITOR_RECOVERY_FAILED below — mirrors the initial handoff
-        # path's BitBucketClientError catch so operators get the auth-setup
+        # path's BitbucketClientError catch so operators get the auth-setup
         # message on every monitor path.
         _log.exception(
             "executor.pr_monitor_resume_bitbucket_auth_failed",
@@ -907,14 +907,14 @@ async def _build_handoff_pr_monitor(
             setup_failure=exc,
         )
         return None
-    except BitBucketClientError as exc:
+    except BitbucketClientError as exc:
         # The factory builds its forge client via ``make_forge_client``, so a
-        # BitBucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL raises
-        # ``BitBucketClientError`` (e.g. reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
-        # from ``BitBucketClient.from_env()`` before the monitor loop exists.
+        # Bitbucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL raises
+        # ``BitbucketClientError`` (e.g. reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
+        # from ``BitbucketClient.from_env()`` before the monitor loop exists.
         # Preserve that actionable reason code instead of flattening it into the
         # generic MONITOR_UNAVAILABLE failure below — mirrors the release-sync
-        # handoff's BitBucketClientError catch so operators get the auth-setup
+        # handoff's BitbucketClientError catch so operators get the auth-setup
         # message on every handoff path.
         _log.error(
             build_failed_log_event,

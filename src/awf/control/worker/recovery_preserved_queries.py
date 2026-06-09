@@ -508,7 +508,7 @@ async def _resolve_preserved_active_branch_open_pr(
     # Gate any non-GitHub forge BEFORE the GitHub-only ``gh pr list`` path.
     # ``BranchOpenPullRequestResolver`` parses ``repo_url`` into a ``RepoRef`` and
     # shells ``gh pr list --repo owner/repo`` (GitHub), dropping the forge host —
-    # so a preserved-active BitBucket workspace would otherwise be queried as a
+    # so a preserved-active Bitbucket workspace would otherwise be queried as a
     # *same-slug GitHub* repo and could attach the wrong monitor instead of
     # failing fast. The executor forge gate does not cover this worker recovery
     # path, so reject here.
@@ -517,13 +517,13 @@ async def _resolve_preserved_active_branch_open_pr(
     # forge > repo-URL host > github), mirroring the executor forge gate, NOT plain
     # URL detection. A bare ``owner/repo`` slug carries no host, so URL detection
     # alone resolves it as GitHub (``RepoRef.from_url`` defaults bare slugs to
-    # github) — a BitBucket workspace configured with ``forge: bitbucket`` but a
+    # github) — a Bitbucket workspace configured with ``forge: bitbucket`` but a
     # bare-slug ``repo_url`` would then slip past this gate into the GitHub
     # resolver. Honoring the persisted forge first closes that gap.
     #
     # Issue #345 Part 2 note: this gate is GitHub-ONLY on purpose, deliberately
-    # NOT the shared ``ensure_forge_supported`` set. BitBucket Cloud is now a
-    # supported forge generally (Part 2 ships ``BitBucketClient``), but the
+    # NOT the shared ``ensure_forge_supported`` set. Bitbucket Cloud is now a
+    # supported forge generally (Part 2 ships ``BitbucketClient``), but the
     # forge-NEUTRAL open-PR resolver is explicitly out of scope, so this still-
     # GitHub-only path must keep rejecting bitbucket (and any future forge) until
     # a forge-neutral resolver exists. Undetectable URLs (``None``) fall through
@@ -531,7 +531,7 @@ async def _resolve_preserved_active_branch_open_pr(
     # this.
     #
     # The reason code is ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED``, NOT the generic
-    # ``FORGE_NOT_SUPPORTED``: BitBucket Cloud *is* a supported forge now, so the
+    # ``FORGE_NOT_SUPPORTED``: Bitbucket Cloud *is* a supported forge now, so the
     # generic code (and its "use a supported forge" fix text) would contradict the
     # real failure for a bitbucket.org operator. The honest reason is that the
     # open-PR resolver itself is GitHub-only.

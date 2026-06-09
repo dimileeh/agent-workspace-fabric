@@ -52,11 +52,11 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "FORGE_NOT_SUPPORTED": _ReasonText(
         (
-            "AWF detected a code forge it does not support. GitHub and BitBucket "
+            "AWF detected a code forge it does not support. GitHub and Bitbucket "
             "Cloud are implemented; any other forge fails fast."
         ),
         (
-            "Use a GitHub or BitBucket Cloud repository, or track support for the "
+            "Use a GitHub or Bitbucket Cloud repository, or track support for the "
             "detected forge upstream. Recreate the workspace against a supported "
             "remote (github.com or bitbucket.org)."
         ),
@@ -80,7 +80,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
             "forge-neutral open-PR resolver lands."
         ),
         (
-            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "The workspace is on a supported non-GitHub forge (e.g. Bitbucket "
             "Cloud), but the GitHub-only open-PR resolver cannot look up its open "
             "PR by branch yet, so worker recovery fails fast instead of querying "
             "the branch as a same-slug GitHub repo."
@@ -95,11 +95,11 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         ),
         (
             "No repository change is needed — the forge is supported. Inject a "
-            "BitBucket-aware adoption metadata fetcher, or adopt a GitHub PR until "
+            "Bitbucket-aware adoption metadata fetcher, or adopt a GitHub PR until "
             "the forge-neutral fetcher lands."
         ),
         (
-            "The repository is on a supported non-GitHub forge (e.g. BitBucket "
+            "The repository is on a supported non-GitHub forge (e.g. Bitbucket "
             "Cloud), but the default adoption metadata fetcher shells `gh pr view`, "
             "which is GitHub-only — so AWF fails fast instead of querying GitHub for "
             "the same owner/repo slug."
@@ -116,7 +116,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
             "PR creation lands."
         ),
         (
-            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "The workspace is on a supported non-GitHub forge (e.g. Bitbucket "
             "Cloud), but opening a new PR shells `gh pr create` and parses "
             "github.com PR URLs, so AWF fails fast at the push step instead of "
             "mis-routing to a same-slug GitHub repository."
@@ -135,7 +135,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
             "release sync lands."
         ),
         (
-            "The workspace is on a supported non-GitHub forge (e.g. BitBucket "
+            "The workspace is on a supported non-GitHub forge (e.g. Bitbucket "
             "Cloud), but release-PR sync shells `gh pr list` / `gh pr view` and "
             "parses github.com PR URLs, so AWF fails fast instead of mis-routing to "
             "a same-slug GitHub repository."
@@ -144,14 +144,14 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         _reason_catalog_link("RELEASE_SYNC_FORGE_NOT_SUPPORTED"),
     ),
     "BITBUCKET_AUTH_NOT_CONFIGURED": _ReasonText(
-        "AWF could not build BitBucket Cloud credentials from the environment.",
+        "AWF could not build Bitbucket Cloud credentials from the environment.",
         (
             "Set BITBUCKET_AUTH_MODE (basic|bearer) and BITBUCKET_API_TOKEN (plus "
             "BITBUCKET_EMAIL for basic mode) in the AWF service environment, then "
             "remonitor the workspace."
         ),
         (
-            "The BitBucket auth mode, API token, or email is missing or malformed. "
+            "The Bitbucket auth mode, API token, or email is missing or malformed. "
             "App passwords are not supported; use an Atlassian API token."
         ),
         "awf service doctor",
@@ -160,11 +160,11 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     "BITBUCKET_GIT_AUTH_NOT_CONFIGURED": _ReasonText(
         (
             "AWF could not authenticate git over HTTPS to a bitbucket.org "
-            "repository because the BitBucket git credentials are not configured."
+            "repository because the Bitbucket git credentials are not configured."
         ),
         (
             "Set BITBUCKET_API_TOKEN and BITBUCKET_EMAIL in the AWF service "
-            "environment (the same Atlassian API token credentials the BitBucket "
+            "environment (the same Atlassian API token credentials the Bitbucket "
             "REST client uses), then remonitor or recreate the workspace."
         ),
         (
@@ -179,7 +179,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "BITBUCKET_PIPELINE_FULL_RERUN": _ReasonText(
         (
-            "AWF re-ran the entire BitBucket pipeline because BitBucket Cloud has "
+            "AWF re-ran the entire Bitbucket pipeline because Bitbucket Cloud has "
             "no failed-only rerun API (that action is UI-only)."
         ),
         (
@@ -187,7 +187,7 @@ _REASON_TEXT: dict[str, _ReasonText] = {
             "inspect the monitor log if reruns keep recurring."
         ),
         (
-            "BitBucket Cloud exposes only a whole-pipeline trigger over REST, so a "
+            "Bitbucket Cloud exposes only a whole-pipeline trigger over REST, so a "
             "transient-failure rerun necessarily reruns every step, not just the "
             "failed ones."
         ),
@@ -196,11 +196,11 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "BITBUCKET_PIPELINE_NOT_RERUNNABLE": _ReasonText(
         (
-            "AWF refused to rerun a BitBucket pipeline because the pull-request "
+            "AWF refused to rerun a Bitbucket pipeline because the pull-request "
             "pipeline target could not be safely reconstructed."
         ),
         (
-            "Re-run the pipeline from the BitBucket UI, or verify the PR pipeline "
+            "Re-run the pipeline from the Bitbucket UI, or verify the PR pipeline "
             "configuration (custom/manual pipelines and required variables are not "
             "auto-rerunnable), then remonitor the workspace."
         ),
@@ -214,16 +214,16 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "BITBUCKET_ISSUE_TRACKER_DISABLED": _ReasonText(
         (
-            "The BitBucket repository issue tracker is disabled, so AWF posted the "
+            "The Bitbucket repository issue tracker is disabled, so AWF posted the "
             "tracking note as a pull-request comment instead of opening an issue."
         ),
         (
-            "Enable the BitBucket repository issue tracker if durable issues are "
+            "Enable the Bitbucket repository issue tracker if durable issues are "
             "wanted; otherwise no action is required — the note was captured on the "
             "PR."
         ),
         (
-            "BitBucket returned 404 for the issues endpoint because the repository "
+            "Bitbucket returned 404 for the issues endpoint because the repository "
             "issue tracker is turned off."
         ),
         "awf workspace logs <workspace_id>",
@@ -231,18 +231,18 @@ _REASON_TEXT: dict[str, _ReasonText] = {
     ),
     "BITBUCKET_ISSUE_CAPTURE_FAILED": _ReasonText(
         (
-            "AWF could not durably capture a deferred review note: the BitBucket "
+            "AWF could not durably capture a deferred review note: the Bitbucket "
             "issue tracker is disabled and there was no PR context to fall back "
             "to, so neither an issue nor a PR comment was recorded."
         ),
         (
             "Treat the deferred follow-up as uncaptured — the thread stays "
-            "unresolved and the merge is blocked. Enable the BitBucket repository "
+            "unresolved and the merge is blocked. Enable the Bitbucket repository "
             "issue tracker (or ensure PR context is available) and remonitor so "
             "the note can be captured."
         ),
         (
-            "BitBucket returned 404 for the issues endpoint (tracker disabled) and "
+            "Bitbucket returned 404 for the issues endpoint (tracker disabled) and "
             "AWF had not yet remembered the PR, leaving no comment fallback target."
         ),
         "awf workspace logs <workspace_id>",

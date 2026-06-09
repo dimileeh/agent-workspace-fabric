@@ -349,7 +349,7 @@ class MonitorConfig:
     Default ``True`` preserves today's behavior: a PENDING/empty check state
     keeps the monitor in ``WaitForCI`` forever. Operators opt out per-profile
     (``monitor.require_ci: false``) for repos that intentionally run NO CI (for
-    example a BitBucket repo with Pipelines disabled), letting ``decide`` skip
+    example a Bitbucket repo with Pipelines disabled), letting ``decide`` skip
     the pending-checks wait — but only when the forge affirmatively reports an
     empty check set (``PRStatus.no_checks_observed``)."""
     # Only used by the RUNNER, not decide(); listed here so the full config

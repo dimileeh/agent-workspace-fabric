@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.bitbucket_client import BITBUCKET_AUTH_NOT_CONFIGURED, BitBucketClientError
+from awf.common.bitbucket_client import BITBUCKET_AUTH_NOT_CONFIGURED, BitbucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor.constants import (
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
@@ -506,9 +506,9 @@ class TestExecutorMonitorHandoffSetup:
         tmp_path: Path,
     ) -> None:
         # The monitor factory builds its forge client via ``make_forge_client``,
-        # so a BitBucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL
-        # raises ``BitBucketClientError`` (reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
-        # from ``BitBucketClient.from_env()`` before the monitor loop exists. The
+        # so a Bitbucket workspace missing BITBUCKET_API_TOKEN/BITBUCKET_EMAIL
+        # raises ``BitbucketClientError`` (reason_code BITBUCKET_AUTH_NOT_CONFIGURED)
+        # from ``BitbucketClient.from_env()`` before the monitor loop exists. The
         # handoff must preserve that actionable reason code rather than flatten it
         # into the generic PR_ADOPTION_MONITOR_UNAVAILABLE failure.
         validation = _RecordingValidation()
@@ -529,7 +529,7 @@ class TestExecutorMonitorHandoffSetup:
         )
 
         def _raise_bitbucket_auth_error(*_args: Any, **_kwargs: Any) -> object:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket auth",
                 status=None,
                 body="BITBUCKET_API_TOKEN is required.",

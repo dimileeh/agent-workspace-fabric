@@ -279,7 +279,7 @@ class TestFindOrCreateReleasePr:
 
     @pytest.mark.unit
     async def test_non_github_forge_fails_closed_before_any_gh_call(self) -> None:
-        # BitBucket Cloud is a supported forge (issue #345 Part 2), so it clears
+        # Bitbucket Cloud is a supported forge (issue #345 Part 2), so it clears
         # the executor forge gate and reaches here — but the open-PR lookup
         # (``gh pr list``), adoption metadata (``gh pr view``), and github.com-only
         # URL parse are all GitHub-only. Fail closed with an honest reason code

@@ -180,7 +180,7 @@ def test_shared_redactors_catch_truncated_github_tokens(raw_token: str) -> None:
 def test_shared_redactors_mask_atlassian_api_token_shapes() -> None:
     """Verify Atlassian API tokens (ATATT…) never leak through diagnostics.
 
-    Defense-in-depth: the BitBucket git-auth design never logs the token, but a
+    Defense-in-depth: the Bitbucket git-auth design never logs the token, but a
     stray token in a log line, an assignment, or a URL must still be masked.
     """
     raw_token = "ATATT3xFfGF0abcDEF_123-456=.789"

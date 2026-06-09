@@ -1,4 +1,4 @@
-"""BitBucketClient + parsing edge-coverage tests (issue #345 Part 2).
+"""BitbucketClient + parsing edge-coverage tests (issue #345 Part 2).
 
 Closes the remaining branches: account-id caching/error/non-dict, the issue-fallback
 PR-page URL, step-log error tolerance, invalid ``Retry-After``, empty-body parsing,
@@ -14,9 +14,9 @@ import pytest
 
 from awf.common.bitbucket_client import (
     BITBUCKET_ISSUE_CAPTURE_FAILED,
-    BitBucketAuth,
-    BitBucketClient,
-    BitBucketClientError,
+    BitbucketAuth,
+    BitbucketClient,
+    BitbucketClientError,
 )
 from awf.common.bitbucket_client_parsing import (
     _comment_account_id,
@@ -33,7 +33,7 @@ from awf.common.bitbucket_client_parsing import (
 )
 from awf.common.github_client import RepoRef
 
-from ._helpers import FakeBitBucket, RecordingSleep, make_client, pr_payload, repo
+from ._helpers import FakeBitbucket, RecordingSleep, make_client, pr_payload, repo
 
 pytestmark = pytest.mark.unit
 
@@ -42,7 +42,7 @@ _REPO = "/2.0/repositories/workspace/repo"
 _PR = f"{_REPO}/pullrequests/42"
 
 
-def _seed_fetch_status(fake: FakeBitBucket, *, account_body: object = None) -> None:
+def _seed_fetch_status(fake: FakeBitbucket, *, account_body: object = None) -> None:
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
@@ -60,7 +60,7 @@ async def test_fetch_pr_status_changed_paths_via_redirected_diffstat() -> None:
     # BB Cloud's PR diffstat answers 302 → resolved diffstat resource. The client
     # must follow the hop so ``changed_paths`` (used by the monitor's scope-policy
     # check) reflects the real files instead of silently collapsing to empty.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
@@ -83,16 +83,16 @@ async def test_fetch_pr_status_changed_paths_via_redirected_diffstat() -> None:
 
 
 async def test_fetch_pr_status_non_dict_body_raises() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=[1, 2, 3])  # 200 but not an object
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert "not found" in excinfo.value.body
 
 
 async def test_account_id_is_cached_across_status_fetches() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     # Second status fetch re-enqueues everything except /2.0/user (served from cache).
     fake.enqueue("GET", _PR, json=pr_payload())
@@ -112,7 +112,7 @@ async def test_fetch_pr_status_populates_review_activity_anchor() -> None:
     # and quiet_period_anchor_at so the non-check-reviewer settle gate anchors on the
     # new review activity instead of decaying to the head-only fallback (which would
     # let a fresh Bitbucket comment be merged past immediately). Mirrors GitHub.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page(
@@ -143,7 +143,7 @@ async def test_fetch_pr_status_anchors_on_resolved_reviewer_task() -> None:
     # A task-only PR whose task the agent already resolved: no pending comments/threads,
     # but the resolved reviewer task must still populate the review-activity anchor so the
     # non-check-reviewer settle window is honored instead of merging immediately.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
@@ -176,7 +176,7 @@ async def test_fetch_pr_status_anchors_on_resolved_reviewer_task() -> None:
 async def test_fetch_pr_status_without_activity_leaves_anchor_unset() -> None:
     # No external review activity and no PR timestamps → anchor stays None so the
     # settle gate keeps its head-only fallback (unchanged behavior).
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -185,11 +185,11 @@ async def test_fetch_pr_status_without_activity_leaves_anchor_unset() -> None:
 
 
 async def test_account_id_fetch_error_propagates() -> None:
-    # A failing /2.0/user lookup must surface as a BitBucketClientError rather
+    # A failing /2.0/user lookup must surface as a BitbucketClientError rather
     # than be swallowed: silently disabling self-comment filtering would treat
     # AWF's own comments as external feedback. The transient 5xx is preserved so
     # the monitor's transient-retry path can keep polling.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
@@ -197,7 +197,7 @@ async def test_account_id_fetch_error_propagates() -> None:
     fake.page("GET", f"{_PR}/tasks", values=[])
     fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert excinfo.value.status == 500
 
@@ -207,7 +207,7 @@ async def test_account_id_failure_is_not_cached_then_succeeds() -> None:
     # retry /2.0/user so self-comment filtering recovers after a transient blip.
     # All responses are enqueued up front; the FIFO fake pops the first /2.0/user
     # (500) on the first poll and serves the second (200) on the next.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])  # first poll: empty
@@ -228,7 +228,7 @@ async def test_account_id_failure_is_not_cached_then_succeeds() -> None:
     fake.enqueue("GET", "/2.0/user", status=500, json={"error": "x"})  # first poll fails
     fake.enqueue("GET", "/2.0/user", json={"account_id": "me"})  # second poll succeeds
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError):
+    with pytest.raises(BitbucketClientError):
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     # Second poll: /2.0/user is retried and now succeeds, marking the viewer's
     # own comment as authored-by-viewer so it is filtered out.
@@ -238,7 +238,7 @@ async def test_account_id_failure_is_not_cached_then_succeeds() -> None:
 
 
 async def test_account_id_non_dict_body_leaves_account_none() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, account_body=[])  # list, not an object
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -250,7 +250,7 @@ async def test_account_id_malformed_body_is_not_cached_then_succeeds() -> None:
     # cached as a terminal result: that would permanently disable viewer-self
     # filtering after a single bad response. A later poll has to retry /2.0/user
     # so self-comment filtering recovers, matching _current_account_id's contract.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])  # first poll: empty
@@ -280,7 +280,7 @@ async def test_account_id_malformed_body_is_not_cached_then_succeeds() -> None:
 
 
 async def test_create_issue_fallback_returns_pr_page_url_when_comment_has_no_href() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     fake.enqueue("POST", f"{_REPO}/issues", status=404, json={"type": "error"})
     fake.enqueue("POST", f"{_PR}/comments", json={"id": 7})  # no links.html.href
@@ -294,17 +294,17 @@ async def test_create_issue_fallback_comment_failure_propagates_error() -> None:
     # When the issue tracker is disabled (404) AND the fallback comment POST also
     # fails (e.g. 403 lacking comment permission), nothing durable was captured. The
     # error must PROPAGATE rather than returning a PR-page URL: the deferred-capture
-    # call site in fix_cycle.py catches BitBucketClientError and downgrades to
+    # call site in fix_cycle.py catches BitbucketClientError and downgrades to
     # needs_human / requeues, so swallowing it here would let the caller record a
     # capture that never happened and resolve the reviewer's thread, dropping the
     # follow-up. This matches create_issue's documented fail-safe contract.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     fake.enqueue("POST", f"{_REPO}/issues", status=404, json={"type": "error"})
     fake.enqueue("POST", f"{_PR}/comments", status=403, json={"type": "error"})
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.create_issue(repo=repo(), title="t", body="b")
     assert excinfo.value.status == 403
 
@@ -322,17 +322,17 @@ async def test_create_issue_fallback_without_pr_context_raises() -> None:
     # BITBUCKET_ISSUE_TRACKER_DISABLED: the latter is catalogued as "note
     # captured on the PR — no action required", which would mislead operators
     # since no comment ran on this path (nothing durable was recorded).
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_REPO}/issues", status=404, json={"type": "error"})
     client = make_client(fake)  # no fetch_pr_status → no remembered PR context
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.create_issue(repo=repo(), title="t", body="b")
     assert excinfo.value.status == 404
     assert excinfo.value.reason_code == BITBUCKET_ISSUE_CAPTURE_FAILED
 
 
 async def test_step_log_404_is_tolerated_as_empty() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -354,12 +354,12 @@ async def test_step_log_follows_offorigin_307_redirect_without_forge_auth() -> N
     """BB's step-log endpoint answers a documented 307 to off-origin log storage.
 
     The shared redirect path origin-checks every ``Location`` (SSRF guard) and would
-    reject that hop, raising a non-transient ``BitBucketClientError`` that escapes the
+    reject that hop, raising a non-transient ``BitbucketClientError`` that escapes the
     "best-effort, never raises" step-log fetch and loses the CI step evidence. The log
     redirect must instead be followed to the signed storage URL — but with the forge
     ``Authorization`` header stripped, so credentials never reach the storage host.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -389,16 +389,16 @@ async def test_step_log_follows_offorigin_307_redirect_without_forge_auth() -> N
 async def test_step_log_second_offorigin_redirect_is_refused_not_followed() -> None:
     """The log-redirect grant is single-use: only ONE off-origin hop is allowed.
 
-    BitBucket documents exactly one 307 from the step-log endpoint to a signed,
+    Bitbucket documents exactly one 307 from the step-log endpoint to a signed,
     off-origin storage URL. Once that first hop is followed (with the forge auth
     stripped), the ``allow_log_redirect`` grant is consumed — so a *second*
     off-origin redirect (e.g. a compromised or adversarial storage host bouncing the
     now-unauthenticated client toward an internal/arbitrary target) faces the strict
     SSRF guard and is refused before being issued. The best-effort log fetch tolerates
-    the resulting ``BitBucketClientError`` by yielding an empty excerpt rather than
+    the resulting ``BitbucketClientError`` by yielding an empty excerpt rather than
     chaining off-origin requests.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -436,10 +436,10 @@ async def test_step_log_transport_failure_yields_empty_log_not_raise() -> None:
     redirect) must not escape the "best-effort, never raises" log fetch.
 
     ``_request_text`` already tolerates 4xx/5xx by returning ``""``; a transport-level
-    ``BitBucketClientError`` (reason ``BITBUCKET_TRANSPORT_ERROR``) must be tolerated the
+    ``BitbucketClientError`` (reason ``BITBUCKET_TRANSPORT_ERROR``) must be tolerated the
     same way. Otherwise it propagates through ``fetch_failing_check_logs`` to
     ``_fetch_status_for_decision``, which treats the whole PR status poll as a transient
-    BitBucket fault and retries forever instead of surfacing the failing CI with an empty
+    Bitbucket fault and retries forever instead of surfacing the failing CI with an empty
     log — a persistent log-storage outage would block the monitor from acting.
     """
     canned = {
@@ -460,11 +460,11 @@ async def test_step_log_transport_failure_yields_empty_log_not_raise() -> None:
             raise httpx.ConnectError("connection reset by peer", request=request)
         return canned[(request.method.upper(), request.url.path)]
 
-    client = BitBucketClient(
+    client = BitbucketClient(
         client=httpx.AsyncClient(
             transport=httpx.MockTransport(handler), base_url="https://api.bitbucket.org"
         ),
-        auth=BitBucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
+        auth=BitbucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
     )
     failures = await client.fetch_failing_check_logs(repo=repo(), pr_number=42, head_sha=_HEAD)
     # The CI failure is still surfaced, just with no log evidence — not raised.
@@ -473,7 +473,7 @@ async def test_step_log_transport_failure_yields_empty_log_not_raise() -> None:
 
 
 async def test_invalid_retry_after_falls_back_to_backoff() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_REPO}/pullrequests",
@@ -488,14 +488,14 @@ async def test_invalid_retry_after_falls_back_to_backoff() -> None:
 
 
 async def test_empty_body_parses_to_none() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_PR}/comments")  # 200, empty body
     client = make_client(fake)
     await client.post_comment(repo=repo(), pr_number=42, body="hi")  # must not raise
 
 
 async def test_cacheable_request_with_params_round_trips() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", "/x", json={"v": 1}, headers={"ETag": "e1"})
     fake.enqueue("GET", "/x", status=304, headers={"ETag": "e1"})
     client = make_client(fake)
@@ -506,9 +506,9 @@ async def test_cacheable_request_with_params_round_trips() -> None:
 
 async def test_304_uses_prefetched_body_when_entry_evicted_mid_flight() -> None:
     """A concurrent task evicting the bounded ETag cache during the ``await`` must
-    not turn a 304 into a ``BitBucketClientError`` — the body captured before the
+    not turn a 304 into a ``BitbucketClientError`` — the body captured before the
     request is sent is what gets returned."""
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", "/x", json={"v": 1}, headers={"ETag": "e1"})
     client = make_client(fake)
     first = await client._request_json("GET", "/x", operation="op", cache=True)
@@ -773,7 +773,7 @@ def test_tail_truncates_long_text() -> None:
 
 
 async def test_paginate_skips_non_dict_value_and_handles_empty_body() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     # statuses page mixes a non-dict value (skipped) with a real status.
     fake.enqueue(

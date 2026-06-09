@@ -159,7 +159,7 @@ class GitManager:
         clone doesn't race.
 
         For a bitbucket.org repo, a credential preflight runs first: if the
-        BitBucket git credentials are not configured it raises a reason-coded
+        Bitbucket git credentials are not configured it raises a reason-coded
         ``GitOperationError`` instead of attempting an unauthenticated clone of a
         private repo (which would fail opaquely or hang). GitHub repos are
         unaffected.

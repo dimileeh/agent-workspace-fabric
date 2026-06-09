@@ -145,7 +145,7 @@ class RepoRef:
 
     ``forge`` records which code-forge the ref was detected on (``github`` by
     default; ``bitbucket`` for ``bitbucket.org`` URLs). The URL builders are
-    host-aware off ``forge`` so a BitBucket ref emits ``bitbucket.org`` URLs.
+    host-aware off ``forge`` so a Bitbucket ref emits ``bitbucket.org`` URLs.
     GitHub behavior is unchanged when ``forge == "github"`` (the common path)."""
 
     owner: str

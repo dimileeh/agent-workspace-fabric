@@ -2,10 +2,10 @@
 
 Extracted from ``bitbucket_client.py`` so the client module stays under the
 first-party file-size guardrail. These symbols form one cohesive unit — the
-``ForgeClientError`` peer for BitBucket, the explicit credential mode, and the
+``ForgeClientError`` peer for Bitbucket, the explicit credential mode, and the
 stable reason codes that flow end-to-end (exception → log field → event →
 policy). ``bitbucket_client`` re-exports them, so existing
-``from awf.common.bitbucket_client import BitBucketClientError`` imports keep
+``from awf.common.bitbucket_client import BitbucketClientError`` imports keep
 working unchanged.
 """
 
@@ -43,22 +43,22 @@ BITBUCKET_MERGE_METHOD_UNSUPPORTED = "BITBUCKET_MERGE_METHOD_UNSUPPORTED"
 # resolve reviewer tasks. Distinct from the generic ``BITBUCKET_AUTH_FAILED`` so the
 # monitor surfaces it as a stable human blocker (NotifyHuman) — the agent addressing
 # the task again cannot fix a missing scope, so a deterministic, reason-coded escalation
-# avoids a retry storm. The task stays UNRESOLVED on BitBucket, so the merge gate keeps
+# avoids a retry storm. The task stays UNRESOLVED on Bitbucket, so the merge gate keeps
 # blocking until an operator grants the scope or resolves the task.
 BITBUCKET_TASK_RESOLVE_FORBIDDEN = "BITBUCKET_TASK_RESOLVE_FORBIDDEN"
-# BitBucket answers 409 Conflict on the merge POST when a merge for this PR is
+# Bitbucket answers 409 Conflict on the merge POST when a merge for this PR is
 # already in flight (typically a prior 202 async merge whose task-status poll was
 # interrupted by a transient fault and re-issued by the monitor) or when the PR has
 # already been merged. Both are recoverable — re-polling ``fetch_pr_status`` observes
 # the original merge's eventual MERGED state — so they are classified transient
-# rather than mapped to ``BITBUCKET_API_ERROR``. BitBucket also overloads 409 for
+# rather than mapped to ``BITBUCKET_API_ERROR``. Bitbucket also overloads 409 for
 # non-recoverable merge failures (merge conflicts, unmet merge checks); those carry
 # no in-progress/already-merged signal and must stay deterministic so they surface
 # ``BITBUCKET_API_ERROR`` instead of polling forever — see
 # ``_is_bitbucket_merge_in_progress_body``.
 BITBUCKET_MERGE_IN_PROGRESS = "BITBUCKET_MERGE_IN_PROGRESS"
 # The bounded async-merge poll budget was exhausted while the merge task was still
-# PENDING. This does *not* mean the merge failed — BitBucket may still complete it
+# PENDING. This does *not* mean the merge failed — Bitbucket may still complete it
 # server-side — so it is recoverable in exactly the same way as
 # ``BITBUCKET_MERGE_IN_PROGRESS``: the monitor must wait and re-poll
 # ``fetch_pr_status`` (observing the eventual MERGED state) rather than mark the
@@ -90,12 +90,12 @@ _BITBUCKET_MERGE_IN_PROGRESS_BODY_SIGNALS = (
 def _is_bitbucket_merge_in_progress_body(body: str) -> bool:
     """Return whether a 409 merge-POST body indicates a recoverable in-flight merge.
 
-    BitBucket reuses 409 for an in-progress async merge, an already-merged PR, and
+    Bitbucket reuses 409 for an in-progress async merge, an already-merged PR, and
     non-recoverable failures (conflicts, unmet merge checks). Only the first two are
     transient; the last must stay deterministic so the monitor notifies a human
     instead of polling indefinitely.
 
-    A bare ``"in progress"`` substring is too broad: BitBucket overloads 409 on the
+    A bare ``"in progress"`` substring is too broad: Bitbucket overloads 409 on the
     merge POST for other concurrent-modification conflicts whose bodies read e.g.
     "another action is in progress" or "operation already in progress", and matching
     those would treat a deterministic conflict as transient and poll forever. Require
@@ -109,8 +109,8 @@ def _is_bitbucket_merge_in_progress_body(body: str) -> bool:
     return "in progress" in lowered and "merge" in lowered
 
 
-class BitBucketClientError(ForgeClientError):
-    """Raised when BitBucket Cloud returns an error or an unusable payload.
+class BitbucketClientError(ForgeClientError):
+    """Raised when Bitbucket Cloud returns an error or an unusable payload.
 
     Mirrors ``GitHubClientError`` and shares the ``ForgeClientError`` base so a
     single ``except ForgeClientError`` catches both: it carries a redacted body, the
@@ -138,18 +138,18 @@ class BitBucketClientError(ForgeClientError):
         )
 
     def redacted_detail(self) -> str:
-        """Return the redacted response body — BitBucket's human-facing detail."""
+        """Return the redacted response body — Bitbucket's human-facing detail."""
         return self.body
 
     @property
     def http_status(self) -> int | None:
-        """Return the BitBucket HTTP status (``None`` for transport-level faults)."""
+        """Return the Bitbucket HTTP status (``None`` for transport-level faults)."""
         return self.status
 
 
 @dataclass(frozen=True)
-class BitBucketAuth:
-    """Explicit BitBucket Cloud credential mode (issue #345 decision D6)."""
+class BitbucketAuth:
+    """Explicit Bitbucket Cloud credential mode (issue #345 decision D6)."""
 
     mode: str
     api_token: str
@@ -171,13 +171,13 @@ class BitBucketAuth:
         return tuple(secret for secret in secrets if secret)
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str]) -> BitBucketAuth:
+    def from_env(cls, env: Mapping[str, str]) -> BitbucketAuth:
         """Build auth from the env contract, failing with a reason code if invalid."""
         mode = (env.get("BITBUCKET_AUTH_MODE") or "basic").strip().lower()
         token = (env.get("BITBUCKET_API_TOKEN") or "").strip()
         email = (env.get("BITBUCKET_EMAIL") or "").strip() or None
         if mode not in {"basic", "bearer"}:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket auth",
                 status=None,
                 body=(
@@ -187,14 +187,14 @@ class BitBucketAuth:
                 reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
             )
         if not token:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket auth",
                 status=None,
                 body="BITBUCKET_API_TOKEN is required.",
                 reason_code=BITBUCKET_AUTH_NOT_CONFIGURED,
             )
         if mode == "basic" and email is None:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket auth",
                 status=None,
                 body="BITBUCKET_EMAIL is required for basic auth mode.",

@@ -1,4 +1,4 @@
-"""BitBucketClient comment/thread/issue tests (issue #345 Part 2).
+"""BitbucketClient comment/thread/issue tests (issue #345 Part 2).
 
 Covers inline review-thread reconstruction (parent grouping, resolved + viewer
 filtering, neutral thread-id encoding), ``resolve_thread`` (POST, never DELETE),
@@ -12,9 +12,9 @@ import json
 
 import pytest
 
-from awf.common.bitbucket_client import BITBUCKET_ISSUE_TRACKER_DISABLED, BitBucketClientError
+from awf.common.bitbucket_client import BITBUCKET_ISSUE_TRACKER_DISABLED, BitbucketClientError
 
-from ._helpers import FakeBitBucket, make_client, pr_payload, repo
+from ._helpers import FakeBitbucket, make_client, pr_payload, repo
 
 pytestmark = pytest.mark.unit
 
@@ -51,7 +51,7 @@ def _inline_comment(
 
 
 def _seed_fetch_status(
-    fake: FakeBitBucket, comments: list[dict], *, account_id: str = "viewer"
+    fake: FakeBitbucket, comments: list[dict], *, account_id: str = "viewer"
 ) -> None:
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
@@ -65,7 +65,7 @@ def _seed_fetch_status(
 
 
 async def test_inline_thread_with_reply_grouped_into_one_thread() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(
         fake,
         [
@@ -84,7 +84,7 @@ async def test_inline_thread_with_reply_grouped_into_one_thread() -> None:
 
 
 async def test_resolved_thread_is_filtered() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, [_inline_comment(100, "done", resolved=True)])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -92,7 +92,7 @@ async def test_resolved_thread_is_filtered() -> None:
 
 
 async def test_viewer_authored_thread_is_filtered() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, [_inline_comment(100, "mine", account="viewer")], account_id="viewer")
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -100,10 +100,10 @@ async def test_viewer_authored_thread_is_filtered() -> None:
 
 
 async def test_outdated_thread_is_filtered() -> None:
-    # Mirror the GitHub path: a BitBucket inline comment marked ``outdated``
+    # Mirror the GitHub path: a Bitbucket inline comment marked ``outdated``
     # after a new push no longer describes the current diff, so it must not
     # appear in ``unresolved_inline_threads`` and drive a fix cycle / block merge.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, [_inline_comment(100, "stale finding", outdated=True)])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -111,11 +111,11 @@ async def test_outdated_thread_is_filtered() -> None:
 
 
 async def test_fetch_pr_status_surfaces_outdated_unresolved_thread() -> None:
-    # #473: a BitBucket inline thread that went ``outdated`` (addressed elsewhere)
+    # #473: a Bitbucket inline thread that went ``outdated`` (addressed elsewhere)
     # but is still unresolved is kept out of the actionable feed yet surfaced in
     # ``outdated_unresolved_inline_threads`` so the monitor can resolve the ones it
     # addressed.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, [_inline_comment(100, "stale finding", outdated=True)])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -186,7 +186,7 @@ def test_partition_inline_review_threads_single_pass_matches_builders() -> None:
 
 
 async def test_resolve_thread_uses_post() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_PR}/comments/100/resolve", json={"type": "resolved"})
     client = make_client(fake)
     await client.resolve_thread(thread_id="bb:workspace/repo#42:100")
@@ -197,9 +197,9 @@ async def test_resolve_thread_uses_post() -> None:
 
 
 async def test_resolve_thread_rejects_unrecognized_id() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError):
+    with pytest.raises(BitbucketClientError):
         await client.resolve_thread(thread_id="not-a-bb-thread")
     assert fake.requests == []
 
@@ -208,7 +208,7 @@ async def test_resolve_thread_rejects_unrecognized_id() -> None:
 
 
 async def test_post_comment_sends_raw_content() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_PR}/comments", json={"id": 5})
     client = make_client(fake)
     await client.post_comment(repo=repo(), pr_number=42, body="hello world")
@@ -220,7 +220,7 @@ async def test_post_comment_sends_raw_content() -> None:
 
 
 async def test_create_issue_returns_html_url() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_REPO}/issues",
@@ -236,7 +236,7 @@ async def test_create_issue_builds_url_from_id_when_href_missing() -> None:
     # points at the specific filed issue (derived from the returned ``id``), not the
     # generic issues list — otherwise deferred capture records a page with no
     # guaranteed link to the tracking issue.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_REPO}/issues", json={"id": 7})  # no links.html.href
     client = make_client(fake)
     url = await client.create_issue(repo=repo(), title="t", body="b")
@@ -246,7 +246,7 @@ async def test_create_issue_builds_url_from_id_when_href_missing() -> None:
 async def test_create_issue_falls_back_to_issues_page_without_href_or_id() -> None:
     # Only when neither a specific href nor a usable numeric id is present does the
     # URL degrade to the generic issues list (better than nothing).
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_REPO}/issues", json={"type": "issue"})  # no href, no id
     client = make_client(fake)
     url = await client.create_issue(repo=repo(), title="t", body="b")
@@ -256,7 +256,7 @@ async def test_create_issue_falls_back_to_issues_page_without_href_or_id() -> No
 async def test_create_issue_falls_back_to_issues_page_when_response_not_dict() -> None:
     # A malformed 200 (non-dict body) still resolves to the generic issues list
     # rather than raising — the issue was created, just unparseable.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_REPO}/issues", json=[])  # non-dict success body
     client = make_client(fake)
     url = await client.create_issue(repo=repo(), title="t", body="b")
@@ -264,7 +264,7 @@ async def test_create_issue_falls_back_to_issues_page_when_response_not_dict() -
 
 
 async def test_create_issue_tracker_disabled_falls_back_to_pr_comment() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     # Prime PR context so the fallback knows which PR to comment on.
     _seed_fetch_status(fake, [])
     fake.enqueue("POST", f"{_REPO}/issues", status=404, json={"type": "error"})
@@ -285,10 +285,10 @@ async def test_create_issue_tracker_disabled_falls_back_to_pr_comment() -> None:
 
 
 async def test_create_issue_non_404_error_propagates() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_REPO}/issues", status=500, json={"type": "error"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.create_issue(repo=repo(), title="t", body="b")
     assert excinfo.value.status == 500
 

@@ -16,7 +16,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_TASK_TIMEOUT,
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TRANSPORT_ERROR,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GITHUB_API_ERROR, GitHubClientError, RepoRef
@@ -243,12 +243,12 @@ async def test_monitor_run_terminates_on_bitbucket_execute_error(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A deterministic ``BitBucketClientError`` escaping ``_execute`` terminates.
+    """A deterministic ``BitbucketClientError`` escaping ``_execute`` terminates.
 
     Regression for PRRT_kwDOSJAM6s6Hnm9b. ``_execute`` drives non-merge forge
     actions (thread-resolve, CI-rerun, fix-cycle) whose action arms catch
-    ``GitHubClientError`` alone; a BitBucket workspace's forge raises
-    ``BitBucketClientError`` instead. The runner's outer ``execute_action`` arm
+    ``GitHubClientError`` alone; a Bitbucket workspace's forge raises
+    ``BitbucketClientError`` instead. The runner's outer ``execute_action`` arm
     must catch it so a deterministic fault marks the workspace failed (preserving
     the reason code) rather than escaping ``run()`` and crashing the background
     monitor task.
@@ -263,7 +263,7 @@ async def test_monitor_run_terminates_on_bitbucket_execute_error(
     sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
     # A clean, mergeable poll so ``decide`` reaches an action; the stubbed
-    # ``_execute`` then raises the deterministic non-merge BitBucket fault.
+    # ``_execute`` then raises the deterministic non-merge Bitbucket fault.
     cmd.queue_result(returncode=0)  # poll: git fetch origin <base>
     cmd.queue_result(returncode=0, stdout="0\n")  # poll: base-behind
     cmd.queue_result(returncode=0, stdout=pr_payload())  # poll: mergeable PR
@@ -278,8 +278,8 @@ async def test_monitor_run_terminates_on_bitbucket_execute_error(
 
     async def fake_execute(**_kwargs: object) -> bool:
         # Model a non-merge forge call (e.g. resolve_thread) raising a
-        # deterministic BitBucket fault the GitHubClientError-only arm misses.
-        raise BitBucketClientError(
+        # deterministic Bitbucket fault the GitHubClientError-only arm misses.
+        raise BitbucketClientError(
             operation="bitbucket resolve_thread",
             status=403,
             body="thread resolution is not permitted for this token",
@@ -315,7 +315,7 @@ async def test_monitor_run_retries_transient_bitbucket_execute_error(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
-    # The merge attempt hits a transient BitBucket blip (5xx). It is classified
+    # The merge attempt hits a transient Bitbucket blip (5xx). It is classified
     # as a merge blocker, so the merge-blocker arm (context ``merge_pr``) waits
     # and re-polls; the PR then shows merged upstream so the monitor
     # short-circuits to completed instead of crashing or terminating.
@@ -342,7 +342,7 @@ async def test_monitor_run_retries_transient_bitbucket_execute_error(
         ) -> str:
             del repo, pr_number, method, delete_branch
             self.merge_attempts += 1
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket merge_pr",
                 status=503,
                 body="service unavailable",
@@ -383,12 +383,12 @@ async def test_transient_bitbucket_execute_error_discards_unconfirmed_addressed_
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A transient ``BitBucketClientError`` escaping ``_execute`` must not persist
+    """A transient ``BitbucketClientError`` escaping ``_execute`` must not persist
     the in-flight addressed markers it mutated.
 
     Regression for PRRT_kwDOSJAM6s6HntiJ. The fix cycle marks a thread addressed
-    in-memory *before* the forge ``resolve_thread`` call. For a BitBucket
-    workspace that call raises ``BitBucketClientError`` — which the
+    in-memory *before* the forge ``resolve_thread`` call. For a Bitbucket
+    workspace that call raises ``BitbucketClientError`` — which the
     ``GitHubClientError``-only fix-cycle arm neither catches nor rolls back — so
     it escapes to ``run()``. On a recoverable blip the runner must discard those
     unconfirmed mutations and re-poll from clean DB state, mirroring the
@@ -419,9 +419,9 @@ async def test_transient_bitbucket_execute_error_discards_unconfirmed_addressed_
         calls["n"] += 1
         if calls["n"] == 1:
             # Mirror the fix cycle marking a thread addressed before the forge
-            # resolve_thread call, then a transient BitBucket fault on resolve.
+            # resolve_thread call, then a transient Bitbucket fault on resolve.
             state.threads_addressed_ids["T_inflight"] = "fix_committed"
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket resolve_thread",
                 status=503,
                 body="service unavailable",
@@ -743,8 +743,8 @@ async def test_transient_retry_event_payload_is_structured_and_redacted(
 
 @pytest.mark.unit
 def test_is_transient_bitbucket_client_error_classifies_recoverable_blips() -> None:
-    def err(*, status: int | None, reason_code: str) -> BitBucketClientError:
-        return BitBucketClientError(
+    def err(*, status: int | None, reason_code: str) -> BitbucketClientError:
+        return BitbucketClientError(
             operation="bitbucket fetch_pr_status",
             status=status,
             body="boom",
@@ -768,7 +768,7 @@ def test_is_transient_bitbucket_client_error_classifies_recoverable_blips() -> N
         err(status=409, reason_code=BITBUCKET_MERGE_IN_PROGRESS)
     )
     # An exhausted async-merge poll budget (still-PENDING task) is recoverable the
-    # same way: BitBucket may still complete the merge server-side, so the monitor
+    # same way: Bitbucket may still complete the merge server-side, so the monitor
     # must wait and re-poll rather than post a spurious "merge rejected" — even
     # though it carries ``status=None`` like the deterministic safety aborts.
     assert _is_transient_bitbucket_client_error(
@@ -807,7 +807,7 @@ async def test_wait_after_transient_bitbucket_error_retries_and_records_event(
         worktrees_root=tmp_path / "worktrees",
     )
     secret = "bbtoken_11AA22BB33CC44DD"
-    exc = BitBucketClientError(
+    exc = BitbucketClientError(
         operation="bitbucket fetch_pr_status",
         status=503,
         body=f"Service Unavailable: https://user:{secret}@bitbucket.org/repo " + ("x" * 600),
@@ -857,7 +857,7 @@ async def test_wait_after_transient_bitbucket_error_fails_fast_on_deterministic_
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
     )
-    exc = BitBucketClientError(
+    exc = BitbucketClientError(
         operation="bitbucket fetch_pr_status",
         status=403,
         body="forbidden",

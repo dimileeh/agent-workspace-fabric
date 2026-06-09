@@ -42,7 +42,7 @@ def test_release_sync_forge_not_supported_has_doctor_guidance() -> None:
 
 @pytest.mark.unit
 def test_bitbucket_git_auth_not_configured_has_doctor_guidance() -> None:
-    """Verify the BitBucket git-auth preflight reason maps to operator guidance."""
+    """Verify the Bitbucket git-auth preflight reason maps to operator guidance."""
     code = "BITBUCKET_GIT_AUTH_NOT_CONFIGURED"
     reason = _REASON_TEXT[code]
 

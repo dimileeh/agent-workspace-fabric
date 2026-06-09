@@ -74,9 +74,9 @@ class _RaisingCreateIssueClient:
     """Minimal gh stand-in whose ``create_issue`` raises a forced error.
 
     Used to exercise the deferred-capture failure arms with a
-    ``BitBucketClientError`` (the BitBucket forge raises this, not
+    ``BitbucketClientError`` (the Bitbucket forge raises this, not
     ``GitHubClientError``) so the capture path's forge-neutral downgrade is
-    covered for BitBucket workspaces.
+    covered for Bitbucket workspaces.
     """
 
     def __init__(self, exc: BaseException) -> None:
@@ -90,7 +90,7 @@ class _RaisingPostCommentClient:
     """gh stand-in whose ``create_issue`` succeeds but ``post_comment`` raises.
 
     Used to exercise the best-effort courtesy comment after a durable capture:
-    on a BitBucket workspace ``post_comment`` raises ``BitBucketClientError``,
+    on a Bitbucket workspace ``post_comment`` raises ``BitbucketClientError``,
     which must be swallowed (the tracking issue is already filed) rather than
     escaping to terminate the monitor.
     """
@@ -277,12 +277,12 @@ async def test_deferred_capture_transient_bitbucket_failure_requeues(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # A transient BitBucket fault (rate limit) during create_issue must NOT
+    # A transient Bitbucket fault (rate limit) during create_issue must NOT
     # downgrade a valid defer to needs_human: clear the verdict so the next poll
     # re-attempts capture, mirroring the GitHub transient path.
     from awf.common.bitbucket_client import (
         BITBUCKET_RATE_LIMITED,
-        BitBucketClientError,
+        BitbucketClientError,
     )
     from awf.runtime.pr_monitor import _mark_review_thread_addressed
     from awf.runtime.pr_monitor_runner.fix_cycle import _capture_deferred_review_thread
@@ -295,7 +295,7 @@ async def test_deferred_capture_transient_bitbucket_failure_requeues(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
         gh=_RaisingCreateIssueClient(
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket create_issue",
                 status=429,
                 body="rate limited",
@@ -332,10 +332,10 @@ async def test_deferred_capture_permanent_bitbucket_failure_downgrades(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # A permanent BitBucket fault (403, token lacks issues scope) during
+    # A permanent Bitbucket fault (403, token lacks issues scope) during
     # create_issue must downgrade to needs_human (return False) rather than escape
     # to the runner's generic handler and terminate the monitor.
-    from awf.common.bitbucket_client import BitBucketClientError
+    from awf.common.bitbucket_client import BitbucketClientError
     from awf.runtime.pr_monitor import _mark_review_thread_addressed
     from awf.runtime.pr_monitor_runner.fix_cycle import _capture_deferred_review_thread
 
@@ -347,7 +347,7 @@ async def test_deferred_capture_permanent_bitbucket_failure_downgrades(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
         gh=_RaisingCreateIssueClient(
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket create_issue",
                 status=403,
                 body="forbidden: missing issues scope",
@@ -387,11 +387,11 @@ async def test_deferred_capture_bitbucket_comment_failure_still_succeeds(
     tmp_path: Path,
 ) -> None:
     # Filing the tracking issue is the durable capture; the explanatory PR comment
-    # is best-effort. On a BitBucket workspace ``post_comment`` raises
-    # ``BitBucketClientError`` — it must be swallowed (not escape and terminate the
+    # is best-effort. On a Bitbucket workspace ``post_comment`` raises
+    # ``BitbucketClientError`` — it must be swallowed (not escape and terminate the
     # monitor), and capture still succeeds (returns True) with the issue recorded
     # as filed so a retry never opens a duplicate.
-    from awf.common.bitbucket_client import BitBucketClientError
+    from awf.common.bitbucket_client import BitbucketClientError
     from awf.runtime.pr_monitor import _mark_review_thread_addressed
     from awf.runtime.pr_monitor_runner.fix_cycle import (
         _capture_deferred_review_thread,
@@ -409,7 +409,7 @@ async def test_deferred_capture_bitbucket_comment_failure_still_succeeds(
         worktrees_root=tmp_path / "worktrees",
         gh=_RaisingPostCommentClient(
             issue_url=issue_url,
-            exc=BitBucketClientError(
+            exc=BitbucketClientError(
                 operation="bitbucket post_comment",
                 status=403,
                 body="forbidden",

@@ -879,9 +879,9 @@ class TestPullRequestUnexpectedErrorPart002:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # R-resolve (bitbucket): a BitBucket feature workspace no longer fails
-        # fast — it reaches push_and_open with a resolved BitBucket forge client
-        # and completes. This is the proof BitBucket can now open its PR.
+        # R-resolve (bitbucket): a Bitbucket feature workspace no longer fails
+        # fast — it reaches push_and_open with a resolved Bitbucket forge client
+        # and completes. This is the proof Bitbucket can now open its PR.
         spy_client = _SpyForgeClient()
         spy_calls: list[tuple[str, object]] = []
 
@@ -922,15 +922,15 @@ class TestPullRequestUnexpectedErrorPart002:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # ``make_forge_client`` builds the BitBucket client eagerly via
-        # ``from_env()``, so a missing/invalid BitBucket API env raises
-        # ``BitBucketClientError`` *before* ``push_and_open`` can wrap it as a
+        # ``make_forge_client`` builds the Bitbucket client eagerly via
+        # ``from_env()``, so a missing/invalid Bitbucket API env raises
+        # ``BitbucketClientError`` *before* ``push_and_open`` can wrap it as a
         # ``PullRequestError``. That construction failure must still be routed
         # through PR-failure handling: a PR_CREATE_FAILED audit event with
         # evidence, and no false git_push-succeeded event (the push never ran).
         from awf.common.bitbucket_client import (
             BITBUCKET_AUTH_NOT_CONFIGURED,
-            BitBucketClientError,
+            BitbucketClientError,
         )
         from awf.control.executor.constants import (
             _AUDIT_GIT_PUSH_EVENT,
@@ -939,7 +939,7 @@ class TestPullRequestUnexpectedErrorPart002:
         )
 
         def _raise_make_forge_client(forge: str, runner: object) -> object:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket auth",
                 status=None,
                 body="BITBUCKET_API_TOKEN is required.",
@@ -1001,9 +1001,9 @@ class TestPullRequestUnexpectedErrorPart002:
         tmp_path: Path,
     ) -> None:
         # PRRT_kwDOSJAM6s6HqvLL: when ``push_and_open`` wraps a
-        # BitBucketClientError (auth / rate-limit / transport) as a
+        # BitbucketClientError (auth / rate-limit / transport) as a
         # PullRequestError, the executor must record the *specific* reason_code
-        # on the failed workspace transition — matching the other BitBucket
+        # on the failed workspace transition — matching the other Bitbucket
         # handoff paths — instead of a generic INFRASTRUCTURE_FAILURE, so
         # operators get actionable doctor guidance. The PR_CREATE_FAILED audit
         # event (the action category) is still recorded.
@@ -1055,7 +1055,7 @@ class TestPullRequestUnexpectedErrorPart002:
     ) -> None:
         # Reuse path: when the workspace already has a PR, the push step only does
         # a git push + PR reuse and must NOT resolve a forge client. Resolving one
-        # would gate a BitBucket reuse push on forge API env (``from_env()``),
+        # would gate a Bitbucket reuse push on forge API env (``from_env()``),
         # failing the run before push even though reuse makes no forge API call.
         def _explode_make_forge_client(forge: str, runner: object) -> object:
             raise AssertionError("make_forge_client must not run on the PR-reuse push path")

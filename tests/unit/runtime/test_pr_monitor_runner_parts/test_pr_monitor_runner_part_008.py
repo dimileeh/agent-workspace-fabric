@@ -116,7 +116,7 @@ async def test_run_closes_forge_client_on_exit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # Regression (issue:4640573294): the per-monitor forge client (a BitBucket
+    # Regression (issue:4640573294): the per-monitor forge client (a Bitbucket
     # client owns an httpx connection pool) must be released when run() finishes,
     # not leaked until GC. run() owns the lifecycle of the client the factory
     # built for it, so it calls gh.aclose() in its finally on every exit path.

@@ -13,7 +13,7 @@ import re as re
 import time as time
 from typing import Any, cast
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import (
     GitHubClientError,
@@ -139,16 +139,16 @@ async def _wait_after_transient_github_error(
 
 async def _wait_after_transient_bitbucket_error(
     self: Any,
-    exc: BitBucketClientError,
+    exc: BitbucketClientError,
     *,
     workspace_id: str,
     pr_number: int,
     context: str,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool:
-    """Wait and keep polling on a recoverable BitBucket blip.
+    """Wait and keep polling on a recoverable Bitbucket blip.
 
-    Mirrors :func:`_wait_after_transient_github_error` so BitBucket workspaces
+    Mirrors :func:`_wait_after_transient_github_error` so Bitbucket workspaces
     survive transient rate-limit/transport/5xx faults instead of terminating
     immediately. Returns ``True`` when the caller should retry (``continue``),
     ``False`` when the error is deterministic and must fail the monitor.
@@ -199,7 +199,7 @@ async def _wait_after_transient_forge_error(
     context: str,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool:
-    """Wait and keep polling on a recoverable forge (GitHub/BitBucket) blip.
+    """Wait and keep polling on a recoverable forge (GitHub/Bitbucket) blip.
 
     The forge-neutral entry point for the consolidated ``except ForgeClientError``
     catch arms: it dispatches to the per-forge wait helper so each keeps emitting
@@ -207,7 +207,7 @@ async def _wait_after_transient_forge_error(
     callers no longer need to branch on the concrete forge type. Returns ``True``
     when the caller should retry, ``False`` when the fault is deterministic.
     """
-    if isinstance(exc, BitBucketClientError):
+    if isinstance(exc, BitbucketClientError):
         return await _wait_after_transient_bitbucket_error(
             self,
             exc,
@@ -230,7 +230,7 @@ async def _wait_after_transient_forge_error(
     # silently classifying a possibly-transient fault as deterministic: a new
     # forge must extend this dispatch. Mirrors the exhaustiveness raise in
     # ``loop.py``.
-    raise RuntimeError(  # pragma: no cover - only GitHub/BitBucket subclasses exist
+    raise RuntimeError(  # pragma: no cover - only GitHub/Bitbucket subclasses exist
         f"unknown ForgeClientError subclass: {type(exc).__name__}"
     )
 

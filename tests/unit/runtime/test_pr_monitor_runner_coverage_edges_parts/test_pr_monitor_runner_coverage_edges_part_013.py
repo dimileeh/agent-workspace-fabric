@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
     BITBUCKET_AUTH_FAILED,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, RepoRef
@@ -610,7 +610,7 @@ async def test_pre_merge_recheck_transient_bitbucket_error_retries_later(
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
-    """A transient BitBucket fault during the pre-merge recheck must wait and keep
+    """A transient Bitbucket fault during the pre-merge recheck must wait and keep
     polling, symmetric to the GitHub arm — not escape uncaught or terminate."""
     sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
@@ -626,7 +626,7 @@ async def test_pre_merge_recheck_transient_bitbucket_error_retries_later(
         runner,
         "_fetch_status_for_decision",
         mocker.AsyncMock(
-            side_effect=BitBucketClientError(
+            side_effect=BitbucketClientError(
                 operation="bitbucket fetch_pr_status",
                 status=503,
                 body="service unavailable",
@@ -670,7 +670,7 @@ async def test_pre_merge_recheck_bitbucket_error_fails_workspace(
     tmp_path: Path,
     mocker: pytest_mock.MockerFixture,
 ) -> None:
-    """A deterministic BitBucket fault during the pre-merge recheck terminates the
+    """A deterministic Bitbucket fault during the pre-merge recheck terminates the
     workspace with the actionable reason code preserved end-to-end."""
     sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
@@ -686,7 +686,7 @@ async def test_pre_merge_recheck_bitbucket_error_fails_workspace(
         runner,
         "_fetch_status_for_decision",
         mocker.AsyncMock(
-            side_effect=BitBucketClientError(
+            side_effect=BitbucketClientError(
                 operation="bitbucket fetch_pr_status",
                 status=403,
                 body="forbidden",

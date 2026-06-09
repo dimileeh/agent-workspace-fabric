@@ -1,10 +1,10 @@
 """Provider-neutral code-forge seam (issue #345 Phase 1).
 
-This module is the "make the change easy" refactor for BitBucket support: it
+This module is the "make the change easy" refactor for Bitbucket support: it
 extracts a structural ``ForgeClient`` Protocol from the existing ``GitHubClient``
 plus a ``make_forge_client`` factory and forge **detection**, so Phase 2 can drop
-in a ``BitBucketClient`` without touching any consumer. GitHub stays the only
-implementation. A BitBucket repo is *detected* and then *fails fast* with a
+in a ``BitbucketClient`` without touching any consumer. GitHub stays the only
+implementation. A Bitbucket repo is *detected* and then *fails fast* with a
 reason-coded :class:`ForgeNotSupportedError` — never a crash, never a silent
 mis-route to GitHub.
 
@@ -18,7 +18,7 @@ Resolution + dispatch flow::
                                   resolved_profile.forge   (persisted once)
                                                    ▼
             make_forge_client(forge, runner) ──► github: GitHubClient
-                                              └─► bitbucket: BitBucketClient (Phase 2, issue #345)
+                                              └─► bitbucket: BitbucketClient (Phase 2, issue #345)
                                                    ▼
             consumers depend on ForgeClient (Protocol), not GitHubClient
 
@@ -28,7 +28,7 @@ satisfy the Protocol *structurally*, with no inheritance change.
 
 ``BranchOpenPullRequestResolver`` is intentionally NOT on this Protocol. It is a
 distinct collaborator with a different surface (``resolve(repo_url, branch_name,
-base_branch)``), wired separately into ``ControlWorker``, and a BitBucket
+base_branch)``), wired separately into ``ControlWorker``, and a Bitbucket
 workspace fails fast at the executor forge gate before any open-PR-resolver path
 matters. A forge-neutral open-PR resolver is deferred to Phase 2.
 
@@ -57,7 +57,7 @@ from awf.runtime.pr_monitor import CheckFailure, PRStatus
 FORGE_NOT_SUPPORTED_REASON_CODE = "FORGE_NOT_SUPPORTED"
 
 # Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (GitHub or
-# BitBucket Cloud), but the GitHub-only ``BranchOpenPullRequestResolver`` cannot
+# Bitbucket Cloud), but the GitHub-only ``BranchOpenPullRequestResolver`` cannot
 # recover an open PR for a non-GitHub forge yet (a forge-neutral resolver is
 # deferred). Using ``FORGE_NOT_SUPPORTED`` here would tell a bitbucket.org operator
 # to switch to a supported forge they are already on — so this path carries its own
@@ -65,10 +65,10 @@ FORGE_NOT_SUPPORTED_REASON_CODE = "FORGE_NOT_SUPPORTED"
 OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED_REASON_CODE = "OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED"
 
 # Distinct again from ``FORGE_NOT_SUPPORTED``: this reason code once fired when a
-# BitBucket feature workspace without an existing PR tried to open one, back when
+# Bitbucket feature workspace without an existing PR tried to open one, back when
 # opening a brand-new PR shelled ``gh pr create`` via ``PullRequestCreator.push_and_open``
 # — a GitHub-only operation that recognized only ``github.com/.../pull/...`` URLs.
-# New-PR creation is now forge-neutral via the injected ``ForgeClient`` (BitBucket
+# New-PR creation is now forge-neutral via the injected ``ForgeClient`` (Bitbucket
 # feature workspaces create their PRs directly), so this reason code is no longer
 # raised in production; it and ``new_pr_unsupported_forge_error`` remain as dead
 # code pending a follow-up cleanup. Retained here so existing reason-code consumers
@@ -104,7 +104,7 @@ class ForgeClient(Protocol):
 
     Structural mirror of the public ``GitHubClient`` async methods (the source
     of truth — keep in lockstep). Request/response types stay provider-neutral
-    (``RepoRef``, ``PRStatus``, ``CheckFailure``) so a future ``BitBucketClient``
+    (``RepoRef``, ``PRStatus``, ``CheckFailure``) so a future ``BitbucketClient``
     satisfies the same surface.
     """
 
@@ -186,7 +186,7 @@ class ForgeClient(Protocol):
         """Release any resources the client owns (HTTP pools, sockets).
 
         :class:`GitHubClient` wraps a stateless subprocess runner and so this is
-        a no-op, but :class:`~awf.common.bitbucket_client.BitBucketClient` owns a
+        a no-op, but :class:`~awf.common.bitbucket_client.BitbucketClient` owns a
         live ``httpx.AsyncClient`` (connection pool + TLS session) that must be
         closed deterministically rather than left to GC. Declaring ``aclose`` on
         the Protocol lets every caller of :func:`make_forge_client` release the
@@ -207,7 +207,7 @@ class ForgeClient(Protocol):
 def _forge_not_supported_error(forge: object) -> ForgeNotSupportedError:
     """Build the honest fail-fast error for an unsupported/unknown forge.
 
-    GitHub and BitBucket are both implemented (issue #345). This fires only for a
+    GitHub and Bitbucket are both implemented (issue #345). This fires only for a
     genuinely-unknown forge value (for example ``gitlab``) that slips past typing
     at runtime, so the factory fails closed rather than mis-routing to GitHub.
     """
@@ -251,7 +251,7 @@ def concrete_forge_for_repo(forge: object, repo_url: str | None) -> ForgeKind:
     **legacy** snapshot that predates the ``forge`` field — it detects the forge
     from ``repo_url`` before falling back to github. This mirrors the profile
     resolver's precedence (explicit forge > URL host > github), so the executor
-    forge gate trips ``FORGE_NOT_SUPPORTED`` for a BitBucket repo whose snapshot
+    forge gate trips ``FORGE_NOT_SUPPORTED`` for a Bitbucket repo whose snapshot
     omits a concrete forge, instead of silently defaulting to github and
     mis-routing into the ``gh`` path the snapshot-less executor resolves later.
     A concrete persisted value always wins (the resolver already decided it at
@@ -264,7 +264,7 @@ def concrete_forge_for_repo(forge: object, repo_url: str | None) -> ForgeKind:
         # for it — a non-concrete forge with a bare-slug ``repo_url`` resolves to
         # github by *detection* here, the same result as the ``concrete_forge``
         # fallback below but reached via the URL path. Always correct in Phase 1
-        # (every bare-slug workspace is GitHub); a Phase 2 BitBucket bare-slug
+        # (every bare-slug workspace is GitHub); a Phase 2 Bitbucket bare-slug
         # workspace would need a concrete persisted forge, since host detection
         # cannot infer bitbucket from a hostless slug.
         detected = detect_forge_from_url(repo_url) if repo_url else None
@@ -277,19 +277,19 @@ def make_forge_client(forge: ForgeKind, runner: AsyncCommandRunner) -> ForgeClie
     """Return the concrete forge client for ``forge``.
 
     ``github`` → :class:`GitHubClient` (over ``runner``). ``bitbucket`` →
-    :class:`~awf.common.bitbucket_client.BitBucketClient`, built from the
-    BitBucket env contract (``runner`` is unused on this path because the
-    BitBucket client talks HTTP via its own injected ``httpx.AsyncClient``). Any
+    :class:`~awf.common.bitbucket_client.BitbucketClient`, built from the
+    Bitbucket env contract (``runner`` is unused on this path because the
+    Bitbucket client talks HTTP via its own injected ``httpx.AsyncClient``). Any
     unknown value that slips past typing at runtime → :class:`ForgeNotSupportedError`,
     so the factory fails closed rather than mis-routing to GitHub.
     """
     ensure_forge_supported(forge)
     if forge == "bitbucket":
         # Imported lazily so the GitHub-only hot path never pays for httpx import
-        # and ``forge`` keeps no import-time dependency on the BitBucket client.
-        from awf.common.bitbucket_client import BitBucketClient
+        # and ``forge`` keeps no import-time dependency on the Bitbucket client.
+        from awf.common.bitbucket_client import BitbucketClient
 
-        return BitBucketClient.from_env()
+        return BitbucketClient.from_env()
     return GitHubClient(runner)
 
 

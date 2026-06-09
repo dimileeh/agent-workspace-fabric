@@ -136,8 +136,8 @@ class TestEnsureMirror:
         assert m1.exists() and m2.exists()
 
 
-class TestEnsureMirrorBitBucketAuth:
-    """BitBucket git-auth preflight in ``ensure_mirror`` (issue #461).
+class TestEnsureMirrorBitbucketAuth:
+    """Bitbucket git-auth preflight in ``ensure_mirror`` (issue #461).
 
     The preflight converts an otherwise opaque clone failure (or TTY hang) for a
     private bitbucket.org repo into a fast, reason-coded error, and leaves the

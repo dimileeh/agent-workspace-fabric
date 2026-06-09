@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from awf.common.audit import redact_audit_text
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge import ForgeNotSupportedError, concrete_forge_for_repo, make_forge_client
 from awf.common.github_client import (
     GitHubClientError,
@@ -63,7 +63,7 @@ from awf.runtime.release_pr_sync import (
 def _resolve_handoff_pr_number(metadata: PullRequestAdoptionMetadata) -> int | None:
     """Resolve the PR number forge-neutrally for handoff persistence.
 
-    GitHub adoption metadata carries an explicit ``number``; the BitBucket
+    GitHub adoption metadata carries an explicit ``number``; the Bitbucket
     ForgeClient ``create_pull_request`` returns only a web URL, so
     ``metadata.number`` is unset there. Fall back to parsing the forge-neutral
     PR URL (``/pull/<n>`` or ``/pull-requests/<n>``) so ``workspace.pr_number``
@@ -122,10 +122,10 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
 
-    # Release-PR sync is GitHub-only, but BitBucket is a *globally* supported forge
+    # Release-PR sync is GitHub-only, but Bitbucket is a *globally* supported forge
     # (issue #345 Part 2), so it clears ``_gate_sync_handoff_unsupported_forge``
     # above. Apply the release-sync-specific GitHub-only gate here — before the
-    # commits-ahead probe and the no-op completion — so a BitBucket release sync
+    # commits-ahead probe and the no-op completion — so a Bitbucket release sync
     # with zero commits ahead fails ``RELEASE_SYNC_FORGE_NOT_SUPPORTED`` instead of
     # silently completing as ``NO_CHANGES_TO_SYNC``. The concrete forge is read from
     # the snapshot ``_gate_sync_handoff_unsupported_forge`` just resolved+persisted
@@ -238,25 +238,25 @@ async def _handoff_sync_release_pr_monitor(
         # ``async with`` so the forge client is closed on every exit path. Unlike
         # the worker PR-monitor factory (whose client lives for the monitor's
         # lifetime and is closed by the runner), this client is used only for the
-        # one-shot PR find/create below, so a BitBucket client would otherwise
+        # one-shot PR find/create below, so a Bitbucket client would otherwise
         # leak its httpx connection pool on every release-sync handoff. The
         # construct-and-enter is inside the try so an unsupported forge / missing
-        # BitBucket auth still maps to the reason-coded failures below.
+        # Bitbucket auth still maps to the reason-coded failures below.
         # Reconstructed forge (not re-resolved); unsupported forges fail fast.
         # Use concrete_forge_for_repo (not plain concrete_forge) to mirror the
         # worker PR-monitor factory and the execution_flow forge gate: a
         # legacy/missing snapshot normalizes profile.forge to "auto", so fall
-        # back to the workspace repo_url's host. Without this, a BitBucket
+        # back to the workspace repo_url's host. Without this, a Bitbucket
         # workspace whose snapshot predates the forge field would silently
         # construct a GitHubClient here instead of failing fast.
         client_forge = concrete_forge_for_repo(profile.forge, workspace.repo_url)
         # Gate the *concrete client forge* before constructing the client: for a
-        # BitBucket release-sync workspace, ``make_forge_client`` would call
-        # ``BitBucketClient.from_env()`` and raise BITBUCKET_AUTH_NOT_CONFIGURED
+        # Bitbucket release-sync workspace, ``make_forge_client`` would call
+        # ``BitbucketClient.from_env()`` and raise BITBUCKET_AUTH_NOT_CONFIGURED
         # when credentials are absent — masking the intended
         # RELEASE_SYNC_FORGE_NOT_SUPPORTED that release sync (GitHub-only) should
         # report. Failing here (caught by the ``ReleasePrSyncError`` handler
-        # below) keeps the honest reason code and never builds a BitBucket client
+        # below) keeps the honest reason code and never builds a Bitbucket client
         # for this unsupported path.
         ensure_release_sync_forge_supported(
             client_forge,
@@ -297,14 +297,14 @@ async def _handoff_sync_release_pr_monitor(
             reason_code=exc.reason_code,
         )
         return
-    except BitBucketClientError as exc:
+    except BitbucketClientError as exc:
         # Defense-in-depth: ``ensure_release_sync_forge_supported`` above raises
         # ``ReleasePrSyncError`` for every non-GitHub forge, so today
         # ``client_forge`` is always ``"github"`` here and ``make_forge_client``
         # only ever builds a ``GitHubClient`` — this handler is currently
         # unreachable. It is kept deliberately, mirroring the
         # ForgeNotSupportedError handler above: if that release-sync gate is later
-        # widened to allow BitBucket, ``BitBucketClient.from_env()`` (e.g.
+        # widened to allow Bitbucket, ``BitbucketClient.from_env()`` (e.g.
         # BITBUCKET_AUTH_NOT_CONFIGURED on missing credentials) must map to a
         # reason-coded failure here instead of escaping uncaught and stranding the
         # workspace in ``running``.
@@ -327,7 +327,7 @@ async def _handoff_sync_release_pr_monitor(
         )
         return
 
-    # Resolve the PR number forge-neutrally once; BitBucket leaves
+    # Resolve the PR number forge-neutrally once; Bitbucket leaves
     # ``metadata.number`` unset and only carries a web URL (#468).
     pr_number = _resolve_handoff_pr_number(metadata)
 

@@ -31,7 +31,7 @@ def unsupported_forge_error(ws: Any) -> ForgeNotSupportedError | None:
     but when the snapshot is *missing* (None) or *legacy* (forge reconstructs as
     ``auto``) — a path the executor still supports, since it resolves+persists a
     profile from ``ws.repo_url`` before running — detect the forge from the repo
-    URL so a BitBucket repo trips the gate instead of defaulting to github and
+    URL so a Bitbucket repo trips the gate instead of defaulting to github and
     slipping into the gh path. A concrete persisted forge always wins; undetectable
     URLs fall back to github so pre-existing GitHub workspaces never trip the gate.
 
@@ -58,13 +58,13 @@ def new_pr_unsupported_forge_error(ws: Any) -> ForgeNotSupportedError | None:
     """Legacy new-PR forge gate — no longer wired into the execution flow.
 
     AWF once shelled ``gh pr create`` (GitHub-only, ``github.com`` URLs only) from
-    ``PullRequestCreator.push_and_open`` to open new PRs, so a BitBucket feature
+    ``PullRequestCreator.push_and_open`` to open new PRs, so a Bitbucket feature
     workspace *without* an existing PR (``ws.pr_url`` unset) had to fail fast here
     with ``PR_CREATE_FORGE_NOT_SUPPORTED`` rather than run the agent and validation
     and then mis-route to ``gh``/github.com at PR creation. That is no longer true:
     new-PR creation is forge-neutral now — ``push_and_open`` opens the PR through
-    the injected :class:`~awf.common.forge.ForgeClient` (GitHub or BitBucket), so a
-    BitBucket workspace creates its PR directly and the executor no longer calls
+    the injected :class:`~awf.common.forge.ForgeClient` (GitHub or Bitbucket), so a
+    Bitbucket workspace creates its PR directly and the executor no longer calls
     this gate. The function and its ``PR_CREATE_FORGE_NOT_SUPPORTED`` reason code are
     retained as dead code (with their tests) pending a follow-up cleanup.
 

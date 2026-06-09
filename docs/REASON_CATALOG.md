@@ -52,58 +52,58 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#awf_start_placeholder](#awf_start_placeholder)
 
 ### BITBUCKET_AUTH_NOT_CONFIGURED
-**Problem:** AWF could not build BitBucket Cloud credentials from the environment.
-**Likely Cause:** The BitBucket auth mode, API token, or email is missing or malformed. App passwords are not supported; use an Atlassian API token.
+**Problem:** AWF could not build Bitbucket Cloud credentials from the environment.
+**Likely Cause:** The Bitbucket auth mode, API token, or email is missing or malformed. App passwords are not supported; use an Atlassian API token.
 **Operator Fix:** Set BITBUCKET_AUTH_MODE (basic|bearer) and BITBUCKET_API_TOKEN (plus BITBUCKET_EMAIL for basic mode) in the AWF service environment, then remonitor the workspace.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_auth_not_configured](#bitbucket_auth_not_configured)
 
 ### BITBUCKET_ERROR
-**Problem:** AWF hit a permanent BitBucket API fault while the PR monitor was performing a non-merge action (for example posting a comment or the human notification) and gave up on that action.
-**Likely Cause:** BitBucket returned a non-transient error (such as 4xx authorization/validation) that retrying would not resolve, so the monitor operation finished as failed and re-raised.
-**Operator Fix:** Inspect the workspace monitor log for the BitBucket response, fix the underlying cause (credentials, permissions, or PR/repo state), then remonitor the workspace.
+**Problem:** AWF hit a permanent Bitbucket API fault while the PR monitor was performing a non-merge action (for example posting a comment or the human notification) and gave up on that action.
+**Likely Cause:** Bitbucket returned a non-transient error (such as 4xx authorization/validation) that retrying would not resolve, so the monitor operation finished as failed and re-raised.
+**Operator Fix:** Inspect the workspace monitor log for the Bitbucket response, fix the underlying cause (credentials, permissions, or PR/repo state), then remonitor the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_error](#bitbucket_error)
 
 ### BITBUCKET_GIT_AUTH_NOT_CONFIGURED
-**Problem:** AWF could not authenticate git over HTTPS to a bitbucket.org repository because the BitBucket git credentials are not configured.
+**Problem:** AWF could not authenticate git over HTTPS to a bitbucket.org repository because the Bitbucket git credentials are not configured.
 **Likely Cause:** The worker tried to clone or push a bitbucket.org repository but BITBUCKET_API_TOKEN and/or BITBUCKET_EMAIL were missing, so git had no credential for HTTPS basic auth. AWF fails fast with this reason code instead of attempting an unauthenticated clone that would hang or fail opaquely.
-**Operator Fix:** Set BITBUCKET_API_TOKEN and BITBUCKET_EMAIL in the AWF service environment (the same Atlassian API token credentials the BitBucket REST client uses), then remonitor or recreate the workspace.
+**Operator Fix:** Set BITBUCKET_API_TOKEN and BITBUCKET_EMAIL in the AWF service environment (the same Atlassian API token credentials the Bitbucket REST client uses), then remonitor or recreate the workspace.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_git_auth_not_configured](#bitbucket_git_auth_not_configured)
 
 ### BITBUCKET_ISSUE_CAPTURE_FAILED
-**Problem:** AWF could not durably capture a deferred review note: the BitBucket issue tracker is disabled and there was no PR context to fall back to, so neither an issue nor a PR comment was recorded.
-**Likely Cause:** BitBucket returned 404 for the issues endpoint (tracker disabled) and AWF had not yet remembered the PR, leaving no comment fallback target.
-**Operator Fix:** Treat the deferred follow-up as uncaptured — the thread stays unresolved and the merge is blocked. Enable the BitBucket repository issue tracker (or ensure PR context is available) and remonitor so the note can be captured.
+**Problem:** AWF could not durably capture a deferred review note: the Bitbucket issue tracker is disabled and there was no PR context to fall back to, so neither an issue nor a PR comment was recorded.
+**Likely Cause:** Bitbucket returned 404 for the issues endpoint (tracker disabled) and AWF had not yet remembered the PR, leaving no comment fallback target.
+**Operator Fix:** Treat the deferred follow-up as uncaptured — the thread stays unresolved and the merge is blocked. Enable the Bitbucket repository issue tracker (or ensure PR context is available) and remonitor so the note can be captured.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_issue_capture_failed](#bitbucket_issue_capture_failed)
 
 ### BITBUCKET_ISSUE_TRACKER_DISABLED
-**Problem:** The BitBucket repository issue tracker is disabled, so AWF posted the tracking note as a pull-request comment instead of opening an issue.
-**Likely Cause:** BitBucket returned 404 for the issues endpoint because the repository issue tracker is turned off.
-**Operator Fix:** Enable the BitBucket repository issue tracker if durable issues are wanted; otherwise no action is required — the note was captured on the PR.
+**Problem:** The Bitbucket repository issue tracker is disabled, so AWF posted the tracking note as a pull-request comment instead of opening an issue.
+**Likely Cause:** Bitbucket returned 404 for the issues endpoint because the repository issue tracker is turned off.
+**Operator Fix:** Enable the Bitbucket repository issue tracker if durable issues are wanted; otherwise no action is required — the note was captured on the PR.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_issue_tracker_disabled](#bitbucket_issue_tracker_disabled)
 
 ### BITBUCKET_PIPELINE_FULL_RERUN
-**Problem:** AWF re-ran the entire BitBucket pipeline because BitBucket Cloud has no failed-only rerun API (that action is UI-only).
-**Likely Cause:** BitBucket Cloud exposes only a whole-pipeline trigger over REST, so a transient-failure rerun necessarily reruns every step, not just the failed ones.
+**Problem:** AWF re-ran the entire Bitbucket pipeline because Bitbucket Cloud has no failed-only rerun API (that action is UI-only).
+**Likely Cause:** Bitbucket Cloud exposes only a whole-pipeline trigger over REST, so a transient-failure rerun necessarily reruns every step, not just the failed ones.
 **Operator Fix:** No action required. The full pipeline was retriggered for the PR; inspect the monitor log if reruns keep recurring.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_pipeline_full_rerun](#bitbucket_pipeline_full_rerun)
 
 ### BITBUCKET_PIPELINE_NOT_RERUNNABLE
-**Problem:** AWF refused to rerun a BitBucket pipeline because the pull-request pipeline target could not be safely reconstructed.
+**Problem:** AWF refused to rerun a Bitbucket pipeline because the pull-request pipeline target could not be safely reconstructed.
 **Likely Cause:** The failing pipeline was custom/manual, required variables, or lacked the source/destination commit metadata AWF needs to retrigger the correct PR pipeline — so AWF declined rather than trigger a wrong run.
-**Operator Fix:** Re-run the pipeline from the BitBucket UI, or verify the PR pipeline configuration (custom/manual pipelines and required variables are not auto-rerunnable), then remonitor the workspace.
+**Operator Fix:** Re-run the pipeline from the Bitbucket UI, or verify the PR pipeline configuration (custom/manual pipelines and required variables are not auto-rerunnable), then remonitor the workspace.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_pipeline_not_rerunnable](#bitbucket_pipeline_not_rerunnable)
 
 ### BITBUCKET_TRANSIENT_ERROR
-**Problem:** AWF hit a transient BitBucket API blip while the PR monitor was performing an action, so it waited and kept polling instead of failing the workspace outright.
-**Likely Cause:** BitBucket returned a temporary error (such as a 5xx or rate-limit response) that is expected to clear on its own.
-**Operator Fix:** Usually no action is required — the monitor retries automatically. If the condition persists across many polls, check BitBucket status and the workspace monitor log, then remonitor.
+**Problem:** AWF hit a transient Bitbucket API blip while the PR monitor was performing an action, so it waited and kept polling instead of failing the workspace outright.
+**Likely Cause:** Bitbucket returned a temporary error (such as a 5xx or rate-limit response) that is expected to clear on its own.
+**Operator Fix:** Usually no action is required — the monitor retries automatically. If the condition persists across many polls, check Bitbucket status and the workspace monitor log, then remonitor.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#bitbucket_transient_error](#bitbucket_transient_error)
 
@@ -262,9 +262,9 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Docs Link:** [docs/REASON_CATALOG.md#duplicate_host_port](#duplicate_host_port)
 
 ### FORGE_NOT_SUPPORTED
-**Problem:** AWF detected a code forge it does not support. GitHub and BitBucket Cloud are implemented; any other forge fails fast.
+**Problem:** AWF detected a code forge it does not support. GitHub and Bitbucket Cloud are implemented; any other forge fails fast.
 **Likely Cause:** The workspace repository URL resolved to an unsupported forge (a host other than github.com or bitbucket.org), or the workspace profile set an unsupported `forge:` value. AWF fails fast instead of mis-routing to GitHub.
-**Operator Fix:** Use a GitHub or BitBucket Cloud repository, or track support for the detected forge upstream. Recreate the workspace against a supported remote (github.com or bitbucket.org).
+**Operator Fix:** Use a GitHub or Bitbucket Cloud repository, or track support for the detected forge upstream. Recreate the workspace against a supported remote (github.com or bitbucket.org).
 **Related Command:** `awf workspace create`
 **Docs Link:** [docs/REASON_CATALOG.md#forge_not_supported](#forge_not_supported)
 
@@ -473,7 +473,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED
 **Problem:** AWF could not recover the open PR for a preserved workspace because the open-PR resolver only supports GitHub.
-**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. BitBucket Cloud), but the GitHub-only open-PR resolver cannot look up its open PR by branch yet, so worker recovery fails fast instead of querying the branch as a same-slug GitHub repo.
+**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. Bitbucket Cloud), but the GitHub-only open-PR resolver cannot look up its open PR by branch yet, so worker recovery fails fast instead of querying the branch as a same-slug GitHub repo.
 **Operator Fix:** No repository change is needed — the forge is supported. Adopt the PR monitor explicitly with `awf workspace adopt-pr`, or remonitor once a forge-neutral open-PR resolver lands.
 **Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#open_pr_resolver_forge_not_supported](#open_pr_resolver_forge_not_supported)
@@ -571,8 +571,8 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY
 **Problem:** AWF could not adopt the PR because the default adoption metadata fetcher only supports GitHub.
-**Likely Cause:** The repository is on a supported non-GitHub forge (e.g. BitBucket Cloud), but the default adoption metadata fetcher shells `gh pr view`, which is GitHub-only — so AWF fails fast instead of querying GitHub for the same owner/repo slug.
-**Operator Fix:** No repository change is needed — the forge is supported. Inject a BitBucket-aware adoption metadata fetcher, or adopt a GitHub PR until the forge-neutral fetcher lands.
+**Likely Cause:** The repository is on a supported non-GitHub forge (e.g. Bitbucket Cloud), but the default adoption metadata fetcher shells `gh pr view`, which is GitHub-only — so AWF fails fast instead of querying GitHub for the same owner/repo slug.
+**Operator Fix:** No repository change is needed — the forge is supported. Inject a Bitbucket-aware adoption metadata fetcher, or adopt a GitHub PR until the forge-neutral fetcher lands.
 **Related Command:** `awf workspace adopt-pr`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_adoption_metadata_fetch_github_only](#pr_adoption_metadata_fetch_github_only)
 
@@ -599,7 +599,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### PR_CREATE_FORGE_NOT_SUPPORTED
 **Problem:** AWF could not open a new pull request because new-PR creation only supports GitHub.
-**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. BitBucket Cloud), but opening a new PR shells `gh pr create` and parses github.com PR URLs, so AWF fails fast at the push step instead of mis-routing to a same-slug GitHub repository.
+**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. Bitbucket Cloud), but opening a new PR shells `gh pr create` and parses github.com PR URLs, so AWF fails fast at the push step instead of mis-routing to a same-slug GitHub repository.
 **Operator Fix:** No repository change is needed — the forge is supported for monitoring an existing PR. Open the pull request manually first (AWF will then monitor it), use a GitHub repository, or remonitor once forge-neutral PR creation lands.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#pr_create_forge_not_supported](#pr_create_forge_not_supported)
@@ -627,7 +627,7 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 
 ### RELEASE_SYNC_FORGE_NOT_SUPPORTED
 **Problem:** AWF could not run release-PR sync because the release-PR sync path only supports GitHub.
-**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. BitBucket Cloud), but release-PR sync shells `gh pr list` / `gh pr view` and parses github.com PR URLs, so AWF fails fast instead of mis-routing to a same-slug GitHub repository.
+**Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. Bitbucket Cloud), but release-PR sync shells `gh pr list` / `gh pr view` and parses github.com PR URLs, so AWF fails fast instead of mis-routing to a same-slug GitHub repository.
 **Operator Fix:** No repository change is needed — the forge is supported. Run release-PR sync against a GitHub repository, or remonitor once a forge-neutral release sync lands.
 **Related Command:** `awf workspace logs <workspace_id>`
 **Docs Link:** [docs/REASON_CATALOG.md#release_sync_forge_not_supported](#release_sync_forge_not_supported)

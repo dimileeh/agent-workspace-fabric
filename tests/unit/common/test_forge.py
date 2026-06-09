@@ -1,7 +1,7 @@
 """Tests for the provider-neutral forge seam (issue #345 Phase 1).
 
 Phase 1 ships the abstraction + detection only: GitHub is the sole concrete
-implementation, and a BitBucket forge is *detected* then *fails fast* with a
+implementation, and a Bitbucket forge is *detected* then *fails fast* with a
 reason-coded error. These tests lock that contract and the structural
 conformance of ``GitHubClient`` to the ``ForgeClient`` Protocol.
 """
@@ -37,15 +37,15 @@ def test_make_forge_client_bitbucket_returns_bitbucket_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Issue #345 Part 2 flips the gate: bitbucket is now a supported forge and the
-    # factory builds a BitBucketClient from the env auth contract (was: raised
+    # factory builds a BitbucketClient from the env auth contract (was: raised
     # ForgeNotSupportedError in Part 1).
-    from awf.common.bitbucket_client import BitBucketClient
+    from awf.common.bitbucket_client import BitbucketClient
 
     monkeypatch.setenv("BITBUCKET_AUTH_MODE", "bearer")
     monkeypatch.setenv("BITBUCKET_API_TOKEN", "tok")
     runner = FakeCommandRunner()
     client = make_forge_client("bitbucket", runner)
-    assert isinstance(client, BitBucketClient)
+    assert isinstance(client, BitbucketClient)
     assert "bitbucket" in _SUPPORTED_FORGES
 
 

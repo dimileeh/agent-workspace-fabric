@@ -1,4 +1,4 @@
-"""BitBucketClient PR lifecycle tests: create, fetch_pr_status, merge.
+"""BitbucketClient PR lifecycle tests: create, fetch_pr_status, merge.
 
 Covers payload assembly into the neutral ``PRStatus`` (state mapping, check-state
 normalization, changed paths), pagination of comments, error paths, and the D5
@@ -15,25 +15,25 @@ from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_MERGE_METHOD_UNSUPPORTED,
     BITBUCKET_MERGE_TASK_TIMEOUT,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 
-from ._helpers import FakeBitBucket, RecordingSleep, make_client, pr_payload, repo
+from ._helpers import FakeBitbucket, RecordingSleep, make_client, pr_payload, repo
 
 pytestmark = pytest.mark.unit
 
 _HEAD = "s" * 40
 _REPO = "/2.0/repositories/workspace/repo"
 _PR = f"{_REPO}/pullrequests/42"
-# BitBucket Cloud serves ``source.commit.hash`` in the abbreviated 12-char form;
+# Bitbucket Cloud serves ``source.commit.hash`` in the abbreviated 12-char form;
 # the commit endpoint resolves it to the full 40-char SHA AWF assumes (#477).
 _ABBREV_HEAD = "a59f411ce4c4"
 _FULL_HEAD = "a59f411ce4c403fe6185df79df05f9b51743c084"
 
 
 def _seed_fetch_status(
-    fake: FakeBitBucket,
+    fake: FakeBitbucket,
     *,
     pr: dict | None = None,
     statuses: list[dict] | None = None,
@@ -54,7 +54,7 @@ def _seed_fetch_status(
 
 
 async def test_create_pull_request_returns_html_url() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_REPO}/pullrequests",
@@ -74,10 +74,10 @@ async def test_create_pull_request_returns_html_url() -> None:
 
 
 async def test_create_pull_request_missing_href_raises() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_REPO}/pullrequests", json={"id": 1})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError):
+    with pytest.raises(BitbucketClientError):
         await client.create_pull_request(
             repo=repo(), base="development", head="h", title="t", body="b"
         )
@@ -87,7 +87,7 @@ async def test_create_pull_request_missing_href_raises() -> None:
 
 
 async def test_fetch_pr_status_open_clean() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(
         fake,
         statuses=[{"state": "SUCCESSFUL", "name": "build", "key": "pipe"}],
@@ -110,7 +110,7 @@ async def test_fetch_pr_status_open_clean() -> None:
 async def test_fetch_pr_status_no_checks_observed_when_no_statuses() -> None:
     # A repo with Pipelines disabled returns an EMPTY commit-statuses list; the
     # signal is set True from that authoritative fetch (#469).
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, statuses=[])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -126,7 +126,7 @@ async def test_fetch_pr_status_no_checks_observed_when_no_statuses() -> None:
 
 
 async def test_fetch_pr_status_failed_check() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, statuses=[{"state": "FAILED", "name": "pipeline"}])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -135,7 +135,7 @@ async def test_fetch_pr_status_failed_check() -> None:
 
 
 async def test_fetch_pr_status_in_progress_check_is_pending() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, statuses=[{"state": "INPROGRESS", "name": "pipeline"}])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -143,7 +143,7 @@ async def test_fetch_pr_status_in_progress_check_is_pending() -> None:
 
 
 async def test_fetch_pr_status_merged() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, pr=pr_payload(state="MERGED", merge_commit_hash="m" * 40))
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -152,7 +152,7 @@ async def test_fetch_pr_status_merged() -> None:
 
 
 async def test_fetch_pr_status_declined_is_closed() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, pr=pr_payload(state="DECLINED"))
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -161,7 +161,7 @@ async def test_fetch_pr_status_declined_is_closed() -> None:
 
 
 async def test_fetch_pr_status_passes_through_base_behind_count() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=5)
@@ -169,10 +169,10 @@ async def test_fetch_pr_status_passes_through_base_behind_count() -> None:
 
 
 async def test_fetch_pr_status_not_found_raises() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, status=404, json={"type": "error"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError):
+    with pytest.raises(BitbucketClientError):
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
 
 
@@ -180,27 +180,27 @@ async def test_fetch_pr_status_statuses_fetch_failure_raises_not_no_checks() -> 
     # A transport/HTTP failure while fetching commit statuses MUST raise
     # ForgeClientError, never degrade to a mergeable no-checks PRStatus that the
     # require_ci opt-out could then merge blind (#469 safety regression).
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.enqueue("GET", f"{_REPO}/commit/{_HEAD}/statuses", status=500, json={"type": "error"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError):
+    with pytest.raises(BitbucketClientError):
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
 
 
 async def test_fetch_pr_status_missing_head_sha_raises() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     pr = pr_payload()
     pr["source"]["commit"] = {}
     fake.enqueue("GET", _PR, json=pr)
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert "no source commit hash" in excinfo.value.body
 
 
 async def test_fetch_pr_status_paginates_comments() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page(
@@ -227,7 +227,7 @@ async def test_paginate_propagates_cache_to_subsequent_pages() -> None:
     stored an ETag and silently bypassed the conditional-request optimization the
     caller asked for.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     page2_url = f"https://api.bitbucket.org{_PR}/comments?page=2"
     # First pass primes the conditional cache: both pages answer with an ETag.
     fake.page(
@@ -255,7 +255,7 @@ async def test_paginate_propagates_cache_to_subsequent_pages() -> None:
 
 
 def _seed_resolve_fetch_status(
-    fake: FakeBitBucket,
+    fake: FakeBitbucket,
     *,
     abbrev: str,
     full: str,
@@ -277,9 +277,9 @@ def _seed_resolve_fetch_status(
 
 
 async def test_fetch_pr_status_resolves_abbreviated_head_sha_to_full() -> None:
-    # (a) BitBucket serves an abbreviated 12-char head; the adapter resolves it to
+    # (a) Bitbucket serves an abbreviated 12-char head; the adapter resolves it to
     # the full 40-char SHA so the pre-merge validation-provenance gate matches.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_resolve_fetch_status(fake, abbrev=_ABBREV_HEAD, full=_FULL_HEAD)
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -297,7 +297,7 @@ async def test_fetch_pr_status_resolves_abbreviated_head_sha_to_full() -> None:
 
 async def test_fetch_pr_status_full_head_sha_makes_no_resolve_call() -> None:
     # (b) A PR already reporting a full 40-char hash incurs NO extra resolve GET.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -311,7 +311,7 @@ async def test_fetch_pr_status_full_head_sha_makes_no_resolve_call() -> None:
 async def test_resolve_full_commit_sha_full_input_skips_http() -> None:
     # The unit-level early return: a 40-char hash is returned verbatim with zero
     # HTTP calls, protecting the "no extra call" optimization.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     client = make_client(fake)
     resolved = await client._resolve_full_commit_sha(repo(), _HEAD)
     assert resolved == _HEAD
@@ -319,24 +319,24 @@ async def test_resolve_full_commit_sha_full_input_skips_http() -> None:
 
 
 async def test_fetch_pr_status_resolve_http_failure_propagates_not_silent() -> None:
-    # (e) A failing commit-resolve GET must surface a BitBucketClientError — never
+    # (e) A failing commit-resolve GET must surface a BitbucketClientError — never
     # silently fall back to the abbreviated hash (which would re-block the merge).
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload(source_sha=_ABBREV_HEAD))
     fake.enqueue("GET", f"{_REPO}/commit/{_ABBREV_HEAD}", status=500, json={"type": "error"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError):
+    with pytest.raises(BitbucketClientError):
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
 
 
 async def test_fetch_pr_status_resolve_short_hash_raises_resolve_failed() -> None:
     # (e) A 200 commit-resolve whose ``hash`` is too short to be a full SHA is an
     # unusable payload: raise the deterministic reason code rather than degrade.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload(source_sha=_ABBREV_HEAD))
     fake.enqueue("GET", f"{_REPO}/commit/{_ABBREV_HEAD}", json={"hash": "abc"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert excinfo.value.reason_code == BITBUCKET_COMMIT_RESOLVE_FAILED
 
@@ -344,11 +344,11 @@ async def test_fetch_pr_status_resolve_short_hash_raises_resolve_failed() -> Non
 async def test_fetch_pr_status_resolve_non_dict_raises_resolve_failed() -> None:
     # (e) A non-dict commit-resolve body carries no ``hash`` at all → deterministic
     # BITBUCKET_COMMIT_RESOLVE_FAILED rather than a silent abbreviated fallback.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload(source_sha=_ABBREV_HEAD))
     fake.enqueue("GET", f"{_REPO}/commit/{_ABBREV_HEAD}", json=["unexpected"])
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert excinfo.value.reason_code == BITBUCKET_COMMIT_RESOLVE_FAILED
 
@@ -359,11 +359,11 @@ async def test_fetch_pr_status_resolve_non_prefix_hash_raises_resolve_failed() -
     # response) must not be accepted as the PR head — otherwise statuses and
     # validation provenance would be recorded for the wrong commit. Treat the
     # prefix mismatch as BITBUCKET_COMMIT_RESOLVE_FAILED, like missing/short hashes.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload(source_sha=_ABBREV_HEAD))
     fake.enqueue("GET", f"{_REPO}/commit/{_ABBREV_HEAD}", json={"hash": "b" * 40})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
     assert excinfo.value.reason_code == BITBUCKET_COMMIT_RESOLVE_FAILED
 
@@ -390,7 +390,7 @@ def _general_comment(comment_id: int, body: str) -> dict:
     ],
 )
 async def test_merge_pr_strategy_round_trip(method: str, expected_strategy: str) -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_PR}/merge", json={"merge_commit": {"hash": "abc123"}})
     client = make_client(fake)
     sha = await client.merge_pr(repo=repo(), pr_number=42, method=method, delete_branch=True)
@@ -403,9 +403,9 @@ async def test_merge_pr_strategy_round_trip(method: str, expected_strategy: str)
 
 
 async def test_merge_pr_unsupported_method_raises_without_request() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="rebase")
     assert excinfo.value.reason_code == BITBUCKET_MERGE_METHOD_UNSUPPORTED
     assert fake.calls("POST") == []  # never POSTed a wrong strategy
@@ -415,10 +415,10 @@ async def test_merge_pr_missing_commit_hash_raises() -> None:
     # A terminal merge with no commit hash is an unusable payload: returning a
     # silent "" would be recorded downstream as a successful merge. Raise instead
     # so the miss is diagnosable rather than masking success.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_PR}/merge", json={"state": "MERGED"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "merge_commit.hash" in str(excinfo.value)
 
@@ -429,7 +429,7 @@ async def test_merge_pr_409_in_progress_body_maps_to_transient_reason() -> None:
     # monitor) maps to the transient BITBUCKET_MERGE_IN_PROGRESS reason — not the
     # deterministic BITBUCKET_API_ERROR — so the monitor re-polls fetch_pr_status
     # instead of terminating the workspace on a merge that may still be completing.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_PR}/merge",
@@ -437,17 +437,17 @@ async def test_merge_pr_409_in_progress_body_maps_to_transient_reason() -> None:
         json={"error": {"message": "merge already in progress"}},
     )
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert excinfo.value.reason_code == BITBUCKET_MERGE_IN_PROGRESS
     assert excinfo.value.status == 409
 
 
 async def test_merge_pr_409_already_merged_body_maps_to_transient_reason() -> None:
-    # BitBucket also answers 409 when the PR "has already been merged" — a re-poll
+    # Bitbucket also answers 409 when the PR "has already been merged" — a re-poll
     # of fetch_pr_status observes the terminal MERGED state, so this is recoverable
     # and must stay transient rather than being misreported as a merge failure.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_PR}/merge",
@@ -455,18 +455,18 @@ async def test_merge_pr_409_already_merged_body_maps_to_transient_reason() -> No
         json={"error": {"message": "This pull request has already been merged."}},
     )
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert excinfo.value.reason_code == BITBUCKET_MERGE_IN_PROGRESS
 
 
 async def test_merge_pr_409_conflict_body_stays_deterministic() -> None:
-    # BitBucket overloads 409 for non-recoverable merge failures too (merge
+    # Bitbucket overloads 409 for non-recoverable merge failures too (merge
     # conflicts, unmet merge checks). Those carry no "in progress"/"already
     # merged" signal, so they must stay deterministic (BITBUCKET_API_ERROR) — a
     # blanket transient remap would poll forever instead of surfacing
     # BITBUCKET_MERGE_FAILED and notifying a human.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_PR}/merge",
@@ -474,19 +474,19 @@ async def test_merge_pr_409_conflict_body_stays_deterministic() -> None:
         json={"error": {"message": "The pull request has merge conflicts."}},
     )
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert excinfo.value.reason_code == BITBUCKET_API_ERROR
     assert excinfo.value.status == 409
 
 
 async def test_merge_pr_409_unrelated_in_progress_body_stays_deterministic() -> None:
-    # A bare "in progress" substring is too broad: BitBucket overloads 409 on the
+    # A bare "in progress" substring is too broad: Bitbucket overloads 409 on the
     # merge POST for other concurrent-modification conflicts whose bodies read e.g.
     # "another action is in progress". That is not a merge already in flight, so it
     # must stay deterministic (BITBUCKET_API_ERROR) — classifying it transient would
     # poll forever instead of surfacing the conflict and notifying a human.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_PR}/merge",
@@ -494,7 +494,7 @@ async def test_merge_pr_409_unrelated_in_progress_body_stays_deterministic() -> 
         json={"error": {"message": "Another action is already in progress."}},
     )
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert excinfo.value.reason_code == BITBUCKET_API_ERROR
     assert excinfo.value.status == 409
@@ -504,7 +504,7 @@ async def test_merge_pr_409_merge_in_progress_phrasing_maps_to_transient() -> No
     # The merge-specific in-progress phrasing (the genuine recoverable case) still
     # maps to the transient reason even though the bare "in progress" substring was
     # removed: the body mentions both "merge" and "in progress".
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_PR}/merge",
@@ -512,7 +512,7 @@ async def test_merge_pr_409_merge_in_progress_phrasing_maps_to_transient() -> No
         json={"error": {"message": "A merge for this pull request is already in progress."}},
     )
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert excinfo.value.reason_code == BITBUCKET_MERGE_IN_PROGRESS
 
@@ -520,7 +520,7 @@ async def test_merge_pr_409_merge_in_progress_phrasing_maps_to_transient() -> No
 async def test_merge_pr_non_409_conflict_keeps_api_error_reason() -> None:
     # Other 4xx faults on the merge POST stay deterministic (BITBUCKET_API_ERROR)
     # so they fail fast rather than being mistaken for an in-flight merge.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_PR}/merge",
@@ -528,7 +528,7 @@ async def test_merge_pr_non_409_conflict_keeps_api_error_reason() -> None:
         json={"error": {"message": "bad request"}},
     )
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert excinfo.value.reason_code == BITBUCKET_API_ERROR
 
@@ -537,10 +537,10 @@ async def test_merge_pr_non_409_conflict_keeps_api_error_reason() -> None:
 
 
 async def test_merge_pr_async_202_polls_location_to_success() -> None:
-    # BitBucket runs merges asynchronously: a slow merge answers 202 with a
+    # Bitbucket runs merges asynchronously: a slow merge answers 202 with a
     # Location header pointing at the task-status endpoint, which must be polled
     # to a terminal status before the merge commit hash is known.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-1"
     fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
     fake.enqueue(
@@ -557,7 +557,7 @@ async def test_merge_pr_async_202_polls_location_to_success() -> None:
 
 
 async def test_merge_pr_async_202_polls_through_pending() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-2"
     fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
     fake.enqueue("GET", f"{_PR}/merge/task-status/task-2", json={"task_status": "PENDING"})
@@ -575,7 +575,7 @@ async def test_merge_pr_async_202_polls_through_pending() -> None:
 
 async def test_merge_pr_async_202_task_id_fallback_without_location() -> None:
     # Some 202 responses carry the task id only in the body; build the poll URL.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_PR}/merge", status=202, json={"task_id": "task-7"})
     fake.enqueue(
         "GET",
@@ -588,12 +588,12 @@ async def test_merge_pr_async_202_task_id_fallback_without_location() -> None:
 
 
 async def test_merge_pr_async_202_non_success_terminal_status_raises() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-3"
     fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
     fake.enqueue("GET", f"{_PR}/merge/task-status/task-3", json={"task_status": "FAILED"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "FAILED" in str(excinfo.value)
     # The error must not reuse the original 202 POST status: a task that ended in
@@ -609,7 +609,7 @@ async def test_merge_pr_async_202_error_envelope_raises_immediately() -> None:
     # That payload must be treated as an immediate terminal non-success so the
     # actionable merge-failure message surfaces, rather than leaving ``task_status``
     # empty and polling until the budget trips into a generic timeout.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-err"
     fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
     fake.enqueue(
@@ -620,7 +620,7 @@ async def test_merge_pr_async_202_error_envelope_raises_immediately() -> None:
     # A high poll budget proves the error short-circuits rather than exhausting it:
     # only one GET is enqueued, so a non-terminal read would fail to dequeue.
     client = make_client(fake, max_merge_polls=10, merge_poll_delay_seconds=0)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "merge checks have not passed" in str(excinfo.value)
     # Not a timeout: the real reason must not be masked by the generic poll-budget
@@ -633,7 +633,7 @@ async def test_merge_pr_async_202_error_envelope_raises_immediately() -> None:
 async def test_merge_pr_async_202_error_envelope_without_message_raises() -> None:
     # A bare error envelope (no nested message) still terminates immediately with a
     # distinct-from-timeout error rather than polling to budget exhaustion.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-err2"
     fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
     fake.enqueue(
@@ -642,7 +642,7 @@ async def test_merge_pr_async_202_error_envelope_without_message_raises() -> Non
         json={"error": {"detail": "no message field here"}},
     )
     client = make_client(fake, max_merge_polls=10, merge_poll_delay_seconds=0)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "reported an error" in str(excinfo.value)
     assert "did not complete" not in str(excinfo.value)
@@ -650,12 +650,12 @@ async def test_merge_pr_async_202_error_envelope_without_message_raises() -> Non
 
 
 async def test_merge_pr_async_202_poll_budget_exhausted_raises() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-4"
     fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
     fake.enqueue("GET", f"{_PR}/merge/task-status/task-4", json={"task_status": "PENDING"})
     client = make_client(fake, max_merge_polls=2, merge_poll_delay_seconds=0)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "did not complete" in str(excinfo.value)
     # The timeout must not reuse the original 202 POST status: ``status=202`` would
@@ -663,7 +663,7 @@ async def test_merge_pr_async_202_poll_budget_exhausted_raises() -> None:
     assert excinfo.value.status is None
     assert "status=202" not in str(excinfo.value)
     # A still-PENDING task at budget exhaustion does not mean the merge failed —
-    # BitBucket may still complete it. The distinct reason code lets the monitor
+    # Bitbucket may still complete it. The distinct reason code lets the monitor
     # treat the timeout as an in-flight merge (cancel + re-poll) instead of a hard
     # deterministic failure (which would post a spurious "merge rejected" comment).
     assert excinfo.value.reason_code == BITBUCKET_MERGE_TASK_TIMEOUT
@@ -672,12 +672,12 @@ async def test_merge_pr_async_202_poll_budget_exhausted_raises() -> None:
 async def test_merge_pr_async_202_non_dict_poll_body_keeps_polling() -> None:
     # A malformed (non-dict) task-status body is treated as not-yet-terminal so a
     # garbled poll cannot be misread as success; the bounded budget then trips.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     poll_url = f"https://api.bitbucket.org{_PR}/merge/task-status/task-5"
     fake.enqueue("POST", f"{_PR}/merge", status=202, headers={"Location": poll_url})
     fake.enqueue("GET", f"{_PR}/merge/task-status/task-5", json=["unexpected"])
     client = make_client(fake, max_merge_polls=1, merge_poll_delay_seconds=0)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "did not complete" in str(excinfo.value)
 
@@ -685,7 +685,7 @@ async def test_merge_pr_async_202_non_dict_poll_body_keeps_polling() -> None:
 async def test_merge_pr_async_202_off_origin_location_rejected() -> None:
     # The poll Location is origin-checked (SSRF guard) before being requested with
     # the Authorization header, exactly like pagination ``next`` links.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue(
         "POST",
         f"{_PR}/merge",
@@ -693,16 +693,16 @@ async def test_merge_pr_async_202_off_origin_location_rejected() -> None:
         headers={"Location": "https://evil.example.com/steal"},
     )
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "origin" in str(excinfo.value).lower()
     assert fake.calls("GET") == []  # never followed the foreign origin
 
 
 async def test_merge_pr_async_202_without_poll_location_raises() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("POST", f"{_PR}/merge", status=202, json={"unexpected": "shape"})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.merge_pr(repo=repo(), pr_number=42, method="squash")
     assert "poll location" in str(excinfo.value).lower()

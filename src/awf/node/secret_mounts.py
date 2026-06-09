@@ -41,14 +41,14 @@ _SUPPORTED_PROVIDERS = (
 )
 _GITHUB_TOKEN_SOURCE_NAMES = ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
 _GITHUB_TOKEN_TARGET_NAMES = frozenset(("GH_TOKEN", "GITHUB_TOKEN"))
-# BitBucket Cloud git/REST credentials (issue #461). Each declared target maps
+# Bitbucket Cloud git/REST credentials (issue #461). Each declared target maps
 # to the source env var(s) it may be filled from; the resolver emits a Compose
 # ``${VAR}`` placeholder, never the secret value itself.
 _BITBUCKET_TARGET_SOURCE_NAMES: dict[str, tuple[str, ...]] = {
     "BITBUCKET_API_TOKEN": ("BITBUCKET_API_TOKEN",),
     "BITBUCKET_EMAIL": ("BITBUCKET_EMAIL",),
 }
-# Agent-side BitBucket git-over-HTTPS auth (issues #465/#466). When the token
+# Agent-side Bitbucket git-over-HTTPS auth (issues #465/#466). When the token
 # target below is injected into the agent env, the resolver also materializes a
 # static ``GIT_ASKPASS`` script (no token — only the env-var *name*) and mounts
 # it read-only at the askpass target, then wires ``GIT_ASKPASS`` +
@@ -432,7 +432,7 @@ class LocalSecretLeaseMountResolver:
         workspace_id: str,
         token_env_var: str,
     ) -> None:
-        """Materialize + mount the agent-side BitBucket ``GIT_ASKPASS`` script.
+        """Materialize + mount the agent-side Bitbucket ``GIT_ASKPASS`` script.
 
         Writes a **static** askpass script (containing no token — only the
         ``token_env_var`` *name*) to a per-workspace subdir of ``work_dir``,

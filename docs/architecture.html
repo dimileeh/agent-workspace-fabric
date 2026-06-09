@@ -47,7 +47,7 @@
 <body>
 <div class="wrap">
   <h1>Agent Workspace Fabric</h1>
-  <p class="sub">The <b>control plane</b> that runs AI coding agents as disciplined contributors. Dependencies flow left → right; the agent owns code changes, AWF owns lifecycle &amp; policy, GitHub/BitBucket stay the source of truth.</p>
+  <p class="sub">The <b>control plane</b> that runs AI coding agents as disciplined contributors. Dependencies flow left → right; the agent owns code changes, AWF owns lifecycle &amp; policy, GitHub/Bitbucket stay the source of truth.</p>
 
   <div class="flow">
     <div class="col">
@@ -77,7 +77,7 @@
       <h2>Execution substrate</h2>
       <div class="box accent-purple"><div class="t">node/ git worktrees</div><div class="d">Per-repo bare mirrors + linked worktrees, chowned to the unprivileged agent.</div></div>
       <div class="box accent-purple"><div class="t">node/ Compose stacks</div><div class="d">One per-workspace Docker Compose stack, rendered from a Jinja2 template.</div></div>
-      <div class="box accent-rose"><div class="t">forge</div><div class="d"><span class="tag" style="background:#14361f;color:#86efac">GitHub</span><span class="tag" style="background:#102a4d;color:#93c5fd">BitBucket</span> via one <code>ForgeClient</code> seam.</div></div>
+      <div class="box accent-rose"><div class="t">forge</div><div class="d"><span class="tag" style="background:#14361f;color:#86efac">GitHub</span><span class="tag" style="background:#102a4d;color:#93c5fd">Bitbucket</span> via one <code>ForgeClient</code> seam.</div></div>
     </div>
   </div>
 

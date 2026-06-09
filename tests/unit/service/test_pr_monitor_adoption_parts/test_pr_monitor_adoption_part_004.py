@@ -101,9 +101,9 @@ class TestPullRequestMonitorAdoptionForgeGate:
         # FLAGGED GAP (validation doc / PR): the *default* adoption metadata fetcher
         # (``fetch_pull_request_adoption_metadata``) is GitHub-only (``gh pr view``).
         # A real bitbucket adoption via the default fetcher would mis-route to
-        # GitHub; a BitBucket-aware adoption metadata fetcher is follow-up work
+        # GitHub; a Bitbucket-aware adoption metadata fetcher is follow-up work
         # outside the 10-method ForgeClient surface. The injected fetcher here
-        # stands in for that future BitBucket path.
+        # stands in for that future Bitbucket path.
         fetcher = _MetadataFetcher(_metadata())
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
@@ -126,7 +126,7 @@ class TestPullRequestMonitorAdoptionForgeGate:
         # the Part 2 gate flip a ``bitbucket.org`` repo passes the adoption forge
         # gate, so the default fetcher must fail closed for a non-GitHub forge
         # rather than silently querying GitHub for the same owner/repo slug. A
-        # BitBucket-aware adoption metadata fetcher must be injected explicitly.
+        # Bitbucket-aware adoption metadata fetcher must be injected explicitly.
         with pytest.raises(PRMonitorAdoptionError) as excinfo:
             await _default_metadata_fetcher(
                 repo=RepoRef.from_url("https://bitbucket.org/workspace/repo"),
@@ -143,11 +143,11 @@ class TestPullRequestMonitorAdoptionForgeGate:
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
         # Part 2 flip: a bitbucket ``pr_url`` is no longer rejected with
-        # FORGE_NOT_SUPPORTED. AWF has no BitBucket PR-URL parser
+        # FORGE_NOT_SUPPORTED. AWF has no Bitbucket PR-URL parser
         # (``parse_github_pull_request_url`` is github.com-only), so a well-formed
         # bitbucket PR URL now surfaces PR_ADOPTION_INPUT_REQUIRED — provide
-        # ``repo_url``/``repo_slug`` + ``pr_number`` for BitBucket adoption instead.
-        # (A BitBucket PR-URL parser is follow-up work, flagged in the PR.)
+        # ``repo_url``/``repo_slug`` + ``pr_number`` for Bitbucket adoption instead.
+        # (A Bitbucket PR-URL parser is follow-up work, flagged in the PR.)
         fetcher = _MetadataFetcher(_metadata())
         async with factory() as session:
             service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)

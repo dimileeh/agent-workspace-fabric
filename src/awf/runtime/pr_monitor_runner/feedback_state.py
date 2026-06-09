@@ -13,7 +13,7 @@ import re as re
 import time as time
 from typing import Any, cast
 
-from awf.common.bitbucket_client import BitBucketClient
+from awf.common.bitbucket_client import BitbucketClient
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.repositories import (
     PRFeedbackResolutionRepository,
@@ -41,17 +41,17 @@ def _forge_scm_provider(self: Any) -> str:
     """Return the SCM provider key for the runner's resolved forge client.
 
     The PR-feedback provenance/replay rows are keyed by ``scm_provider`` so a
-    GitHub and a BitBucket PR with the same numeric id never alias. ``self._deps.gh``
-    is the per-workspace resolved ``ForgeClient`` (a ``BitBucketClient`` or a
+    GitHub and a Bitbucket PR with the same numeric id never alias. ``self._deps.gh``
+    is the per-workspace resolved ``ForgeClient`` (a ``BitbucketClient`` or a
     ``GitHubClient``), so it is the authoritative forge signal here — no DB re-read.
 
-    GitHub and BitBucket are the only forges today. A blanket ``else "github"``
+    GitHub and Bitbucket are the only forges today. A blanket ``else "github"``
     fallback would silently store (and later query) any future third forge's rows
     under the GitHub key, aliasing its feedback state against GitHub workspaces on
     the same repo/PR number. Fail loudly on an unknown client instead, so a newly
     wired forge is forced to declare its own provider key here.
     """
-    if isinstance(self._deps.gh, BitBucketClient):
+    if isinstance(self._deps.gh, BitbucketClient):
         return "bitbucket"
     if isinstance(self._deps.gh, GitHubClient):
         return "github"
@@ -61,13 +61,13 @@ def _forge_scm_provider(self: Any) -> str:
 def _forge_pr_url(self: Any, repo: RepoRef, pr_number: int) -> str:
     """Build the forge-correct PR web URL for provenance rows.
 
-    A hardcoded github.com URL would poison BitBucket provenance/replay state with a
+    A hardcoded github.com URL would poison Bitbucket provenance/replay state with a
     nonexistent github.com link; derive the host/path shape from the resolved forge.
     Mirrors ``_forge_scm_provider``: fail loudly on an unknown client so a newly wired
     forge is forced to declare its URL shape here, rather than silently persisting a
     nonexistent github.com link in provenance rows.
     """
-    if isinstance(self._deps.gh, BitBucketClient):
+    if isinstance(self._deps.gh, BitbucketClient):
         return f"https://bitbucket.org/{repo.slug()}/pull-requests/{pr_number}"
     if isinstance(self._deps.gh, GitHubClient):
         return f"https://github.com/{repo.slug()}/pull/{pr_number}"
@@ -88,9 +88,9 @@ async def _record_pr_feedback_resolution(
     if verdict_result.verdict == "agent_failed":
         return
     # One-time state loss on upgrade (harmless): before #454 every workspace wrote
-    # ``scm_provider="github"``, so any BitBucket feedback row recorded pre-upgrade
-    # is keyed under "github" and a restarted BitBucket workspace (now querying under
-    # "bitbucket") won't find it. The thread is genuinely resolved on BitBucket, so
+    # ``scm_provider="github"``, so any Bitbucket feedback row recorded pre-upgrade
+    # is keyed under "github" and a restarted Bitbucket workspace (now querying under
+    # "bitbucket") won't find it. The thread is genuinely resolved on Bitbucket, so
     # ``fetch_pr_status`` won't re-surface it — at worst one redundant verdict gets
     # re-recorded under the correct provider; no migration is required.
     async with self._deps.session_factory() as s:
