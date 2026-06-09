@@ -81,8 +81,12 @@ existing test whose expectation changes.
 Implementation:
 - `src/awf/common/bitbucket_client_parsing.py` — add `_BB_CLOUD_DEFAULT_MERGE_STRATEGIES`
   constant; change the neither-present branch of `effective_merge_strategies`; refresh the
-  docstring. (No change to `map_bb_merge_methods`, `bb_merge_strategy_for_method`, the two
-  consumers in `bitbucket_client.py`, the merge loop, or GitHub.)
+  docstring. (No change to `map_bb_merge_methods`, `bb_merge_strategy_for_method`, the merge
+  loop, or GitHub.)
+- `src/awf/common/bitbucket_client.py` — consumer cleanup in
+  `fetch_branch_pull_request_allowed_merge_methods`: drop the now-dead
+  `if strategies is None: return None` branch (since `effective_merge_strategies` no longer
+  returns `None`) and refresh its docstring.
 
 Tests:
 - `tests/unit/common/test_bitbucket_client_forge.py` — add direct pure-function unit tests for
@@ -91,7 +95,8 @@ Tests:
   client-level regression for `fetch_repo_merge_methods` on an unconstrained PR; **update** the
   now-stale `test_fetch_branch_merge_methods_absent_returns_none`.
 
-No source changes outside `bitbucket_client_parsing.py`. No migrations, no config, no console.
+No source changes outside `bitbucket_client_parsing.py` and `bitbucket_client.py` (consumer
+cleanup). No migrations, no config, no console.
 
 ## Tests to write first (strict TDD)
 
