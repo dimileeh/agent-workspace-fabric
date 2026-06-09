@@ -19,7 +19,7 @@ services:
     {% endif %}{% if s.env_file %}env_file:
       - {{ s.env_file | tojson }}
     {% endif %}{% if s.environment %}environment:
-      {% for k, v in s.environment %}{{ k }}: {{ v | tojson }}
+      {% for k, v in s.environment %}{{ k | tojson }}: {{ v | tojson }}
       {% endfor %}
     {% endif %}{% if s.depends_on %}depends_on:
       {% for dep in s.depends_on %}{{ dep }}:
