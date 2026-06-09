@@ -159,6 +159,38 @@ test("attachWorkspaceStreamHandlers terminates the stream on a mid-stream error"
   assert.equal(streamClosed, 1);
 });
 
+test("attachWorkspaceStreamHandlers ignores a close that follows a terminal error", () => {
+  const socket = makeFakeSocket();
+  const sent = [];
+  let streamClosed = 0;
+  attachWorkspaceStreamHandlers({
+    socket,
+    workspaceId: "ws-2b",
+    send: (payload) => sent.push(payload),
+    closeStream: () => {
+      streamClosed += 1;
+    },
+  });
+
+  // Our own socket.close() in the error path provokes a follow-up "close":
+  // the internal terminal guard must drop it so we emit exactly one terminal
+  // frame and call closeStream once.
+  socket.emit("error", new Error("boom"));
+  socket.emit("close", 1006, Buffer.from("gone", "utf-8"));
+
+  assert.deepEqual(sent, [
+    {
+      type: "error",
+      ok: false,
+      error_code: "AWF_STREAM_ERROR",
+      message: "AWF workspace stream failed.",
+      detail: "boom",
+    },
+  ]);
+  assert.equal(socket.closed, 1);
+  assert.equal(streamClosed, 1);
+});
+
 test("attachWorkspaceStreamHandlers ends the stream on upstream close", () => {
   const socket = makeFakeSocket();
   const sent = [];

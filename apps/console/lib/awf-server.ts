@@ -176,6 +176,12 @@ export function attachWorkspaceStreamHandlers({
   send: (payload: unknown, event?: string) => void;
   closeStream: () => void;
 }): void {
+  // Both "error" and "close" run terminal logic, and our own socket.close() in
+  // the error path provokes a follow-up "close". Guard terminal handling inside
+  // the helper so it stays deterministic (exactly one terminal frame + one
+  // closeStream) without relying on caller idempotency.
+  let terminated = false;
+
   socket.on("open", () => {
     send({ type: "connected", workspace_id: workspaceId });
   });
@@ -188,6 +194,10 @@ export function attachWorkspaceStreamHandlers({
     }
   });
   socket.on("error", (error) => {
+    if (terminated) {
+      return;
+    }
+    terminated = true;
     send({
       type: "error",
       ...normalizeError(error, "AWF_STREAM_ERROR", "AWF workspace stream failed."),
@@ -196,6 +206,10 @@ export function attachWorkspaceStreamHandlers({
     closeStream();
   });
   socket.on("close", (code, reason) => {
+    if (terminated) {
+      return;
+    }
+    terminated = true;
     send({
       type: "closed",
       workspace_id: workspaceId,
