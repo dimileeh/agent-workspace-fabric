@@ -1094,7 +1094,7 @@ export function RuntimeRow({ item }: { item: RuntimeService }) {
       <Td>{item.health ? <Badge value={item.health} /> : "—"}</Td>
       <Td className="mono max-w-[220px] truncate">{item.image ?? "—"}</Td>
       <Td>{item.ports.length > 0 ? item.ports.join(", ") : "—"}</Td>
-      <Td>{item.started_at ?? "—"}</Td>
+      <Td>{formatDateTime(item.started_at)}</Td>
     </tr>
   );
 }
