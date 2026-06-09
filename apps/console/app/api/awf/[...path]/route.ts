@@ -5,6 +5,8 @@ import {
   openAwfWorkspaceSocket,
   proxyAwf,
   proxyAwfGet,
+  sanitizeStreamChannels,
+  sanitizeTailBytes,
 } from "@/lib/awf-server";
 
 export const runtime = "nodejs";
@@ -54,8 +56,8 @@ async function proxyAwfWrite(
 }
 
 async function streamWorkspace(request: NextRequest, workspaceId: string): Promise<Response> {
-  const channels = request.nextUrl.searchParams.get("channels") || "events,agent,validation,services";
-  const tailBytes = request.nextUrl.searchParams.get("tail_bytes") || "65536";
+  const channels = sanitizeStreamChannels(request.nextUrl.searchParams.get("channels"));
+  const tailBytes = sanitizeTailBytes(request.nextUrl.searchParams.get("tail_bytes"));
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {

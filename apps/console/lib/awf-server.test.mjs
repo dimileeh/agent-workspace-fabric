@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { proxyAwf } from "./awf-server.ts";
+import {
+  AWF_STREAM_MAX_TAIL_BYTES,
+  proxyAwf,
+  sanitizeStreamChannels,
+  sanitizeTailBytes,
+} from "./awf-server.ts";
 
 const originalBaseUrl = process.env.AWF_API_BASE_URL;
 const originalFetchTimeoutMs = process.env.AWF_API_FETCH_TIMEOUT_MS;
@@ -48,6 +53,29 @@ test("proxyAwf aborts hung backend fetches with a bounded timeout", async () => 
     message: "Unable to reach the AWF API.",
     detail: "backend fetch aborted by timeout",
   });
+});
+
+test("sanitizeStreamChannels keeps only supported channels", () => {
+  assert.equal(sanitizeStreamChannels("agent, events"), "agent,events");
+  assert.equal(sanitizeStreamChannels("agent,bogus,services"), "agent,services");
+});
+
+test("sanitizeStreamChannels falls back to the default set when empty or unknown", () => {
+  const defaults = "events,agent,validation,services";
+  assert.equal(sanitizeStreamChannels(null), defaults);
+  assert.equal(sanitizeStreamChannels(""), defaults);
+  assert.equal(sanitizeStreamChannels("bogus,nope"), defaults);
+});
+
+test("sanitizeTailBytes clamps to the supported range", () => {
+  assert.equal(sanitizeTailBytes("1024"), "1024");
+  assert.equal(sanitizeTailBytes("999999999"), String(AWF_STREAM_MAX_TAIL_BYTES));
+  assert.equal(sanitizeTailBytes("-5"), "0");
+});
+
+test("sanitizeTailBytes falls back to the cap for missing or non-numeric input", () => {
+  assert.equal(sanitizeTailBytes(null), String(AWF_STREAM_MAX_TAIL_BYTES));
+  assert.equal(sanitizeTailBytes("not-a-number"), String(AWF_STREAM_MAX_TAIL_BYTES));
 });
 
 function restoreEnv(name, value) {

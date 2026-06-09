@@ -110,6 +110,28 @@ export function encodeSse(data: unknown, event = "message"): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+export const AWF_STREAM_CHANNELS = ["events", "agent", "validation", "services"] as const;
+const AWF_STREAM_CHANNEL_SET = new Set<string>(AWF_STREAM_CHANNELS);
+const AWF_STREAM_DEFAULT_CHANNELS = AWF_STREAM_CHANNELS.join(",");
+export const AWF_STREAM_MAX_TAIL_BYTES = 65_536;
+
+export function sanitizeStreamChannels(raw: string | null): string {
+  const filtered = (raw ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => AWF_STREAM_CHANNEL_SET.has(value));
+  return filtered.length > 0 ? filtered.join(",") : AWF_STREAM_DEFAULT_CHANNELS;
+}
+
+export function sanitizeTailBytes(raw: string | null): string {
+  const parsed = Number(raw ?? AWF_STREAM_MAX_TAIL_BYTES);
+  if (!Number.isFinite(parsed)) {
+    return String(AWF_STREAM_MAX_TAIL_BYTES);
+  }
+  const clamped = Math.min(Math.max(Math.trunc(parsed), 0), AWF_STREAM_MAX_TAIL_BYTES);
+  return String(clamped);
+}
+
 export function openAwfWorkspaceSocket({
   workspaceId,
   channels,
