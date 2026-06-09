@@ -106,14 +106,14 @@ jobs:
           fi
 
       - name: Upload distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-distributions
           path: dist/*
           if-no-files-found: error
 
       - name: Upload release audit artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-distribution-checksums
           path: |
