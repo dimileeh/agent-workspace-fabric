@@ -1497,3 +1497,48 @@ async def test_setup_dependency_retry_does_not_consume_flaky_retry_budget(
     assert len(retry_metadata["attempts"]) == 1
     assert retry_metadata["attempts"][0]["attempt"] == 1
     assert retry_metadata["attempts"][0]["retry_number"] == 1
+
+
+@pytest.mark.unit
+async def test_optional_command_failure_is_advisory_and_does_not_fail_validation(
+    tmp_path: Path,
+) -> None:
+    """A phase command with ``required: false`` must not block validation.
+
+    Regression for PRRT_kwDOSJAM6s6IRgv7: the optional command's non-zero
+    result was appended verbatim, so ``ValidationResult.all_passed`` (and
+    ``first_failure``) still treated the workspace as failed even though the
+    command was explicitly advisory.
+    """
+    fake = FakeCommandRunner()
+    val = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "optional-cmd",
+            "phases": {
+                "validate": [
+                    {"command": "advisory-lint", "required": False},
+                    "pytest -q",
+                ]
+            },
+        }
+    )
+    fake.queue_result(returncode=1, stderr="advisory lint reported issues")
+    fake.queue_result(returncode=0, stdout="all tests passed")
+
+    result = await val.run_profile_phases(
+        workspace_id="ws_optional_cmd",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=profile,
+        phase_names=("validate",),
+    )
+
+    # The advisory failure neither halts the sequence nor fails the verdict.
+    assert result.all_passed
+    assert result.first_failure is None
+    assert len(fake.calls) == 2
+    advisory = result.commands[0]
+    assert advisory.returncode == 1
+    assert advisory.required is False
+    assert not advisory.ok

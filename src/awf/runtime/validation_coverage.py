@@ -161,6 +161,7 @@ def _final_command_result(
         result,
         reason_code=reason_code,
         retry_count=attempts,
+        required=step.command.required,
         metadata=_execution_command_metadata(step),
         captured_stdout=None,
         captured_stderr=None,

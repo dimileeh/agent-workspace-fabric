@@ -78,6 +78,7 @@ class ValidationCommandResult:
     stream_ids: dict[str, str | None] = field(default_factory=dict)
     retry_count: int = 0
     policy_failed: bool = False
+    required: bool = True
     metadata: dict[str, object] = field(default_factory=dict)
     captured_stdout: str | None = field(default=None, repr=False, compare=False)
     captured_stderr: str | None = field(default=None, repr=False, compare=False)
@@ -85,6 +86,16 @@ class ValidationCommandResult:
     @property
     def ok(self) -> bool:
         return self.returncode == 0 and not self.policy_failed
+
+    @property
+    def blocks_validation(self) -> bool:
+        """Whether this command's outcome should fail the validation verdict.
+
+        Advisory commands (``required: false`` in the profile) run and record
+        their outcome for inspection, but a non-zero result must not block the
+        workspace — see ``ValidationResult.all_passed``.
+        """
+        return self.required and not self.ok
 
 
 @dataclass(frozen=True)
@@ -175,7 +186,7 @@ class ValidationResult:
             return False
         if self.coverage is not None and not self.coverage.ok:
             return False
-        return all(c.ok for c in self.commands)
+        return not any(c.blocks_validation for c in self.commands)
 
     @property
     def total_retries(self) -> int:
@@ -185,7 +196,7 @@ class ValidationResult:
     def first_failure(self) -> ValidationCommandResult | None:
         if self.migration is not None and not self.migration.ok:
             return self.migration
-        first_command_failure = next((c for c in self.commands if not c.ok), None)
+        first_command_failure = next((c for c in self.commands if c.blocks_validation), None)
         if first_command_failure is not None:
             return first_command_failure
         if self.coverage is not None and not self.coverage.ok:

@@ -85,7 +85,7 @@ def _failed_pre_push_commands(result: ValidationResult) -> tuple[ValidationComma
     failures: list[ValidationCommandResult] = []
     if result.migration is not None and not result.migration.ok:
         failures.append(result.migration)
-    failures.extend(command for command in result.commands if not command.ok)
+    failures.extend(command for command in result.commands if command.blocks_validation)
     coverage_command = result.coverage.command_result if result.coverage is not None else None
     if coverage_command is not None and not coverage_command.ok:
         failures.append(coverage_command)
