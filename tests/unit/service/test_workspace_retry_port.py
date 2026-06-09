@@ -1,0 +1,1466 @@
+"""Port-conflict retry tests for terminal workspaces."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.api.schemas import WorkspaceCreateRequest
+from awf.common.config import Settings
+from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import (
+    QueueDecisionRepository,
+    ResourceReservationRepository,
+    WorkspaceRepository,
+)
+from awf.db.repositories.base import (
+    PRE_LAUNCH_FAILURE_EVENT_TYPE,
+    PRE_LAUNCH_FAILURE_REASON_CODE,
+    PROVISIONING_LAUNCHING_EVENT_TYPE,
+    PROVISIONING_LAUNCHING_REASON_CODE,
+)
+from awf.db.session import make_session_factory
+from awf.service import workspaces_retry
+from awf.service.workspaces import (
+    WorkspaceCreateHostPortConflictError,
+    WorkspaceRetrySourceRuntimeNotReleasedError,
+    create_workspace_row,
+    retry_workspace_row,
+)
+from tests.postgres import postgres_test_engine
+
+pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Yield a session factory backed by a disposable test database."""
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+def _request(
+    *,
+    task_kind: str = "feature_branch_pr",
+    provider_readiness_override: bool = True,
+) -> WorkspaceCreateRequest:
+    payload: dict[str, object] = {
+        "repo": {"url": "git@github.com:example/retryable.git", "base_branch": "development"},
+        "task": {
+            "title": "Retry flaky validation",
+            "prompt": "Fix the intermittent validation failure.",
+            "agent": "codex",
+            "kind": task_kind,
+            "external_id": "TICKET-RETRY",
+            "task_class": "test_task",
+            "owned_paths": ["src/awf/retry/**"],
+            "auto_merge": False,
+            "initial_review_grace_period_seconds": 30,
+        },
+        "workspace": {"profile_ref": "python", "profile": None},
+        "validation": {"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
+        "resources": {},
+    }
+    if provider_readiness_override:
+        payload["preflight"] = {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "retry service test fixture",
+        }
+    return WorkspaceCreateRequest.model_validate(payload)
+
+
+def _request_with_preflight_override(
+    *,
+    reason: str = "operator verified provider readiness manually",
+) -> WorkspaceCreateRequest:
+    payload = _request().model_dump(mode="json")
+    payload["preflight"] = {
+        "provider_readiness_override": True,
+        "provider_readiness_override_reason": reason,
+    }
+    return WorkspaceCreateRequest.model_validate(payload)
+
+
+def _settings_with_host_home(tmp_path) -> Settings:  # type: ignore[no-untyped-def]
+    return Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+    )
+
+
+async def _mark_failed(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    branch_name: str = "codex/old-attempt",
+    remote_push_branch: str | None = None,
+    release_runtime: bool = True,
+) -> dict[str, object]:
+    """Mark a workspace as failed with shared transition/evidence payload."""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = "validation_failure"
+        workspace.failure_message = "pytest failed"
+        workspace.branch_name = branch_name
+        workspace.remote_push_branch = remote_push_branch
+        workspace.pr_url = "https://github.com/example/retryable/pull/10"
+        workspace.compose_project_name = "awf_old_attempt"
+        assert workspace.resolved_profile is not None
+        frozen_profile = {
+            **workspace.resolved_profile,
+            "source": "frozen:test-profile",
+        }
+        workspace.resolved_profile = frozen_profile
+        await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        if release_runtime:
+            await repo.add_event(
+                workspace,
+                event_type="workspace.terminal_runtime_released",
+                reason_code="TERMINAL_RUNTIME_RELEASED",
+            )
+        await session.commit()
+        return frozen_profile
+
+
+@pytest.mark.unit
+async def test_source_runtime_release_gate_uses_enum_terminal_statuses(monkeypatch) -> None:
+    """The retry release gate must not depend on StrEnum string equality."""
+
+    async def runtime_not_released(_session: object, _workspace_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(workspaces_retry, "HOST_PORT_TERMINAL_RELEASE_STATUSES", (), raising=False)
+    monkeypatch.setattr(
+        workspaces_retry,
+        "HOST_PORT_TERMINAL_RELEASE_WORKSPACE_STATUSES",
+        (WorkspaceStatus.failed,),
+    )
+    monkeypatch.setattr(
+        workspaces_retry,
+        "has_terminal_runtime_released_event",
+        runtime_not_released,
+    )
+    source = SimpleNamespace(
+        id="ws_enum_terminal_release",
+        status=WorkspaceStatus.failed.value,
+        compose_project_name="awf_ws_enum_terminal_release",
+        compose_file_path=None,
+        node_id=None,
+    )
+
+    assert await workspaces_retry._source_runtime_not_yet_released(object(), source) is True
+
+
+@pytest.mark.unit
+async def test_retry_acquires_host_port_lock_before_source_runtime_release_gate(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source-runtime release read must happen inside host-port admission."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override(
+        reason="host-port lock ordering regression test",
+    )
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [
+        {
+            "name": "sidecar",
+            "repo_url": "git@github.com:example/sidecar.git",
+            "base_branch": "main",
+            "ports": [[5432, 5434]],
+        }
+    ]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        source_id = source.id
+        await session.commit()
+
+    await _mark_failed(factory, source_id, release_runtime=False)
+    calls: list[tuple[str, object]] = []
+
+    async def _record_host_port_lock(
+        _repo: object,
+        *,
+        host_ports: list[int],
+    ) -> None:
+        calls.append(("lock", list(host_ports)))
+
+    async def _source_runtime_not_released(
+        _session: object,
+        source: object,
+    ) -> bool:
+        calls.append(("source-gate", getattr(source, "id", None)))
+        return True
+
+    monkeypatch.setattr(
+        workspaces_retry.WorkspaceRepository,
+        "acquire_host_port_admission_lock",
+        _record_host_port_lock,
+    )
+    monkeypatch.setattr(
+        workspaces_retry,
+        "_source_runtime_not_yet_released",
+        _source_runtime_not_released,
+    )
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source_id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="host-port lock ordering regression test",
+                provider_environ={},
+            )
+
+    assert calls == [
+        ("lock", [5434]),
+        ("source-gate", source_id),
+    ]
+
+
+@pytest.mark.unit
+async def test_retry_rejects_host_port_conflict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retrying a workspace whose companion host port is still held by another
+    active workspace must raise WorkspaceCreateHostPortConflictError instead
+    of silently creating a workspace that will fail during compose-up."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        blocker = await repo.create(
+            repo_url="git@github.com:example/blocker.git",
+            branch_base="main",
+            task_title="Block port",
+            task_prompt="noop",
+            task_external_id=None,
+            task_class="test_task",
+            owned_paths=[],
+            task_policy={
+                "companions": [
+                    {"name": "blocker-svc", "ports": [[5432, 5434]]},
+                ],
+            },
+            auto_merge=False,
+            initial_review_grace_period_seconds=0,
+            agent="codex",
+            env_profile=None,
+            profile_ref=None,
+            requested_profile=None,
+            resolved_profile=None,
+            test_commands=[],
+            requires_database=False,
+            idempotency_key=None,
+            task_kind="feature_branch_pr",
+            remote_push_branch=None,
+        )
+        blocker.node_id = "local"
+        await repo.transition(blocker, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.ready, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.running, reason_code="TEST")
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceCreateHostPortConflictError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="host port conflict regression test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_rejects_host_port_conflict_with_normalized_target_node(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retry admission must normalize the configured worker node before
+    scanning host-port conflicts, matching create admission reservations."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+        worker_node_id=" node-a ",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id)
+
+    async with factory() as session:
+        blocker = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        blocker_reservations = await ResourceReservationRepository(
+            session,
+        ).list_for_workspace(blocker.id)
+        assert len(blocker_reservations) == 1
+        assert blocker_reservations[0].node_id == "node-a"
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceCreateHostPortConflictError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="normalized target node conflict test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_allows_same_port_when_source_is_only_holder(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retrying must succeed when the only workspace holding the companion host
+    port is the failed source itself and its terminal runtime has been
+    released (compose stack torn down).  Only then is the host port free."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        assert source.task_policy is not None
+        assert "companions" in source.task_policy
+        await session.commit()
+
+    await _mark_failed(factory, source.id)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="host port same-holder test",
+            provider_environ={},
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_rejects_host_port_conflict_with_source(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retrying a failed workspace that still holds its companion host port
+    (no terminal_runtime_released event) must raise
+    WorkspaceRetrySourceRuntimeNotReleasedError.  The source's compose stack
+    may still be running, so a separate fast-fail check detects this before
+    the generic conflict query, yielding a clearer error message."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="host port source conflict test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_allows_early_cancelled_source_without_runtime_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A source cancelled before scheduler/provisioner claim has no runtime to release."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        ws.node_id = None
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
+        for reservation in await ResourceReservationRepository(session).list_for_workspace(ws.id):
+            await session.delete(reservation)
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="early cancelled no runtime evidence test",
+            provider_environ={},
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_rejects_cancelled_provisioning_null_runtime_source_without_reservation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A legacy cancelled source that reached provisioning needs release evidence."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        ws.node_id = None
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
+        for reservation in await ResourceReservationRepository(session).list_for_workspace(ws.id):
+            await session.delete(reservation)
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason=(
+                    "cancelled provisioning null-runtime source test"
+                ),
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_allows_when_source_compose_project_name_is_none(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A modern workspace that failed before compose-up has explicit evidence.
+
+    When ``compose_project_name`` is None but the source has a durable
+    pre-launch failure marker, retrying it must not raise
+    WorkspaceRetrySourceRuntimeNotReleasedError even when no
+    terminal_runtime_released event exists.  The reservation is retained as
+    placement evidence, not proof that Compose never launched."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        ws.failure_reason = "clone_failure"
+        ws.failure_message = "git clone failed"
+        ws.compose_project_name = None
+        await repo.add_event(
+            ws,
+            event_type=PRE_LAUNCH_FAILURE_EVENT_TYPE,
+            reason_code=PRE_LAUNCH_FAILURE_REASON_CODE,
+        )
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="compose_project_name is None retry",
+            provider_environ={},
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_rejects_null_compose_source_with_reservation_after_launch_started(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A reserved source that reached launch must block until runtime release.
+
+    Upgraded legacy compose failures can have ResourceReservation placement
+    evidence while compose_project_name/compose_file_path are null.  A launch
+    marker means the old awf_<workspace_id> stack may still hold the port, so
+    retry admission must not exclude the source from conflict scanning until
+    cleanup records terminal_runtime_released.
+    """
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        await repo.add_event(
+            ws,
+            event_type=PROVISIONING_LAUNCHING_EVENT_TYPE,
+            reason_code=PROVISIONING_LAUNCHING_REASON_CODE,
+        )
+        ws.failure_reason = "compose_metadata_not_persisted"
+        ws.failure_message = "legacy stack leaked before metadata was persisted"
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        await session.commit()
+
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        )
+        assert reservations
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="reserved launch-started source test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_rejects_legacy_null_runtime_source_without_reservation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A legacy null-runtime source with host ports blocks retry until cleanup releases it."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        ws.failure_reason = "compose_metadata_not_persisted"
+        ws.failure_message = "legacy stack leaked before metadata was persisted"
+        ws.node_id = None
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        for reservation in await ResourceReservationRepository(session).list_for_workspace(ws.id):
+            await session.delete(reservation)
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="legacy null-runtime source test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_rejects_node_stamped_legacy_null_runtime_source_without_reservation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A legacy failed source can stamp node_id while still leaking containers."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        ws.failure_reason = "compose_metadata_not_persisted"
+        ws.failure_message = "legacy stack leaked before metadata was persisted"
+        ws.node_id = "legacy-node"
+        ws.compose_project_name = None
+        ws.compose_file_path = None
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        for reservation in await ResourceReservationRepository(session).list_for_workspace(ws.id):
+            await session.delete(reservation)
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="node-stamped legacy null-runtime source test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_allows_when_no_host_ports_even_if_source_compose_stack_running(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A source workspace with compose_project_name set but no host ports
+    (no companions, no resolved-profile ports) must NOT raise
+    WorkspaceRetrySourceRuntimeNotReleasedError — the compose project
+    name is workspace-ID-scoped (awf_<id>), so a zero-port workspace
+    cannot cause host-port conflicts with the retry.  The
+    runtime-release guard is only applied inside the if host_ports:
+    branch where it provides actual safety."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        ws.failure_reason = "compose_up_failure"
+        ws.failure_message = "compose up failed"
+        ws.compose_project_name = "awf_stuck_stack"
+        await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        await session.commit()
+
+    async with factory() as session:
+        result = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="no-host-ports runtime guard test",
+            provider_environ={},
+        )
+        assert result.source_workspace_id == source.id
+
+
+@pytest.mark.unit
+async def test_retry_rejects_unreleased_legacy_requested_profile_host_ports(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """A legacy inline profile source can have requested_profile ports but no
+    resolved_profile snapshot. Retry admission must still apply the
+    source-runtime release gate for those profile ports."""
+    settings = _settings_with_host_home(tmp_path)
+    payload = _request_with_preflight_override().model_dump(mode="python")
+    payload["workspace"] = {
+        "profile_ref": None,
+        "profile": {
+            "name": "legacy-inline-profile-ports",
+            "services": [
+                {
+                    "name": "postgres",
+                    "image": "postgres:16",
+                    "ports": [[5432, 15432]],
+                }
+            ],
+        },
+    }
+    req = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        assert ws.requested_profile is not None
+        assert ws.requested_profile["services"][0]["ports"] == [[5432, 15432]]
+        ws.resolved_profile = None
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySourceRuntimeNotReleasedError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="legacy requested-profile port source test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_allows_when_target_node_differs_from_source(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When the retry targets a different node than the source, the
+    runtime-release gate must be skipped — the source's unreleased
+    compose stack on node A does not block retry placement on node B."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        ws.node_id = "node-a"
+        await session.commit()
+
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id, limit=1
+        )
+        if reservations:
+            reservations[0].node_id = "node-b"
+            await session.commit()
+
+    different_node_settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+        worker_node_id="node-b",
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=different_node_settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="target node differs test",
+            provider_environ={},
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_allows_when_source_node_id_is_none_but_reservation_on_different_node(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When source.node_id is None (compose-launch failure before the
+    ready/success path fills it) but the source's reservation records a
+    different node than the retry target, the runtime-release gate must
+    use the reservation's node_id as the source's effective node and allow
+    the retry.  The old code checked source.node_id directly, which was
+    always None for this failure mode, causing a false
+    SOURCE_RUNTIME_NOT_RELEASED error."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        ws.node_id = None
+        await session.commit()
+
+    async with factory() as session:
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id, limit=1
+        )
+        if reservations:
+            reservations[0].node_id = "node-a"
+            await session.commit()
+
+    different_node_settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+        worker_node_id="node-b",
+    )
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=different_node_settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="reservation node differs test",
+            provider_environ={},
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_persist_reservation_when_source_has_none(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """Retrying a legacy source with no ResourceReservation but a known
+    target_node_id (from settings.worker_node_id) must still persist a
+    reservation for the retried workspace so that subsequent
+    find_host_port_conflicts can see the retried workspace's node
+    placement.  Without this, a later create/retry on the same node
+    misses the retried workspace's host port claims."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+        worker_node_id="node-1",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        for res in await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        ):
+            await session.delete(res)
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="legacy no-reservation test",
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried_reservations = await ResourceReservationRepository(
+            session,
+        ).list_for_workspace(retry.new_workspace.id)
+        retry_decisions = await QueueDecisionRepository(session).list_for_workspace(
+            retry.new_workspace.id,
+        )
+        assert len(retried_reservations) == 1
+        assert retried_reservations[0].node_id == "node-1"
+        assert retried_reservations[0].dind_slots == 0
+        assert len(retry_decisions) == 1
+        assert retry_decisions[0].resource_summary["node_id"] == "node-1"
+        assert retry_decisions[0].resource_summary["dind_slots"] == 0
+        assert retry_decisions[0].resource_summary["phase"] == retried_reservations[0].phase
+        assert "capacity" in retry_decisions[0].resource_summary
+
+
+@pytest.mark.unit
+async def test_retry_no_reservation_when_target_node_unknown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When the source has no reservation and no worker_node_id is configured,
+    target_node_id falls back to "local" (matching create-admission behaviour)
+    and a reservation is created on the local node so the COALESCE-based
+    conflict checker can detect port collisions on that node."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(source.id)
+        assert ws is not None
+        ws.node_id = None
+        for res in await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        ):
+            await session.delete(res)
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="no node test",
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried_reservations = await ResourceReservationRepository(
+            session,
+        ).list_for_workspace(retry.new_workspace.id)
+        assert len(retried_reservations) == 1
+        assert retried_reservations[0].node_id == "local"
+
+
+@pytest.mark.unit
+async def test_retry_rejects_host_port_conflict_when_target_node_unknown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When target_node_id falls back to "local", the conflict scan on that
+    node must detect an active workspace holding the same host port so the
+    retry is rejected with a 409-class error."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(source.id)
+        assert ws is not None
+        ws.node_id = None
+        for res in await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        ):
+            await session.delete(res)
+        await session.commit()
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        blocker = await repo.create(
+            repo_url="git@github.com:example/blocker.git",
+            branch_base="main",
+            task_title="Block port",
+            task_prompt="noop",
+            task_external_id=None,
+            task_class="test_task",
+            owned_paths=[],
+            task_policy={
+                "companions": [
+                    {"name": "blocker-svc", "ports": [[5432, 5434]]},
+                ],
+            },
+            auto_merge=False,
+            initial_review_grace_period_seconds=0,
+            agent="codex",
+            env_profile=None,
+            profile_ref=None,
+            requested_profile=None,
+            resolved_profile=None,
+            test_commands=[],
+            requires_database=False,
+            idempotency_key=None,
+            task_kind="feature_branch_pr",
+            remote_push_branch=None,
+        )
+        blocker.node_id = "local"
+        await repo.transition(blocker, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.ready, reason_code="TEST")
+        await repo.transition(blocker, to=WorkspaceStatus.running, reason_code="TEST")
+        await session.commit()
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceCreateHostPortConflictError):
+            await retry_workspace_row(
+                session,
+                source.id,
+                settings=settings,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="no-node conflict scan test",
+                provider_environ={},
+            )
+
+
+@pytest.mark.unit
+async def test_retry_runtime_gate_override_excludes_source_from_port_conflict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When ignore_source_runtime_check=True, the runtime-not-released gate
+    is skipped, and the source workspace is excluded from port conflict
+    scanning because the retry replaces the source. Even though the source
+    still holds host ports (no runtime release event), retry succeeds because
+    excluding the source avoids a false conflict with itself."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="auto-retry port conflict",
+            provider_environ={},
+            ignore_source_runtime_check=True,
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_runtime_gate_override_succeeds_when_source_runtime_released(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When ignore_source_runtime_check=True and the source runtime has been
+    released, the retry can proceed because the source's host ports are no
+    longer held and there is no conflict."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="auto-retry source released",
+            provider_environ={},
+            ignore_source_runtime_check=True,
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_runtime_gate_override_succeeds_no_host_ports_runtime_not_released(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """When ignore_source_runtime_check=True and there are no host-port
+    claims, retry must succeed even when the source compose stack has not
+    been released because there are no ports to collide on."""
+    settings = _settings_with_host_home(tmp_path)
+    req = _request_with_preflight_override()
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=False)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="auto-retry no ports",
+            provider_environ={},
+            ignore_source_runtime_check=True,
+        )
+        assert retry.new_workspace.id != source.id
+
+
+@pytest.mark.unit
+async def test_retry_defaults_unset_worker_node_to_local_for_legacy_source_hostname(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    """An upgraded local install may have failed source rows stamped with the
+    old container hostname while current local workers default to "local".
+    When the source runtime is already released, the retry reservation must be
+    placed on "local" so the local scheduler can list and claim it."""
+    settings = Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+    )
+    req = _request_with_preflight_override()
+    companion_req = {
+        "name": "sidecar",
+        "repo_url": "git@github.com:example/sidecar.git",
+        "base_branch": "main",
+        "ports": [[5432, 5434]],
+    }
+    payload = req.model_dump(mode="python")
+    payload["companions"] = [companion_req]
+    req_with_companion = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        source = await create_workspace_row(
+            session,
+            req_with_companion,
+            settings=settings,
+            provider_environ={},
+        )
+        await session.commit()
+
+    await _mark_failed(factory, source.id, release_runtime=True)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(source.id)
+        assert ws is not None
+        ws.node_id = "legacy-container-hostname"
+        reservations = await ResourceReservationRepository(session).list_for_workspace(
+            source.id,
+        )
+        assert len(reservations) == 1
+        assert reservations[0].node_id == "local"
+        await session.commit()
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            source.id,
+            settings=settings,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="legacy local hostname normalization test",
+            provider_environ={},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried_reservations = await ResourceReservationRepository(
+            session,
+        ).list_for_workspace(retry.new_workspace.id)
+        assert len(retried_reservations) == 1
+        assert retried_reservations[0].node_id == "local"

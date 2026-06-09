@@ -1,0 +1,71 @@
+name: node-next-browser-app
+version: 1
+description: Generic Node/Next-style app profile with browser validation sidecar.
+runtime:
+  environment:
+    APP_BASE_URL: http://app:3000
+    BROWSER_VALIDATE_URL: http://browser:9323/validate
+docker:
+  mode: none
+services:
+  - name: app
+    build_context: .
+    dockerfile: Dockerfile
+    environment:
+      PORT: "3000"
+    healthcheck_cmd: node /app/scripts/container-healthcheck.mjs http://127.0.0.1:3000/healthz ok
+    command: node /app/server.mjs
+  - name: browser
+    build_context: .
+    dockerfile: Dockerfile.playwright
+    environment:
+      APP_BASE_URL: http://app:3000
+      PORT: "9323"
+    depends_on:
+      - app
+    healthcheck_cmd: node /app/scripts/container-healthcheck.mjs http://127.0.0.1:9323/healthz ok
+    command: node /app/browser/validator-server.mjs
+app_endpoints:
+  - name: app
+    service: app
+    port: 3000
+    path: /
+    health:
+      path: /healthz
+      expected_status: 200
+    visibility: agent
+  - name: browser_validation
+    service: browser
+    port: 9323
+    path: /validate
+    health:
+      path: /healthz
+      expected_status: 200
+    visibility: validation
+  - name: operator_notes
+    service: app
+    port: 3000
+    path: /operator
+    visibility: console
+phases:
+  setup:
+    - command: node scripts/setup.mjs
+      timeout_seconds: 30
+  validate:
+    - command: node scripts/validate-browser.mjs
+      timeout_seconds: 120
+validation:
+  healthchecks:
+    - name: app
+      command: node scripts/healthcheck.mjs app
+      timeout_seconds: 120
+      interval_seconds: 1
+      attempt_timeout_seconds: 15
+    - name: browser
+      command: node scripts/healthcheck.mjs browser
+      timeout_seconds: 120
+      interval_seconds: 1
+      attempt_timeout_seconds: 15
+ports:
+  app: http://app:3000
+  browser: http://browser:9323/validate

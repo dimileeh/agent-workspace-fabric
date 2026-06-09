@@ -1,8 +1,9 @@
 """Defer-signal artifact at terminal transitions.
 
-On each terminal ``MonitorAction`` dispatch (``Merge`` / ``NotifyHuman`` /
+On each terminal ``MonitorAction`` dispatch (``Merge`` /
 ``ShortCircuitCompleted`` / ``Abort``) the runner writes a JSON file
-under ``<artifacts_root>/<workspace_id>.defer-signal.json``. The file
+under ``<artifacts_root>/<workspace_id>.defer-signal.json``. ``NotifyHuman``
+is a live wait state and must not publish a terminal artifact. The file
 tells an orchestrator outside AWF:
 
   * what terminal action fired (did we actually merge?),
@@ -25,27 +26,22 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.db.base import Base
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
+from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
     pr_payload,
+    review_node,
     seed_monitoring_workspace,
-    thread_node,
 )
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 @pytest.fixture
@@ -83,24 +79,21 @@ class TestDeferSignalArtifact:
         the orchestrator can spec follow-up workspaces."""
         ws_id = await seed_monitoring_workspace(factory)
         artifacts_root = tmp_path / "artifacts"
-        bot_thread = thread_node(
-            tid="T_bot",
-            author="greptile-apps",
-            path="src/foo.py",
-            line=42,
-            body="consider renaming",
-        )
+        # #305: inline-thread defers are captured + resolved, so the terminal
+        # deferred item recorded in the artifact is a review-level comment defer
+        # (never auto-resolved). A bot review-comment defer does not block merge.
+        bot_review = review_node(cid=801, author="greptile-apps", body="consider renaming")
         # Outer iter 1: AddressComments fires; adapter defers.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         adapter.queue(stdout="DEFER: advisory nit, skipping")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))  # settle
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))  # settle
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # Outer iter 2: bot-defer → gate passes → Merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGESHA\n")
         runner = make_runner(
@@ -119,27 +112,17 @@ class TestDeferSignalArtifact:
         data = _artifact_for(artifacts_root, ws_id)
         assert data["workspace_id"] == ws_id
         assert data["pr_number"] == 42
-        # ``repo`` (owner/name) is required for the watchdog to disambiguate
-        # PR-number collisions across repos.
-        assert data["repo"] == "dimileeh/aira-web"
-        # ``head_sha`` lets the watchdog detect new commits since the
-        # terminal — without it, NotifyHuman + new push would never re-engage.
-        # Pin the exact SHA so a regression that writes the wrong commit
-        # (e.g. base SHA, empty string) is caught.
-        assert data["head_sha"] == "abc1234567890def"
         assert data["terminal_action"] == "Merge"
         assert data["merged"] is True
         assert len(data["deferred_bot_items"]) == 1
         item = data["deferred_bot_items"][0]
-        assert item["kind"] == "thread"
-        assert item["id"] == "T_bot"
+        assert item["kind"] == "review"
+        assert item["id"] == "801"
         assert item["author"] == "greptile-apps"
-        assert item["path"] == "src/foo.py"
-        assert item["line"] == 42
         assert data["deferred_human_items"] == []
 
     @pytest.mark.unit
-    async def test_artifact_written_on_merge_blocked_downgrade(
+    async def test_merge_blocked_notification_waits_until_external_merge_for_artifact(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -147,36 +130,38 @@ class TestDeferSignalArtifact:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """``gh pr merge`` can be rejected by branch protection. The
-        runner falls back to posting a "ready to merge" comment and
-        still writes the artifact, but with ``merged=False`` so the
-        orchestrator knows no squash actually landed."""
+        """``gh pr merge`` can be rejected by branch protection.
+
+        The runner posts a human-attention comment, but does not publish a
+        terminal artifact or tear down the workspace until the PR is
+        actually merged.
+        """
         ws_id = await seed_monitoring_workspace(factory)
         artifacts_root = tmp_path / "artifacts"
-        bot_thread = thread_node(
-            tid="T_bot",
-            author="greptile-apps",
-            path="src/foo.py",
-            line=42,
-            body="consider renaming",
-        )
+        # #305: terminal deferred item is a bot review-comment defer (inline
+        # thread defers are captured + resolved and never reach the artifact).
+        bot_review = review_node(cid=801, author="greptile-apps", body="consider renaming")
         # Outer iter 1: AddressComments fires; adapter defers.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         adapter.queue(stdout="DEFER: advisory nit, skipping")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))  # settle
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))  # settle
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
         # Outer iter 2: bot-defer → gate passes → Merge dispatched, but
         # gh pr merge is blocked by branch protection → downgrade path.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[bot_review]))
         cmd.queue_result(
             returncode=1,
             stderr="pull request not mergeable: required status checks pending",
         )  # gh pr merge — blocked
         cmd.queue_result(returncode=0)  # gh pr comment (ready-to-merge fallback)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, reviews=[bot_review]))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = make_runner(
             factory=factory,
             cmd=cmd,
@@ -191,18 +176,17 @@ class TestDeferSignalArtifact:
             compose_file=tmp_path / "compose.yml",
         )
         data = _artifact_for(artifacts_root, ws_id)
-        assert data["terminal_action"] == "Merge"
-        assert data["merged"] is False
+        assert data["terminal_action"] == "ShortCircuitCompleted"
+        assert data["merged"] is True
         assert len(data["deferred_bot_items"]) == 1
         item = data["deferred_bot_items"][0]
-        assert item["id"] == "T_bot"
+        assert item["kind"] == "review"
+        assert item["id"] == "801"
         assert item["author"] == "greptile-apps"
-        assert item["path"] == "src/foo.py"
-        assert item["line"] == 42
         assert data["deferred_human_items"] == []
 
     @pytest.mark.unit
-    async def test_artifact_written_on_notify_human_with_human_defers(
+    async def test_human_defer_notification_waits_until_external_merge_for_artifact(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -212,25 +196,27 @@ class TestDeferSignalArtifact:
     ) -> None:
         ws_id = await seed_monitoring_workspace(factory)
         artifacts_root = tmp_path / "artifacts"
-        human_thread = thread_node(
-            tid="T_human",
-            author="alice-human",
-            path="src/bar.py",
-            line=7,
-            body="design question",
-        )
+        # #305: a human review-comment defer blocks (NotifyHuman) and is the
+        # terminal deferred item recorded; inline-thread defers are captured.
+        human_review = review_node(cid=802, author="alice-human", body="design question")
         # Outer iter 1: AddressComments; agent defers.
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[human_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         adapter.queue(stdout="DEFER: needs maintainer input")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[human_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")
         # Outer iter 2: human-defer → gate blocks → NotifyHuman.
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[human_thread]))
+        cmd.queue_result(returncode=0, stdout=pr_payload(reviews=[human_review]))
         cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
+        # NotifyHuman is not terminal; the monitor remains alive until the
+        # PR is actually merged.
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, reviews=[human_review]))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = make_runner(
             factory=factory,
             cmd=cmd,
@@ -245,16 +231,14 @@ class TestDeferSignalArtifact:
             compose_file=tmp_path / "compose.yml",
         )
         data = _artifact_for(artifacts_root, ws_id)
-        assert data["terminal_action"] == "NotifyHuman"
-        assert data["repo"] == "dimileeh/aira-web"
-        assert data["head_sha"] == "abc1234567890def"
-        assert data["merged"] is False
+        assert data["terminal_action"] == "ShortCircuitCompleted"
+        assert data["merged"] is True
         assert data["deferred_bot_items"] == []
         assert len(data["deferred_human_items"]) == 1
         item = data["deferred_human_items"][0]
-        assert item["id"] == "T_human"
+        assert item["kind"] == "review"
+        assert item["id"] == "802"
         assert item["author"] == "alice-human"
-        assert item["path"] == "src/bar.py"
 
     @pytest.mark.unit
     async def test_artifact_written_on_abort(
@@ -335,7 +319,7 @@ class TestDeferSignalArtifact:
     ) -> None:
         """When ``artifacts_root`` is not passed to the runner, it
         defaults to ``worktrees_root.parents[1] / "artifacts"`` — matches
-        the layout ``run_awf.py`` uses where ``worktrees_root`` is
+        the local service layout where ``worktrees_root`` is
         ``<work_dir>/git/worktrees`` and artifacts live at
         ``<work_dir>/artifacts``."""
         ws_id = await seed_monitoring_workspace(factory)

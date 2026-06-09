@@ -9,14 +9,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError
-from awf.db.base import Base
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_engine, make_session_factory
-from scripts import run_awf
+from awf.db.session import make_session_factory
+from tests.postgres import create_postgres_test_engine
 
 # ── github_client error paths ──────────────────────────────────────────────
 
@@ -73,36 +73,26 @@ class TestDigHelper:
 
 class TestExecutorFixPassWarnings:
     """Lines 425 + 452: the fix-cycle logs a warning when ``git add -A``
-    or ``git commit`` in a fix pass fails. Both are non-fatal — they
-    let the next retry's validation confirm or refute that the CLI did
-    useful work — but we still want the operator to see the warning."""
+    or ``git commit`` in a fix pass fails. These git failures are terminal
+    infrastructure failures, and the operator still needs the warning log
+    before the workspace is marked failed with a reason code."""
 
     @pytest.mark.unit
-    @pytest.mark.skip(
-        reason=(
-            "Complex FakeCommandRunner queue setup with the fix-cycle's"
-            " validation retry proved brittle across test orderings — "
-            " the executor's fix-pass warning paths are reached via"
-            " existing test_executor_validation_fix_cycle.py integration"
-            " flows in practice. Left in skipped state as a specification"
-            " marker for the invariant."
-        )
-    )
-    async def test_fix_pass_add_and_commit_failures_log_and_continue(self, tmp_path: Path) -> None:
+    async def test_fix_pass_add_failure_marks_workspace_failed(self, tmp_path: Path) -> None:
+        from awf.adapters import base as _adapter_base
         from awf.adapters import registry as _registry  # noqa: F401
+        from awf.adapters.codex import CodexAdapter
         from awf.common.commands import FakeCommandRunner
         from awf.control.executor import ExecutorConfig, WorkspaceExecutor
         from awf.db.enums import AgentRuntime
         from awf.node.compose_manager import ComposeManager
-        from awf.runtime.pr_creator import PullRequestCreator
-        from awf.runtime.validation import ValidationRunner
+        from awf.runtime.pr_creator import PullRequestResult
+        from awf.runtime.validation import ValidationCommandResult, ValidationResult
 
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
         )
-        engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'fp.db'}")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
         factory = make_session_factory(engine)
         async with factory() as s:
             repo = WorkspaceRepository(s)
@@ -123,38 +113,96 @@ class TestExecutorFixPassWarnings:
             await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="T")
             await s.commit()
             ws_id = ws.id
+        (tmp_path / "w" / "wt" / ws_id).mkdir(parents=True, exist_ok=True)
 
         fake = FakeCommandRunner()
         # adapter.run is via subprocess.
         fake.queue_result(returncode=0)  # adapter
-        # Initial commit block: add, cached diff (non-empty), commit, rev-list.
+        # Initial commit block: branch check, add, cached diff (non-empty), commit, rev-list.
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # rev-parse --abbrev-ref HEAD
         fake.queue_result(returncode=0)  # git add -A
         fake.queue_result(returncode=0, stdout="a\n")  # diff --cached
         fake.queue_result(returncode=0)  # commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        # Validation pass 0: FAIL (triggers fix cycle).
-        fake.queue_result(returncode=1, stderr="pytest: 1 failed")
-        # Fix pass 1: adapter → fix_add FAILS (warning) → cached diff →
-        # commit FAILS (warning) → validation GREEN.
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
+        # Fix pass 1: adapter -> fix_add FAILS (warning + reason-coded failure).
         fake.queue_result(returncode=0)  # adapter (fix pass)
         fake.queue_result(returncode=1, stderr="index.lock held")  # fix_add FAILS
-        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (hack: still has change)
-        fake.queue_result(returncode=1, stderr="commit would be empty")  # fix_commit FAILS
-        fake.queue_result(returncode=0)  # validation pass 1 green
-        # Pre-push diagnostics + push + gh pr create.
-        fake.queue_result(returncode=0, stdout="sha\n")
-        fake.queue_result(returncode=0, stdout="awf/x\n")
-        fake.queue_result(returncode=0, stdout="ab commit\n")
-        fake.queue_result(returncode=0)  # push
-        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")
+
+        class _FixPassValidation:
+            def __init__(self, artifacts_dir: Path) -> None:
+                self.artifacts_dir = artifacts_dir
+                self.validation_calls = 0
+
+            async def run_profile_coverage(self, **_kwargs: Any) -> None:
+                return None
+
+            async def run_profile_phases(
+                self,
+                *,
+                workspace_id: str,
+                phase_names: tuple[str, ...],
+                **_kwargs: Any,
+            ) -> ValidationResult:
+                if phase_names == ("setup", "pre_agent"):
+                    return ValidationResult()
+                assert phase_names == ("post_agent", "validate")
+                self.validation_calls += 1
+                artifacts = self.artifacts_dir / workspace_id
+                artifacts.mkdir(parents=True, exist_ok=True)
+                stdout = artifacts / f"validate_{self.validation_calls}.stdout"
+                stderr = artifacts / f"validate_{self.validation_calls}.stderr"
+                if self.validation_calls == 1:
+                    stdout.write_text("", encoding="utf-8")
+                    stderr.write_text("pytest: 1 failed", encoding="utf-8")
+                    return ValidationResult(
+                        commands=[
+                            ValidationCommandResult(
+                                command="pytest -q",
+                                returncode=1,
+                                duration_seconds=0.1,
+                                stdout_path=stdout,
+                                stderr_path=stderr,
+                                phase="validate",
+                                reason_code="COMMAND_FAILED",
+                            )
+                        ]
+                    )
+                stdout.write_text("passed", encoding="utf-8")
+                stderr.write_text("", encoding="utf-8")
+                return ValidationResult(
+                    commands=[
+                        ValidationCommandResult(
+                            command="pytest -q",
+                            returncode=0,
+                            duration_seconds=0.1,
+                            stdout_path=stdout,
+                            stderr_path=stderr,
+                            phase="validate",
+                        )
+                    ]
+                )
+
+        class _SuccessfulPrCreator:
+            async def push_and_open(
+                self,
+                *,
+                branch_name: str,
+                **_kwargs: Any,
+            ) -> PullRequestResult:
+                return PullRequestResult(
+                    url="https://github.com/x/y/pull/1",
+                    branch=branch_name,
+                    head_sha="c" * 40,
+                )
 
         executor = WorkspaceExecutor(
             session_factory=factory,
             runner=fake,
             compose=ComposeManager(work_dir=tmp_path / "w", template_path=template),
-            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "a"),
-            pr_creator=PullRequestCreator(fake),
+            validation=_FixPassValidation(tmp_path / "a"),  # type: ignore[arg-type]
+            pr_creator=_SuccessfulPrCreator(),  # type: ignore[arg-type]
             config=ExecutorConfig(
                 worktrees_root=tmp_path / "w" / "wt",
                 compose_projects_root=tmp_path / "w" / "c",
@@ -164,13 +212,32 @@ class TestExecutorFixPassWarnings:
                 max_validation_fix_passes=3,
             ),
         )
-        await executor.execute(ws_id)
+        original_adapter_registry = dict(_adapter_base._REGISTRY)
+        _adapter_base._REGISTRY[AgentRuntime.codex] = CodexAdapter
+        try:
+            with structlog.testing.capture_logs() as captured:
+                await executor.execute(ws_id)
+        finally:
+            _adapter_base._REGISTRY.clear()
+            _adapter_base._REGISTRY.update(original_adapter_registry)
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            # Landed at completed despite fix-pass sub-failures.
-            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.status == WorkspaceStatus.failed.value, {
+                "failure_reason": ws.failure_reason,
+                "failure_message": ws.failure_message,
+                "events": [(event.event_type, event.reason_code) for event in ws.events],
+                "calls": [call.args for call in fake.calls],
+            }
+            assert ws.failure_reason == FailureReason.infrastructure_failure.value
+            assert "validation fix pass git add -A failed" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "VALIDATION_FIX_GIT_ADD_FAILED"
+        assert any(
+            event.get("event") == "executor.fix_pass_add_failed"
+            and event.get("stderr") == "index.lock held"
+            for event in captured
+        )
         await engine.dispose()
 
 
@@ -194,9 +261,7 @@ class TestExecutorMarkFailedStatusDiverged:
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
         )
-        engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'mf.db'}")
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        engine = await create_postgres_test_engine()
         factory = make_session_factory(engine)
         async with factory() as s:
             repo = WorkspaceRepository(s)
@@ -288,89 +353,6 @@ class TestGitManagerEmptyRefSkip:
             )
 
 
-# ── run_awf _main's "status != completed without failure_reason" ──────────
-
-
-class TestRunAwfIncompleteNoFailureReason:
-    @pytest.mark.unit
-    async def test_non_completed_status_without_reason_flips_exit_to_one(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Line 1072: a task result whose status isn't 'completed' but
-        also has no failure_reason is odd (state machine never reached
-        completed nor was it explicitly marked failed). Still exits 1
-        so the operator notices."""
-        config = tmp_path / "tasks.json"
-        config.write_text(
-            '[{"repo_url": "git@github.com:x/y.git", "branch_base": "development", '
-            '"task_title": "weird", "task_prompt": "p", "agent": "codex", '
-            '"test_commands": [], "requires_database": false}]'
-        )
-
-        async def _fake_run_task_with_guard(cfg, **kwargs):  # type: ignore[no-untyped-def]
-            return {
-                "workspace_id": "ws_weird",
-                "title": "weird",
-                # Odd state: not completed, but no failure_reason either.
-                "status": "cancelled",
-                "pr_url": None,
-                "failure_reason": None,
-                "failure_message": None,
-                "branch": "awf/weird",
-                "base_commit": "a" * 40,
-            }
-
-        monkeypatch.setattr(run_awf, "_run_task_with_failure_guard", _fake_run_task_with_guard)
-        fake_home = tmp_path / "fake_home"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-
-        rc = await run_awf._main(
-            config_path=config,
-            work_dir=tmp_path / "work",
-            keep_state=True,
-        )
-        assert rc == 1
-
-
 # validation display tests live in tests/unit/test_polish_small_gaps.py,
 # where they drive ``ValidationRunner._exec`` directly with a fake
 # runner instead of reimplementing the formatting logic.
-
-
-# ── attach_feature_pr_monitor._main ────────────────────────────────────────
-
-
-class TestAttachFeaturePrMain:
-    @pytest.mark.unit
-    async def test_main_invokes_orchestrate_attach(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Lines 218-219: ``_main`` is the argparse-bound entry. It
-        constructs a runner and delegates to orchestrate_attach. We
-        monkeypatch the delegatee and verify the delegation happens."""
-        import argparse
-
-        from scripts import attach_feature_pr_monitor as mod
-
-        captured: dict[str, Any] = {}
-
-        async def _fake_orchestrate(**kwargs: Any) -> int:
-            captured.update(kwargs)
-            return 0
-
-        monkeypatch.setattr(mod, "orchestrate_attach", _fake_orchestrate)
-
-        ns = argparse.Namespace(
-            repo="git@github.com:dimileeh/aira-web.git",
-            pr=277,
-            agent="codex",
-            auto_merge=False,
-            companions=None,
-            work_dir=tmp_path,
-        )
-        rc = await mod._main(ns)
-        assert rc == 0
-        assert captured["repo_url"] == "git@github.com:dimileeh/aira-web.git"
-        assert captured["pr_number"] == 277
-        assert captured["agent"] == "codex"

@@ -12,83 +12,348 @@ friendly formatting is opt-in via ``--format pretty``.
 
 from __future__ import annotations
 
-import json
-import os
+import asyncio
+import importlib.metadata as importlib_metadata
+import subprocess
 import sys
-from enum import StrEnum
-from typing import Any
+from pathlib import Path
+from typing import NoReturn
 
+import click
 import httpx
 import typer
+from click.core import ParameterSource
+
+from awf import __version__
+from awf.cli.common import (
+    OutputFormat,
+    _call,
+    _emit,
+)
+from awf.cli.init_ops import (
+    _prompt_project_onboarding_choices,
+    _resolve_service_compose_paths,
+    _resolve_service_env_files,
+    _resolve_service_runtime_env_files,
+    _run_init_project_onboarding,
+    _stdio_is_interactive,
+    _trusted_service_compose_env_file,
+)
+from awf.cli.mcp_commands import mcp_app
+from awf.cli.profile_smoke_commands import profile_app, smoke_app
+from awf.cli.service_commands import service_app
+from awf.cli.setup_commands import setup_command
+from awf.cli.start_commands import start_command
+from awf.cli.workspace_commands import locks_app, operations_app, workspace_app
+
+__all__ = [
+    "app",
+    "_call",
+    "_prompt_project_onboarding_choices",
+    "_resolve_service_compose_paths",
+    "_resolve_service_env_files",
+    "_resolve_service_runtime_env_files",
+    "_stdio_is_interactive",
+    "_trusted_service_compose_env_file",
+    "httpx",
+    "subprocess",
+]
+
+_DX_FIRST_PATH_HELP = """
+For first-time users: the current runnable first path is
+`awf service bootstrap` (or the friendly `awf start` wrapper), then
+`awf init <path>` to prepare your project repository. Run `awf setup
+--dry-run` first for a read-only host readiness check.
+"""
+
+_MUTATES_GLOBAL_HELP = """
+Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
+via the async worker.
+"""
+
+_PROVIDER_HELP_PASSTHROUGH = (
+    "Legacy no-path init bootstrap provider flag. Hidden from help and rejected "
+    "with migration guidance; use `awf service bootstrap`."
+)
+
+_DISTRIBUTION_NAME = "agent-workspace-fabric"
+
 
 app = typer.Typer(
     name="awf",
-    help="Aira Agent Workspace Fabric — CLI operator surface.",
+    help=f"Agent Workspace Fabric — CLI operator surface.\n{_DX_FIRST_PATH_HELP}{_MUTATES_GLOBAL_HELP}",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
 
-workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy).")
-app.add_typer(workspace_app, name="workspace")
 
-
-class OutputFormat(StrEnum):
-    json = "json"
-    pretty = "pretty"
-
-
-_DEFAULT_BASE_URL = "http://localhost:8000"
-
-
-def _base_url(override: str | None) -> str:
-    return override or os.environ.get("AWF_CLI_BASE_URL", _DEFAULT_BASE_URL)
-
-
-def _emit(payload: object, fmt: OutputFormat) -> None:
-    if fmt == OutputFormat.json:
-        typer.echo(json.dumps(payload, indent=2, default=str))
-        return
-    # "pretty" is a light human view — one line per key, sorted keys for
-    # determinism. This is not a dashboard; it's the minimum that makes
-    # copy-paste from a terminal readable.
-    if isinstance(payload, list):
-        for i, item in enumerate(payload):
-            typer.echo(f"--- #{i + 1} ---")
-            _emit_pretty_dict(item if isinstance(item, dict) else {"value": item})
-        return
-    if isinstance(payload, dict):
-        _emit_pretty_dict(payload)
-        return
-    typer.echo(str(payload))
-
-
-def _emit_pretty_dict(d: dict[str, Any]) -> None:
-    for key in sorted(d.keys()):
-        typer.echo(f"  {key}: {d[key]}")
-
-
-def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:
-    url = f"{base_url.rstrip('/')}{path}"
+def _cli_version() -> str:
+    """Return the installed console script version, with a source-tree fallback."""
     try:
-        return httpx.request(method, url, timeout=30.0, **kwargs)
-    except httpx.RequestError as exc:
-        typer.echo(f"error: could not reach AWF API at {url}: {exc}", err=True)
-        raise typer.Exit(code=2) from exc
+        return importlib_metadata.version(_DISTRIBUTION_NAME)
+    except importlib_metadata.PackageNotFoundError:
+        return __version__
 
 
-def _handle_response(response: httpx.Response, fmt: OutputFormat) -> None:
-    if response.status_code >= 400:
-        try:
-            typer.echo(json.dumps(response.json(), indent=2), err=True)
-        except ValueError:
-            typer.echo(response.text, err=True)
-        raise typer.Exit(code=1)
-    if response.status_code == 204 or not response.content:
-        return
-    _emit(response.json(), fmt)
+def _version_callback(value: bool) -> None:
+    """Print the package version for the eager root ``--version`` option."""
+    if value:
+        typer.echo(f"awf {_cli_version()}")
+        raise typer.Exit()
+
+
+@app.callback()
+def root_callback(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the AWF version and exit.",
+    ),
+) -> None:
+    """Register root-level CLI options shared by all AWF commands."""
+    del version
+
+
+app.add_typer(workspace_app, name="workspace")
+app.add_typer(profile_app, name="profile")
+app.add_typer(service_app, name="service")
+app.add_typer(locks_app, name="locks")
+app.add_typer(operations_app, name="operations")
+app.add_typer(mcp_app, name="mcp")
+app.add_typer(smoke_app, name="smoke")
+app.command(
+    "setup",
+    help=(
+        "Prepare this machine for AWF first-run use. Runs read-only host "
+        "readiness checks (Docker, Compose, Git, gh, Python, ports, disk, "
+        "PATH, capacity) and reports blockers without starting Core. Use "
+        "--dry-run to only check, --provider to target a provider, and "
+        "--format json for scripting."
+    ),
+)(setup_command)
+app.command(
+    "start",
+    help=(
+        "Start local AWF Core. A friendly wrapper over the existing service "
+        "bootstrap engine that renders a first-run success panel or a "
+        "reason-coded failure. The expert commands awf service "
+        "bootstrap/status/doctor remain available."
+    ),
+)(start_command)
 
 
 # ── Commands ─────────────────────────────────────────────────────────────
+
+
+_DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS = "180"
+_DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = "2"
+_INIT_REQUIRES_PROJECT_PATH_REASON = "AWF_INIT_REQUIRES_PROJECT_PATH"
+
+
+def _init_migration_payload(
+    legacy_flags: list[str],
+    path_required_flags: list[str],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": "error",
+        "reason_code": _INIT_REQUIRES_PROJECT_PATH_REASON,
+        "command": "awf init",
+        "message": "`awf init` requires a project path.",
+        "next_steps": [
+            "Run awf service bootstrap to start local AWF Core.",
+            "Run awf init <path> to onboard a project repository.",
+        ],
+    }
+    if legacy_flags:
+        payload["rejected_flags"] = legacy_flags
+    if path_required_flags:
+        payload["path_required_flags"] = path_required_flags
+    return payload
+
+
+def _emit_init_migration_error(
+    fmt: OutputFormat,
+    *,
+    legacy_flags: list[str],
+    path_required_flags: list[str],
+) -> NoReturn:
+    payload = _init_migration_payload(legacy_flags, path_required_flags)
+    if fmt == OutputFormat.json:
+        _emit(payload, fmt)
+    else:
+        typer.echo("AWF init: project path required", err=True)
+        typer.echo(f"Reason: {_INIT_REQUIRES_PROJECT_PATH_REASON}", err=True)
+        typer.echo(
+            "Problem: `awf init` no longer bootstraps the local service stack.",
+            err=True,
+        )
+        if legacy_flags:
+            typer.echo(
+                "Rejected legacy no-path init flag(s): " + ", ".join(legacy_flags),
+                err=True,
+            )
+        if path_required_flags:
+            typer.echo(
+                "Project path required for flag(s): " + ", ".join(path_required_flags),
+                err=True,
+            )
+        typer.echo("Next:", err=True)
+        typer.echo("  - Run `awf service bootstrap` to start local AWF Core.", err=True)
+        typer.echo("  - Run `awf init <path>` to onboard a project repository.", err=True)
+    raise typer.Exit(code=2)
+
+
+@app.command(
+    "init",
+    help=f"Run local onboarding checks for a project path.\n{_DX_FIRST_PATH_HELP}",
+)
+def init(
+    path: Path | None = typer.Argument(
+        None,
+        help=(
+            "Path to a checked-out repository. Required for project onboarding; "
+            "run `awf service bootstrap` first when local Core is not running."
+        ),
+    ),
+    include_smoke_request: bool = typer.Option(
+        False,
+        "--include-smoke-request",
+        help="Include a smoke-workspace request payload (does not submit).",
+    ),
+    guided: bool | None = typer.Option(
+        None,
+        "--guided/--no-guided",
+        help=(
+            "Project onboarding: prompt for a short first-run profile setup. "
+            "Defaults to guided only for interactive pretty output when no profile exists."
+        ),
+    ),
+    write_profile: bool = typer.Option(
+        False,
+        "--write-profile",
+        help="Project onboarding: write .awf/workspace.yml from the detected profile.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Project onboarding: approve non-interactive profile writes.",
+    ),
+    template: str = typer.Option(
+        "auto",
+        "--template",
+        help="Project onboarding: template override or auto.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Project onboarding: overwrite an existing .awf/workspace.yml when writing.",
+    ),
+    write_env: bool = typer.Option(
+        True,
+        "--write-env/--no-write-env",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
+        hidden=True,
+    ),
+    timeout_seconds: str = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
+        _DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS,
+        "--timeout-seconds",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
+        hidden=True,
+    ),
+    poll_interval_seconds: str = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
+        _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS,
+        "--poll-interval-seconds",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
+        hidden=True,
+    ),
+    skip_agent_runtime_build: bool = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
+        False,
+        "--skip-agent-runtime-build",
+        help="Legacy no-path init bootstrap flag; use `awf service bootstrap`.",
+        hidden=True,
+    ),
+    provider: list[str] = typer.Option(  # noqa: ARG001 - parsed only to reject legacy flag
+        [],
+        "--provider",
+        help=_PROVIDER_HELP_PASSTHROUGH,
+        hidden=True,
+    ),
+    fmt: OutputFormat = typer.Option(
+        OutputFormat.pretty,
+        "--format",
+        help="Output format. JSON unlocks scripting; pretty is the default.",
+    ),
+) -> None:
+    """Run project-onboarding checks for a repository path."""
+    ctx = click.get_current_context()
+
+    def _explicit(name: str) -> bool:
+        """Return whether an option was explicitly supplied."""
+        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+
+    if path is None:
+        path_required_flags: list[str] = []
+        legacy_flags: list[str] = []
+        if _explicit("include_smoke_request"):
+            path_required_flags.append("--include-smoke-request")
+        if _explicit("guided"):
+            path_required_flags.append("--guided" if guided else "--no-guided")
+        if _explicit("write_profile"):
+            path_required_flags.append("--write-profile")
+        if _explicit("yes"):
+            path_required_flags.append("--yes")
+        if _explicit("template"):
+            path_required_flags.append("--template")
+        if _explicit("force"):
+            path_required_flags.append("--force")
+        if _explicit("skip_agent_runtime_build"):
+            legacy_flags.append("--skip-agent-runtime-build")
+        if _explicit("provider"):
+            legacy_flags.append("--provider")
+        if _explicit("timeout_seconds"):
+            legacy_flags.append("--timeout-seconds")
+        if _explicit("poll_interval_seconds"):
+            legacy_flags.append("--poll-interval-seconds")
+        if _explicit("write_env"):
+            legacy_flags.append("--write-env" if write_env else "--no-write-env")
+        _emit_init_migration_error(
+            fmt,
+            legacy_flags=legacy_flags,
+            path_required_flags=path_required_flags,
+        )
+
+    bootstrap_only_flags: list[str] = []
+    if _explicit("skip_agent_runtime_build"):
+        bootstrap_only_flags.append("--skip-agent-runtime-build")
+    if _explicit("provider"):
+        bootstrap_only_flags.append("--provider")
+    if _explicit("timeout_seconds"):
+        bootstrap_only_flags.append("--timeout-seconds")
+    if _explicit("poll_interval_seconds"):
+        bootstrap_only_flags.append("--poll-interval-seconds")
+    if _explicit("write_env"):
+        bootstrap_only_flags.append("--write-env" if write_env else "--no-write-env")
+    if bootstrap_only_flags:
+        typer.echo(
+            "error: legacy bootstrap-only flag(s) "
+            f"{', '.join(bootstrap_only_flags)} are not valid for project onboarding; "
+            "run `awf service bootstrap` for local service setup.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    _run_init_project_onboarding(
+        path,
+        include_smoke_request=include_smoke_request,
+        guided=guided,
+        write_profile=write_profile,
+        yes=yes,
+        template=template,
+        force=force,
+        fmt=fmt,
+    )
 
 
 @app.command()
@@ -109,65 +374,20 @@ def serve(
     )
 
 
-@workspace_app.command("create")
-def workspace_create(
-    repo_url: str = typer.Option(..., "--repo", help="Git URL."),
-    task_title: str = typer.Option(..., "--title"),
-    task_prompt: str = typer.Option(..., "--prompt"),
-    branch_base: str = typer.Option("development", "--base"),
-    agent: str = typer.Option("codex", "--agent"),
-    test_commands: list[str] = typer.Option([], "--test", help="Repeatable."),
-    requires_database: bool = typer.Option(False, "--with-db"),
-    idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
-    base_url: str | None = typer.Option(None, "--base-url"),
-    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+@app.command("worker")
+def worker(
+    once: bool = typer.Option(
+        False,
+        "--once",
+        help="Run one poll batch and exit.",
+        hidden=True,
+    ),
 ) -> None:
-    """Submit a workspace creation request."""
-    body = {
-        "repo_url": repo_url,
-        "branch_base": branch_base,
-        "task_title": task_title,
-        "task_prompt": task_prompt,
-        "agent": agent,
-        "test_commands": test_commands,
-        "requires_database": requires_database,
-    }
-    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
-    response = _call(
-        "POST",
-        "/v1/workspaces",
-        base_url=_base_url(base_url),
-        json=body,
-        headers=headers,
-    )
-    _handle_response(response, fmt)
+    """Run the AWF control worker."""
+    from awf.service.config import resolve_service_settings
+    from awf.service.worker import run_worker
 
-
-@workspace_app.command("show")
-def workspace_show(
-    workspace_id: str = typer.Argument(...),
-    base_url: str | None = typer.Option(None, "--base-url"),
-    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
-) -> None:
-    """Fetch the current state of one workspace."""
-    response = _call("GET", f"/v1/workspaces/{workspace_id}", base_url=_base_url(base_url))
-    _handle_response(response, fmt)
-
-
-@workspace_app.command("list")
-def workspace_list(
-    limit: int = typer.Option(50, "--limit"),
-    base_url: str | None = typer.Option(None, "--base-url"),
-    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
-) -> None:
-    """List workspaces (newest first)."""
-    response = _call(
-        "GET",
-        "/v1/workspaces",
-        base_url=_base_url(base_url),
-        params={"limit": limit},
-    )
-    _handle_response(response, fmt)
+    asyncio.run(run_worker(resolve_service_settings(), once=once))
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point

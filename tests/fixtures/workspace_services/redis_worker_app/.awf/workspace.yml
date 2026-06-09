@@ -1,0 +1,64 @@
+name: redis-worker-app
+version: 1
+description: Generic Python app profile with Redis and worker sidecars.
+runtime:
+  environment:
+    APP_BASE_URL: http://app:8080
+    REDIS_URL: redis://redis:6379/0
+    WORKER_STATUS_URL: http://app:8080/status
+docker:
+  mode: none
+services:
+  - name: redis
+    image: redis:7-alpine
+    healthcheck_cmd: redis-cli ping
+    volumes:
+      - [redis_data, /data]
+  - name: app
+    build_context: .
+    dockerfile: Dockerfile
+    environment:
+      PORT: "8080"
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+    healthcheck_cmd: python /app/scripts/container_healthcheck.py app
+    command: python /app/app.py
+  - name: worker
+    build_context: .
+    dockerfile: Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WORKER_ID: redis-worker-fixture
+    depends_on:
+      - redis
+    healthcheck_cmd: python /app/scripts/container_healthcheck.py worker
+    command: python /app/worker.py
+phases:
+  setup:
+    - command: python scripts/setup.py
+      timeout_seconds: 30
+  validate:
+    - command: python scripts/validate.py
+      timeout_seconds: 30
+validation:
+  healthchecks:
+    - name: redis
+      command: python scripts/healthcheck.py redis
+      timeout_seconds: 120
+      interval_seconds: 1
+      attempt_timeout_seconds: 15
+    - name: app
+      command: python scripts/healthcheck.py app
+      timeout_seconds: 120
+      interval_seconds: 1
+      attempt_timeout_seconds: 15
+    - name: worker
+      command: python scripts/healthcheck.py worker
+      timeout_seconds: 120
+      interval_seconds: 1
+      attempt_timeout_seconds: 15
+ports:
+  app: http://app:8080
+  redis: redis://redis:6379/0
+  worker: redis-worker://worker

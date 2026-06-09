@@ -1,0 +1,1458 @@
+"""ControlWorker tests.
+
+We use the real Provisioner against real git + PostgreSQL to validate the full
+pipeline, rather than mocking the provisioner. The worker's contract is
+primarily about listing work off the DB in the right order and bounding
+concurrency, so end-to-end is the most useful test.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import subprocess
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from sqlalchemy.exc import InterfaceError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.control.worker import (
+    ControlWorker,
+    WorkerConfig,
+)
+from awf.control.worker import recovery_stale as worker_recovery_stale
+from awf.control.worker.helpers import (
+    _candidate_claim_is_stale,
+    _extract_pr_number,
+    _stale_active_execution_failure_message,
+)
+from awf.control.worker.scheduling import (
+    _scheduler_candidate_cursor,
+    _scheduler_candidate_fetch_limit,
+)
+from awf.control.worker.types import (
+    _ActiveExecutionCandidate,
+)
+from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
+from awf.db.repositories import (
+    ResourceReservationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    ValidationRunRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
+from awf.db.session import make_session_factory
+from awf.node.cleanup import (
+    COMPOSE_DOWN_SUCCEEDED,
+    WorkspaceCleanupResult,
+    WorkspaceCleanupStepResult,
+)
+from awf.node.git_manager import GitManager
+from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.service.scheduler import (
+    SchedulerOrderCursor,
+    scheduler_score_from_workspace,
+)
+from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
+from tests.postgres import postgres_test_engine
+
+PRESERVED_EXECUTION_EVENT_TYPE = "workspace.active_execution_preserved_after_restart"
+PRESERVED_EXECUTION_REASON_CODE = "ACTIVE_EXECUTION_PRESERVED_AFTER_RESTART"
+PRESERVED_EXECUTION_SUBPHASE = "runtime_preserved_after_restart"
+WORKER_TEST_TIMEOUT_SECONDS = 300.0
+
+
+def _git(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _git_output(args: list[str], cwd: Path) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+async def _pending_execution_task() -> None:
+    await asyncio.Event().wait()
+
+
+def _scheduler_test_scoring_time(
+    *,
+    after: SchedulerOrderCursor | None,
+    scoring_at: datetime | None,
+) -> datetime:
+    if after is None:
+        assert scoring_at is not None
+        return scoring_at
+    if scoring_at is not None:
+        assert scoring_at == after.scoring_at
+    return after.scoring_at
+
+
+def _scheduler_order_cursor_for_workspace(
+    workspace: Workspace,
+    *,
+    scoring_at: datetime,
+) -> SchedulerOrderCursor:
+    score = scheduler_score_from_workspace(workspace, now=scoring_at)
+    return SchedulerOrderCursor(
+        class_priority=score.class_priority,
+        effective_score=score.effective_score,
+        queued_at=score.queued_at,
+        workspace_id=score.workspace_id,
+        scoring_at=scoring_at,
+    )
+
+
+@pytest.fixture
+def origin_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "origin"
+    repo.mkdir()
+    _git(["init", "-q", "-b", "development"], repo)
+    _git(["config", "user.name", "T"], repo)
+    _git(["config", "user.email", "t@t"], repo)
+    (repo / "README.md").write_text("hello\n")
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "init"], repo)
+    return repo
+
+
+@pytest.fixture
+async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+@pytest.fixture
+def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> ControlWorker:
+    git = GitManager(tmp_path / "awf-work")
+    prov = Provisioner(
+        session_factory=session_factory,
+        git=git,
+        config=ProvisionerConfig(node_id="test-node-01"),
+    )
+    return ControlWorker(
+        session_factory=session_factory,
+        provisioner=prov,
+        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+    )
+
+
+async def _create_requested(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    *,
+    create_task_attempt: bool = False,
+    task_policy: dict[str, object] | None = None,
+    task_class: str | None = None,
+    created_at: datetime | None = None,
+    agent: str = "codex",
+) -> str:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent=agent,
+            test_commands=[],
+            task_policy=task_policy,
+            task_class=task_class,
+        )
+        if created_at is not None:
+            ws.created_at = created_at
+            ws.updated_at = created_at
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
+        await s.commit()
+        return ws.id
+
+
+async def _reserve_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    node_id: str = "local",
+    steady_cpu: float = 1.0,
+    steady_memory_gb: float = 1.0,
+    peak_cpu: float = 1.0,
+    peak_memory_gb: float = 1.0,
+    disk_mb: int | None = None,
+    dind_slots: int = 0,
+) -> None:
+    async with session_factory() as s:
+        attempt = await TaskAttemptRepository(s).get_by_workspace_id(workspace_id)
+        assert attempt is not None
+        await ResourceReservationRepository(s).create(
+            workspace_id=workspace_id,
+            attempt_id=attempt.id,
+            node_id=node_id,
+            steady_cpu=steady_cpu,
+            steady_memory_gb=steady_memory_gb,
+            peak_cpu=peak_cpu,
+            peak_memory_gb=peak_memory_gb,
+            disk_mb=disk_mb,
+            dind_slots=dind_slots,
+            phase="workspace_lifecycle",
+        )
+        await s.commit()
+
+
+async def _create_ready(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    *,
+    agent: str = "codex",
+    task_policy: dict[str, object] | None = None,
+    task_class: str | None = None,
+    create_task_attempt: bool = False,
+) -> str:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent=agent,
+            test_commands=[],
+            task_policy=task_policy,
+            task_class=task_class,
+        )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
+async def _create_monitoring_pr(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    *,
+    agent: str = "codex",
+    task_policy: dict[str, object] | None = None,
+    task_class: str | None = None,
+    create_task_attempt: bool = False,
+    pr_number: int = 123,
+    with_pr_url: bool = True,
+    monitor_iter_count: int = 0,
+    monitor_threads_addressed: dict[str, str] | None = None,
+    monitor_last_commit_sha: str | None = None,
+    monitor_started_at: datetime | None = None,
+) -> str:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent=agent,
+            test_commands=[],
+            task_policy=task_policy,
+            task_class=task_class,
+        )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.remote_push_branch = ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        if with_pr_url:
+            ws.pr_url = f"https://github.com/example/repo/pull/{pr_number}"
+            ws.pr_number = pr_number
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        ws.monitor_iter_count = monitor_iter_count
+        ws.monitor_threads_addressed = dict(monitor_threads_addressed or {})
+        ws.monitor_last_commit_sha = monitor_last_commit_sha
+        if monitor_started_at is not None:
+            ws.monitor_started_at = monitor_started_at
+        await s.commit()
+        return ws.id
+
+
+async def _create_active_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    status: WorkspaceStatus,
+    *,
+    compose_project_name: str | None = None,
+    node_id: str | None = None,
+    persist_compose_project: bool = True,
+    task_policy: dict[str, object] | None = None,
+    task_prompt: str = "p",
+    agent: str = "codex",
+    task_class: str | None = None,
+    owned_paths: list[str] | None = None,
+    auto_merge: bool = True,
+    initial_review_grace_period_seconds: float | None = None,
+    profile_ref: str | None = None,
+    requested_profile: dict[str, object] | None = None,
+    resolved_profile: dict[str, object] | None = None,
+    task_kind: str = "feature_branch_pr",
+    test_commands: list[str] | None = None,
+    create_task_attempt: bool = False,
+) -> str:
+    assert status in {
+        WorkspaceStatus.running,
+        WorkspaceStatus.validating,
+        WorkspaceStatus.pushing,
+    }
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt=task_prompt,
+            agent=agent,
+            task_class=task_class,
+            owned_paths=owned_paths,
+            test_commands=list(test_commands or []),
+            task_policy=task_policy,
+            auto_merge=auto_merge,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+            profile_ref=profile_ref,
+            requested_profile=requested_profile,
+            resolved_profile=resolved_profile,
+            task_kind=task_kind,
+        )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=ws.task_external_id,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.remote_push_branch = ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.node_id = node_id
+        if persist_compose_project:
+            ws.compose_project_name = (
+                compose_project_name if compose_project_name is not None else f"awf_{ws.id}"
+            )
+        else:
+            ws.compose_project_name = None
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        if status in {WorkspaceStatus.validating, WorkspaceStatus.pushing}:
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        if status == WorkspaceStatus.pushing:
+            await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
+async def _seed_primary_failure_evidence(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    failure_reason: str,
+    failure_message: str,
+    reason_code: str,
+    include_validation_run: bool = False,
+) -> str | None:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        original_status = WorkspaceStatus(ws.status)
+        if original_status == WorkspaceStatus.failed:
+            await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="SEED")
+        validation_run_id: str | None = None
+        if include_validation_run:
+            validation_repo = ValidationRunRepository(s)
+            run = await validation_repo.start(
+                workspace_id=workspace_id,
+                attempt_id=None,
+                tier=0,
+                commands=[
+                    {
+                        "command": "uv run pytest tests/unit/test_example.py::test_failure",
+                        "phase": "validation",
+                    }
+                ],
+                base_commit="a" * 40,
+                target_branch="development",
+                target_head_sha="b" * 40,
+                log_stream_refs={"validation": "logs/validation.log"},
+                workspace_head_sha="c" * 40,
+                profile_name="default",
+                profile_version=1,
+                profile_source=".awf/workspace.yml",
+                resolved_profile_digest="d" * 64,
+                environment_identity_digest="e" * 64,
+                environment_identity_inputs={"python": "3.12"},
+            )
+            await validation_repo.finish(
+                run.id,
+                status="failed",
+                reason_code=reason_code,
+                coverage={
+                    "percent": 91.5,
+                    "minimum_percent": 99.0,
+                    "threshold": 99.0,
+                    "failing_test_node_ids": [
+                        "tests/unit/test_example.py::test_failure",
+                    ],
+                    "failing_test_evidence": [
+                        "FAILED tests/unit/test_example.py::test_failure",
+                    ],
+                },
+            )
+            validation_run_id = run.id
+        ws.failure_reason = failure_reason
+        ws.failure_message = failure_message
+        await repo.transition(
+            ws,
+            to=WorkspaceStatus.failed,
+            reason_code=reason_code,
+            payload={
+                "reason_code": reason_code,
+                "message": failure_message,
+                "details": {
+                    "recommended_action": "fix the primary failure before retrying",
+                    "recovery_strategy": "retry_after_fix",
+                },
+            },
+        )
+        if original_status in {
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+        }:
+            # The worker paths under test require an active row, while the
+            # causality evidence itself must come from a real failed
+            # transition. Do not write a remonitor state_reset here: that would
+            # deliberately start a new failure epoch and suppress the primary
+            # evidence these secondary-path tests exercise.
+            ws.status = original_status.value
+        await s.commit()
+        return validation_run_id
+
+
+async def _create_terminal_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    status: WorkspaceStatus,
+) -> str:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.remote_push_branch = ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        if status == WorkspaceStatus.failed:
+            ws.failure_reason = "infrastructure_failure"
+            ws.failure_message = "seed failure"
+            await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        elif status == WorkspaceStatus.cancelled:
+            await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="SEED")
+        else:
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+            await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+            if status == WorkspaceStatus.completed:
+                await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="SEED")
+            else:
+                assert status == WorkspaceStatus.destroyed
+                await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="SEED")
+                await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="SEED")
+                await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
+async def _move_to_operator_control_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    final_status: WorkspaceStatus,
+) -> None:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_OPERATOR")
+        if final_status == WorkspaceStatus.destroyed:
+            await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="TEST_OPERATOR")
+            await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="TEST_OPERATOR")
+        else:
+            assert final_status == WorkspaceStatus.cancelled
+        await s.commit()
+
+
+class _TransitioningProvisioner:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+        self.calls: list[str] = []
+
+    async def provision(self, workspace_id: str) -> None:
+        await self.provision_claimed(workspace_id)
+
+    async def provision_claimed(
+        self, workspace_id: str, execution_claim_epoch: int | None = None
+    ) -> None:
+        self.calls.append(workspace_id)
+        async with self._session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            if ws.status == WorkspaceStatus.requested.value:
+                await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            elif ws.status != WorkspaceStatus.provisioning.value:
+                return
+            ws.branch_name = f"awf/{workspace_id}"
+            ws.base_commit = "b" * 40
+            ws.compose_project_name = f"awf_{workspace_id}"
+            ws.compose_file_path = f"/tmp/awf/{workspace_id}/compose.yml"
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="TEST_READY")
+            await s.commit()
+
+    def get_worktree_path(self, workspace_id: str) -> Path | None:
+        del workspace_id
+        return None
+
+
+class _MissingWorktreePathProvisioner(_TransitioningProvisioner):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], worktrees_root: Path):
+        super().__init__(session_factory)
+        self._worktrees_root = worktrees_root
+
+    def get_worktree_path(self, workspace_id: str) -> Path:
+        return self._worktrees_root / workspace_id
+
+
+class _RecordingExecutor:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.resume_calls: list[str] = []
+
+    async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        self.calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        self.resume_calls.append(workspace_id)
+
+
+class _BlockingExecutor(_RecordingExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute(self, workspace_id: str, **_kwargs: object) -> None:
+        self.calls.append(workspace_id)
+        self.started.set()
+        await self.release.wait()
+
+
+class _BlockingMonitorExecutor(_RecordingExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        self.resume_calls.append(workspace_id)
+        self.started.set()
+        await self.release.wait()
+
+
+class _RecordingRuntimeInspector:
+    def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        self._snapshots = snapshots
+        self.calls: list[str | None] = []
+
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        self.calls.append(compose_project_name)
+        return self._snapshots[compose_project_name]
+
+
+class _RecordingRuntimeCleaner:
+    def __init__(self, result: WorkspaceCleanupResult | None = None) -> None:
+        self.result = result or WorkspaceCleanupResult.from_steps(
+            [
+                WorkspaceCleanupStepResult(
+                    name="compose_down",
+                    status="succeeded",
+                    reason_code=COMPOSE_DOWN_SUCCEEDED,
+                )
+            ]
+        )
+        self.calls: list[dict[str, object]] = []
+
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> WorkspaceCleanupResult:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "repo_url": repo_url,
+                "compose_project_name": compose_project_name,
+                "compose_file_path": compose_file_path,
+                "worktree_host_path": worktree_host_path,
+                "remove_volumes": remove_volumes,
+                "remove_worktree": remove_worktree,
+            }
+        )
+        return self.result
+
+
+class _TrackedSessionContext:
+    def __init__(self, factory: _TrackingSessionFactory) -> None:
+        self._factory = factory
+        self._session = factory.base_factory()
+
+    async def __aenter__(self) -> AsyncSession:
+        session = await self._session.__aenter__()
+        self._factory.active_sessions += 1
+        return session
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool | None:
+        try:
+            return await self._session.__aexit__(exc_type, exc, traceback)
+        finally:
+            self._factory.active_sessions -= 1
+
+
+class _TrackingSessionFactory:
+    def __init__(self, base_factory: async_sessionmaker[AsyncSession]) -> None:
+        self.base_factory = base_factory
+        self.active_sessions = 0
+
+    def __call__(self) -> _TrackedSessionContext:
+        return _TrackedSessionContext(self)
+
+
+class _RecordingBranchOpenPRResolver:
+    def __init__(
+        self,
+        results_by_branch: dict[str, list[SimpleNamespace] | Exception],
+    ) -> None:
+        self._results_by_branch = results_by_branch
+        self.calls: list[dict[str, str | None]] = []
+
+    async def resolve(
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> list[SimpleNamespace]:
+        self.calls.append(
+            {
+                "repo_url": repo_url,
+                "branch_name": branch_name,
+                "base_branch": base_branch,
+            }
+        )
+        result = self._results_by_branch[branch_name]
+        if isinstance(result, Exception):
+            raise result
+        return list(result)
+
+
+class _RetargetedBranchOpenPRResolver:
+    def __init__(
+        self,
+        results_by_branch: dict[str, list[SimpleNamespace]],
+    ) -> None:
+        self._results_by_branch = results_by_branch
+        self.calls: list[dict[str, str | None]] = []
+
+    async def resolve(
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> list[SimpleNamespace]:
+        self.calls.append(
+            {
+                "repo_url": repo_url,
+                "branch_name": branch_name,
+                "base_branch": base_branch,
+            }
+        )
+        if base_branch is not None:
+            return []
+        return list(self._results_by_branch[branch_name])
+
+
+class _SequenceBranchOpenPRResolver:
+    def __init__(
+        self,
+        results_by_branch: dict[str, list[list[SimpleNamespace] | Exception]],
+    ) -> None:
+        self._results_by_branch = results_by_branch
+        self.calls: list[dict[str, str | None]] = []
+
+    async def resolve(
+        self,
+        *,
+        repo_url: str,
+        branch_name: str,
+        base_branch: str | None,
+    ) -> list[SimpleNamespace]:
+        self.calls.append(
+            {
+                "repo_url": repo_url,
+                "branch_name": branch_name,
+                "base_branch": base_branch,
+            }
+        )
+        results = self._results_by_branch[branch_name]
+        result = results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return list(result)
+
+
+def _rewrite_branch_placeholder(value: Any, branch_name: str) -> Any:
+    if isinstance(value, str):
+        return branch_name if value == "BRANCH" else value
+    if isinstance(value, list):
+        return [_rewrite_branch_placeholder(item, branch_name) for item in value]
+    if isinstance(value, dict):
+        return {key: _rewrite_branch_placeholder(item, branch_name) for key, item in value.items()}
+    if isinstance(value, SimpleNamespace):
+        return SimpleNamespace(
+            **{
+                key: _rewrite_branch_placeholder(item, branch_name)
+                for key, item in vars(value).items()
+            }
+        )
+    return value
+
+
+def _live_agent_snapshot(*, container_id: str = "agent") -> RuntimeSnapshot:
+    return RuntimeSnapshot(
+        stack_state="running",
+        services=[
+            RuntimeService(
+                name="agent",
+                container_id=container_id,
+                image="awf-agent:latest",
+                state="running",
+                status="Up 2 minutes",
+                health="healthy",
+            )
+        ],
+    )
+
+
+def _seed_workspace_worktree(
+    *,
+    worktrees_root: Path,
+    origin: Path,
+    workspace_id: str,
+    branch_name: str,
+    commit_change: bool,
+    dirty_change: bool = False,
+) -> tuple[Path, str, str]:
+    worktree = worktrees_root / workspace_id
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    _git(["clone", "-q", str(origin), str(worktree)], worktree.parent)
+    _git(["config", "user.name", "T"], worktree)
+    _git(["config", "user.email", "t@t"], worktree)
+    _git(["checkout", "-q", "-b", branch_name], worktree)
+    base_commit = _git_output(["rev-parse", "HEAD"], worktree)
+    if commit_change:
+        (worktree / "agent.txt").write_text(f"work from {workspace_id}\n")
+        _git(["add", "agent.txt"], worktree)
+        _git(["commit", "-q", "-m", "agent work"], worktree)
+    if dirty_change:
+        (worktree / "dirty.txt").write_text("uncommitted\n")
+    head_sha = _git_output(["rev-parse", "HEAD"], worktree)
+    return worktree, base_commit, head_sha
+
+
+def _closed_connection_error() -> InterfaceError:
+    return InterfaceError(
+        "SELECT 1",
+        {},
+        RuntimeError("connection is closed"),
+        connection_invalidated=True,
+    )
+
+
+class _HealthyRuntimeInspector:
+    def __init__(self) -> None:
+        self.calls: list[str | None] = []
+
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        self.calls.append(compose_project_name)
+        return RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent",
+                    image="awf-agent:latest",
+                    state="running",
+                )
+            ],
+        )
+
+
+class _RaisingRuntimeInspector:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls: list[str | None] = []
+
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        self.calls.append(compose_project_name)
+        raise self.exc
+
+
+async def _noop_project_stop(_compose_project_name: str | None) -> None:
+    return None
+
+
+class _UnexpectedCleaner:
+    async def cleanup(self, **_kwargs: object) -> list[str]:
+        raise AssertionError("remonitor must not run workspace cleanup")
+
+
+def _unexpected_cleaner_factory() -> _UnexpectedCleaner:
+    return _UnexpectedCleaner()
+
+
+class TestRunOnceStaleActiveExecutionRecoveryPart022:
+    @pytest.mark.unit
+    async def test_runtime_stranding_failure_transition_rechecks_refreshed_claim(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_id = "ws_stranding_refreshed_during_failure"
+        stale_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        refreshed_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        workspace = SimpleNamespace(
+            id=workspace_id,
+            status=WorkspaceStatus.running.value,
+            execution_claimed_by="worker-a",
+            execution_claim_expires_at=stale_expires_at,
+            monitor_claimed_by=None,
+            monitor_claim_expires_at=None,
+            failure_reason=None,
+            failure_message=None,
+        )
+
+        class RecordingSession:
+            committed = False
+            info: dict[str, Any] = {}
+
+            async def __aenter__(self) -> RecordingSession:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def commit(self) -> None:
+                self.committed = True
+
+        class RecordingWorkspaceRepository:
+            transition_calls = 0
+            transition_if_current_calls: list[dict[str, object]] = []
+            event_calls = 0
+
+            def __init__(self, session: RecordingSession) -> None:
+                assert session is recording_session
+
+            async def get_for_update(self, requested_workspace_id: str) -> SimpleNamespace:
+                assert requested_workspace_id == workspace_id
+                return workspace
+
+            async def transition(
+                self,
+                transitioned_workspace: SimpleNamespace,
+                *,
+                to: WorkspaceStatus,
+                reason_code: str,
+                payload: dict[str, object] | None = None,
+            ) -> SimpleNamespace:
+                del reason_code, payload
+                self.__class__.transition_calls += 1
+                transitioned_workspace.status = to.value
+                return transitioned_workspace
+
+            async def transition_if_current(
+                self,
+                requested_workspace_id: str,
+                *,
+                from_status: WorkspaceStatus,
+                to: WorkspaceStatus,
+                reason_code: str,
+                payload: dict[str, object] | None = None,
+                extra_conditions: tuple[object, ...] = (),
+            ) -> None:
+                self.__class__.transition_if_current_calls.append(
+                    {
+                        "workspace_id": requested_workspace_id,
+                        "from_status": from_status,
+                        "to": to,
+                        "reason_code": reason_code,
+                        "payload": payload,
+                        "extra_conditions_count": len(extra_conditions),
+                    }
+                )
+
+            async def add_event(self, *_args: object, **_kwargs: object) -> None:
+                self.__class__.event_calls += 1
+
+        async def _refresh_claim_during_failure_causality_load(
+            session: AsyncSession,
+            loaded_workspace: Workspace,
+        ) -> None:
+            del session
+            loaded_workspace.execution_claim_expires_at = refreshed_expires_at
+
+        recording_session = RecordingSession()
+        monkeypatch.setattr(
+            worker_recovery_stale,
+            "load_failure_causality_snapshot",
+            _refresh_claim_during_failure_causality_load,
+        )
+        monkeypatch.setattr(
+            worker_recovery_stale,
+            "WorkspaceRepository",
+            RecordingWorkspaceRepository,
+        )
+        worker = ControlWorker(
+            session_factory=lambda: recording_session,  # type: ignore[arg-type]
+            provisioner=object(),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+        finding = WorkspaceRuntimeFinding(
+            workspace_id=workspace_id,
+            workspace_status=WorkspaceStatus.running.value,
+            status="stranded",
+            reason_code="STRANDED_WORKSPACE",
+            decision="fail_workspace",
+            message="runtime is stranded",
+        )
+
+        await worker._fail_stranded_workspace(  # noqa: SLF001
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_refreshed_runtime_stranding",
+            ),
+            RuntimeSnapshot(stack_state="stopped", reason="worker restarted"),
+            finding,
+        )
+
+        assert RecordingWorkspaceRepository.transition_calls == 0
+        assert RecordingWorkspaceRepository.transition_if_current_calls == [
+            {
+                "workspace_id": workspace_id,
+                "from_status": WorkspaceStatus.running,
+                "to": WorkspaceStatus.failed,
+                "reason_code": "STRANDED_WORKSPACE",
+                "payload": None,
+                "extra_conditions_count": 1,
+            }
+        ]
+        assert RecordingWorkspaceRepository.event_calls == 0
+        assert recording_session.committed is False
+        assert workspace.status == WorkspaceStatus.running.value
+        assert workspace.failure_reason is None
+        assert workspace.execution_claimed_by == "worker-a"
+        assert workspace.execution_claim_expires_at == refreshed_expires_at
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_scan_is_limited_to_worker_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        local_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "local-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_local_running",
+            node_id="node-a",
+        )
+        remote_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "remote-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_remote_running",
+            node_id="node-b",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_local_running": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            local_ws = await WorkspaceRepository(s).get(local_id)
+            remote_ws = await WorkspaceRepository(s).get(remote_id)
+            assert local_ws is not None
+            assert remote_ws is not None
+            assert local_ws.status == WorkspaceStatus.failed.value
+            assert remote_ws.status == WorkspaceStatus.running.value
+            assert remote_ws.failure_reason is None
+        assert inspector.calls == ["awf_local_running"]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_with_open_pr_records_recoverable_runtime_stranding(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitoring-pr",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{workspace_id}": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STRANDED_WORKSPACE"
+            assert events[0].payload is not None
+            assert events[0].payload["decision"] == "remonitor_workspace"
+        assert inspector.calls == [f"awf_{workspace_id}"]
+        assert executor.resume_calls == []
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_runtime_stranding_clears_expired_claim_and_resumes(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "claimed-monitoring-pr",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "dead-monitor-worker"
+            ws.monitor_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{workspace_id}": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        await worker._recover_stale_active_executions()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None
+            assert ws.failure_reason is None
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STRANDED_WORKSPACE"
+            assert events[0].payload is not None
+            assert events[0].payload["decision"] == "remonitor_workspace"
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None
+        assert executor.resume_calls == [workspace_id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_running_runtime_after_restart_remonitors_open_pr(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "running-claimed-monitoring-pr",
+        )
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "dead-monitor-worker"
+            ws.monitor_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await repo.add_event(
+                ws,
+                event_type="workspace.stale_active_execution_detected",
+                reason_code="STALE_ACTIVE_EXECUTION",
+                payload={"seed": "prior restart scan"},
+            )
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{workspace_id}": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="agent",
+                            image="awf-agent:latest",
+                            state="running",
+                            status="Up 10 minutes",
+                        )
+                    ],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STRANDED_WORKSPACE"
+            assert events[0].payload is not None
+            assert events[0].payload["decision"] == "remonitor_workspace"
+
+        assert inspector.calls == [f"awf_{workspace_id}"]
+        assert executor.resume_calls == [workspace_id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_without_pr_url_follows_failure_path(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitoring-pr-without-url",
+            with_pr_url=False,
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{workspace_id}": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "STRANDED_WORKSPACE" in ws.failure_message
+        assert inspector.calls == [f"awf_{workspace_id}"]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        [
+            WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+            WorkspaceStatus.destroyed,
+        ],
+    )
+    async def test_terminal_rows_are_ignored(
+        self,
+        status: WorkspaceStatus,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            f"terminal-{status.value}",
+            status,
+        )
+        inspector = _RecordingRuntimeInspector({})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == status.value
+        assert inspector.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("limit", "expected"),
+    [
+        (0, 0),
+        (1, 4),
+        (5, 20),
+        (6, 22),
+        (64, 80),
+        (234, 250),
+        (251, 251),
+    ],
+)
+def test_scheduler_candidate_fetch_limit_documents_overfetch_edges(
+    limit: int,
+    expected: int,
+) -> None:
+    assert _scheduler_candidate_fetch_limit(limit) == expected
+
+
+@pytest.mark.unit
+def test_stale_execution_helper_defaults_for_non_runtime_statuses() -> None:
+    now = datetime(2026, 4, 27, 23, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        execution_claimed_by="worker",
+        execution_claim_expires_at=now + timedelta(minutes=5),
+        monitor_claimed_by="monitor",
+        monitor_claim_expires_at=now + timedelta(minutes=5),
+    )
+
+    assert _candidate_claim_is_stale(workspace, WorkspaceStatus.ready, now) is True
+
+    message = _stale_active_execution_failure_message(
+        _ActiveExecutionCandidate(
+            workspace_id="ws_missing_compose",
+            status=WorkspaceStatus.running,
+            compose_project_name=None,
+        ),
+        RuntimeSnapshot(stack_state="unknown"),
+    )
+
+    assert "no compose project is persisted for the workspace" in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://github.com/example/repo/pull/275", 275),
+        ("https://github.com/example/repo/pull/275/", 275),
+        ("https://github.com/example/repo/pull/275/files", 275),
+        ("https://github.com/example/repo/pull/275?notification_referrer_id=abc", 275),
+        ("https://github.com/example/repo/pull/275#discussion_r3275054005", 275),
+        # Bitbucket PRs use ``/pull-requests/<n>``; the recovery path
+        # re-derives pr_number from pr_url, so it must accept this shape.
+        ("https://bitbucket.org/workspace/repo/pull-requests/7", 7),
+        ("https://bitbucket.org/workspace/repo/pull-requests/7/diff", 7),
+        ("https://github.com/example/repo/pull/not-a-number?notification_referrer_id=abc", None),
+        ("https://github.com/example/repo/issues/275?notification_referrer_id=abc", None),
+    ],
+)
+def test_extract_pr_number_accepts_query_and_fragment_boundaries(
+    url: str,
+    expected: int | None,
+) -> None:
+    assert _extract_pr_number(url) == expected
+
+
+@pytest.mark.unit
+def test_scheduler_candidate_cursor_handles_empty_and_uses_last_page_row() -> None:
+    scoring_at = datetime(2026, 5, 2, 12, 2, tzinfo=UTC)
+    first = SimpleNamespace(id="ws_b", created_at=datetime(2026, 5, 2, 12, 0, tzinfo=UTC))
+    second = SimpleNamespace(id="ws_a", created_at=datetime(2026, 5, 2, 12, 1, tzinfo=UTC))
+    third = SimpleNamespace(id="ws_c", created_at=datetime(2026, 5, 2, 12, 1, tzinfo=UTC))
+
+    assert _scheduler_candidate_cursor([], scoring_at=scoring_at) is None
+    assert _scheduler_candidate_cursor([first, second, third], scoring_at=scoring_at) == (
+        SchedulerOrderCursor(
+            class_priority=0,
+            effective_score=0,
+            queued_at=third.created_at,
+            workspace_id="ws_c",
+            scoring_at=scoring_at,
+        )
+    )

@@ -1,0 +1,648 @@
+"""Local service CLI command group."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from enum import StrEnum
+from pathlib import Path
+
+import typer
+
+from awf.cli.common import (
+    OutputFormat,
+    _api_token_headers,
+    _api_token_option,
+    _base_url,
+    _call,
+    _emit,
+    _handle_response,
+    warn_on_overlay_unmount_failure,
+)
+from awf.cli.init_ops import (
+    _add_env_migration_payload,
+    _migrate_legacy_service_env_file,
+    _resolve_service_compose_paths,
+    _resolve_service_runtime_env_files,
+)
+from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
+
+_DX_FIRST_PATH_HELP = """
+For first-time users: the current runnable first path is
+`awf service bootstrap` (or the friendly `awf start` wrapper), then
+`awf init <path>` to prepare your project repository. Run `awf setup
+--dry-run` first for a read-only host readiness check.
+"""
+_PROVIDER_HELP = (
+    "Repeatable provider strictness check: github, codex, claude_code, cursor, "
+    "gemini, opencode, grok, or docker."
+)
+
+
+class GCStatusFilter(StrEnum):
+    """Status vocabulary accepted by ``awf service gc`` ``--status`` filters.
+
+    Mirrors every :class:`~awf.db.enums.WorkspaceStatus` plus ``superseded`` -- a
+    terminal GC status that is *not* a ``WorkspaceStatus`` enum member (see
+    ``GCTerminalStatus`` in ``api/schemas.py`` and ``TERMINAL_WORKSPACE_GC_STATUSES``
+    in ``service/gc.py``). Typing the CLI options as the bare ``WorkspaceStatus``
+    enum left the thin client unable to send ``superseded``, so the
+    superseded-only cleanup path the API now accepts was unreachable from the CLI.
+    The drift guard in ``tests/unit/cli/test_service_gc_cli.py`` keeps this in
+    lockstep with ``WorkspaceStatus``.
+    """
+
+    requested = "requested"
+    provisioning = "provisioning"
+    ready = "ready"
+    running = "running"
+    validating = "validating"
+    pushing = "pushing"
+    monitoring_pr = "monitoring_pr"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+    destroying = "destroying"
+    destroyed = "destroyed"
+    superseded = "superseded"
+
+
+service_app = typer.Typer(help="Local service operations.")
+
+
+@service_app.command("status")
+def service_status(
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=_PROVIDER_HELP,
+    ),
+) -> None:
+    """Check local AWF service dependencies."""
+    from awf.common.config import Settings
+    from awf.service.config import local_service_environ, resolve_service_settings
+    from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+    from awf.service.status import collect_service_status
+
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
+    payload = asyncio.run(
+        collect_service_status(
+            settings,
+            strict_providers=strict_providers,
+            provider_environ=service_env,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+        )
+    )
+    _emit(payload, fmt)
+    if payload.get("status") != "ok":
+        raise typer.Exit(code=1)
+
+
+@service_app.command("doctor")
+def service_doctor(
+    fmt: OutputFormat = typer.Option(OutputFormat.pretty, "--format"),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=_PROVIDER_HELP,
+    ),
+    bundle: bool = typer.Option(
+        False,
+        "--bundle",
+        help="Write a telemetry-free redacted support bundle to the current directory.",
+    ),
+) -> None:
+    """Run operator-friendly local AWF diagnostics."""
+    from awf.common.config import Settings
+    from awf.service.config import local_service_environ, resolve_service_settings
+    from awf.service.doctor import collect_doctor_report, render_doctor_pretty
+    from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+    from awf.service.support_bundle import collect_support_bundle, write_support_bundle
+
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
+
+    if bundle:
+        bundle_payload = asyncio.run(
+            collect_support_bundle(
+                settings,
+                strict_providers=strict_providers,
+                provider_environ=service_env,
+                environ=service_env,
+                compose_file=compose_file,
+                compose_env_file=compose_env_file,
+            )
+        )
+        path = write_support_bundle(bundle_payload)
+        if fmt == OutputFormat.json:
+            _emit({"support_bundle_path": str(path)}, fmt)
+        else:
+            typer.echo(f"Support bundle written to: {path}")
+        return
+
+    report = asyncio.run(
+        collect_doctor_report(
+            settings,
+            strict_providers=strict_providers,
+            provider_environ=service_env,
+            environ=service_env,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+        )
+    )
+
+    if fmt == OutputFormat.json:
+        _emit(report.to_dict(), fmt)
+    else:
+        typer.echo(render_doctor_pretty(report), nl=False)
+        if report.status == "fail":
+            typer.echo(
+                "\nDiagnostics reported failures. To collect a safe support bundle, run:\n"
+                "  awf service doctor --bundle\n"
+                "\nFor bug reports, use the template at:\n"
+                "  .github/ISSUE_TEMPLATE/bug_report.yml"
+            )
+    if report.status == "fail":
+        raise typer.Exit(code=1)
+
+
+@service_app.command("release-readiness")
+@service_app.command("readiness")
+def service_readiness(
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+    demo_path: Path | None = typer.Option(
+        None,
+        "--demo-path",
+        help="Path to the maintained AWF Core golden-path demo project.",
+    ),
+    failure_window_hours: int = typer.Option(
+        24,
+        "--failure-window-hours",
+        min=1,
+        max=168,
+        help="Recent failure-analysis window used by the release gate.",
+    ),
+    slo_window_hours: int = typer.Option(
+        168,
+        "--slo-window-hours",
+        min=1,
+        max=720,
+        help="Rolling PRD SLO metrics window used by the release gate.",
+    ),
+    allow_generic_failures: bool = typer.Option(
+        False,
+        "--allow-generic-failures/--no-allow-generic-failures",
+        help=(
+            "Permit generic recent failure reasons in the scorecard. Use only with "
+            "a written release rationale."
+        ),
+    ),
+    allow_slo_breach: bool = typer.Option(
+        False,
+        "--allow-slo-breach/--no-allow-slo-breach",
+        help=(
+            "Permit PRD SLO threshold breaches in the scorecard. Use only with "
+            "a written release rationale."
+        ),
+    ),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=_PROVIDER_HELP,
+    ),
+) -> None:
+    """Run the executable local AWF Core release-readiness gate."""
+    from awf.common.config import Settings
+    from awf.service.config import local_service_environ, resolve_service_settings
+    from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+    from awf.service.readiness import (
+        DEFAULT_DEMO_PATH,
+        collect_core_readiness_report,
+        render_core_readiness_pretty,
+    )
+
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
+    report = asyncio.run(
+        collect_core_readiness_report(
+            settings=settings,
+            demo_path=demo_path if demo_path is not None else DEFAULT_DEMO_PATH,
+            failure_window_hours=failure_window_hours,
+            slo_window_hours=slo_window_hours,
+            strict_providers=frozenset(strict_providers),
+            provider_environ=service_env,
+            environ=service_env,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+            allow_generic_failures=allow_generic_failures,
+            allow_slo_breach=allow_slo_breach,
+        )
+    )
+    if fmt == OutputFormat.pretty:
+        typer.echo(render_core_readiness_pretty(report), nl=False)
+    else:
+        _emit(report.to_dict(), fmt)
+    if report.status == "fail":
+        raise typer.Exit(code=1)
+
+
+@service_app.command(
+    "bootstrap",
+    help=f"Start local Postgres, migrations, API, worker, and verify readiness.\n{_DX_FIRST_PATH_HELP}",
+)
+def service_bootstrap(
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+    timeout_seconds: float = typer.Option(
+        180.0,
+        "--timeout-seconds",
+        min=0.0,
+        help="Maximum time to wait for final service readiness.",
+    ),
+    poll_interval_seconds: float = typer.Option(
+        2.0,
+        "--poll-interval-seconds",
+        min=0.01,
+        help="Seconds between readiness polls.",
+    ),
+    skip_agent_runtime_build: bool = typer.Option(
+        False,
+        "--skip-agent-runtime-build",
+        help="Skip building the configured AWF agent runtime image.",
+    ),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=_PROVIDER_HELP,
+    ),
+) -> None:
+    """Start the local AWF service stack and emit structured bootstrap output."""
+    from awf.common.config import Settings
+    from awf.service.bootstrap import (
+        ServiceBootstrapError,
+        ServiceBootstrapOptions,
+        run_service_bootstrap,
+    )
+    from awf.service.config import local_service_environ, resolve_service_settings
+    from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    options = ServiceBootstrapOptions(
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        skip_agent_runtime_build=skip_agent_runtime_build,
+        strict_providers=frozenset(strict_providers),
+    )
+    compose_file, env_file, env_example = _resolve_service_compose_paths()
+    env_migration = _migrate_legacy_service_env_file(env_file, env_example)
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
+    try:
+        result = asyncio.run(
+            run_service_bootstrap(
+                settings,
+                options=options,
+                compose_file=compose_file,
+                env_file=compose_env_file,
+                service_environ=service_env,
+            )
+        )
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+    except ServiceBootstrapError as exc:
+        payload = exc.to_dict()
+        _add_env_migration_payload(payload, env_migration)
+        _emit(payload, fmt)
+        raise typer.Exit(code=1) from None
+
+    payload = result.to_dict()
+    _add_env_migration_payload(payload, env_migration)
+    _emit(payload, fmt)
+
+
+@service_app.command("config")
+def service_config(
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Print resolved local service settings with secrets redacted."""
+    from awf.service.config import resolve_service_settings, service_config_payload
+
+    _emit(service_config_payload(resolve_service_settings()), fmt)
+
+
+@service_app.command("logs")
+def service_logs(
+    tail: int = typer.Option(
+        DEFAULT_LOG_TAIL,
+        "--tail",
+        min=0,
+        help="Number of log lines to show per service.",
+    ),
+    service: list[ServiceLogName] = typer.Option(
+        [],
+        "--service",
+        help="Repeatable service filter.",
+    ),
+    follow: bool = typer.Option(
+        False,
+        "--follow/--no-follow",
+        help="Stream logs until interrupted.",
+    ),
+) -> None:
+    """Tail local AWF service Compose logs."""
+    from awf.service.config import local_service_environ
+    from awf.service.logs import ServiceLogsError, run_service_logs
+
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, compose_env_file = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    try:
+        result = run_service_logs(
+            services=service,
+            tail=tail,
+            follow=follow,
+            compose_file=compose_file,
+            compose_env_file=compose_env_file,
+            service_environ=service_env,
+        )
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+    except ServiceLogsError as exc:
+        typer.echo(
+            f"error: docker compose logs failed (exit {exc.returncode}): {exc.detail}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, err=True, nl=False)
+
+
+def _resolve_local_service_gc_target(
+    base_url: str | None,
+    api_token: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve the ``service gc`` REST target, honouring the local service ``.env``.
+
+    ``service gc`` is a thin trigger over ``POST /v1/service/gc``. Like the
+    sibling ``service_*`` commands, it must honour an ``AWF_API_TOKEN`` or API
+    port that lives only in root ``.env`` (the documented setup path).
+    Explicit ``--base-url`` / ``--api-token`` flags and process-environment
+    overrides still win; root ``.env`` is consulted only when neither is
+    present, so existing ``AWF_BASE_URL`` / ``AWF_API_TOKEN`` shell overrides
+    keep their precedence.
+    """
+    needs_api_token = api_token is None and not os.environ.get("AWF_API_TOKEN")
+    needs_base_url = base_url is None and not (
+        os.environ.get("AWF_BASE_URL")
+        or os.environ.get("AWF_CLI_BASE_URL")
+        or os.environ.get("AWF_API_HOST_PORT")
+    )
+    if not needs_api_token and not needs_base_url:
+        return base_url, api_token
+
+    from awf.common.config import Settings
+    from awf.service.config import local_service_environ, resolve_service_settings
+
+    compose_file, env_file, _ = _resolve_service_compose_paths()
+    env_file, _ = _resolve_service_runtime_env_files(
+        compose_file,
+        env_file,
+        paths_verified=True,
+    )
+    service_env = local_service_environ(env_file=env_file)
+    settings = resolve_service_settings(
+        Settings(_env_file=env_file),
+        environ=service_env,
+    )
+    resolved_base_url = settings.api_base_url if needs_base_url else base_url
+    resolved_api_token = settings.api_token if needs_api_token else api_token
+    return resolved_base_url, resolved_api_token
+
+
+@service_app.command("gc")
+def service_gc(
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Delete selected worktree, compose, and auth directories. Defaults to dry-run.",
+    ),
+    min_age_hours: float | None = typer.Option(
+        None,
+        "--min-age-hours",
+        "--retention-hours",
+        min=0,
+        help=(
+            "Only consider workspaces whose last update is at least this old. "
+            "Defaults to AWF_COMPLETED_WORKSPACE_RETENTION_HOURS."
+        ),
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Maximum number of candidates to plan, oldest first.",
+    ),
+    status: list[GCStatusFilter] = typer.Option(
+        [],
+        "--status",
+        help=(
+            "Repeatable terminal status filter (accepts ``superseded``). Active "
+            "statuses are always protected even when requested."
+        ),
+    ),
+    exclude_status: list[GCStatusFilter] = typer.Option(
+        [],
+        "--exclude-status",
+        help="Repeatable status filter to remove from the eligible terminal set.",
+    ),
+    timeout_seconds: float = typer.Option(
+        900.0,
+        "--timeout-seconds",
+        min=0.0,
+        help=(
+            "HTTP timeout for the GC trigger. Defaults high because an "
+            "``--execute`` run tearing down Docker stacks and deleting large "
+            "worktree trees can take minutes; raise it further for very large "
+            "reclaims so the CLI does not report a false timeout."
+        ),
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Plan or execute filesystem GC for terminal service workspaces.
+
+    This is a thin trigger over ``POST /v1/service/gc``: the root control-plane
+    (the api container) runs the deletion in-container with correct ownership, so
+    a running API is required (``awf serve`` / control-plane up). Defaults for
+    retention and batch limit are applied server-side.
+    """
+    resolved_base_url, resolved_api_token = _resolve_local_service_gc_target(base_url, api_token)
+
+    body: dict[str, object] = {"execute": execute}
+    if min_age_hours is not None:
+        body["min_age_hours"] = min_age_hours
+    if limit is not None:
+        body["limit"] = limit
+    if status:
+        body["statuses"] = [item.value for item in status]
+    if exclude_status:
+        body["exclude_statuses"] = [item.value for item in exclude_status]
+
+    response = _call(
+        "POST",
+        "/v1/service/gc",
+        base_url=_base_url(resolved_base_url),
+        timeout=timeout_seconds,
+        json=body,
+        headers=_api_token_headers(resolved_api_token),
+    )
+    if response.status_code >= 400:
+        # ``_handle_response`` prints the error envelope and always raises
+        # ``typer.Exit`` for >= 400, so control never returns from this call.
+        _handle_response(response, fmt)
+    try:
+        payload = response.json()
+    except ValueError:
+        # A proxy, load balancer, or early-close can return a 2xx with a
+        # non-JSON (or empty) body; surface a clean error instead of letting
+        # ``json.JSONDecodeError`` bubble out as a cryptic traceback.
+        typer.echo(
+            f"error: GC API returned a non-JSON response (HTTP {response.status_code}): "
+            f"{response.text[:200]}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+    _emit(payload, fmt)
+    warn_on_overlay_unmount_failure(payload)
+    if isinstance(payload, dict) and payload.get("status") == "partial":
+        raise typer.Exit(code=1)
+
+
+@service_app.command("reconcile-target")
+def service_reconcile_target(
+    repo_url: str = typer.Option(..., "--repo-url", help="Repository Git URL."),
+    branch: str = typer.Option(
+        "development",
+        "--branch",
+        help="Target branch to inspect and repair.",
+    ),
+    work_dir: Path | None = typer.Option(
+        None,
+        "--work-dir",
+        help="Override AWF_WORK_DIR for target-branch checkout state.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Detect and render resolver output without committing or pushing.",
+    ),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Run one target-branch reconciliation pass.
+
+    The first resolver is Python/Alembic-specific: if the integrated branch
+    has multiple Alembic heads, AWF writes and pushes a merge revision.
+    """
+    from awf.common.commands import AsyncioSubprocessRunner
+    from awf.service.config import resolve_service_settings
+    from awf.service.target_branch_monitor import (
+        TargetBranchMonitorError,
+        TargetBranchMonitorResult,
+        run_target_branch_reconcile_once,
+    )
+
+    settings = resolve_service_settings()
+    state_dir = (work_dir or Path(settings.work_dir)).expanduser().resolve()
+
+    async def _run() -> TargetBranchMonitorResult:
+        """Execute run."""
+        return await run_target_branch_reconcile_once(
+            runner=AsyncioSubprocessRunner(),
+            work_dir=state_dir,
+            repo_url=repo_url,
+            branch=branch,
+            dry_run=dry_run,
+        )
+
+    try:
+        result = asyncio.run(_run())
+    except TargetBranchMonitorError as exc:
+        payload = {
+            "status": "failed",
+            "operation": exc.operation,
+            "returncode": exc.result.returncode,
+            "stdout": exc.result.stdout,
+            "stderr": exc.result.stderr,
+        }
+        _emit(payload, fmt)
+        raise typer.Exit(code=1) from None
+
+    _emit(result.to_dict(), fmt)

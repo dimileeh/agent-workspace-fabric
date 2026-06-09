@@ -1,312 +1,379 @@
-"""Release-PR sync core — idempotent development→main PR maintenance.
+"""Release-PR sync — compute source→target divergence and find/create the PR.
 
-This is the Phase 2 companion to ``release_pr_monitor.py``. The monitor
-drives a PR through comments + CI + base-sync + (notify-human). This
-module's job is narrower: given a repo + source branch + target branch,
+Pure, unit-testable helpers backing the executor's ``sync_release_pr`` handoff.
+No DB access and no workspace state here: callers pass an ``AsyncCommandRunner``
+(for local git in the worktree), a ``GitHubClient`` (for ``gh``), and a parsed
+``RepoRef``. The handoff owns persistence + monitor launch.
 
-    1. Check whether source has commits not on target (``rev-list --count``).
-       If not, exit no-op.
-    2. Check whether an open PR already exists between those refs
-       (``gh pr list --state open --base <target> --head <source>``).
-       If yes, return its number — the monitor (if active) will pick
-       up new commits on its next poll via SyncBase.
-    3. Otherwise, open a PR (``gh pr create``) with an auto-generated
-       body listing feature PRs merged into the source branch since the
-       last release PR.
+Flow:
 
-The function is pure-ish: all side effects route through an
-``AsyncCommandRunner`` so ``FakeCommandRunner`` drives tests.
+1. ``git fetch origin`` then ``git rev-list --count origin/<target>..origin/<source>``
+   to learn how many commits ``source`` is ahead of ``target``.
+2. If zero, return a :class:`ReleasePrSyncNoOp` — the handoff completes the
+   workspace cleanly without opening a PR or running the monitor.
+3. Otherwise reuse an existing open ``source→target`` PR, or create one, then
+   resolve its full adoption metadata and return a :class:`ReleasePrSyncResult`.
 
-Callers:
-
-* **`scripts/schedule_release_pr.py`** — one-shot CLI. Runs this
-  function; if a PR is open (either pre-existing or freshly created),
-  also spins up a ``sync_release_pr`` workspace with the monitor
-  attached. Intended to be invoked by a cron / GitHub webhook /
-  ``release_pr_watcher.py`` when development advances.
-* **`scripts/release_pr_watcher.py`** — long-running daemon. Polls
-  each configured repo, invokes the scheduler when dev is ahead of
-  main. (GitHub webhooks can replace the poller later when AWF has a
-  public HTTP surface; the functional contract is identical.)
-
-None of this runs inside a container — everything happens on the
-host via ``gh`` CLI and local git. The container + worktree only
-come into play once the release-PR monitor handoff happens (comment
-resolution invokes the coding CLI in the agent container).
+Generic AWF core behaviour — no hard-coded repositories or branch names.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from typing import Any
 
 from awf.common.commands import AsyncCommandRunner
-from awf.common.github_client import RepoRef
+from awf.common.forge import ForgeClient
+from awf.common.github_client import (
+    GitHubClientError,
+    PullRequestAdoptionMetadata,
+    RepoRef,
+    fetch_pull_request_adoption_metadata,
+    list_open_pull_requests_for_branch,
+    parse_github_pull_request_url,
+)
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
 
+NO_CHANGES_REASON_CODE = "NO_CHANGES_TO_SYNC"
 
-@dataclass(frozen=True)
-class ReleasePrResult:
-    """What ``ensure_release_pr_open`` produces.
+# Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (GitHub or
+# Bitbucket Cloud), but release-PR sync is GitHub-only — it shells ``gh pr list`` /
+# ``gh pr view`` and parses github.com-only PR URLs. Mirrors
+# ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
+RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE = "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
 
-    * ``pr_number`` is set whenever a PR exists (pre-existing or newly
-      opened). ``None`` means the repo is in sync — no-op.
-    * ``created`` is ``True`` only for the fresh-open path. Callers use
-      this to decide whether to emit a "new release PR" notification.
+
+def ensure_release_sync_forge_supported(
+    forge: str,
+    *,
+    repo_slug: str,
+    source_branch: str,
+    target_branch: str,
+) -> None:
+    """Fail closed before any ``gh`` call when release-PR sync hits a non-GitHub forge.
+
+    Release-PR sync is GitHub-only: the open-PR lookup shells ``gh pr list``,
+    adoption metadata shells ``gh pr view``, and the created-PR URL is parsed with
+    the github.com-only ``parse_github_pull_request_url`` — only
+    ``gh.create_pull_request`` is forge-neutral. Bitbucket Cloud is a *supported*
+    forge (issue #345 Part 2), so it clears the executor forge gate; without this
+    guard those GitHub-only steps would mis-route to github.com for the same
+    owner/repo slug (a different repository) or reject the bitbucket.org create URL
+    as ``RELEASE_SYNC_PR_URL_INVALID``. Callers invoke this both inside
+    :func:`find_or_create_release_pr` and *before constructing the forge client* in
+    the executor handoff, so a missing-credential ``BitbucketClient.from_env()``
+    cannot mask this honest reason code with ``BITBUCKET_AUTH_NOT_CONFIGURED``.
+    Mirrors ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and
+    ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
     """
-
-    pr_number: int | None
-    pr_url: str | None
-    ahead_by: int
-    created: bool
-    reason: str  # human-readable, goes into structured logs / CLI output
+    if forge == "github":
+        return
+    raise ReleasePrSyncError(
+        reason_code=RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE,
+        message=(
+            "release-PR sync is GitHub-only (shells `gh pr list` / `gh pr view` "
+            f"and parses github.com PR URLs); forge {forge!r} requires a "
+            "forge-neutral release sync."
+        ),
+        detail={
+            "repo_slug": repo_slug,
+            "forge": forge,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+        },
+    )
 
 
 class ReleasePrSyncError(Exception):
-    """Raised when the sync can't complete (gh CLI error, bad repo, etc.)."""
+    """Structured failure while preparing a release-PR sync."""
 
-    def __init__(self, *, operation: str, stderr: str) -> None:
-        self.operation = operation
-        self.stderr = stderr
-        super().__init__(f"{operation} failed: {stderr.strip() or '<no output>'}")
+    def __init__(
+        self,
+        *,
+        reason_code: str,
+        message: str,
+        detail: dict[str, object] | None = None,
+    ) -> None:
+        self.reason_code = reason_code
+        self.message = message
+        self.detail = detail
+        super().__init__(message)
 
 
-async def ensure_release_pr_open(
+@dataclass(frozen=True)
+class ReleasePrSyncNoOp:
+    """No commits to sync — the workspace should complete without a PR."""
+
+    source_branch: str
+    target_branch: str
+    reason_code: str = NO_CHANGES_REASON_CODE
+
+
+@dataclass(frozen=True)
+class ReleasePrSyncResult:
+    """A release PR exists (reused or freshly created) and is ready to monitor."""
+
+    metadata: PullRequestAdoptionMetadata
+    created: bool
+    commits_ahead: int
+    source_branch: str
+    target_branch: str
+
+
+async def count_commits_ahead(
     *,
     runner: AsyncCommandRunner,
-    repo: RepoRef,
-    source_branch: str = "development",
-    target_branch: str = "main",
-    dry_run: bool = False,
-) -> ReleasePrResult:
-    """Idempotently ensure a release PR exists if the source diverges from target.
-
-    Order of operations:
-
-    1. Count commits on source not on target via remote refs
-       (``gh api repos/<owner>/<repo>/compare/<target>...<source>``).
-       Zero → no-op.
-    2. Query existing open PRs with that base/head pair. Found → return.
-    3. Create PR with an auto-generated title + body.
-    """
-    ahead = await _count_commits_ahead(
-        runner=runner, repo=repo, source=source_branch, target=target_branch
-    )
-    if ahead == 0:
-        return ReleasePrResult(
-            pr_number=None,
-            pr_url=None,
-            ahead_by=0,
-            created=False,
-            reason="source is at or behind target; no release needed",
-        )
-
-    existing = await _find_open_release_pr(
-        runner=runner, repo=repo, source=source_branch, target=target_branch
-    )
-    if existing is not None:
-        number, url = existing
-        return ReleasePrResult(
-            pr_number=number,
-            pr_url=url,
-            ahead_by=ahead,
-            created=False,
-            reason=(f"release PR already open ({url}); monitor will SyncBase on its next poll"),
-        )
-
-    if dry_run:
-        return ReleasePrResult(
-            pr_number=None,
-            pr_url=None,
-            ahead_by=ahead,
-            created=False,
-            reason=f"dry-run: would open a release PR for {ahead} commit(s) ahead",
-        )
-
-    title, body = await _build_release_pr_body(
-        runner=runner, repo=repo, source=source_branch, target=target_branch, ahead=ahead
-    )
-    created_number, created_url = await _create_pr(
-        runner=runner,
-        repo=repo,
-        source=source_branch,
-        target=target_branch,
-        title=title,
-        body=body,
-    )
-    return ReleasePrResult(
-        pr_number=created_number,
-        pr_url=created_url,
-        ahead_by=ahead,
-        created=True,
-        reason=f"opened release PR {created_url} with {ahead} commit(s)",
-    )
-
-
-# ── Internals ──────────────────────────────────────────────────────────────
-
-
-async def _count_commits_ahead(
-    *, runner: AsyncCommandRunner, repo: RepoRef, source: str, target: str
+    cwd: str,
+    source_branch: str,
+    target_branch: str,
 ) -> int:
-    """Number of commits on ``source`` that aren't on ``target``.
+    """Return how many commits ``origin/<source>`` is ahead of ``origin/<target>``."""
 
-    Uses GitHub's compare API rather than a local git clone so the
-    watcher/scheduler don't need a persistent local mirror. ``gh api``
-    authenticates via the existing gh credential.
-    """
-    result = await runner.run(
-        [
-            "gh",
-            "api",
-            f"repos/{repo.slug()}/compare/{target}...{source}",
-            "--jq",
-            ".ahead_by",
-        ]
+    fetch = await runner.run(
+        ["git", "fetch", "origin", target_branch, source_branch],
+        cwd=cwd,
     )
-    if not result.ok:
+    if fetch.returncode != 0:
         raise ReleasePrSyncError(
-            operation=f"gh api compare {target}...{source}", stderr=result.stderr
+            reason_code="RELEASE_SYNC_FETCH_FAILED",
+            message=(fetch.stderr or f"git fetch origin exited {fetch.returncode}").strip(),
+            detail={"source_branch": source_branch, "target_branch": target_branch},
         )
-    text = (result.stdout or "").strip()
-    if not text:
-        return 0
+    rev_list = await runner.run(
+        [
+            "git",
+            "rev-list",
+            "--count",
+            f"origin/{target_branch}..origin/{source_branch}",
+        ],
+        cwd=cwd,
+    )
+    if rev_list.returncode != 0:
+        raise ReleasePrSyncError(
+            reason_code="RELEASE_SYNC_REV_LIST_FAILED",
+            message=(rev_list.stderr or f"git rev-list exited {rev_list.returncode}").strip(),
+            detail={"source_branch": source_branch, "target_branch": target_branch},
+        )
+    text = rev_list.stdout.strip()
     try:
         return int(text)
     except ValueError as exc:
-        raise ReleasePrSyncError(operation="parse ahead_by", stderr=f"{exc}: got {text!r}") from exc
+        raise ReleasePrSyncError(
+            reason_code="RELEASE_SYNC_REV_LIST_INVALID",
+            message=f"git rev-list --count returned non-numeric output: {text!r}",
+            detail={"source_branch": source_branch, "target_branch": target_branch},
+        ) from exc
 
 
-async def _find_open_release_pr(
-    *, runner: AsyncCommandRunner, repo: RepoRef, source: str, target: str
-) -> tuple[int, str] | None:
-    """Return ``(number, url)`` of an open PR from source → target, if any.
+def _is_duplicate_pull_request_error(exc: GitHubClientError) -> bool:
+    """True when ``gh pr create`` failed because the PR already exists.
 
-    ``gh pr list`` filters on both ``--base`` and ``--head``; we trust
-    it to uniquely identify the release PR because (a) we only ever
-    open one at a time, (b) GitHub itself refuses to open a duplicate
-    PR with identical base+head."""
-    result = await runner.run(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--repo",
-            repo.slug(),
-            "--state",
-            "open",
-            "--base",
-            target,
-            "--head",
-            source,
-            "--json",
-            "number,url",
-        ]
-    )
-    if not result.ok:
-        raise ReleasePrSyncError(operation="gh pr list", stderr=result.stderr)
-    payload: list[dict[str, Any]] = json.loads(result.stdout or "[]")
-    if not payload:
-        return None
-    # Take the first (there should only ever be one).
-    row = payload[0]
-    return int(row["number"]), str(row["url"])
-
-
-async def _build_release_pr_body(
-    *,
-    runner: AsyncCommandRunner,
-    repo: RepoRef,
-    source: str,
-    target: str,
-    ahead: int,
-) -> tuple[str, str]:
-    """Produce (title, body) for the new release PR.
-
-    Title: ``release: <source> → <target> (<N> commit(s))``.
-    Body: an enumeration of merged feature PRs in the range, plus a
-    pointer to AWF's monitor. We fetch the commit list via the same
-    compare API used for ahead_by — single extra round trip.
+    ``gh`` exits 1 with stderr like ``a pull request for branch "X" into
+    branch "Y" already exists`` when a concurrent run or a human opened the
+    source→target PR first. Only this signal is treated as a recoverable
+    TOCTOU race; auth/network/branch-protection failures must propagate.
     """
-    title = f"release: {source} → {target} ({ahead} commit{'s' if ahead != 1 else ''})"
-    commits_result = await runner.run(
-        [
-            "gh",
-            "api",
-            f"repos/{repo.slug()}/compare/{target}...{source}",
-            "--jq",
-            '[.commits[] | {sha: .sha[0:7], message: (.commit.message | split("\\n")[0])}]',
-        ]
-    )
-    if not commits_result.ok:
-        # Body fetch is best-effort; degrade gracefully.
-        commit_lines = "(commit list unavailable)"
-    else:
-        try:
-            commits: list[dict[str, str]] = json.loads(commits_result.stdout or "[]")
-            bullets = [f"- `{c['sha']}` {c['message']}" for c in commits[:50]]
-            if len(commits) > 50:
-                bullets.append(f"- …and {len(commits) - 50} more.")
-            commit_lines = "\n".join(bullets) or "(no commits listed)"
-        except (json.JSONDecodeError, KeyError):
-            commit_lines = "(commit list parse failed)"
 
-    body = (
-        f"Automated release PR opened by AWF.\n\n"
-        f"**Source**: `{source}` — **Target**: `{target}` — "
-        f"**Ahead by**: {ahead} commit(s).\n\n"
-        f"### Commits included\n\n{commit_lines}\n\n"
-        f"---\n"
-        f"AWF's release-PR monitor will keep this PR up to date as more "
-        f"feature branches merge into `{source}`, resolve review threads "
-        f"via the coding CLI inside the workspace container, and post a "
-        f'"ready to merge" comment when all 5 gates are green. '
-        f"**This PR will NOT auto-merge** — a human decides when to click "
-        f"the merge button."
-    )
-    return title, body
+    return exc.returncode == 1 and "already exists" in exc.stderr.lower()
 
 
-async def _create_pr(
+async def _find_open_same_repo_pr_number(
     *,
     runner: AsyncCommandRunner,
     repo: RepoRef,
-    source: str,
-    target: str,
+    source_branch: str,
+    target_branch: str,
+) -> int | None:
+    """Number of an open same-repo ``source→target`` PR, or ``None`` if none.
+
+    ``gh pr list --head`` matches by branch name alone, so a fork PR opened
+    against this repo with an identically-named head branch can show up here.
+    Only a PR whose head lives in the requested repo is eligible; fork
+    collisions are ignored.
+    """
+
+    repo_slug = repo.slug()
+    existing = await list_open_pull_requests_for_branch(
+        runner=runner,
+        repo=repo,
+        branch_name=source_branch,
+        base_branch=target_branch,
+    )
+    same_repo_existing = [pr for pr in existing if pr.head_repo_slug.lower() == repo_slug.lower()]
+    return same_repo_existing[0].number if same_repo_existing else None
+
+
+async def find_or_create_release_pr(
+    *,
+    runner: AsyncCommandRunner,
+    gh: ForgeClient,
+    repo: RepoRef,
+    source_branch: str,
+    target_branch: str,
     title: str,
     body: str,
-) -> tuple[int, str]:
-    """Open the PR via ``gh pr create`` and return (number, url)."""
-    result = await runner.run(
-        [
-            "gh",
-            "pr",
-            "create",
-            "--repo",
-            repo.slug(),
-            "--base",
-            target,
-            "--head",
-            source,
-            "--title",
-            title,
-            "--body",
-            body,
-        ]
+) -> tuple[PullRequestAdoptionMetadata, bool]:
+    """Reuse an open ``source→target`` PR if present, else create one.
+
+    Returns the resolved adoption metadata plus a ``created`` flag.
+    """
+
+    # Defense-in-depth: the executor handoff already gates the concrete client
+    # forge before constructing the forge client, but this keeps the GitHub-only
+    # contract enforced for every caller (and catches a github-client /
+    # non-github-repo mismatch) before any ``gh`` call.
+    ensure_release_sync_forge_supported(
+        repo.forge,
+        repo_slug=repo.slug(),
+        source_branch=source_branch,
+        target_branch=target_branch,
     )
-    if not result.ok:
-        raise ReleasePrSyncError(operation="gh pr create", stderr=result.stderr)
-    # `gh pr create` emits the new PR URL on stdout. Parse the PR number
-    # out of it.
-    url = (result.stdout or "").strip().splitlines()[-1].strip()
-    try:
-        number = int(url.rsplit("/pull/", 1)[1].split("/")[0])
-    except (IndexError, ValueError) as exc:
-        raise ReleasePrSyncError(
-            operation="gh pr create (parse url)",
-            stderr=f"{exc}: unexpected output {url!r}",
-        ) from exc
-    return number, url
+
+    repo_slug = repo.slug()
+    existing_number = await _find_open_same_repo_pr_number(
+        runner=runner,
+        repo=repo,
+        source_branch=source_branch,
+        target_branch=target_branch,
+    )
+    if existing_number is not None:
+        pr_number = existing_number
+        created = False
+    else:
+        try:
+            pr_url = await gh.create_pull_request(
+                repo=repo,
+                base=target_branch,
+                head=source_branch,
+                title=title,
+                body=body,
+            )
+        except GitHubClientError as exc:
+            if exc.returncode == 0:
+                # ``gh`` exited 0 but printed no parseable PR URL. GitHubClient
+                # signals exactly this case with returncode=0 (real gh failures
+                # carry the non-zero exit code). Surface it with the release-sync
+                # reason code rather than leaking the raw gh error, preserving the
+                # RELEASE_SYNC_PR_URL_INVALID contract downstream callers rely on.
+                raise ReleasePrSyncError(
+                    reason_code="RELEASE_SYNC_PR_URL_INVALID",
+                    message=f"gh pr create returned no parseable PR URL: {exc.stderr!r}",
+                    detail={"source_branch": source_branch, "target_branch": target_branch},
+                ) from exc
+            # TOCTOU: the list above can race a concurrent sync run or a human
+            # opening the same source→target PR before this create. GitHub
+            # rejects the duplicate with a recognisable "already exists" error,
+            # so only then re-check and adopt the now-existing PR instead of
+            # failing the workspace. Any other failure (auth, network, branch
+            # protection) re-raises immediately with its original context
+            # rather than being masked by a second, unrelated list call.
+            if not _is_duplicate_pull_request_error(exc):
+                raise
+            raced_number = await _find_open_same_repo_pr_number(
+                runner=runner,
+                repo=repo,
+                source_branch=source_branch,
+                target_branch=target_branch,
+            )
+            if raced_number is None:
+                raise
+            pr_number = raced_number
+            created = False
+        else:
+            try:
+                parsed_repo, pr_number = parse_github_pull_request_url(pr_url)
+            except ValueError as exc:
+                raise ReleasePrSyncError(
+                    reason_code="RELEASE_SYNC_PR_URL_INVALID",
+                    message=f"gh pr create returned an unparseable PR URL: {pr_url!r}",
+                    detail={"source_branch": source_branch, "target_branch": target_branch},
+                ) from exc
+            if parsed_repo.slug().lower() != repo_slug.lower():
+                raise ReleasePrSyncError(
+                    reason_code="RELEASE_SYNC_PR_REPO_MISMATCH",
+                    message=(
+                        f"gh pr create returned a PR URL for a different repository: {pr_url!r}"
+                    ),
+                    detail={
+                        "expected_repo": repo_slug,
+                        "parsed_repo": parsed_repo.slug(),
+                        "source_branch": source_branch,
+                        "target_branch": target_branch,
+                    },
+                )
+            created = True
+    metadata = await fetch_pull_request_adoption_metadata(
+        runner=runner,
+        repo=repo,
+        pr_number=pr_number,
+    )
+    return metadata, created
+
+
+async def prepare_release_pr_sync(
+    *,
+    runner: AsyncCommandRunner,
+    gh: ForgeClient,
+    repo: RepoRef,
+    cwd: str,
+    source_branch: str,
+    target_branch: str,
+    title: str,
+    body: str,
+) -> ReleasePrSyncNoOp | ReleasePrSyncResult:
+    """Decide what the handoff should do: no-op, or monitor a (reused/new) PR."""
+
+    commits_ahead = await count_commits_ahead(
+        runner=runner,
+        cwd=cwd,
+        source_branch=source_branch,
+        target_branch=target_branch,
+    )
+    if commits_ahead <= 0:
+        _log.info(
+            "release_pr_sync.no_changes",
+            repo=repo.slug(),
+            source_branch=source_branch,
+            target_branch=target_branch,
+        )
+        return ReleasePrSyncNoOp(source_branch=source_branch, target_branch=target_branch)
+
+    metadata, created = await find_or_create_release_pr(
+        runner=runner,
+        gh=gh,
+        repo=repo,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        title=title,
+        body=body,
+    )
+    _log.info(
+        "release_pr_sync.pr_ready",
+        repo=repo.slug(),
+        source_branch=source_branch,
+        target_branch=target_branch,
+        pr_number=metadata.number,
+        created=created,
+        commits_ahead=commits_ahead,
+    )
+    return ReleasePrSyncResult(
+        metadata=metadata,
+        created=created,
+        commits_ahead=commits_ahead,
+        source_branch=source_branch,
+        target_branch=target_branch,
+    )
+
+
+def release_pr_title(*, source_branch: str, target_branch: str) -> str:
+    return f"Release: merge {source_branch} into {target_branch}"
+
+
+def release_pr_body(*, source_branch: str, target_branch: str) -> str:
+    return (
+        f"Automated AWF release PR syncing `{source_branch}` into `{target_branch}`.\n\n"
+        "Opened by the `sync_release_pr` task kind and monitored with "
+        "release/manual behavior (auto-merge disabled). Merging into the "
+        "release target stays human-gated."
+    )

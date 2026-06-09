@@ -1,0 +1,2 @@
+- [AWF architecture snapshot](awf_architecture.md) — one-line context on the project's main layers for subsequent scans
+- [Recurring bug hotspots](awf_hotspots.md) — areas where bugs recur in AWF PRs

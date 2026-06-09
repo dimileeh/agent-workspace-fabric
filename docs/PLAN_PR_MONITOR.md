@@ -1,5 +1,10 @@
 # AWF Phase 1.5 — PR Monitor: Feature Branch → Development, Fully Autonomous
 
+> Historical design note: this plan predates the current service-backed
+> monitor adoption and remonitor surfaces. References to retired watchdog or
+> helper-script paths are preserved as implementation history, not current
+> operator guidance.
+
 ## Context
 
 Today AWF ends the task at "PR opened." The real cost — reviewer comments
@@ -211,12 +216,16 @@ Responsibilities:
 
 ### 5. dev → main: notification-only variant
 
-A new task shape `task_kind: "monitor_release_pr"` that:
+Selected by `auto_merge=False` (no dedicated task kind). To monitor an
+existing release/manual PR, adopt it via the PR-adoption flow with
+`auto_merge=false`; to open/maintain the `development → main` release PR
+automatically, use the `sync_release_pr` task kind. (The earlier
+`monitor_release_pr` task kind is deprecated and rejected.) This variant:
 
 - Does NOT clone a repo or run the initial coding agent.
-- Does NOT create a PR (one already exists).
+- Does NOT create a PR when adopting one that already exists.
 - Runs the same monitor loop against the supplied PR number, but with `auto_merge=False`.
-- On the `Merge` branch of the decision tree: posts a GitHub PR comment "All gates green — ready for human merge", records the ready-SHA, and exits `completed`. Never calls `gh pr merge`.
+- On the `Merge` branch of the decision tree: posts a GitHub PR comment "All gates green — ready for human merge", records the ready-SHA, and keeps polling until the PR is actually merged or closed. Never calls `gh pr merge`.
 - If new comments arrive AFTER the "ready" notification but before human merge: re-enters the fix cycle as normal. The CLI still addresses them. New commits push. Checks re-run. The "ready" notification re-posts only when the ready-SHA advances, so the human isn't pinged per-poll.
 
 The auto-merge flag is the only functional divergence; the rest of the
@@ -225,7 +234,7 @@ code is shared.
 ### 6. Iteration + time accounting (no caps)
 
 - `iter` increments on `AddressComments`, `SyncBase`, `ReportCiFailure`. `WaitForCI` does NOT increment (it's passive).
-- There is NO `iter_cap` or `wall_clock_cap`. The monitor drives each PR to `Merge` / `NotifyHuman` regardless of how many review cycles or how much wall-clock time it takes. `iter_count` stays in state for log context only.
+- There is NO `iter_cap` or `wall_clock_cap`. The monitor drives each PR until it is merged or closed regardless of how many review cycles or how much wall-clock time it takes. `NotifyHuman` is a live waiting state, not a teardown signal. `iter_count` stays in state for log context only.
 - If the monitor PROCESS dies, `awf-watchdog` re-attaches a new monitor to the PR — volume-driven death is handled externally.
 - `poll_interval` (default 60 s during CI waits, 30 s during the comment-settle window).
 
@@ -322,14 +331,14 @@ would land in "ready but not merged" terminal state.
 - `mypy` / `ruff` clean.
 - Alembic migration up + down: new columns `pr_merge_sha`, `monitor_iter_count`, `monitor_threads_addressed`, `monitor_started_at` on `workspaces`.
 - Manual local run: schedule a small aira-agent task, wait for CodeRabbit + Cursor to comment, observe the workspace cycle through `monitoring_pr` and end in `completed` with the PR merged.
-- Manual release run: create a dev→main PR, schedule a `monitor_release_pr` task, verify a "ready to merge" comment appears when all gates are green and the PR is NOT merged.
+- Manual release run: schedule a `sync_release_pr` task (or adopt an existing dev→main PR with `auto_merge=false`), verify a "ready to merge" comment appears when all gates are green and the PR is NOT merged.
 
 ## Risks + mitigations
 
 | Risk | Mitigation |
 |---|---|
 | CLI makes cosmetic changes that don't actually address feedback → thread re-opens on next review | Iter cap + require a new HEAD SHA between `AddressComments` invocations; if the SHA didn't advance despite a "fix_committed" verdict, force an abort. |
-| GH token can't merge due to branch protection | Merge call fails → fall back to `NotifyHuman` behavior (post "ready to merge" comment, exit `completed`). Operator sees the PR flagged as ready and does the final click. Documented in README. |
+| GH token can't merge due to branch protection | Merge call fails → fall back to `NotifyHuman` behavior (post "ready to merge" comment, keep polling). Operator sees the PR flagged as ready; when it is merged manually, AWF observes the merge and only then completes/cleans up. Documented in README. |
 | Cost explosion from repeated CLI invocations | Covered at the coding-CLI / workspace layer (per-workspace cost ceiling, reviewer-bot rate limits). Monitor-level budget caps were removed after stranding PRs that attracted 5 bot reviewers; operator intervention (close PR) is the correct escape for a genuine runaway. |
 | CodeRabbit posts comments AFTER initial push during the settle window | `settle_interval` (30 s) in `fix_cycle` specifically to catch this. Worst case the burst arrives just after our push; next outer-loop iteration catches it. |
 | Thread-resolve mutation fails (transient) | Retry with exponential backoff; if the thread stays unresolved, next poll re-queues it under `AddressComments` — the CLI sees its own previous fix commit + the already-posted reply and just needs to retry the resolve. |

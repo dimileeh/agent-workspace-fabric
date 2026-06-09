@@ -1,7 +1,7 @@
 [project]
-name = "awf"
+name = "agent-workspace-fabric"
 version = "0.1.0"
-description = "Aira Agent Workspace Fabric — isolated Docker execution substrate for AI coding agents"
+description = "Agent Workspace Fabric — isolated Docker execution substrate for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
@@ -26,15 +26,16 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29.0",
-    "aiosqlite>=0.20.0",
     "alembic>=1.13.0",
     "httpx>=0.27.0",
     "typer>=0.12.0",
     "jinja2>=3.1.0",
+    "keyring>=24",
     "docker>=7.0.0",
     "mcp>=1.9.0",
     "python-dotenv>=1.0.0",
     "structlog>=24.4.0",
+    "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]
@@ -44,9 +45,11 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "pytest-timeout>=2.3.0",
     "pytest-mock>=3.14.0",
+    "pytest-split>=0.10.0",
+    "pytest-xdist>=3.6.0",
     "testcontainers[postgres]>=4.8.0",
     "hypothesis>=6.112.0",
-    "pyyaml>=6.0.0",
+    "openapi-spec-validator>=0.7.0",
     "types-PyYAML>=6.0.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
@@ -56,11 +59,10 @@ dev = [
 
 [project.scripts]
 awf = "awf.cli.main:app"
-awf-watchdog = "awf.cli.watchdog:main"
 
 [project.urls]
-Repository = "https://github.com/dimileeh/aira-agent-workspace-fabric"
-Issues = "https://github.com/dimileeh/aira-agent-workspace-fabric/issues"
+Repository = "https://github.com/dimileeh/agent-workspace-fabric"
+Issues = "https://github.com/dimileeh/agent-workspace-fabric/issues"
 
 [build-system]
 requires = ["hatchling"]
@@ -68,15 +70,96 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/awf"]
+exclude = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "docker/compose/.env",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+".env.example" = "awf/bootstrap_assets/.env.example"
+"compose.yaml" = "awf/bootstrap_assets/compose.yaml"
+"README.md" = "awf/bootstrap_assets/README.md"
+"alembic.ini" = "awf/bootstrap_assets/alembic.ini"
+"apps/console/Dockerfile" = "awf/bootstrap_assets/apps/console/Dockerfile"
+"apps/console/app" = "awf/bootstrap_assets/apps/console/app"
+"apps/console/components" = "awf/bootstrap_assets/apps/console/components"
+"apps/console/lib" = "awf/bootstrap_assets/apps/console/lib"
+"apps/console/next.config.ts" = "awf/bootstrap_assets/apps/console/next.config.ts"
+"apps/console/package-lock.json" = "awf/bootstrap_assets/apps/console/package-lock.json"
+"apps/console/package.json" = "awf/bootstrap_assets/apps/console/package.json"
+"apps/console/postcss.config.mjs" = "awf/bootstrap_assets/apps/console/postcss.config.mjs"
+"apps/console/scripts" = "awf/bootstrap_assets/apps/console/scripts"
+"apps/console/tsconfig.json" = "awf/bootstrap_assets/apps/console/tsconfig.json"
+"docs" = "awf/bootstrap_assets/docs"
+"docker/agent-runtime.Dockerfile" = "awf/bootstrap_assets/docker/agent-runtime.Dockerfile"
+"docker/compose/local-service.yml" = "awf/bootstrap_assets/docker/compose/local-service.yml"
+"docker/compose/workspace.base.yml.j2" = "awf/bootstrap_assets/docker/compose/workspace.base.yml.j2"
+"docker/control-plane.Dockerfile" = "awf/bootstrap_assets/docker/control-plane.Dockerfile"
+"migrations" = "awf/bootstrap_assets/migrations"
+"openapi.json" = "awf/bootstrap_assets/openapi.json"
+"pyproject.toml" = "awf/bootstrap_assets/pyproject.toml"
+"src" = "awf/bootstrap_assets/src"
+"uv.lock" = "awf/bootstrap_assets/uv.lock"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.env.example",
+    "/compose.yaml",
+    "/README.md",
+    "/RELEASING.md",
+    "/alembic.ini",
+    "/apps/console/Dockerfile",
+    "/apps/console/app",
+    "/apps/console/components",
+    "/apps/console/lib",
+    "/apps/console/next.config.ts",
+    "/apps/console/package-lock.json",
+    "/apps/console/package.json",
+    "/apps/console/postcss.config.mjs",
+    "/apps/console/scripts",
+    "/apps/console/tsconfig.json",
+    "/docs",
+    "/docker/agent-runtime.Dockerfile",
+    "/docker/compose/local-service.yml",
+    "/docker/compose/workspace.base.yml.j2",
+    "/docker/control-plane.Dockerfile",
+    "/migrations",
+    "/openapi.json",
+    "/packaging/install.sh",
+    "/pyproject.toml",
+    "/scripts/generate_install_manifest.py",
+    "/src",
+    "/uv.lock",
+]
+exclude = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "/apps/console/.env.local",
+    "/apps/console/.next",
+    "/apps/console/next-env.d.ts",
+    "/apps/console/node_modules",
+    "/apps/console/playwright-report",
+    "/apps/console/test-results",
+    "/apps/console/tsconfig.tsbuildinfo",
+    "/docker/compose/.env",
+]
+
+[tool.hatch.build.targets.sdist.force-include]
+# Keep this alongside the sdist include entry: hatchling's wheel-from-sdist
+# path can otherwise omit this console source directory from generated wheels.
+"apps/console/lib" = "apps/console/lib"
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+force-exclude = true
 extend-exclude = [
     ".venv",
     "migrations/versions",
     "build",
     "dist",
+    "docker/compose/local-service.yml",
 ]
 
 [tool.ruff.lint]
@@ -103,11 +186,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002"]  # test fixtures often appear unused to ruff
 "migrations/**" = ["E402", "F401"]
-# Operator CLIs implement Protocol/ABC stubs whose signatures must match the
-# production interface even when the method body ignores some params (noop
-# adapters in salvage_workspace.py, watcher stubs mirroring the release-PR
-# scheduler). Enforcing the stricter rules here would just mean splattering
-# ``# noqa`` across every stub for no safety benefit.
+# Generator scripts are small build/docs tools. Keep their lint posture slightly
+# looser so CLI helper signatures can stay simple.
 "scripts/**" = [
     "ARG001",
     "ARG002",
@@ -168,6 +248,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 timeout = 30
 addopts = [
@@ -192,12 +273,20 @@ omit = [
 ]
 
 [tool.coverage.report]
+precision = 2
 exclude_lines = [
     "pragma: no cover",
     "raise NotImplementedError",
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
+    # Protocol / abstract method stub bodies written as a bare ``...``. These are
+    # type declarations with no runtime behaviour (the concrete implementation
+    # overrides them), so they are verified by mypy's structural-conformance
+    # checks, not by pytest. Excluding them avoids writing throwaway tests that
+    # call the stub solely to mark the line executed. Matches a line that is
+    # only ``...`` (never ``x = ...`` or ``foo[...]``).
+    '^\s*\.\.\.\s*$',
 ]
-fail_under = 90
+fail_under = 99
 show_missing = true
 skip_covered = false

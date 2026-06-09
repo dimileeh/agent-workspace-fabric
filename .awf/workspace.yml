@@ -1,0 +1,66 @@
+awf:
+  name: awf-self
+  version: 1
+  description: AWF self-dogfood profile for Python CLI/control-plane work.
+  docker:
+    mode: none
+  runtime:
+    environment:
+      PYTHONUNBUFFERED: "1"
+      AWF_DATABASE_URL: "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+      AWF_TEST_DATABASE_URL: "postgresql+asyncpg://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+  services:
+    - name: postgres
+      image: postgres:16-alpine
+      environment:
+        POSTGRES_DB: awf
+        POSTGRES_PASSWORD: "${AWF_POSTGRES_PASSWORD}"
+        POSTGRES_USER: awf
+      healthcheck_cmd: "pg_isready -U awf -d awf"
+      volumes:
+        - [postgres_data, /var/lib/postgresql/data]
+  security:
+    egress:
+      mode: open
+      open_explanation: AWF self-dogfood needs unrestricted internet to bootstrap services, run the local API/worker Postgres stack, pull agent and control-plane images, and support broad engineering dogfood experiments.
+  planning:
+    required: true
+    plan_path: docs/awf-plans/{workspace_id}.md
+    conformance_report_path: docs/awf-plans/{workspace_id}.conformance.json
+    max_iterations: 3
+    enforce_plan_only_changes: true
+    fail_on_unexplained_deviation: true
+  monitor:
+    non_check_reviewer_settle_seconds: 900
+    non_check_reviewer_logins:
+      - greptile-apps
+      - chatgpt-codex-connector
+  validation:
+    requested_tier: 1
+    strategy:
+      baseline_coverage: skip
+      edit_gate: targeted
+      final_gate: none
+    coverage:
+      minimum_percent: 99
+      enforce: true
+      provider: python
+      command:
+        command: uv run --python 3.12 --extra dev pytest --timeout=300 --cov=awf --cov-report=term-missing --cov-fail-under=99
+        timeout_seconds: 3600
+      parallel_workers: 3
+  phases:
+    setup:
+      - command: uv sync --extra dev
+        timeout_seconds: 900
+      - command: uv run --python 3.12 --extra dev pre-commit install --install-hooks
+        timeout_seconds: 300
+    validate:
+      - command: uv run --python 3.12 --extra dev ruff check src/awf/cli tests/unit/cli
+        timeout_seconds: 300
+      - command: uv run --python 3.12 --extra dev mypy src/awf/cli
+        timeout_seconds: 300
+      - command: uv run --python 3.12 --extra dev pytest tests/unit/cli -q
+        timeout_seconds: 300
+      - command: uv run --python 3.12 --extra dev pytest tests/unit/control/test_test_quality_guardrails_self.py -q
+        timeout_seconds: 300

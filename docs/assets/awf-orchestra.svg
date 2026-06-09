@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 660" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" role="img" aria-label="AWF conducting an orchestra of AI coding agents, each in its own isolated workspace, producing merged pull requests.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#131a2e"/>
+    </linearGradient>
+    <linearGradient id="stage" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2742"/>
+      <stop offset="1" stop-color="#0d1428"/>
+    </linearGradient>
+    <radialGradient id="spot" cx="0.5" cy="0.1" r="0.7">
+      <stop offset="0" stop-color="#f59e0b" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#f59e0b" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="660" fill="url(#bg)"/>
+  <rect x="0" y="430" width="1200" height="230" fill="url(#stage)"/>
+  <ellipse cx="600" cy="250" rx="520" ry="300" fill="url(#spot)"/>
+
+  <!-- Title -->
+  <text x="600" y="62" text-anchor="middle" fill="#f1f5f9" font-size="38" font-weight="700" letter-spacing="0.5">Agent Workspace Fabric</text>
+  <text x="600" y="92" text-anchor="middle" fill="#94a3b8" font-size="17" letter-spacing="3" font-weight="600">ORCHESTRATING AI CODING AGENTS</text>
+
+  <!-- Baton waves: conductor -> each agent booth -->
+  <g fill="none" stroke-width="2.5" stroke-linecap="round" opacity="0.55">
+    <path d="M600 250 C 360 300, 220 330, 150 388" stroke="#10b981"/>
+    <path d="M600 250 C 520 320, 470 340, 440 388" stroke="#d97706"/>
+    <path d="M600 250 C 680 320, 730 340, 760 388" stroke="#4285f4"/>
+    <path d="M600 250 C 840 300, 980 330, 1050 388" stroke="#a855f7"/>
+  </g>
+
+  <!-- Conductor = AWF control plane -->
+  <g>
+    <!-- podium -->
+    <path d="M540 312 L660 312 L690 372 L510 372 Z" fill="#1e293b" stroke="#334155" stroke-width="2"/>
+    <rect x="556" y="328" width="88" height="30" rx="6" fill="#0b1020"/>
+    <text x="600" y="349" text-anchor="middle" fill="#f59e0b" font-size="20" font-weight="800" letter-spacing="2">AWF</text>
+    <text x="600" y="392" text-anchor="middle" fill="#64748b" font-size="12" letter-spacing="1.5">CONTROL PLANE</text>
+    <!-- body -->
+    <path d="M576 300 Q600 280 624 300 L618 250 Q600 238 582 250 Z" fill="#334155"/>
+    <!-- head -->
+    <circle cx="600" cy="222" r="22" fill="#fbbf24"/>
+    <circle cx="600" cy="222" r="22" fill="none" stroke="#f59e0b" stroke-width="2"/>
+    <!-- arms + baton -->
+    <path d="M588 258 L548 232" stroke="#fbbf24" stroke-width="6" stroke-linecap="round"/>
+    <path d="M612 258 L664 214" stroke="#fbbf24" stroke-width="6" stroke-linecap="round"/>
+    <line x1="664" y1="214" x2="712" y2="178" stroke="#f8fafc" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="712" cy="178" r="4" fill="#f8fafc"/>
+    <!-- floating notes -->
+    <g fill="#f59e0b" opacity="0.8">
+      <circle cx="470" cy="180" r="6"/><rect x="475" y="156" width="2.5" height="26" rx="1"/>
+      <circle cx="742" cy="240" r="5"/><rect x="746" y="218" width="2.2" height="24" rx="1"/>
+      <circle cx="412" cy="262" r="4"/>
+    </g>
+  </g>
+
+  <!-- Agent booths: each an isolated workspace (worktree + compose stack) -> PR -->
+  <!-- booth template repeated x4 with color + label -->
+  <!-- 1: Codex -->
+  <g>
+    <rect x="40" y="388" width="220" height="210" rx="16" fill="#111c30" stroke="#10b981" stroke-width="2"/>
+    <circle cx="80" cy="426" r="15" fill="#10b981"/>
+    <text x="106" y="424" fill="#e2e8f0" font-size="17" font-weight="700">Codex</text>
+    <text x="106" y="442" fill="#64748b" font-size="11">coding agent</text>
+    <rect x="62" y="470" width="176" height="58" rx="9" fill="#0b1020" stroke="#1e293b"/>
+    <text x="74" y="491" fill="#94a3b8" font-size="11.5">isolated git worktree</text>
+    <text x="74" y="513" fill="#94a3b8" font-size="11.5">+ per-task Compose stack</text>
+    <rect x="62" y="540" width="176" height="34" rx="8" fill="#10b98122" stroke="#10b981"/>
+    <text x="150" y="562" text-anchor="middle" fill="#34d399" font-size="13" font-weight="700">→ Pull Request ✓</text>
+  </g>
+  <!-- 2: Claude Code -->
+  <g>
+    <rect x="340" y="388" width="220" height="210" rx="16" fill="#111c30" stroke="#d97706" stroke-width="2"/>
+    <circle cx="380" cy="426" r="15" fill="#d97706"/>
+    <text x="406" y="424" fill="#e2e8f0" font-size="17" font-weight="700">Claude Code</text>
+    <text x="406" y="442" fill="#64748b" font-size="11">coding agent</text>
+    <rect x="362" y="470" width="176" height="58" rx="9" fill="#0b1020" stroke="#1e293b"/>
+    <text x="374" y="491" fill="#94a3b8" font-size="11.5">isolated git worktree</text>
+    <text x="374" y="513" fill="#94a3b8" font-size="11.5">+ per-task Compose stack</text>
+    <rect x="362" y="540" width="176" height="34" rx="8" fill="#d9770622" stroke="#d97706"/>
+    <text x="450" y="562" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="700">→ Pull Request ✓</text>
+  </g>
+  <!-- 3: Gemini -->
+  <g>
+    <rect x="640" y="388" width="220" height="210" rx="16" fill="#111c30" stroke="#4285f4" stroke-width="2"/>
+    <circle cx="680" cy="426" r="15" fill="#4285f4"/>
+    <text x="706" y="424" fill="#e2e8f0" font-size="17" font-weight="700">Gemini</text>
+    <text x="706" y="442" fill="#64748b" font-size="11">coding agent</text>
+    <rect x="662" y="470" width="176" height="58" rx="9" fill="#0b1020" stroke="#1e293b"/>
+    <text x="674" y="491" fill="#94a3b8" font-size="11.5">isolated git worktree</text>
+    <text x="674" y="513" fill="#94a3b8" font-size="11.5">+ per-task Compose stack</text>
+    <rect x="662" y="540" width="176" height="34" rx="8" fill="#4285f422" stroke="#4285f4"/>
+    <text x="750" y="562" text-anchor="middle" fill="#60a5fa" font-size="13" font-weight="700">→ Pull Request ✓</text>
+  </g>
+  <!-- 4: OpenCode -->
+  <g>
+    <rect x="940" y="388" width="220" height="210" rx="16" fill="#111c30" stroke="#a855f7" stroke-width="2"/>
+    <circle cx="980" cy="426" r="15" fill="#a855f7"/>
+    <text x="1006" y="424" fill="#e2e8f0" font-size="17" font-weight="700">OpenCode</text>
+    <text x="1006" y="442" fill="#64748b" font-size="11">coding agent</text>
+    <rect x="962" y="470" width="176" height="58" rx="9" fill="#0b1020" stroke="#1e293b"/>
+    <text x="974" y="491" fill="#94a3b8" font-size="11.5">isolated git worktree</text>
+    <text x="974" y="513" fill="#94a3b8" font-size="11.5">+ per-task Compose stack</text>
+    <rect x="962" y="540" width="176" height="34" rx="8" fill="#a855f722" stroke="#a855f7"/>
+    <text x="1050" y="562" text-anchor="middle" fill="#c084fc" font-size="13" font-weight="700">→ Pull Request ✓</text>
+  </g>
+
+  <!-- Tagline -->
+  <text x="600" y="632" text-anchor="middle" fill="#cbd5e1" font-size="16">One conductor, many agents — each task in its own pit: isolated worktree, isolated stack, a clean merged PR.</text>
+</svg>

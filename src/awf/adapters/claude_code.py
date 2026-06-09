@@ -19,9 +19,34 @@ class ClaudeCodeAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:
         return AgentRuntime.claude_code
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+    @property
+    def runtime_scratch_paths(self) -> tuple[str, ...]:
+        # ``claude`` creates nested git worktrees for its isolated subagents
+        # under ``.claude/worktrees/`` inside the checkout. Exclude that
+        # agent-runtime state from AWF's validation-cleanliness guard.
+        return (".claude/worktrees/",)
+
+    def get_provider(self, model: str | None) -> str:
+        del model
+        return "anthropic"
+
+    def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["claude", "--dangerously-skip-permissions"]
-        if model:
-            args += ["--model", model]
-        args += ["-p", prompt]
+        selected_model = model or self._default_model
+        if selected_model:
+            args += ["--model", selected_model]
+        if self._default_effort:
+            args += ["--effort", _claude_effort_for_awf_effort(self._default_effort)]
+        args.append("-p")
         return args
+
+
+def _claude_effort_for_awf_effort(effort: str) -> str:
+    """Normalize AWF's effort policy to Claude Code's ``--effort`` flag.
+
+    The ``claude`` CLI accepts the same effort ladder AWF uses
+    (``low``, ``medium``, ``high``, ``xhigh``, ``max``), so the requested effort
+    is propagated as-is. In particular ``xhigh`` stays ``xhigh`` and is not
+    collapsed to ``max``.
+    """
+    return effort.lower()

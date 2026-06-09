@@ -19,12 +19,16 @@ class CodexAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:
         return AgentRuntime.codex
 
-    def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+    def get_provider(self, model: str | None) -> str:
+        del model
+        return "openai"
+
+    def _cli_args(self, *, model: str | None) -> list[str]:
         args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
-        if model:
-            args += ["--model", model]
-            # High reasoning effort is the right default for full tasks; callers
-            # can override via a future per-request knob.
-            args += ["-c", 'model_reasoning_effort="high"']
-        args.append(prompt)
+        selected_model = model or self._default_model
+        if selected_model:
+            args += ["--model", selected_model]
+        if self._default_effort:
+            args += ["-c", f'model_reasoning_effort="{self._default_effort}"']
+        args.append("-")
         return args

@@ -1,16 +1,19 @@
-"""Pull-request creator — pushes the feature branch and opens a PR via ``gh``.
+"""Pull-request creator — pushes the feature branch and opens or reuses a PR.
 
 Two responsibilities:
 
 1. ``git -C <worktree> push -u origin <branch>`` — uploads the commits the
-   coding CLI just made to the remote.
-2. ``gh pr create --base <base> --head <branch> --title ... --body ...`` —
-   opens the PR on GitHub. We capture stdout which contains the PR URL.
+   coding CLI just made to the remote. When updating an adopted fork PR through
+   an explicit push URL, AWF omits ``-u`` so credentialed URLs are not persisted
+   in branch upstream config. The push is forge-neutral plain git.
+2. Open the PR via the injected :class:`~awf.common.forge.ForgeClient` when one
+   does not already exist. The forge client (GitHub or Bitbucket) is resolved by
+   the caller and passed in per-call, so ``PullRequestCreator`` stays
+   forge-agnostic and stateless. The client returns the PR URL directly.
 
-We shell out to the ``gh`` CLI (not the GitHub REST API directly) because:
-- ``gh`` already handles auth via stored tokens / keyrings / env vars, so
-  AWF doesn't need to re-implement that.
-- Error messages are familiar to operators who already use ``gh``.
+``PullRequestCreator`` shells plain ``git`` for the push but never shells the
+forge CLI itself — the resolved ``ForgeClient`` owns the forge-specific PR-open
+call (``gh pr create`` for GitHub, the REST API for Bitbucket).
 """
 
 from __future__ import annotations
@@ -20,14 +23,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.commands import AsyncCommandRunner
+from awf.common.forge import ForgeClient
+from awf.common.git_identity import git_safe_directory_config_args
+from awf.common.github_client import GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
-
-# gh prints the PR URL as the only non-empty, non-warning line of stdout.
-# Matching anywhere tolerates leading "Creating pull request..." noise from
-# future gh versions without tight-coupling to a specific release.
-_PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 
 # Redact credentials embedded in URLs before logging. Git/gh can emit
 # ``https://user:token@host`` in stderr under certain auth failures;
@@ -41,6 +42,7 @@ _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/@\s]+(?::[^/@\s]+)?@")
 # workstreams) would otherwise emit an unbounded list that could
 # exceed log-backend payload limits.
 _MAX_DIAGNOSTIC_COMMITS = 50
+_HEADS_REF_PREFIX = "refs/heads/"
 
 
 def _redact_credentials(text: str) -> str:
@@ -49,26 +51,48 @@ def _redact_credentials(text: str) -> str:
     return _URL_CREDENTIAL_PATTERN.sub(r"\1***@", text)
 
 
+def _short_branch_name(branch_name: str) -> str:
+    """Return the branch name without a leading ``refs/heads/`` prefix."""
+    return branch_name.removeprefix(_HEADS_REF_PREFIX)
+
+
 @dataclass(frozen=True)
 class PullRequestResult:
     url: str
     branch: str
+    head_sha: str | None = None
 
 
 class PullRequestError(Exception):
-    """Raised when push or ``gh pr create`` fails."""
+    """Raised when the git push or the forge PR-open call fails."""
 
-    def __init__(self, *, operation: str, returncode: int, stderr: str) -> None:
+    def __init__(
+        self,
+        *,
+        operation: str,
+        returncode: int,
+        stderr: str,
+        head_sha: str | None = None,
+        reason_code: str | None = None,
+    ) -> None:
         self.operation = operation
         self.returncode = returncode
         self.stderr = stderr
+        self.head_sha = head_sha
+        # Forge clients that carry an actionable reason code (e.g.
+        # ``BitbucketClientError`` with auth / rate-limit / transport codes)
+        # propagate it here so the executor records the specific doctor
+        # guidance on the failed workspace instead of a generic
+        # ``PR_CREATE_FAILED``. ``GitHubClientError`` has no reason code, and
+        # the push / no-client / no-URL raises leave this ``None``.
+        self.reason_code = reason_code
         super().__init__(
             f"{operation} failed (exit={returncode}): {stderr.strip() or '<no output>'}"
         )
 
 
 class PullRequestCreator:
-    """Pushes a feature branch and opens a PR via ``gh``."""
+    """Pushes a feature branch and opens a PR via an injected ``ForgeClient``."""
 
     def __init__(self, runner: AsyncCommandRunner) -> None:
         self._runner = runner
@@ -81,7 +105,19 @@ class PullRequestCreator:
         base_branch: str,
         title: str,
         body: str,
+        forge_client: ForgeClient | None = None,
+        repo_url: str,
+        existing_pr_url: str | None = None,
+        remote_branch_name: str | None = None,
+        remote_url: str | None = None,
     ) -> PullRequestResult:
+        if existing_pr_url and remote_branch_name:
+            push_target_branch = _short_branch_name(remote_branch_name)
+            push_ref = f"HEAD:{_HEADS_REF_PREFIX}{push_target_branch}"
+        else:
+            push_target_branch = branch_name
+            push_ref = branch_name
+        push_remote = remote_url or "origin"
         # Step 0: capture the worktree's view of the branch state so we
         # can diagnose post-validation push failures. T39 (ws_eb8c2bd5)
         # hit ``gh pr create: No commits between development and
@@ -91,15 +127,24 @@ class PullRequestCreator:
         # local branch was empty relative to base (bad commit step), or
         # (c) HEAD was detached / on a different branch. These three
         # logs answer all three questions:
-        await self._log_pre_push_diagnostics(
+        head_sha = await self._log_pre_push_diagnostics(
             worktree_path=worktree_path,
-            branch_name=branch_name,
+            branch_name=push_target_branch,
             base_branch=base_branch,
         )
 
         # Step 1: push the branch.
         push = await self._runner.run(
-            ["git", "-C", str(worktree_path), "push", "-u", "origin", branch_name],
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "push",
+                *(["-u"] if remote_url is None else []),
+                push_remote,
+                push_ref,
+            ],
         )
         # Log the verbatim push output BEFORE the ok check. If the push
         # silently said "Everything up-to-date" with returncode 0 (the
@@ -111,49 +156,94 @@ class PullRequestCreator:
         # and embedded credentials must not hit log storage.
         _log.info(
             "pr_creator.push_output",
-            branch=branch_name,
+            branch=push_target_branch,
+            remote=_redact_credentials(push_remote),
             returncode=push.returncode,
             stdout=_redact_credentials(push.stdout.strip())[:500],
             stderr=_redact_credentials(push.stderr.strip())[:500],
         )
         if not push.ok:
             raise PullRequestError(
-                operation="git push", returncode=push.returncode, stderr=push.stderr
+                operation="git push",
+                returncode=push.returncode,
+                stderr=push.stderr,
+                head_sha=head_sha,
             )
 
-        # Step 2: open the PR. gh reads auth from ~/.config/gh by default.
-        pr = await self._runner.run(
-            [
-                "gh",
-                "pr",
-                "create",
-                "--base",
-                base_branch,
-                "--head",
-                branch_name,
-                "--title",
-                title,
-                "--body",
-                body,
-            ],
-            cwd=str(worktree_path),
-        )
-        if not pr.ok:
-            raise PullRequestError(
-                operation="gh pr create", returncode=pr.returncode, stderr=pr.stderr
+        if existing_pr_url:
+            _log.info("pr.reused", branch=push_target_branch, url=existing_pr_url)
+            return PullRequestResult(
+                url=existing_pr_url,
+                branch=push_target_branch,
+                head_sha=head_sha,
             )
 
-        url_match = _PR_URL_PATTERN.search(pr.stdout)
-        if url_match is None:
+        # Step 2: open the PR through the resolved forge client. The client
+        # (GitHub or Bitbucket) owns auth and the forge-specific call and returns
+        # the PR URL directly — no github-shaped regex, so a Bitbucket URL is
+        # accepted verbatim (D7). ``BitbucketClientError`` is imported lazily so
+        # the GitHub-only hot path never pays for the httpx import that the
+        # Bitbucket client drags in (mirrors ``forge.make_forge_client``).
+        from awf.common.bitbucket_client import BitbucketClientError
+
+        if forge_client is None:  # pragma: no cover - open path always supplies one
+            # The reuse path (``existing_pr_url`` set) returns above without ever
+            # touching the forge client, so callers may omit it there. Opening a
+            # new PR requires one; treat a missing client as a forge failure
+            # rather than an ``AttributeError`` so it flows through the same
+            # structured error handling.
             raise PullRequestError(
-                operation="gh pr create (no URL in stdout)",
+                operation="create_pull_request (no forge client)",
                 returncode=0,
-                stderr=f"unexpected gh output: {pr.stdout[:500]}",
+                stderr="forge client required to open a new PR",
+                head_sha=head_sha,
             )
 
-        url = url_match.group(0)
+        repo = RepoRef.from_url(remote_url or repo_url)
+        try:
+            url = await forge_client.create_pull_request(
+                repo=repo,
+                base=base_branch,
+                head=branch_name,
+                title=title,
+                body=body,
+            )
+        except GitHubClientError as exc:
+            # Preserve the structured returncode + already-redacted stderr +
+            # operation (never ``str(exc)``, which could leak unredacted output);
+            # the executor keys its audit branch off ``exc.operation``.
+            raise PullRequestError(
+                operation=exc.operation,
+                returncode=exc.returncode,
+                stderr=exc.stderr,
+                head_sha=head_sha,
+            ) from exc
+        except BitbucketClientError as exc:
+            # Bitbucket uses HTTP status (``None`` for transport errors) and a
+            # redacted ``body`` where GitHub uses returncode/stderr — map them
+            # onto the same structured PullRequestError fields. Preserve
+            # ``exc.reason_code`` (auth / rate-limit / transport) so the
+            # executor records the specific doctor guidance instead of a
+            # generic ``PR_CREATE_FAILED`` (mirrors the other Bitbucket
+            # handoff paths that flow ``reason_code`` end-to-end).
+            raise PullRequestError(
+                operation=exc.operation,
+                returncode=exc.status if exc.status is not None else 0,
+                stderr=exc.body,
+                head_sha=head_sha,
+                reason_code=exc.reason_code,
+            ) from exc
+
+        if not url:
+            raise PullRequestError(
+                operation="create_pull_request (no URL)",
+                returncode=0,
+                stderr="forge returned an empty PR URL",
+                head_sha=head_sha,
+            )
+
         _log.info("pr.created", branch=branch_name, url=url)
-        return PullRequestResult(url=url, branch=branch_name)
+        return PullRequestResult(url=url, branch=branch_name, head_sha=head_sha)
 
     async def _log_pre_push_diagnostics(
         self,
@@ -161,7 +251,7 @@ class PullRequestCreator:
         worktree_path: Path,
         branch_name: str,
         base_branch: str,
-    ) -> None:
+    ) -> str | None:
         """Capture the local git state right before the push fires.
 
         Three queries, one structured log line:
@@ -179,13 +269,31 @@ class PullRequestCreator:
         they're diagnostic only. Normal push either succeeds (fine) or
         fails with a real error (triaged by the push step below).
         """
-        head_sha = await self._runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
+        head_sha = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "HEAD",
+            ]
+        )
         current_branch = await self._runner.run(
-            ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"]
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
+            ]
         )
         ahead_of_base = await self._runner.run(
             [
                 "git",
+                *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
                 "log",
@@ -220,3 +328,4 @@ class PullRequestCreator:
             commits_ahead_rc=ahead_of_base.returncode,
             base_branch=base_branch,
         )
+        return head_sha.stdout.strip() or None

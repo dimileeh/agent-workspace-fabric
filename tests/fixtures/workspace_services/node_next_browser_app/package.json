@@ -1,0 +1,12 @@
+{
+  "name": "awf-node-next-browser-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "setup": "node scripts/setup.mjs",
+    "healthcheck": "node scripts/healthcheck.mjs app",
+    "validate:browser": "node scripts/validate-browser.mjs"
+  }
+}

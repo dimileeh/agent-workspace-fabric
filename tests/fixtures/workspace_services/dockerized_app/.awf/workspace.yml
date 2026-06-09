@@ -1,0 +1,33 @@
+name: dockerized-app-sidecar
+version: 1
+description: Minimal Dockerized app profile with a workspace-local Redis sidecar.
+runtime:
+  environment:
+    APP_BASE_URL: http://app:8080
+    CACHE_URL: redis://redis:6379/0
+docker:
+  mode: none
+services:
+  - name: redis
+    image: redis:7-alpine
+    environment:
+      REDIS_PORT: "6379"
+    healthcheck_cmd: redis-cli ping
+    ports:
+      - [6379, 16379]
+  - name: app
+    build_context: .
+    dockerfile: Dockerfile
+    env_file: app.env
+    environment:
+      CACHE_URL: redis://redis:6379/0
+      PORT: "8080"
+    depends_on:
+      - redis
+    healthcheck_cmd: wget -qO- http://127.0.0.1:8080/healthz >/dev/null
+    ports:
+      - [8080, 18080]
+    command: python /app/app.py
+ports:
+  app: http://app:8080
+  redis: redis://redis:6379/0

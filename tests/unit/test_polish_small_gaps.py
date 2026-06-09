@@ -5,14 +5,10 @@ in one file to avoid scattering tiny test modules.
 
 Covers:
 
- - ``runtime/feature_pr_sync._default_process_lister`` — direct call
-   with pgrep present and absent.
  - ``runtime/validation.ValidationResult.first_failure`` — the
    migration-failed branch.
  - ``runtime/validation.ValidationRunner._format_display`` — the
    ``sh -c`` preamble-stripping path.
- - ``runtime/release_pr_sync`` — PR body commit-list JSON parse
-   failure fallback.
  - ``node/provisioner._load_and_claim`` — skip_unknown log path.
  - ``node/provisioner._mark_failed`` — from_status mismatch path.
  - ``node/git_manager.GitManager.work_dir`` property.
@@ -23,64 +19,25 @@ Covers:
 
 from __future__ import annotations
 
-import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.validation_fix_cycle import read_output_tail
-from awf.db.base import Base
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.git_manager import GitManager, _slugify_repo
 from awf.node.provisioner import Provisioner
-from awf.runtime import feature_pr_sync
-from awf.runtime.feature_pr_sync import _default_process_lister, is_feature_pr_monitor_running
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationResult,
     ValidationRunner,
 )
-
-# ── feature_pr_sync ────────────────────────────────────────────────────────
-
-
-class TestDefaultProcessLister:
-    @pytest.mark.unit
-    def test_pgrep_match_returns_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _fake(*args: Any, **kwargs: Any) -> str:
-            return "12345 python run_awf.py --config spec.json\n"
-
-        monkeypatch.setattr(subprocess, "check_output", _fake)
-        out = _default_process_lister()
-        assert "run_awf.py" in out
-
-    @pytest.mark.unit
-    def test_pgrep_no_match_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _raise(*args: Any, **kwargs: Any) -> str:
-            raise subprocess.CalledProcessError(1, "pgrep")
-
-        monkeypatch.setattr(subprocess, "check_output", _raise)
-        assert _default_process_lister() == ""
-
-    @pytest.mark.unit
-    def test_is_feature_pr_monitor_running_calls_default_lister(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Covers the ``if process_lister is None: process_lister =
-        _default_process_lister`` branch plus the default path itself."""
-        # Force _default_process_lister to return a recognisable line.
-        monkeypatch.setattr(
-            feature_pr_sync,
-            "_default_process_lister",
-            lambda: "12345 python run_awf.py --config /tmp/my-spec.json\n",
-        )
-        assert is_feature_pr_monitor_running(spec_filename="my-spec.json")
-
+from tests.postgres import postgres_test_engine
 
 # ── validation ─────────────────────────────────────────────────────────────
 
@@ -153,56 +110,13 @@ class TestValidationDisplay:
         assert "'tests/with spaces/'" in result.command or '"tests/with spaces/"' in result.command
 
 
-# ── release_pr_sync ────────────────────────────────────────────────────────
-
-
-class TestReleasePrBodyJsonParseFallback:
-    @pytest.mark.unit
-    async def test_malformed_commits_json_falls_back_to_stub_message(
-        self,
-    ) -> None:
-        """Lines 254-255: when gh returns malformed JSON, the body
-        builder must not crash — emits a sentinel instead."""
-        from awf.common.commands import FakeCommandRunner
-        from awf.common.github_client import RepoRef
-        from awf.runtime.release_pr_sync import ensure_release_pr_open
-
-        runner = FakeCommandRunner()
-        # ahead-by query → "3"
-        runner.queue_result(returncode=0, stdout="3\n")
-        # existing PR query → none open
-        runner.queue_result(returncode=0, stdout="[]\n")
-        # commits list → malformed JSON (not a list)
-        runner.queue_result(returncode=0, stdout="this is not json at all")
-        # gh pr create → returns URL
-        runner.queue_result(
-            returncode=0,
-            stdout="https://github.com/o/r/pull/42\n",
-        )
-        result = await ensure_release_pr_open(
-            runner=runner,
-            repo=RepoRef(owner="o", name="r"),
-            source_branch="development",
-            target_branch="main",
-        )
-        assert result.pr_number == 42
-        # The fallback kicked in — we can't inspect the body directly
-        # without catching the create call args; proves lines 254-255
-        # ran by confirming the create succeeded despite bad JSON.
-
-
 # ── provisioner ────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
-async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'p.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 class TestProvisionerSkipUnknown:
@@ -270,6 +184,93 @@ class TestProvisionerSkipUnknown:
             assert ws is not None
             # Status preserved, not overridden.
             assert ws.status == "requested"
+
+    @pytest.mark.unit
+    async def test_mark_failed_pre_launch_leaves_compose_project_name_null(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Pre-launch failures (compose_launched=False) must not set
+        compose_project_name.  A workspace that failed before Docker
+        Compose was launched never bound a host port, so it must not
+        block port admission in find_host_port_conflicts."""
+
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url="r",
+                branch_base="b",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requires_database=False,
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await s.commit()
+            ws_id = ws.id
+
+        from awf.node.provisioner import ProvisionerConfig
+
+        prov = Provisioner(
+            session_factory=factory,
+            git=object(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node"),
+        )
+        await prov._mark_failed(
+            workspace_id=ws_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="port conflict before compose launch",
+            from_status=WorkspaceStatus.provisioning,
+            compose_launched=False,
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.compose_project_name is None
+
+    @pytest.mark.unit
+    async def test_mark_failed_post_compose_sets_compose_project_name(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Post-compose failures (compose_launched=True) must set
+        compose_project_name so the cleanup worker and port-conflict
+        check can find the Docker project."""
+
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url="r",
+                branch_base="b",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requires_database=False,
+            )
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await s.commit()
+            ws_id = ws.id
+
+        from awf.node.provisioner import ProvisionerConfig
+
+        prov = Provisioner(
+            session_factory=factory,
+            git=object(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node"),
+        )
+        await prov._mark_failed(
+            workspace_id=ws_id,
+            failure_reason=FailureReason.service_startup_failure,
+            message="compose stack failed to start",
+            from_status=WorkspaceStatus.provisioning,
+            compose_launched=True,
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.compose_project_name == f"awf_{ws_id}"
 
 
 # ── git_manager ────────────────────────────────────────────────────────────

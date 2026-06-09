@@ -1,79 +1,44 @@
 {#
-  Per-workspace Docker Compose stack.
+  Universal per-workspace Docker Compose stack.
 
-  Rendered by awf.node.compose_manager for each workspace. One compose project
-  per workspace = deterministic cleanup (``docker compose down -v`` removes
-  everything named with the project prefix).
-
-  Variables expected:
-    workspace_id           — e.g. ws_abc123 (used for project name scoping)
-    agent_runtime_image    — image to run the coding agent + repo in
-    worktree_host_path     — absolute host path to the git worktree, mounted
-                             into the agent container at /workspace
-    postgres_image         — e.g. postgres:16-alpine
-    postgres_user, postgres_password, postgres_db
-    resources              — optional mapping with cpu/memory caps
-    auth_mounts            — list of {source, target, mode} bind mounts for
-                             CLI credentials (~/.codex, ~/.claude, etc.)
-    git_name, git_email    — optional git identity for commits
-    companions             — list of companion services (dicts rendered from
-                             CompanionService). Each adds a build-from-host
-                             service (e.g. aira-agent backend, aira-web) that
-                             runs alongside the agent so validation can run
-                             against a live stack.
-    agent_depends_on       — ordered list of services the agent depends on
+  The base stack is intentionally small: an agent container with the repo at
+  /workspace, plus only the services declared by the resolved workspace
+  profile. Project databases, pgvector, Redis, app-under-test, Playwright, and
+  DinD are profile data, not AWF defaults.
 #}
 services:
-  postgres:
-    image: "{{ postgres_image }}"
-    container_name: "awf-{{ workspace_id }}-postgres"
-    environment:
-      POSTGRES_USER: "{{ postgres_user }}"
-      POSTGRES_PASSWORD: "{{ postgres_password }}"
-      POSTGRES_DB: "{{ postgres_db }}"
-    volumes:
-      # pgvector/pgvector:pg18 uses /var/lib/postgresql (not .../data) for its
-      # data dir — matches Dmitri's aira-agent/docker-compose.yml convention.
-      - postgres_data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U {{ postgres_user }} -d {{ postgres_db }}"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-      start_period: 2s
-    networks:
-      - awf_net
-    restart: "no"
-
-  {% for c in companions %}
-  {{ c.name }}:
-    container_name: "awf-{{ workspace_id }}-{{ c.name }}"
-    build:
-      context: "{{ c.build_context }}"
-      dockerfile: "{{ c.dockerfile }}"
-    {% if c.env_file %}env_file:
-      - "{{ c.env_file }}"
-    {% endif %}{% if c.environment %}environment:
-      {% for k, v in c.environment %}{{ k }}: "{{ v }}"
+  {% for s in services %}
+  {{ s.name }}:
+    container_name: "awf-{{ workspace_id }}-{{ s.name }}"
+    {% if s.image %}image: {{ s.image | tojson }}
+    {% if s.local_image %}pull_policy: never
+    {% endif %}{% elif s.build_context %}build:
+      context: {{ s.build_context | tojson }}
+      dockerfile: {{ s.dockerfile | tojson }}
+    {% endif %}{% if s.privileged %}privileged: true
+    {% endif %}{% if s.env_file %}env_file:
+      - {{ s.env_file | tojson }}
+    {% endif %}{% if s.environment %}environment:
+      {% for k, v in s.environment %}{{ k | tojson }}: {{ v | tojson }}
       {% endfor %}
-    {% endif %}{% if c.depends_on %}depends_on:
-      {% for dep in c.depends_on %}{{ dep }}:
+    {% endif %}{% if s.depends_on %}depends_on:
+      {% for dep in s.depends_on %}{{ dep }}:
         condition: service_healthy
       {% endfor %}
-    {% endif %}{% if c.healthcheck_cmd %}healthcheck:
+    {% endif %}{% if s.healthcheck_cmd %}healthcheck:
       test:
         - "CMD-SHELL"
-        - {{ c.healthcheck_cmd | tojson }}
+        - {{ s.healthcheck_cmd | tojson }}
       interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 10s
-    {% endif %}{% if c.command %}command: {{ c.command }}
-    {% endif %}{% if c.ports %}ports:
-      {% for cp, hp in c.ports %}- "{{ hp }}:{{ cp }}"
+      retries: 60
+      start_period: 5s
+    {% endif %}{% if s.command %}command: {{ s.command | tojson }}
+    {% endif %}{% if s.ports %}ports:
+      {% for cp, hp in s.ports %}- "{{ hp }}:{{ cp }}"
       {% endfor %}
-    {% endif %}{% if c.volumes %}volumes:
-      {% for src, tgt in c.volumes %}- "{{ src }}:{{ tgt }}"
+    {% endif %}{% if s.volumes %}volumes:
+      {% for src, tgt in s.volumes %}- {{ (src ~ ":" ~ tgt) | tojson }}
       {% endfor %}
     {% endif %}networks:
       - awf_net
@@ -86,12 +51,8 @@ services:
     working_dir: /workspace
     environment:
       WORKSPACE_ID: "{{ workspace_id }}"
-      DATABASE_URL: "postgresql+psycopg://{{ postgres_user }}:{{ postgres_password }}@postgres:5432/{{ postgres_db }}"
-      # aira-agent reads AIRA_DATABASE_URL; alias so ``alembic upgrade head``
-      # during the validation step picks up the stack-local Postgres without
-      # per-task config.
-      AIRA_DATABASE_URL: "postgresql+asyncpg://{{ postgres_user }}:{{ postgres_password }}@postgres:5432/{{ postgres_db }}"
-      {% if git_name %}GIT_AUTHOR_NAME: "{{ git_name }}"
+      {% for k, v in agent_environment %}{{ k | tojson }}: {{ v | tojson }}
+      {% endfor %}{% if git_name %}GIT_AUTHOR_NAME: "{{ git_name }}"
       GIT_COMMITTER_NAME: "{{ git_name }}"{% endif %}
       {% if git_email %}GIT_AUTHOR_EMAIL: "{{ git_email }}"
       GIT_COMMITTER_EMAIL: "{{ git_email }}"{% endif %}
@@ -100,11 +61,14 @@ services:
       {% if auth_mounts %}{% for m in auth_mounts %}
       - "{{ m.source }}:{{ m.target }}:{{ m.mode | default('ro') }}"
       {% endfor %}{% endif %}
-    depends_on:
+    {% if host_gateway_enabled -%}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    {% endif %}{% if agent_depends_on %}depends_on:
       {% for dep in agent_depends_on %}{{ dep }}:
         condition: service_healthy
       {% endfor %}
-    networks:
+    {% endif %}networks:
       - awf_net
     command: ["sh", "-c", "sleep infinity"]
     restart: "no"
@@ -116,10 +80,15 @@ services:
           memory: "{{ resources.memory_limit }}"
     {% endif %}
 
-volumes:
-  postgres_data:
-    name: "awf-{{ workspace_id }}-pgdata"
+{% if named_volumes %}volumes:
+  {% for v in named_volumes %}{{ v | tojson }}:
+    name: {{ ("awf-" ~ workspace_id ~ "-" ~ v) | tojson }}
+  {% endfor %}
+{% else %}volumes: {}
+{% endif %}
 
 networks:
   awf_net:
     name: "awf-{{ workspace_id }}-net"
+    {% if network_internal %}internal: true
+    {% endif %}

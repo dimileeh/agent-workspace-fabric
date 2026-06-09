@@ -1,0 +1,160 @@
+"""OpenCode CLI adapter.
+
+OpenCode runs non-interactively via ``opencode run``. For AWF's Ollama
+integration we inject a small inline config that points the OpenCode
+``ollama`` provider at the host Ollama daemon. The agent container then talks
+to Ollama through Docker's host gateway while AWF still owns the workspace
+lifecycle.
+"""
+
+from __future__ import annotations
+
+import json
+
+from awf.adapters.base import AgentAdapter, register_adapter
+from awf.db.enums import AgentRuntime
+
+OPENCODE_OLLAMA_CLOUD_MODELS = (
+    "kimi-k2.6:cloud",
+    "glm-5.1:cloud",
+    "gemma4:31b-cloud",
+    "deepseek-v4-pro:cloud",
+)
+"""Ollama Cloud models AWF exposes through the OpenCode adapter."""
+
+DEFAULT_OLLAMA_OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
+
+
+@register_adapter
+class OpenCodeAdapter(AgentAdapter):
+    runtime = AgentRuntime.opencode
+
+    @property
+    def name(self) -> AgentRuntime:
+        return AgentRuntime.opencode
+
+    def get_provider(self, model: str | None) -> str:
+        active_model = model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
+        if "/" in active_model:
+            return active_model.split("/", 1)[0]
+        return "ollama"
+
+    def _cli_args(self, *, model: str | None) -> list[str]:
+        selected_model = _qualified_model(
+            model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
+        )
+        script = _opencode_launcher_script(effort=self._default_effort)
+        args = [
+            "sh",
+            "-c",
+            script,
+            "awf-opencode",
+            "--dangerously-skip-permissions",
+            "--model",
+            selected_model,
+        ]
+        if variant := _variant_for_effort(self._default_effort):
+            args.extend(["--variant", variant, "--thinking"])
+        args.append("Follow the instructions in the attached AWF prompt file exactly.")
+        return args
+
+
+def _qualified_model(model: str) -> str:
+    if "/" in model:
+        return model
+    return f"ollama/{model}"
+
+
+def _opencode_launcher_script(*, effort: str | None) -> str:
+    config = _opencode_config_for_effort(effort=effort)
+    config_json = json.dumps(config, separators=(",", ":"))
+    return (
+        "set -eu\n"
+        "prompt_path=\n"
+        "config_path=\n"
+        "child_pid=\n"
+        "cleanup() {\n"
+        '  if [ -n "$child_pid" ] && kill -0 "$child_pid" 2>/dev/null; then\n'
+        '    kill "$child_pid" 2>/dev/null || true\n'
+        '    wait "$child_pid" 2>/dev/null || true\n'
+        "  fi\n"
+        '  [ -n "$prompt_path" ] && rm -f "$prompt_path" 2>/dev/null || true\n'
+        '  [ -n "$config_path" ] && rm -f "$config_path" 2>/dev/null || true\n'
+        "}\n"
+        "forward_signal() {\n"
+        '  sig="$1"\n'
+        '  code="$2"\n'
+        '  if [ -n "$child_pid" ]; then\n'
+        '    kill "-$sig" "$child_pid" 2>/dev/null || true\n'
+        '    wait "$child_pid" 2>/dev/null || true\n'
+        "    child_pid=\n"
+        "  fi\n"
+        '  exit "$code"\n'
+        "}\n"
+        "trap cleanup EXIT\n"
+        "trap 'forward_signal HUP 129' HUP\n"
+        "trap 'forward_signal INT 130' INT\n"
+        "trap 'forward_signal TERM 143' TERM\n"
+        'config_path="$(mktemp "${TMPDIR:-/tmp}/awf-opencode-config.XXXXXX.json")"\n'
+        "export AWF_OPENCODE_OLLAMA_BASE_URL="
+        '"${AWF_OPENCODE_OLLAMA_BASE_URL:-'
+        f"{DEFAULT_OLLAMA_OPENAI_BASE_URL}"
+        '}"\n'
+        "cat > \"$config_path\" <<'AWF_OPENCODE_CONFIG'\n"
+        f"{config_json}\n"
+        "AWF_OPENCODE_CONFIG\n"
+        'export OPENCODE_CONFIG_CONTENT="$(cat "$config_path")"\n'
+        'prompt_path="$(mktemp "${TMPDIR:-/tmp}/awf-opencode-prompt.XXXXXX.md")"\n'
+        'cat > "$prompt_path"\n'
+        'opencode run --file "$prompt_path" "$@" &\n'
+        "child_pid=$!\n"
+        "set +e\n"
+        'wait "$child_pid"\n'
+        "status=$?\n"
+        "set -e\n"
+        "child_pid=\n"
+        'exit "$status"\n'
+    )
+
+
+def _opencode_config_for_effort(*, effort: str | None) -> dict[str, object]:
+    model_config: dict[str, object] = {"name": ""}
+    if _thinking_enabled(effort):
+        # Ollama Cloud exposes thinking-capable models; OpenCode's provider
+        # config asks Ollama for thinking, while the CLI ``--variant`` flag
+        # carries the requested reasoning effort for OpenCode versions that
+        # support it.
+        model_config["options"] = {"think": True}
+
+    models = {model: {**model_config, "name": model} for model in OPENCODE_OLLAMA_CLOUD_MODELS}
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": "allow",
+        "provider": {
+            "ollama": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Ollama",
+                "options": {
+                    "baseURL": "{env:AWF_OPENCODE_OLLAMA_BASE_URL}",
+                },
+                "models": models,
+            },
+        },
+    }
+
+
+def _thinking_enabled(effort: str | None) -> bool:
+    if effort is None:
+        return False
+    return effort.lower() in {"high", "xhigh", "max"}
+
+
+def _variant_for_effort(effort: str | None) -> str | None:
+    if effort is None:
+        return None
+    normalized = effort.lower()
+    if normalized in {"xhigh", "max"}:
+        return "max"
+    if normalized == "high":
+        return "high"
+    return None

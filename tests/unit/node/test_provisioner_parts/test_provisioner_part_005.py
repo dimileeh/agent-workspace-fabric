@@ -1,0 +1,292 @@
+"""Regression test for intra-workspace companion-vs-profile host-port conflict.
+
+``_check_auto_resolved_profile_host_ports`` excludes the current workspace
+from ``find_host_port_conflicts`` via ``excluding_workspace_id``, which is
+correct for cross-workspace conflict detection.  However, when a companion
+and an auto-resolved profile service **within the same workspace** claim the
+same host port, the self-exclusion hides the conflict, leading to a Docker
+Compose INFRASTRUCTURE_FAILURE at launch instead of a clean
+DUPLICATE_HOST_PORT rejection.
+
+The fix adds a pre-DB in-memory check that compares profile ports against
+the workspace's own companion ports before the cross-workspace DB query.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
+
+from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.profiles.models import WorkspaceProfile
+from awf.service.workspaces import WorkspaceCreateDuplicateHostPortError
+
+
+def _profile_with_service_port(host_port: int) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "test-profile",
+            "docker": {"mode": "dind"},
+            "services": [
+                {
+                    "name": "db",
+                    "image": "postgres:16",
+                    "ports": [[5432, host_port]],
+                }
+            ],
+            "security": {"egress": {"mode": "restricted"}},
+        }
+    )
+
+
+def _companion_task_policy(*host_ports: int) -> dict[str, Any]:
+    return {
+        "companions": [
+            {
+                "name": f"svc-{i}",
+                "repo_url": f"git@github.com:example/svc-{i}.git",
+                "ports": [[80, hp]],
+            }
+            for i, hp in enumerate(host_ports)
+        ]
+    }
+
+
+def _profile_with_duplicate_service_ports(host_port: int) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "test-profile",
+            "docker": {"mode": "dind"},
+            "services": [
+                {
+                    "name": "db",
+                    "image": "postgres:16",
+                    "ports": [[5432, host_port]],
+                },
+                {
+                    "name": "cache",
+                    "image": "redis:7",
+                    "ports": [[6379, host_port]],
+                },
+            ],
+            "security": {"egress": {"mode": "restricted"}},
+        }
+    )
+
+
+class TestAutoResolvedProfileIntraProfileDuplicate:
+    """Regression: two profile services claiming the same host port."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_detected(self) -> None:
+        session_factory = AsyncMock()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=AsyncMock(),
+            stack_launcher=None,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        profile = _profile_with_duplicate_service_ports(8080)
+        task_policy: dict[str, Any] = {"companions": []}
+        with pytest.raises(WorkspaceCreateDuplicateHostPortError) as exc_info:
+            await provisioner._check_auto_resolved_profile_host_ports(
+                workspace_id="ws-1",
+                profile=profile,
+                excluding_workspace_id="ws-1",
+                task_policy=task_policy,
+            )
+        assert exc_info.value.host_port == 8080
+        assert session_factory.call_count == 0
+
+
+class TestAutoResolvedProfileIntraWorkspaceDuplicate:
+    """Regression: companion and profile sharing a host port within the same workspace."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_detected(self) -> None:
+        session_factory = AsyncMock()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=AsyncMock(),
+            stack_launcher=None,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        profile = _profile_with_service_port(8080)
+        task_policy = _companion_task_policy(8080)
+        with pytest.raises(WorkspaceCreateDuplicateHostPortError) as exc_info:
+            await provisioner._check_auto_resolved_profile_host_ports(
+                workspace_id="ws-1",
+                profile=profile,
+                excluding_workspace_id="ws-1",
+                task_policy=task_policy,
+            )
+        assert exc_info.value.host_port == 8080
+        assert session_factory.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_when_profile_ports_differ_from_companions(
+        self,
+    ) -> None:
+        session_factory = Mock()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=AsyncMock(),
+            stack_launcher=None,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        profile = _profile_with_service_port(5432)
+        task_policy = _companion_task_policy(8080, 9090)
+        mock_session = AsyncMock()
+        mock_session.info = {}
+        mock_session.bind = None
+
+        class _SessionCtx:
+            async def __aenter__(self) -> AsyncMock:
+                return mock_session
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return None
+
+        session_factory.return_value = _SessionCtx()
+        with (
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.find_host_port_conflicts",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.acquire_host_port_admission_lock",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.get_for_update",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await provisioner._check_auto_resolved_profile_host_ports(
+                workspace_id="ws-1",
+                profile=profile,
+                excluding_workspace_id="ws-1",
+                task_policy=task_policy,
+            )
+        assert session_factory.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_stale_epoch_does_not_publish_resolved_profile(self) -> None:
+        # A later claimant advanced ``execution_claim_epoch`` while the row
+        # stayed ``provisioning``. The status guard alone would let this fenced
+        # provisioner publish its stale auto-resolved profile into the new
+        # claimant's row (which the new provisioner inherits instead of
+        # re-resolving) — reopening the #421 split-brain for auto profiles with
+        # host ports. The epoch fence must skip the publish.
+        ws = self._publish_target(epoch=1)
+        await self._run_publish(
+            ws=ws,
+            dispatched_epoch=2,
+        )
+        assert ws.resolved_profile is None
+
+    @pytest.mark.asyncio
+    async def test_matching_epoch_publishes_resolved_profile(self) -> None:
+        # The owning provisioner (epoch matches) still publishes its profile to
+        # close the host-port TOCTOU window — the fence must not over-block.
+        ws = self._publish_target(epoch=2)
+        await self._run_publish(
+            ws=ws,
+            dispatched_epoch=2,
+        )
+        assert ws.resolved_profile is not None
+
+    @pytest.mark.asyncio
+    async def test_none_dispatched_epoch_publishes_resolved_profile(self) -> None:
+        # Legacy (un-fenced) dispatch keeps publishing regardless of the row's
+        # epoch — ``execution_claim_epoch=None`` opts out of the fence.
+        ws = self._publish_target(epoch=7)
+        await self._run_publish(
+            ws=ws,
+            dispatched_epoch=None,
+        )
+        assert ws.resolved_profile is not None
+
+    @staticmethod
+    def _publish_target(*, epoch: int) -> Mock:
+        ws = Mock()
+        ws.status = "provisioning"
+        ws.execution_claim_epoch = epoch
+        ws.resolved_profile = None
+        return ws
+
+    @staticmethod
+    async def _run_publish(*, ws: Mock, dispatched_epoch: int | None) -> None:
+        session_factory = Mock()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=AsyncMock(),
+            stack_launcher=None,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        profile = _profile_with_service_port(5432)
+        mock_session = AsyncMock()
+        mock_session.info = {}
+        mock_session.bind = None
+
+        class _SessionCtx:
+            async def __aenter__(self) -> AsyncMock:
+                return mock_session
+
+            async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+                return None
+
+        session_factory.return_value = _SessionCtx()
+        with (
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.find_host_port_conflicts",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.acquire_host_port_admission_lock",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "awf.node.provisioner.WorkspaceRepository.get_for_update",
+                new_callable=AsyncMock,
+                return_value=ws,
+            ),
+        ):
+            await provisioner._check_auto_resolved_profile_host_ports(
+                workspace_id="ws-1",
+                profile=profile,
+                profile_resolution=Mock(),
+                excluding_workspace_id="ws-1",
+                task_policy={"companions": []},
+                execution_claim_epoch=dispatched_epoch,
+            )
+
+    @pytest.mark.asyncio
+    async def test_no_check_when_profile_has_no_host_ports(self) -> None:
+        session_factory = AsyncMock()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=AsyncMock(),
+            stack_launcher=None,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "empty-profile",
+                "services": [],
+                "security": {"egress": {"mode": "restricted"}},
+            }
+        )
+        task_policy = _companion_task_policy(8080)
+        await provisioner._check_auto_resolved_profile_host_ports(
+            workspace_id="ws-1",
+            profile=profile,
+            excluding_workspace_id="ws-1",
+            task_policy=task_policy,
+        )
+        assert session_factory.call_count == 0

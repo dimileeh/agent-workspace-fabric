@@ -11,6 +11,16 @@ schemas, the state machine, and tests without pulling in SQLAlchemy.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
+
+ForgeKind = Literal["github", "bitbucket"]
+"""Concrete code-forge vocabulary persisted on ``resolved_profile.forge``.
+
+Dependency-free literal (issue #345). ``"auto"`` is a resolution-input value only
+— it lives on the profile field type, never in ``ForgeKind`` itself, because the
+resolver always persists a concrete kind. Both ``"github"`` and ``"bitbucket"``
+(Bitbucket Cloud, Part 2) are implemented; an unknown forge fails fast with
+``FORGE_NOT_SUPPORTED``."""
 
 
 class WorkspaceStatus(StrEnum):
@@ -61,8 +71,38 @@ class OperationType(StrEnum):
     start = "start"
     validate = "validate"
     push = "push"
+    refresh = "refresh"
+    rebase = "rebase"
+    retry = "retry"
     cancel = "cancel"
+    stop = "stop"
+    remonitor = "remonitor"
+    guide = "guide"
+    sync_base = "sync_base"
+    comment_repair = "comment_repair"
+    ci_repair = "ci_repair"
+    human_wait = "human_wait"
+    monitor_state = "monitor_state"
+    adopt_pr = "adopt_pr"
     destroy = "destroy"
+
+
+class CallbackDeliveryStatus(StrEnum):
+    """Lifecycle status for an outbound external callback delivery."""
+
+    pending = "pending"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    skipped = "skipped"
+
+
+class CallbackEventKind(StrEnum):
+    """Top-level callback event source category."""
+
+    workspace = "workspace"
+    merge = "merge"
+    operation = "operation"
 
 
 class FailureReason(StrEnum):
@@ -78,6 +118,10 @@ class FailureReason(StrEnum):
     infrastructure_failure = "infrastructure_failure"
     policy_failure = "policy_failure"
     cleanup_failure = "cleanup_failure"
+    profile_resolution_failure = "profile_resolution_failure"
+    service_startup_failure = "service_startup_failure"
+    phase_timeout = "phase_timeout"
+    health_check_failure = "health_check_failure"
 
 
 class TaskKind(StrEnum):
@@ -90,19 +134,42 @@ class TaskKind(StrEnum):
     """Default: clone repo, run coding CLI, push PR against base branch,
     monitor comments + CI, squash-merge into base. The everyday path."""
 
-    monitor_release_pr = "monitor_release_pr"
-    """No clone, no initial coding-CLI run, no PR creation. Given an
-    existing PR number, monitor the 5 gates and — when all green — post
-    a "ready to merge" comment. Never auto-merges (dev→main is human-only)."""
-
     sync_release_pr = "sync_release_pr"
-    """Automated development→main release-PR maintenance. Checks for
-    divergence; opens a PR if one doesn't exist; attaches the release-
-    PR monitor (auto_merge=False). Intended to be fired by a watcher /
-    webhook whenever development advances beyond main. Never merges;
-    only posts "ready to merge" when all gates green. The existing open
-    PR is kept current via the monitor's SyncBase cycle as more feature
-    branches land on development."""
+    """Automated source→target release-PR maintenance (default
+    development→``repo.base_branch``). No coding agent and no feature PR:
+    checks whether the source branch is ahead of the target; completes
+    cleanly when nothing is ahead; otherwise reuses an existing open
+    source→target PR or opens one, then attaches the release-PR monitor
+    (auto_merge forced ``False``). Never merges; only posts "ready to
+    merge" when all gates are green. The open PR is kept current via the
+    monitor's SyncBase cycle as more work lands on the source branch.
+
+    To monitor an arbitrary already-open PR (any base/head), use the
+    generic PR-adoption flow with ``auto_merge=false`` instead of a task
+    kind — that selects the same release/manual monitor behavior."""
+
+    sync_feature_pr = "sync_feature_pr"
+    """Adopt an already-open feature PR into AWF's service monitor.
+    Provisioning checks out the PR head ref and the executor skips the
+    original coding-agent, validation, push, and PR-create path before
+    handing the workspace to the normal PR monitor."""
+
+
+# Legacy task-kind value removed from ``TaskKind`` above. Kept here as the
+# single canonical literal so the REST/MCP admission validator and the executor
+# fail-fast guard reject ``monitor_release_pr`` identically and cannot drift.
+DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND = "monitor_release_pr"
+
+
+class TaskClass(StrEnum):
+    """PRD task policy class used by scheduling, validation, and overlap risk."""
+
+    docs_task = "docs_task"
+    test_task = "test_task"
+    refactor_task = "refactor_task"
+    migration_task = "migration_task"
+    dependency_task = "dependency_task"
+    build_config_task = "build_config_task"
 
 
 class AgentRuntime(StrEnum):
@@ -121,3 +188,20 @@ class AgentRuntime(StrEnum):
 
     gemini = "gemini"
     """Google Gemini CLI — ``gemini --yolo``."""
+
+    cursor = "cursor"
+    """Cursor CLI — ``cursor-agent -p --force`` for non-interactive workspace edits."""
+
+    opencode = "opencode"
+    """OpenCode CLI — ``opencode run`` with an AWF-managed provider config."""
+
+    grok = "grok"
+    """xAI Grok Build CLI — ``grok -p`` with headless auto-approval flags."""
+
+
+class EgressDecision(StrEnum):
+    """Per-workspace egress enforcement outcome recorded in audit evidence."""
+
+    allow = "allow"
+    deny = "deny"
+    deferred = "deferred"

@@ -1,0 +1,830 @@
+"""Executor-level scenarios for post-agent commit classification + repair.
+
+These tests drive ``WorkspaceExecutor.execute`` through the post-agent
+``git add`` / ``git commit`` block. They lock in three behaviors:
+
+  1. Pre-commit hook failures during post-agent commit get a structured
+     reason code (``POST_AGENT_COMMIT_PRECOMMIT_FAILED`` /
+     ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED`` /
+     ``POST_AGENT_COMMIT_FAILED``) — distinct from the generic
+     ``INFRASTRUCTURE_FAILURE`` default and distinct from
+     ``AGENT_IDLE_TIMEOUT`` / ``AGENT_TIMEOUT``.
+
+  2. The format-only failure path runs a scoped ``ruff format`` against
+     the intersection of the agent's staged diff and the
+     ``Would reformat:`` paths from the pre-commit output, retries the
+     commit once, and emits a structured event recording the outcome.
+
+  3. When the agent raised ``AgentRunError`` (timeout / provider failure)
+     before the commit step, the agent's original reason code wins on
+     the terminal ``workspace.state_changed`` event — the commit-step
+     diagnostics are nested under ``payload["details"]["post_agent_commit"]``
+     for observability but do NOT overwrite the agent's classification.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.adapters import registry as _registry  # noqa: F401 — populate registry
+from awf.common.commands import FakeCommandRunner
+from awf.control.executor import (
+    ExecutorConfig,
+    WorkspaceExecutor,
+)
+from awf.control.executor.constants import (
+    POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+    POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE,
+    POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+    POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE,
+)
+from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.repositories import (
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
+from awf.db.session import make_session_factory
+from awf.runtime.pr_creator import PullRequestCreator
+from tests.postgres import postgres_test_engine
+from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_001 import (
+    _NoopResumeCompose,
+    _RecordingValidation,
+    _seed_ready,
+)
+
+
+@pytest.fixture
+async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        session_factory = make_session_factory(engine)
+        session_factory._awf_test_worktrees_root = tmp_path / "work" / "worktrees"  # type: ignore[attr-defined]
+        yield session_factory
+
+
+@pytest.fixture
+def fake() -> FakeCommandRunner:
+    return FakeCommandRunner()
+
+
+def _make_executor(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    *,
+    validation: Any = None,
+) -> WorkspaceExecutor:
+    return WorkspaceExecutor(
+        session_factory=factory,
+        runner=fake,
+        compose=_NoopResumeCompose(),
+        validation=validation or _RecordingValidation(),
+        pr_creator=PullRequestCreator(fake),
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "work" / "worktrees",
+            compose_projects_root=tmp_path / "work" / "compose",
+            default_models={
+                AgentRuntime.codex: "gpt-5",
+                AgentRuntime.claude_code: "sonnet",
+                AgentRuntime.gemini: "gemini-2.5-pro",
+            },
+        ),
+    )
+
+
+def _git_add_suffixes(fake: FakeCommandRunner) -> list[list[str]]:
+    return [call.args[call.args.index("add") :] for call in fake.calls if "add" in call.args]
+
+
+def _precommit_format_only_output(*paths: str) -> str:
+    """Mimic ``pre-commit`` framing when only ``awf-ruff-format-check`` fails."""
+    lines = [
+        "trailing-whitespace.....................................................Passed",
+        "ruff check..............................................................Passed",
+        "ruff format --check.....................................................Failed",
+        "- hook id: awf-ruff-format-check",
+        "- exit code: 1",
+        "",
+    ]
+    for path in paths:
+        lines.append(f"Would reformat: {path}")
+    lines.append(f"{len(paths)} file{'s' if len(paths) != 1 else ''} would be reformatted")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _precommit_mypy_output() -> str:
+    return "\n".join(
+        [
+            "trailing-whitespace.....................................................Passed",
+            "ruff check..............................................................Passed",
+            "ruff format --check.....................................................Passed",
+            "mypy....................................................................Failed",
+            "- hook id: awf-mypy",
+            "- exit code: 1",
+            "",
+            "src/awf/foo.py:42: error: Incompatible types",
+            "",
+        ]
+    )
+
+
+def _precommit_eof_only_output(*paths: str) -> str:
+    lines = [
+        "fix end of files.......................................................Failed",
+        "- hook id: end-of-file-fixer",
+        "- exit code: 1",
+        "- files were modified by this hook",
+        "",
+    ]
+    for path in paths:
+        lines.append(f"Fixing {path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _precommit_whitespace_eof_and_format_output(*format_paths: str) -> str:
+    lines = [
+        "trim trailing whitespace.................................................Failed",
+        "- hook id: trailing-whitespace",
+        "- exit code: 1",
+        "- files were modified by this hook",
+        "",
+        "Fixing docs/awf-plans/ws_761.md",
+        "fix end of files.......................................................Failed",
+        "- hook id: end-of-file-fixer",
+        "- exit code: 1",
+        "- files were modified by this hook",
+        "",
+        "Fixing docs/awf-plans/ws_761.conformance.json",
+        "ruff format --check.....................................................Failed",
+        "- hook id: awf-ruff-format-check",
+        "- exit code: 1",
+        "",
+    ]
+    for path in format_paths:
+        lines.append(f"Would reformat: {path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _precommit_ruff_check_and_format_output(*format_paths: str) -> str:
+    lines = [
+        "fix end of files.......................................................Failed",
+        "- hook id: end-of-file-fixer",
+        "- exit code: 1",
+        "- files were modified by this hook",
+        "",
+        "Fixing docs/awf-plans/ws_89.conformance.json",
+        "ruff check..............................................................Failed",
+        "- hook id: awf-ruff-check",
+        "- exit code: 1",
+        "",
+        "F401 fix_test.py imported but unused",
+        "ruff format --check.....................................................Failed",
+        "- hook id: awf-ruff-format-check",
+        "- exit code: 1",
+        "",
+    ]
+    for path in format_paths:
+        lines.append(f"Would reformat: {path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _precommit_autofixable_ruff_check_output(*paths: str) -> str:
+    lines = [
+        "ruff check..............................................................Failed",
+        "- hook id: awf-ruff-check",
+        "- exit code: 1",
+        "",
+    ]
+    for path in paths:
+        lines.extend(
+            [
+                "I001 [*] Import block is un-sorted or un-formatted",
+                f"   --> {path}:13:1",
+            ]
+        )
+    lines.extend(
+        [
+            f"Found {len(paths)} error{'s' if len(paths) != 1 else ''}.",
+            f"[*] {len(paths)} fixable with the `--fix` option.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _precommit_autofixable_ruff_check_and_format_output(*paths: str) -> str:
+    lines = [
+        "ruff check..............................................................Failed",
+        "- hook id: awf-ruff-check",
+        "- exit code: 1",
+        "",
+    ]
+    for path in paths:
+        lines.extend(
+            [
+                "I001 [*] Import block is un-sorted or un-formatted",
+                f"   --> {path}:13:1",
+            ]
+        )
+    lines.extend(
+        [
+            f"Found {len(paths)} error{'s' if len(paths) != 1 else ''}.",
+            f"[*] {len(paths)} fixable with the `--fix` option.",
+            "",
+            "ruff format --check.....................................................Failed",
+            "- hook id: awf-ruff-format-check",
+            "- exit code: 1",
+            "",
+        ]
+    )
+    for path in paths:
+        lines.append(f"Would reformat: {path}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+async def _failed_state_event(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> Any:
+    async with factory() as session:
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+        )
+    failed_event = next(
+        (event for event in reversed(events) if event.new_state == "failed"),
+        None,
+    )
+    assert failed_event is not None, (
+        f"no failed workspace.state_changed event found for workspace {workspace_id}"
+    )
+    return failed_event
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_precommit_failure_uses_precommit_reason_code(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
+    fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # git commit fails
+    fake.queue_result(returncode=1, stderr="repair failed")  # targeted agent repair fails
+    fake.queue_result(returncode=0)  # git add -A stages repair edits
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff after salvage
+    fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # retry still fails
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert event.payload is not None
+    assert event.payload["reason_code"] == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    details = event.payload["details"]
+    assert isinstance(details, dict)
+    commit_details = details["post_agent_commit"]
+    assert commit_details["reason_code"] == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert commit_details["repair_strategy"] == "agent"
+    assert commit_details["precommit_repair_attempted"] is True
+    assert "awf-mypy" in commit_details["failed_hooks"]
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+    assert repair_events
+    assert repair_events[-1].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert repair_events[-1].payload["retry_outcome"] == "error"  # type: ignore[index]
+    assert repair_events[-1].payload["restaged_paths"] == ["src/awf/foo.py"]  # type: ignore[index]
+
+    # The failed repair-agent run may still have edited files; AWF stages those
+    # partial edits and retries the commit once before giving up.
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_format_only_failure_repairs_and_retries(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/foo.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1, stdout=_precommit_format_only_output("src/foo.py")
+    )  # git commit fails with format-only
+    fake.queue_result(returncode=0)  # ruff format src/foo.py
+    fake.queue_result(returncode=0)  # git add -- src/foo.py
+    fake.queue_result(returncode=0)  # git commit retry ok
+    # After the commit step succeeds, the executor proceeds into the
+    # rev-list/ancestor checks. Returning ``0`` here drives it through
+    # the "no commits salvaged" branch so we don't need to set up the
+    # full validation → push → gh pr create pipeline; the success of the
+    # format-repair is observable via the event payload regardless of
+    # how the workspace later terminates.
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repaired_paths"] == ["src/foo.py"]
+    assert payload["retry_outcome"] == "succeeded"
+    # A successful repair keeps the original rewrite-needed reason
+    # code — the dedicated repair-failed code is reserved for "error"
+    # outcomes.
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+
+    ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
+    assert ruff_calls, "expected a ruff format invocation"
+    assert "src/foo.py" in ruff_calls[0].args
+    assert "--check" not in ruff_calls[0].args
+    # ``ruff format`` must run inside the workspace worktree — otherwise the
+    # worktree-relative paths from ``Would reformat:`` resolve against the
+    # executor's own cwd and the retry commit re-fails on the same files.
+    assert ruff_calls[0].cwd is not None
+    assert ruff_calls[0].cwd.endswith(ws_id)
+
+    # Two git commit invocations: the initial failing attempt + the retry.
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_format_repair_retry_still_fails_marks_precommit(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/foo.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1, stdout=_precommit_format_only_output("src/foo.py")
+    )  # initial commit fails (format only)
+    fake.queue_result(returncode=0)  # ruff format src/foo.py
+    fake.queue_result(returncode=0)  # git add -- src/foo.py
+    fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # retry fails (mypy)
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    repair_payload = repair_events[0].payload
+    assert isinstance(repair_payload, dict)
+    assert repair_payload["repaired_paths"] == ["src/foo.py"]
+    assert repair_payload["retry_outcome"] == "failed"
+    # A "failed" outcome (repair ran, retry commit hit a non-format
+    # hook) is not a repair-pipeline failure — keep the rewrite-needed
+    # reason code so the dedicated repair-failed code stays reserved
+    # for "error" outcomes only.
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert event.payload is not None
+    assert event.payload["details"]["post_agent_commit"]["format_repair_attempted"] is True
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_format_repair_retry_same_format_hook_marks_repair_failed(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Retry commit re-fails with the same ``awf-ruff-format-check`` hook.
+
+    When ``ruff format`` ran but the retry commit is rejected by the same
+    format hook (e.g. ruff couldn't normalize a file), the terminal reason
+    code MUST be the dedicated repair-failed code — NOT
+    ``POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED``, whose REASON_CATALOG
+    entry only describes the empty-intersection skip. Pairing the
+    rewrite-needed code with ``format_repair_attempted=True`` would be
+    self-contradictory on operator dashboards.
+    """
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/foo.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1, stdout=_precommit_format_only_output("src/foo.py")
+    )  # initial commit fails (format only)
+    fake.queue_result(returncode=0)  # ruff format src/foo.py
+    fake.queue_result(returncode=0)  # git add -- src/foo.py
+    fake.queue_result(
+        returncode=1, stdout=_precommit_format_only_output("src/foo.py")
+    )  # retry fails with the SAME format hook
+
+    executor = _make_executor(fake, factory, tmp_path)
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    repair_payload = repair_events[0].payload
+    assert isinstance(repair_payload, dict)
+    assert repair_payload["repaired_paths"] == ["src/foo.py"]
+    assert repair_payload["retry_outcome"] == "failed"
+    # The repair event itself keeps the rewrite-needed reason code — the
+    # dedicated repair-failed code is reserved for "error" outcomes, and
+    # ``retry_outcome="failed"`` is not an error outcome.
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED_REASON_CODE
+
+    event = await _failed_state_event(factory, ws_id)
+    # Terminal reason code MUST be the dedicated repair-failed code, not
+    # POST_AGENT_COMMIT_FORMAT_REWRITE_NEEDED — the REASON_CATALOG entry
+    # for that code describes only the empty-intersection skip, which is
+    # self-contradictory once ``format_repair_attempted=True``.
+    assert event.reason_code == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert event.payload is not None
+    assert event.payload["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    commit_details = event.payload["details"]["post_agent_commit"]
+    assert commit_details["stage"] == "git commit"
+    assert commit_details["reason_code"] == POST_AGENT_FORMAT_REPAIR_FAILED_REASON_CODE
+    assert commit_details["format_repair_attempted"] is True
+
+    # Two git commit invocations: the initial failing attempt + the retry.
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_eof_only_hook_modification_restages_and_retries(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(
+        returncode=0,
+        stdout=("docs/awf-plans/ws_06.md\ndocs/awf-plans/ws_06.conformance.json\nsrc/awf/api.py\n"),
+    )  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_eof_only_output(
+            "docs/awf-plans/ws_06.conformance.json",
+        ),
+    )  # git commit fails after EOF hook rewrote an AWF artifact
+    fake.queue_result(returncode=0)  # git add -- original staged paths
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "deterministic"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == ["end-of-file-fixer"]
+    assert payload["restaged_paths"] == [
+        "docs/awf-plans/ws_06.md",
+        "docs/awf-plans/ws_06.conformance.json",
+        "src/awf/api.py",
+    ]
+    assert payload["repaired_paths"] == []
+    assert payload["normalizer_paths"] == ["docs/awf-plans/ws_06.conformance.json"]
+
+    ruff_calls = [call for call in fake.calls if "ruff" in call.args]
+    assert not ruff_calls
+    restage_calls = [
+        call
+        for call in fake.calls
+        if "add" in call.args and "--" in call.args and "src/awf/api.py" in call.args
+    ]
+    assert restage_calls
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_mixed_deterministic_hooks_formats_restages_and_retries(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(
+        returncode=0,
+        stdout=(
+            "docs/awf-plans/ws_761.md\n"
+            "docs/awf-plans/ws_761.conformance.json\n"
+            "tests/unit/mcp/test_mcp_server.py\n"
+        ),
+    )  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_whitespace_eof_and_format_output(
+            "tests/unit/mcp/test_mcp_server.py",
+        ),
+    )
+    fake.queue_result(returncode=0)  # ruff format tests/unit/mcp/test_mcp_server.py
+    fake.queue_result(returncode=0)  # git add -- original staged paths + formatter path
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "deterministic"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == [
+        "trailing-whitespace",
+        "end-of-file-fixer",
+        "awf-ruff-format-check",
+    ]
+    assert payload["formatter_paths"] == ["tests/unit/mcp/test_mcp_server.py"]
+    assert payload["repaired_paths"] == ["tests/unit/mcp/test_mcp_server.py"]
+    assert payload["normalizer_paths"] == [
+        "docs/awf-plans/ws_761.md",
+        "docs/awf-plans/ws_761.conformance.json",
+    ]
+    assert payload["restaged_paths"] == [
+        "docs/awf-plans/ws_761.md",
+        "docs/awf-plans/ws_761.conformance.json",
+        "tests/unit/mcp/test_mcp_server.py",
+    ]
+
+    ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
+    assert len(ruff_calls) == 1
+    assert "tests/unit/mcp/test_mcp_server.py" in ruff_calls[0].args
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_semantic_precommit_failure_invokes_targeted_agent_repair(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(
+        returncode=0,
+        stdout="fix_test.py\nrun_debug.py\nsrc/awf/mcp.py\n",
+    )  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_ruff_check_and_format_output("run_debug.py"),
+    )  # semantic pre-commit failure: must not auto-format-only
+    fake.queue_result(returncode=0, stdout="repair ok")  # targeted agent repair
+    fake.queue_result(returncode=0)  # git add -A after repair
+    fake.queue_result(returncode=0, stdout="src/awf/mcp.py\n")  # cached diff after repair
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "agent"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == [
+        "end-of-file-fixer",
+        "awf-ruff-check",
+        "awf-ruff-format-check",
+    ]
+    assert payload["normalizer_paths"] == ["docs/awf-plans/ws_89.conformance.json"]
+
+    agent_repair_calls = [
+        call
+        for call in fake.calls
+        if call.input_bytes is not None and b"post-agent pre-commit repair" in call.input_bytes
+    ]
+    assert len(agent_repair_calls) == 1
+    prompt = agent_repair_calls[0].input_bytes.decode()
+    assert "awf-ruff-check" in prompt
+    assert "Do not bypass pre-commit" in prompt
+    assert "run_debug.py" in prompt
+    assert "Normalizer-rewritten paths, if any:" in prompt
+    assert "docs/awf-plans/ws_89.conformance.json" in prompt
+
+    ruff_calls = [call for call in fake.calls if "ruff" in call.args and "format" in call.args]
+    assert not ruff_calls
+    assert _git_add_suffixes(fake).count(["add", "-A"]) == 2
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 2
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_autofixable_ruff_check_runs_bounded_fix_before_agent(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/awf/mcp/server.py\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_autofixable_ruff_check_output("src/awf/mcp/server.py"),
+    )  # semantic hook, but every diagnostic is tool-marked fixable
+    fake.queue_result(returncode=0)  # ruff check --fix src/awf/mcp/server.py
+    fake.queue_result(
+        returncode=0
+    )  # ruff format src/awf/mcp/server.py (union of format_repair + repair paths)
+    fake.queue_result(returncode=0)  # git add -- original staged paths
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "deterministic_autofix"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == ["awf-ruff-check"]
+    assert payload["repaired_paths"] == ["src/awf/mcp/server.py"]
+    assert payload["restaged_paths"] == ["src/awf/mcp/server.py"]
+
+    ruff_fix_calls = [
+        call
+        for call in fake.calls
+        if "ruff" in call.args and "check" in call.args and "--fix" in call.args
+    ]
+    assert len(ruff_fix_calls) == 1
+    assert "src/awf/mcp/server.py" in ruff_fix_calls[0].args
+    assert ruff_fix_calls[0].cwd is not None
+    assert ruff_fix_calls[0].cwd.endswith(ws_id)
+
+    ruff_format_calls = [
+        call
+        for call in fake.calls
+        if "ruff" in call.args and "format" in call.args and "--check" not in call.args
+    ]
+    assert len(ruff_format_calls) == 1
+    assert "src/awf/mcp/server.py" in ruff_format_calls[0].args
+    assert ruff_format_calls[0].cwd is not None
+    assert ruff_format_calls[0].cwd.endswith(ws_id)
+
+    agent_repair_calls = [
+        call
+        for call in fake.calls
+        if call.input_bytes is not None and b"post-agent pre-commit repair" in call.input_bytes
+    ]
+    assert agent_repair_calls == []
+
+
+@pytest.mark.unit
+async def test_post_agent_commit_autofixable_ruff_check_also_formats_reported_paths(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    ws_id = await _seed_ready(factory)
+    path = "tests/unit/service/test_host_setup_credentials.py"
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout=f"{path}\n")  # cached diff
+    fake.queue_result(
+        returncode=1,
+        stdout=_precommit_autofixable_ruff_check_and_format_output(path),
+    )  # both Ruff hooks failed, but check diagnostics are autofixable
+    fake.queue_result(returncode=0)  # ruff check --fix path
+    fake.queue_result(returncode=0)  # ruff format path
+    fake.queue_result(returncode=0)  # git add -- original staged paths
+    fake.queue_result(returncode=0)  # git commit retry ok
+    fake.queue_result(returncode=0, stdout="0\n")  # stop before validation/PR pipeline
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        repair_events = await WorkspaceEventRepository(s).list(
+            workspace_id=ws_id,
+            event_type=POST_AGENT_COMMIT_FORMAT_REPAIR_EVENT_TYPE,
+        )
+
+    assert len(repair_events) == 1
+    assert repair_events[0].reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    payload = repair_events[0].payload
+    assert isinstance(payload, dict)
+    assert payload["repair_strategy"] == "deterministic_autofix"
+    assert payload["retry_outcome"] == "succeeded"
+    assert payload["failed_hooks"] == ["awf-ruff-check", "awf-ruff-format-check"]
+    assert payload["repaired_paths"] == [path]
+    assert payload["formatter_paths"] == [path]
+    assert payload["restaged_paths"] == [path]
+
+    ruff_fix_calls = [
+        call
+        for call in fake.calls
+        if "ruff" in call.args and "check" in call.args and "--fix" in call.args
+    ]
+    assert len(ruff_fix_calls) == 1
+    assert path in ruff_fix_calls[0].args
+
+    ruff_format_calls = [
+        call
+        for call in fake.calls
+        if "ruff" in call.args and "format" in call.args and "--check" not in call.args
+    ]
+    assert len(ruff_format_calls) == 1
+    assert path in ruff_format_calls[0].args
+    assert ruff_format_calls[0].cwd is not None
+    assert ruff_format_calls[0].cwd.endswith(ws_id)
+
+    agent_repair_calls = [
+        call
+        for call in fake.calls
+        if call.input_bytes is not None and b"post-agent pre-commit repair" in call.input_bytes
+    ]
+    assert agent_repair_calls == []

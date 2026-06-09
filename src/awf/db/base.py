@@ -1,9 +1,8 @@
 """SQLAlchemy Declarative base and shared helpers.
 
-The DB layer targets both Postgres (production, via asyncpg) and SQLite (unit
-tests, via aiosqlite). Keep ORM-level code portable across both by using
-``JSON`` (generic — Postgres still uses JSONB), ``String(36)`` for UUID-shaped
-IDs, and ``DateTime(timezone=True)`` everywhere.
+The AWF control plane requires PostgreSQL via asyncpg. ORM-level code should use
+PostgreSQL-compatible SQLAlchemy constructs and keep database-specific behavior
+explicit.
 """
 
 from __future__ import annotations

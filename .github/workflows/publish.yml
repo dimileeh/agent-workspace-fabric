@@ -1,0 +1,215 @@
+name: Publish Python Package
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: "Trusted Publishing target. Use testpypi before pypi."
+        required: true
+        default: "none"
+        type: choice
+        options:
+          - "none"
+          - "testpypi"
+          - "pypi"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      manifest_generated: ${{ steps.build.outputs.manifest_generated }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.31"
+          github-token: ""
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Build wheel and sdist
+        id: build
+        run: |
+          uv venv --python 3.12
+          uv pip install build
+          .venv/bin/python -m build
+          mkdir -p artifacts/release
+          sha256sum dist/* | tee artifacts/release/python-distribution-sha256.txt
+          VERSION="$(
+            .venv/bin/python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          with Path("pyproject.toml").open("rb") as project_file:
+              print(tomllib.load(project_file)["project"]["version"])
+          PY
+          )"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" == v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v${VERSION}"
+          fi
+          .venv/bin/python scripts/generate_install_manifest.py \
+            --dist-dir dist \
+            --checksums-file artifacts/release/python-distribution-sha256.txt \
+            --output artifacts/release/awf-install-manifest.json \
+            --version "${VERSION}" \
+            --tag "${TAG}" \
+            --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --channel auto
+          # Expose the resolved version/tag to the drift-gate step below.
+          {
+            echo "AWF_RELEASE_VERSION=${VERSION}"
+            echo "AWF_RELEASE_TAG=${TAG}"
+          } >> "${GITHUB_ENV}"
+          # Signal whether a manifest was generated for this ref. On non-release
+          # refs generate_install_manifest.py SKIPs and removes the --output
+          # manifest, so downstream jobs (installer-smoke) must not run without
+          # it. The checksum file alone is not enough to satisfy release_smoke.py.
+          if [[ -f artifacts/release/awf-install-manifest.json ]]; then
+            echo "manifest_generated=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "manifest_generated=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Verify release artifact drift
+        run: |
+          # Fail the release if the generated manifest or the checksum file drift
+          # from the built dist/* (sha256, filenames, channel/version/tag/commit,
+          # or checksum bytes). Pass GITHUB_SHA as the expected commit so a stale
+          # or edited source.commit is caught instead of being compared against
+          # itself. A skipped manifest (non-release ref) leaves no file; only run
+          # the gate when the manifest exists.
+          if [[ -f artifacts/release/awf-install-manifest.json ]]; then
+            .venv/bin/python scripts/check_release_artifacts.py \
+              --dist-dir dist \
+              --checksums-file artifacts/release/python-distribution-sha256.txt \
+              --manifest artifacts/release/awf-install-manifest.json \
+              --version "${AWF_RELEASE_VERSION}" \
+              --tag "${AWF_RELEASE_TAG}" \
+              --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+              --commit "${GITHUB_SHA}"
+          else
+            echo "SKIP: no manifest generated for this ref; nothing to drift-check"
+          fi
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Upload release audit artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distribution-checksums
+          path: |
+            artifacts/release/python-distribution-sha256.txt
+            artifacts/release/awf-install-manifest.json
+          if-no-files-found: error
+
+  installer-smoke:
+    needs: build
+    # Only run when the build job actually produced a manifest. On non-release
+    # refs the manifest is intentionally skipped/removed, and release_smoke.py
+    # hard-fails without it — so guard the whole job rather than fail spuriously.
+    if: ${{ needs.build.outputs.manifest_generated == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+
+      - name: Download release audit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distribution-checksums
+          path: artifacts/release
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.31"
+          github-token: ""
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Installer checksum smoke
+        run: |
+          # Consume the real uploaded release artifacts: rewrite the manifest's
+          # artifact URLs to the local downloaded wheel and run packaging/install.sh
+          # in --dry-run so the manifest-pinned sha256 is verified against the real
+          # wheel bytes BEFORE any install mutation. Fails if the checksum is not
+          # verified or the installer mutates anything.
+          # --no-project: release_smoke.py is stdlib-only, so skip syncing the
+          # full project virtualenv (awf + all runtime deps) just to run it.
+          # Avoids needless resolution/install time and a network/uv-cache
+          # dependency; the build job likewise uses an explicit, minimal venv.
+          uv run --no-project --python 3.12 python scripts/release_smoke.py \
+            --dist-dir dist \
+            --manifest artifacts/release/awf-install-manifest.json \
+            --smoke-manifest-out artifacts/release/awf-install-manifest.smoke.json \
+            --method uv \
+            --run
+
+  publish:
+    # always() defeats GitHub Actions' implicit skip-propagation: installer-smoke
+    # is intentionally skipped on non-release refs (no manifest to verify), and
+    # without always() that skip would silently skip publish too — swallowing a
+    # manual workflow_dispatch with publish_target != 'none' from a development
+    # branch (AC4). Gate explicitly on dependency results instead: build must
+    # have produced artifacts, and a *failed* (or cancelled) smoke still blocks
+    # the release, while a *skipped* smoke leaves the manual publish to proceed.
+    #
+    # Real PyPI publishes are additionally gated on a tag ref: workflow_dispatch
+    # can target any branch, so without this guard an arbitrary branch could
+    # bypass the tagged-release path and push straight to the production index.
+    # Branch dispatches remain free to use testpypi (publish_target != 'pypi');
+    # only publish_target == 'pypi' requires github.ref_type == 'tag'.
+    if: >-
+      ${{ always()
+          && github.event_name == 'workflow_dispatch'
+          && inputs.publish_target != 'none'
+          && (inputs.publish_target != 'pypi' || github.ref_type == 'tag')
+          && needs.build.result == 'success'
+          && needs.installer-smoke.result != 'failure'
+          && needs.installer-smoke.result != 'cancelled' }}
+    needs: [build, installer-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: ${{ inputs.publish_target }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist
+
+      - name: Publish via PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.publish_target == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}

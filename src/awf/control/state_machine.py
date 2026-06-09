@@ -21,13 +21,16 @@ from awf.db.enums import WorkspaceStatus
 # Declared here (not a class attribute) so mypy can narrow the types and ``_TRANSITIONS``
 # participates in the module-level immutability story.
 _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
-    WorkspaceStatus.requested: frozenset({WorkspaceStatus.provisioning, WorkspaceStatus.cancelled}),
+    WorkspaceStatus.requested: frozenset(
+        {WorkspaceStatus.provisioning, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
+    ),
     WorkspaceStatus.provisioning: frozenset(
         {WorkspaceStatus.ready, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
     ),
     WorkspaceStatus.ready: frozenset(
         {
             WorkspaceStatus.running,
+            WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
             WorkspaceStatus.destroying,
         }
@@ -35,15 +38,28 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
     WorkspaceStatus.running: frozenset(
         {
             WorkspaceStatus.validating,
+            # Worker-restart salvage can attach an already-open PR monitor for
+            # preserved active work that reached PR handoff before restart.
+            WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
     ),
+    # Worker-restart salvage can rewind an abandoned active phase so the
+    # executor can reclaim validate-only recovery through its running path.
     WorkspaceStatus.validating: frozenset(
-        {WorkspaceStatus.pushing, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
+        {
+            WorkspaceStatus.running,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+            WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+        }
     ),
     WorkspaceStatus.pushing: frozenset(
         {
+            WorkspaceStatus.running,
             WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.completed,
             WorkspaceStatus.failed,
@@ -51,7 +67,12 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
         }
     ),
     WorkspaceStatus.monitoring_pr: frozenset(
-        {WorkspaceStatus.completed, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
+        {
+            WorkspaceStatus.ready,
+            WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+        }
     ),
     WorkspaceStatus.completed: frozenset({WorkspaceStatus.destroying}),
     WorkspaceStatus.failed: frozenset({WorkspaceStatus.destroying}),
@@ -66,6 +87,15 @@ _TRANSITIONS: Final[MappingProxyType[WorkspaceStatus, frozenset[WorkspaceStatus]
 )
 
 _TERMINAL: Final[frozenset[WorkspaceStatus]] = frozenset({WorkspaceStatus.destroyed})
+_CALLBACK_TERMINAL: Final[frozenset[WorkspaceStatus]] = frozenset(
+    {
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroyed,
+        WorkspaceStatus.destroying,
+        WorkspaceStatus.failed,
+        WorkspaceStatus.completed,
+    }
+)
 
 
 class InvalidWorkspaceTransitionError(Exception):
@@ -110,6 +140,11 @@ class WorkspaceStateMachine:
     def is_terminal(state: WorkspaceStatus) -> bool:
         """Terminal states have no outgoing transitions; cleanup handlers key off this."""
         return state in _TERMINAL
+
+    @staticmethod
+    def is_callback_terminal(state: WorkspaceStatus) -> bool:
+        """States where stale async callbacks must not advance the workspace."""
+        return state in _CALLBACK_TERMINAL
 
     @staticmethod
     def allowed_next(state: WorkspaceStatus) -> set[WorkspaceStatus]:

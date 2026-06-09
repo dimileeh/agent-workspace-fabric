@@ -1,5 +1,10 @@
 # Aira Agent Workspace Fabric (AWF) v2.2
 
+> Historical product contract: this Aira-oriented PRD guided the current public
+> Agent Workspace Fabric (AWF) alpha. Public release instructions live in
+> `RELEASING.md`; current user-facing setup lives in `README.md` and
+> `docs/QUICKSTART.md`.
+
 **Combined Product Requirements Document and Architecture Specification**
 
 | Field | Value |
@@ -89,10 +94,10 @@ The end-state use cases include parallel feature development, task-local documen
 | Use Case | Description | Expected Outcome |
 | --- | --- | --- |
 | Parallel engineering delivery | Several agents work concurrently on one repository | Isolation, lock enforcement, and merge queue serialize integration safely |
-| Docs-only task | Agent edits docs or examples | Soft lock, low validation tier by default, fast merge gating if repo policy allows |
+| Docs-only task | Agent edits docs or examples | Advisory owned paths, low validation tier by default, fast merge gating if repo policy allows |
 | Refactor task | Agent touches shared code without intended behavior change | Controlled overlap policy, stronger stale marking, elevated validation tier |
-| Migration task | Agent changes schema and app code | Hard lock on migration surface, serialization, stale invalidation for dependent workspaces |
-| Dependency task | Agent updates package manifests or lockfiles | Hard lock, supply-chain checks, elevated validation, operator visibility |
+| Migration task | Agent changes schema and app code | Advisory owned-path risk, schema-aware stale invalidation, elevated validation |
+| Dependency task | Agent updates package manifests or lockfiles | Advisory owned-path risk, supply-chain checks, elevated validation, operator visibility |
 | Local operator workflow | Dmitri runs AWF on a DGX node | CLI plus lightweight dashboard expose queue, locks, resource usage, and retries |
 | Aira production workflow | AWF becomes a production subsystem in Aira | Integrated operator console exposes same semantics with richer aggregation |
 
@@ -184,16 +189,18 @@ When a task is classified as `migration_task` or otherwise marked schema-depende
 
 ## 6. Deterministic Policy Matrix by Task Class
 
-The system must replace narrative flexibility with deterministic policy selection. Every task attempt is assigned a **task class** before dispatch. Task class may be explicitly set by Aira, inferred from requested scope, or upgraded by touched-path analysis. The task class determines the lock mode, stale marking triggers, default validation tier, and escalation path. If actual touched files imply a higher-risk class than initially declared, the system must upgrade the class and apply the stricter policy.
+The system must replace narrative flexibility with deterministic policy selection. Every task attempt is assigned a **task class** before dispatch. Task class may be explicitly set by Aira, inferred from requested scope, or upgraded by touched-path analysis. The task class determines overlap-risk metadata, stale marking triggers, default validation tier, and escalation path. If actual touched files imply a higher-risk class than initially declared, the system must upgrade the class and apply the stricter validation and stale policy.
 
-| Task Class | Default Examples | Locking Behavior | Stale Marking Rules | Validation Level | Escalation Behavior |
+Owned paths are coordination hints and stale-detection inputs, not exclusive code locks. A path overlap between active workspaces must not block admission by itself, including for `migration_task`, `dependency_task`, and `build_config_task`. Blocking is reserved for a future explicit exclusive resource lock concept that is scoped separately from owned paths.
+
+| Task Class | Default Examples | Admission and Overlap Behavior | Stale Marking Rules | Validation Level | Escalation Behavior |
 | --- | --- | --- | --- | --- | --- |
-| `docs_task` | Markdown docs, comments-only edits, examples outside executed build path | **Soft lock** on owned paths; overlap allowed with warning unless repo policy promotes to hard lock | Mark stale only if target branch advances on overlapping owned paths or docs build config changes | **Tier 1** by default; Tier 2 if docs site build or code examples are executable | Escalate only on out-of-scope edits, repeated docs build failure, or merge conflict |
-| `test_task` | Adding or updating tests without intended production code changes | **Soft lock** on test paths; **hard lock** if touching shared golden fixtures or test harness config | Mark stale if target branch advances on touched production paths, shared test harness, fixtures, or owned test paths | **Tier 1 + targeted Tier 2** by default | Escalate on out-of-scope production edits, flaky validation beyond retry budget, or merge conflict |
-| `refactor_task` | Internal restructuring, renames, code movement without intended behavior change | **Soft lock** on owned module paths; **hard lock** on shared interface definitions, public API surfaces, or codegen outputs | Mark stale if target branch advances on any overlapping module path, interface surface, dependency manifest, or build config | **Tier 2** minimum | Escalate on semantic overlap, repeated rebase failure, validation mismatch, or unexpected scope expansion |
-| `migration_task` | Schema migrations, data model contract changes, stateful rollout scripts | **Hard lock** on migration directories, schema definitions, dependent app modules, and workspace-local database contract surfaces; only one active merge candidate per schema lineage | Mark stale immediately on any target-branch schema, migration, ORM model, or dependency change affecting runtime contract; affected workspaces must refresh database state before further validation | **Tier 2** mandatory; **Tier 3** recommended or mandatory per repo policy | Escalate on any rebase conflict, failed migration validation, cross-task schema contention, or required database refresh after upstream merge |
-| `dependency_task` | Package manifest changes, lockfile updates, base image updates, toolchain changes | **Hard lock** on dependency manifests, lockfiles, package manager config, base image definitions | Mark stale on any target-branch change to manifests, lockfiles, generated dependency artifacts, or build tooling | **Tier 2** mandatory; Tier 3 if runtime-critical or security-sensitive dependency change | Escalate on install-script policy violation, CVE or policy failure, repeated flake, or merge conflict |
-| `build_config_task` | CI config, Dockerfiles, Makefiles, build scripts, codegen config | **Hard lock** on build or config paths and generated outputs governed by those configs | Mark stale on any target-branch change to build config, generated artifacts, runtime image config, or toolchain manifests | **Tier 2** mandatory; Tier 3 if repo policy marks build system as critical | Escalate on any rebase conflict, validation failure affecting shared build path, or unexpected downstream blast radius |
+| `docs_task` | Markdown docs, comments-only edits, examples outside executed build path | Admit owned-path overlaps; attach `OWNED_PATH_OVERLAP_RISK` warning when active workspaces overlap | Mark stale only if target branch advances on overlapping owned paths or docs build config changes | **Tier 1** by default; Tier 2 if docs site build or code examples are executable | Escalate only on out-of-scope edits, repeated docs build failure, or merge conflict |
+| `test_task` | Adding or updating tests without intended production code changes | Admit owned-path overlaps; shared fixtures or harness config may require stricter validation but not path-based admission failure | Mark stale if target branch advances on touched production paths, shared test harness, fixtures, or owned test paths | **Tier 1 + targeted Tier 2** by default | Escalate on out-of-scope production edits, flaky validation beyond retry budget, or merge conflict |
+| `refactor_task` | Internal restructuring, renames, code movement without intended behavior change | Admit owned-path overlaps; surface overlapping module/interface/codegen paths as risk metadata | Mark stale if target branch advances on any overlapping module path, interface surface, dependency manifest, or build config | **Tier 2** minimum | Escalate on semantic overlap, repeated rebase failure, validation mismatch, or unexpected scope expansion |
+| `migration_task` | Schema migrations, data model contract changes, stateful rollout scripts | Admit owned-path overlaps and flag risk; serialize only if a future explicit exclusive schema resource lock exists | Mark stale immediately on any target-branch schema, migration, ORM model, or dependency change affecting runtime contract; affected workspaces must refresh database state before further validation | **Tier 2** mandatory; **Tier 3** recommended or mandatory per repo policy | Escalate on any rebase conflict, failed migration validation, cross-task schema contention, or required database refresh after upstream merge |
+| `dependency_task` | Package manifest changes, lockfile updates, base image updates, toolchain changes | Admit owned-path overlaps and flag risk; serialize only if a future explicit exclusive dependency/toolchain resource lock exists | Mark stale on any target-branch change to manifests, lockfiles, generated dependency artifacts, or build tooling | **Tier 2** mandatory; Tier 3 if runtime-critical or security-sensitive dependency change | Escalate on install-script policy violation, CVE or policy failure, repeated flake, or merge conflict |
+| `build_config_task` | CI config, Dockerfiles, Makefiles, build scripts, codegen config | Admit owned-path overlaps and flag risk; serialize only if a future explicit exclusive build resource lock exists | Mark stale on any target-branch change to build config, generated artifacts, runtime image config, or toolchain manifests | **Tier 2** mandatory; Tier 3 if repo policy marks build system as critical | Escalate on any rebase conflict, validation failure affecting shared build path, or unexpected downstream blast radius |
 
 The default task-class assignment itself must be deterministic.
 
@@ -215,7 +222,7 @@ When multiple policy sources disagree, AWF must resolve them in a single normati
 | --- | --- | --- |
 | 1 | Security policies | Secret scope, egress mode, forbidden actions, and artifact handling rules always win |
 | 2 | Repository policy | Path-based and class-based repository rules may strengthen defaults for the specific repo |
-| 3 | Task-class policy | The task-class matrix defines the minimum lock mode, stale behavior, and validation floor |
+| 3 | Task-class policy | The task-class matrix defines overlap-risk behavior, stale behavior, and validation floor |
 | 4 | Touched-path upgrades | If actual touched paths imply a higher-risk class, AWF upgrades to the stricter class immediately |
 | 5 | Stale and freshness rules | Fresh-validation and drift rules may block merge eligibility even after earlier checks passed |
 | 6 | Merge queue ordering rules | Serialized integration and queue ordering decide when an otherwise eligible candidate may merge |
@@ -226,11 +233,11 @@ When multiple policy sources disagree, AWF must resolve them in a single normati
 | Repository policy attempts to allow Tier 1 only for a path that is classified as `migration_task` | Task-class policy | The attempt still requires Tier 2, and Tier 3 if repo policy strengthens it |
 | Operator tries to make a stale attempt canonical without fresh required validation | Stale and freshness rules | Override is rejected until the attempt is refreshed or replaced |
 
-## 7. Scheduling, Locking, and Fairness Policy
+## 7. Scheduling, Advisory Ownership, and Fairness Policy
 
-A scheduler that can create workspaces but cannot explain its admission and ordering decisions will not be operationally trustworthy. AWF therefore must schedule at the **task-attempt** level, not merely at the task level, and it must account for queue priority, starvation prevention, lock contention, resource saturation, and retry budgets.[2]
+A scheduler that can create workspaces but cannot explain its admission and ordering decisions will not be operationally trustworthy. AWF therefore must schedule at the **task-attempt** level, not merely at the task level, and it must account for queue priority, starvation prevention, overlap risk, resource saturation, and retry budgets.[2]
 
-Admission happens in two stages. First, AWF evaluates policy, lock claims, and resource requirements. An attempt may enter `queued` only if its policy class is known, required resource reservation has been computed, and no hard lock prevents admission. If a hard lock conflicts, the attempt enters `blocked_on_lock` rather than the runnable queue. If only soft locks conflict, the attempt may still queue but must carry an overlap risk marker and stricter stale checks. Appendix A defines the normative lock semantics, overlap resolution, lifecycle, and retry behavior.
+Admission happens in two stages. First, AWF evaluates policy, owned-path hints, existing active overlap, and resource requirements. An attempt may enter `queued` or be provisioned when its policy class is known and required resource reservation has been computed. Owned-path overlap never blocks admission by itself; the new attempt carries an overlap risk marker and stricter stale checks. A future explicit exclusive resource lock may block admission, but that lock must be modeled separately from owned paths. Appendix A defines the normative advisory owned-path semantics, overlap resolution, lifecycle, and retry behavior.
 
 ### 7.1 Scheduling Order and Fairness
 
@@ -251,15 +258,15 @@ The score is then applied in lexicographic order as `(class_priority, effective_
 
 ### 7.2 Starvation and Retry Placement
 
-Fairness must be enforceable rather than aspirational. Any runnable attempt that waits more than **120 minutes** must be bumped ahead of newer runnable attempts in the same resource class, unless it remains blocked by a hard lock or asks for resources that are not currently satisfiable. This rule does not permit bypassing serialization for `migration_task`, `dependency_task`, or `build_config_task`; it only changes relative order among attempts that are otherwise admissible.
+Fairness must be enforceable rather than aspirational. Any runnable attempt that waits more than **120 minutes** must be bumped ahead of newer runnable attempts in the same resource class, unless it asks for resources that are not currently satisfiable or is blocked by a future explicit exclusive resource lock. This rule does not convert owned-path overlap into serialization for `migration_task`, `dependency_task`, or `build_config_task`; it only changes relative order among attempts that are otherwise admissible.
 
 Retries share the same queue as first-run attempts. They do not inherit lock ownership from their parent attempt, and they receive a retry bonus only when the prior failure class was `infrastructure_failure`. This bonus is intentionally too small to let retries permanently outrank new work with materially higher base priority. Running attempts are not preempted by default, but queued and not-yet-started attempts may be reprioritized or cancelled and requeued.
 
 | Policy Area | Requirement |
 | --- | --- |
 | Scheduling unit | The unit of dispatch is `task_attempt`, each with its own lineage, reservation, validation history, and failure reason codes |
-| Hard-lock conflict handling | Any overlapping hard lock blocks admission and places the attempt in `blocked_on_lock` until the owning attempt is terminal or drain expires |
-| Soft-lock conflict handling | Overlapping soft locks permit admission but require an overlap risk marker and stale invalidation if another attempt changes the overlapping region |
+| Owned-path overlap handling | Overlapping owned paths permit admission and require an overlap risk marker plus stale invalidation if another attempt changes the overlapping region |
+| Future exclusive-lock handling | Only an explicit exclusive resource lock may block admission and place the attempt in `blocked_on_lock`; owned paths are not that lock |
 | Fairness guarantee | No runnable attempt may wait indefinitely behind newer runnable attempts in the same resource class |
 | Cancellation | Cancellation may be requested in any non-terminal state; node execution should stop quickly but cleanup may continue asynchronously |
 | Preemption | Running attempts are not preempted by default; queued attempts may be reprioritized; reserved but not started attempts may be cancelled and requeued |
@@ -305,7 +312,7 @@ The workspace system must model **task**, **task attempt**, **workspace**, and *
 | `workspace` | `destroying` | Cleanup in progress after terminal or explicit destroy request | No |
 | `workspace` | `destroyed` | Workspace resources reclaimed and state archived | Yes |
 | `task_attempt` | `queued` | Awaiting dispatch | No |
-| `task_attempt` | `blocked_on_lock` | Admission blocked by hard lock | No |
+| `task_attempt` | `blocked_on_lock` | Admission blocked by a future explicit exclusive resource lock | No |
 | `task_attempt` | `in_progress` | Bound to active workspace | No |
 | `task_attempt` | `superseded` | Replaced by newer canonical attempt before merge | Yes |
 | `task_attempt` | `merged` | This attempt became the merge source | Yes |
@@ -503,7 +510,7 @@ Operator UX is a first-class product surface, not an implementation afterthought
 | Screen / View | Purpose | Minimum Required Data |
 | --- | --- | --- |
 | Workspace timeline | Show full lifecycle for one workspace or attempt | State transitions, timestamps, node placement, validation runs, stale reason, failure reason code, human actions |
-| Lock graph | Explain current lock ownership and blocking relationships | Path globs, lock mode, owning attempt, waiters, promotion history |
+| Overlap graph | Explain current advisory owned paths and overlap relationships | Path globs, overlap risk, owning workspace or attempt, stale impact |
 | Merge queue visualization | Explain why each candidate is or is not mergeable | Queue order, required validation tier, freshness state, stale dependencies, merge blocker reason |
 | Resource saturation dashboard | Show capacity bottlenecks | Node CPU, memory, disk, reservation headroom, queued attempts, admission denials |
 | Failure analysis view | Group failures by taxonomy and reason code | Failure class, count, retry outcome, impacted repos/nodes, latest examples |
@@ -519,7 +526,7 @@ The UI and CLI must expose filters by repository, branch target, task class, wor
 | `refresh now` | Initiates immediate drift recomputation against the current target branch and records an async operation |
 | `rebase now` | Initiates immediate rebase against the current target branch and schedules required Tier 2 validation |
 | `make canonical` | Promotes a completed eligible attempt to canonical if it satisfies freshness and mandatory validation rules; automatically demotes the prior canonical attempt |
-| `promote to hard lock` | Converts an existing soft lock to hard lock for the declared path scope and records a `human_action` event |
+| `promote to exclusive lock` | Future operator action that converts a named resource, not an ordinary owned path, into an explicit exclusive lock and records a `human_action` event |
 | `pin failed workspace` | Prevents automatic destruction for diagnosis while preserving cleanup safeguards for secrets |
 | `redispatch as new attempt` | Creates a new task attempt with lineage link to failed or superseded attempt |
 | `cancel and destroy` | Moves attempt toward terminal cancellation and begins cleanup |
@@ -547,7 +554,7 @@ The data model must distinguish planning intent, execution history, validation h
 | `resource_reservation` | Reserved execution capacity for a task attempt | `reservation_id`, `attempt_id`, `node_id`, `steady_cpu_units`, `steady_memory_mb`, `peak_cpu_units`, `peak_memory_mb`, `disk_mb`, `reservation_phase`, `reserved_at`, `released_at` |
 | `stale_reason` | Structured stale causality record | `stale_reason_id`, `workspace_id`, `attempt_id`, `trigger_type`, `trigger_ref`, `explanation`, `detected_at` |
 | `queue_decision` | Snapshot of scheduler admission or blocking logic | `queue_decision_id`, `attempt_id`, `decision`, `reason_code`, `class_priority`, `computed_priority`, `age_boost`, `retry_bonus`, `decided_at` |
-| `policy_evaluation_snapshot` | Immutable record of the policy inputs that produced classification and validation outcomes | `snapshot_id`, `task_id`, `attempt_id`, `task_class`, `owned_paths_resolved`, `lock_set_hash`, `validation_tier_required`, `repo_policy_version`, `stale_policy_version`, `created_at` |
+| `policy_evaluation_snapshot` | Immutable record of the policy inputs that produced classification and validation outcomes | `snapshot_id`, `task_id`, `attempt_id`, `task_class`, `owned_paths_resolved`, `overlap_risk_hash`, `validation_tier_required`, `repo_policy_version`, `stale_policy_version`, `created_at` |
 | `human_action` | Operator intervention record | `action_id`, `actor_id`, `target_type`, `target_id`, `action_type`, `notes`, `created_at` |
 | `file_lock` | Claimed ownership or exclusion surface | `lock_id`, `repo_id`, `path_glob`, `mode`, `owner_attempt_id`, `promoted_by_action_id`, `expires_at` |
 | `merge_candidate` | Candidate branch and queue state | `candidate_id`, `attempt_id`, `head_sha`, `target_branch`, `queue_position`, `fresh_validation_tier`, `merge_state`, `invalidated_reason_code` |
@@ -684,7 +691,21 @@ Example `202 Accepted` response:
   "status_url": "/v1/workspaces/ws_01HXYZ",
   "events_url": "/v1/events?workspace_id=ws_01HXYZ",
   "attempt_id": "att_01HXYZ",
-  "accepted_at": "2026-04-21T10:00:00Z"
+  "accepted_at": "2026-04-21T10:00:00Z",
+  "warnings": [
+    {
+      "warning_code": "OWNED_PATH_OVERLAP_RISK",
+      "message": "Owned paths overlap active workspaces; this may require rebase or conflict resolution.",
+      "workspace_ids": ["ws_existing"],
+      "overlaps": [
+        {
+          "workspace_id": "ws_existing",
+          "existing_path": "src/service/**",
+          "requested_path": "src/service/workspaces.py"
+        }
+      ]
+    }
+  ]
 }
 ```
 
@@ -705,7 +726,7 @@ Example `202 Accepted` response:
 | `INVALID_REQUEST` | Malformed payload or missing required fields |
 | `IDEMPOTENCY_CONFLICT` | Same idempotency key reused with different payload |
 | `VERSION_CONFLICT` | Optimistic concurrency or version mismatch |
-| `LOCK_CONFLICT` | Hard lock prevents the requested action |
+| `LOCK_CONFLICT` | Future explicit exclusive resource lock prevents the requested action; ordinary owned-path overlap must use `OWNED_PATH_OVERLAP_RISK` warning metadata instead |
 | `INVALID_STATE` | Action not permitted from current state |
 | `POLICY_DENIED` | Repository or task policy forbids the requested action |
 | `RESOURCE_UNAVAILABLE` | Reservation or placement could not be satisfied |
@@ -742,8 +763,8 @@ This v2.2 specification preserves the strongest operational flows from v2, but r
 | Step | System Behavior |
 | --- | --- |
 | 1 | Aira creates a `task` with declared owned paths, task class, priority, and desired validation minimum |
-| 2 | AWF evaluates policy, computes lock claims, writes a `policy_evaluation_snapshot`, writes a `queue_decision`, and creates a `task_attempt` |
-| 3 | If no hard lock blocks admission, the control plane assigns a node and requests workspace provisioning |
+| 2 | AWF evaluates policy, computes advisory owned-path overlap risk, writes a `policy_evaluation_snapshot`, writes a `queue_decision`, and creates a `task_attempt` |
+| 3 | Unless a future explicit exclusive resource lock blocks admission, the control plane assigns a node and requests workspace provisioning |
 | 4 | The execution node materializes the repository from mirror or worktree cache, injects the environment profile, and marks the workspace `ready` |
 | 5 | Runtime starts task execution and transitions through `running` and `validating_tier1` |
 | 6 | If Tier 1 succeeds, runtime pushes the branch, emits a structured result, and the workspace becomes `completed` |
@@ -786,7 +807,7 @@ This v2.2 specification preserves the strongest operational flows from v2, but r
 
 | Step | System Behavior |
 | --- | --- |
-| 1 | A task classified as `migration_task` acquires hard locks on migration surfaces and dependent schema-contract paths |
+| 1 | A task classified as `migration_task` records advisory owned paths on migration surfaces and dependent schema-contract paths |
 | 2 | The workspace provisions a **dedicated Postgres instance** as part of its compose stack, and that Postgres instance remains alive for the full workspace lifecycle rather than only during tests |
 | 3 | The agent applies its own Alembic migrations to its own Postgres instance and records the resulting schema revision lineage |
 | 4 | Tier 1 and Tier 2 validation run migration-specific checks inside the workspace-local service stack, starting the app-under-test and Playwright services only when required by the validation profile |
@@ -967,7 +988,7 @@ The CLI should be packaged from the same Python codebase using **Typer**. It sho
 | `awf workspace refresh` / `rebase` / `validate` | Trigger lifecycle actions |
 | `awf workspace destroy` / `cancel` | End or clean up a workspace |
 | `awf node status` | Show node capacity, saturation, and local health |
-| `awf locks list` | Inspect blocking ownership |
+| `awf locks list` | Inspect advisory owned-path reservations and overlap risks |
 | `awf dashboard serve` | Launch the local operator dashboard if desired |
 
 ### 18.8 Local Web Dashboard
@@ -979,7 +1000,7 @@ The local dashboard should be implemented in the same FastAPI service using **Ji
 | Queue overview | Runnable, blocked, and running attempts; class, priority, wait time, and reservation footprint |
 | Workspace detail | Timeline, current state, base SHA, branch, compose services, latest validation, and stale reasons |
 | Node capacity | CPU, memory, peak reservation headroom, active workspaces, and test-burst occupancy |
-| Lock graph | Path claims, hard versus soft locks, blockers, and waiting attempts |
+| Overlap graph | Advisory path claims, overlap risks, stale impact, and future explicit exclusive-lock blockers |
 | Failure analysis | Latest failures by reason code with drill-down to logs and cleanup status |
 | Events stream | Recent immutable events across workspaces |
 
@@ -1157,7 +1178,7 @@ The major technical risks remain similar to those identified in v1, but the miti
 | --- | --- | --- |
 | Worktree instability or filesystem edge cases | Can break provisioning or cleanup at scale | Phase-specific fallback to cached clones; health metrics on create/cleanup path |
 | Flaky validation | Produces false failure and false confidence | Historical flakiness tracking, retry budgets, stronger reason codes, optional Tier 3 |
-| Queue starvation under hard locks | Low-priority or blocked tasks may never run | Fairness boosting, lock graph visibility, operator promotion/demotion actions |
+| Queue starvation under future explicit exclusive locks | Low-priority or blocked tasks may never run | Fairness boosting, overlap/exclusive-lock graph visibility, operator promotion/demotion actions |
 | Excessive stale churn | High merge velocity can cause many rebase cycles | Better task scoping, overlap detection, class-based serialization, queue metrics |
 | Secret exposure through logs | Compromises trust and compliance | Redaction, lease scoping, artifact scanning, operator pin safeguards |
 | Cleanup leakage | Resource exhaustion and cross-run contamination | Asynchronous cleanup retries, pinned workspace policy, eventual cleanup SLO |
@@ -1170,46 +1191,45 @@ AWF v2.2 defines the **same end-state product vision as v2**, but makes the cont
 
 The practical effect is that the document now reads less like a broad architectural aspiration and more like an operating contract for multi-agent software work. It preserves the strengths of v2 while reducing ambiguity in exactly the places most likely to create operational drift during implementation, especially around persistent database isolation, workspace resource economics, and the concrete Phase 1 build plan.
 
-## Appendix A. Lock Semantics
+## Appendix A. Owned-Path Advisory Semantics
 
-This appendix defines the normative behavior for lock precedence, overlapping glob resolution, lifecycle, retry handling, and representative edge cases. The goal is to make path ownership predictable in real repositories where glob specificity and task-class severity do not always align cleanly.
+This appendix defines the normative behavior for advisory owned-path overlap, overlapping glob resolution, retry handling, and representative edge cases. The goal is to make path ownership useful for stale detection and operator visibility without treating ordinary source paths as exclusive locks.
 
 ### A.1 Precedence and Overlap Resolution
 
 | Task-Class Precedence | Meaning |
 | --- | --- |
-| `migration_task` > `dependency_task` > `build_config_task` > `refactor_task` > `test_task` > `docs_task` | Higher-precedence task classes win equal-specificity tie-breaks and determine the stricter outcome |
+| `migration_task` > `dependency_task` > `build_config_task` > `refactor_task` > `test_task` > `docs_task` | Higher-precedence task classes determine stale/validation severity when overlap risk is interpreted |
 
 | Rule | Requirement |
 | --- | --- |
-| Hard-lock supremacy | If any overlapping hard lock conflicts on a path, no new attempt may move past `blocked_on_lock` until the owning attempt is terminal or its drain period expires |
-| Soft-lock overlap | Overlapping soft locks are allowed, but any attempt whose soft-locked region is later modified by another attempt must be re-evaluated under stale rules |
-| Specificity first | More specific globs win before task-class precedence is consulted |
-| Equal-specificity tie-break | If specificity is equal, higher task-class precedence wins; the lower-precedence attempt is marked `at_risk` if admission remains allowed |
+| Advisory overlap | Overlapping owned paths are allowed and must attach `OWNED_PATH_OVERLAP_RISK` metadata to the new workspace or attempt |
+| No path-exclusive blocking | A migration, dependency, or build-config owned path still admits overlap unless a separate future explicit exclusive resource lock exists |
+| Specificity first | More specific globs identify the narrower stale-risk surface before task-class precedence is consulted |
+| Equal-specificity tie-break | If specificity is equal, higher task-class precedence determines stricter stale and validation expectations; it does not block admission by itself |
 
 Specificity is determined in this order: longest literal path prefix, then fewest wildcard segments, then greatest number of concrete path segments. Under that rule, `orchestrator/workspace/**` is more specific than `orchestrator/**`, and `db/migrations/*.sql` is more specific than `db/**`.
 
-### A.2 Lock Lifecycle and Retry Inheritance
+### A.2 Advisory Lifecycle and Retry Inheritance
 
 | Lifecycle Event | Required Behavior |
 | --- | --- |
-| Attempt admitted | AWF computes lock claims from current policy, current repository state, and resolved owned paths |
-| Attempt reaches terminal state | Locks release immediately unless repository policy enables a short cleanup drain period |
-| Drain period enabled | Locks may remain for a short non-renewable drain, default maximum **5 minutes**, only to allow cleanup to finish |
-| `failed` plus `cleanup_failure` | Locks still release on terminal transition, but the workspace may remain pinned for diagnosis |
-| Retry or redispatch | New attempts recompute lock claims from current policy and current repository state; locks are never inherited automatically |
-| Historical retention | Released locks remain in history for diagnosis but cannot block new work |
+| Attempt admitted | AWF computes owned-path overlap risk from current policy, current repository state, and resolved owned paths |
+| Attempt reaches terminal state | Its owned paths remain in history for diagnosis but are no longer active overlap-risk inputs |
+| `failed` plus `cleanup_failure` | The workspace may remain pinned for diagnosis, but its terminal status does not block new overlapping owned paths |
+| Retry or redispatch | New attempts recompute overlap risk from current policy and current repository state; advisory ownership is never inherited automatically |
+| Historical retention | Historical owned paths remain useful for diagnosis but cannot block new work |
 
-Locks never live longer than the attempt that created them. A retry does not inherit prior lock ownership even when it reuses the same workspace lineage or human intent.
+Owned-path hints never live as exclusive locks. A retry does not inherit prior advisory overlap state even when it reuses the same workspace lineage or human intent.
 
 ### A.3 Worked Examples
 
 | Example | Situation | Outcome |
 | --- | --- | --- |
-| Docs overlaps refactor | A `docs_task` and a `refactor_task` both claim `docs/api/client.md` with soft locks | Both attempts may queue, but the `refactor_task` has higher precedence on equal specificity; the docs attempt is marked `at_risk` and becomes stale if the refactor merges changes in that file |
-| Migration blocks test task | A `migration_task` holds a hard lock on `db/migrations/**` and dependent `app/models/**`; a `test_task` later requests edits in `app/models/**` | The test attempt remains `blocked_on_lock` until the migration attempt is terminal or drain expires |
-| Dependency change lands during refactors | A `dependency_task` merges changes to `package.json` and `pnpm-lock.yaml` while several `refactor_task` attempts are running | Existing refactors keep their current locks, but any affected attempt is re-evaluated for staleness under dependency-sensitive rules and may require full Tier 2 or redispatch |
-| Specific glob beats broader glob | One attempt owns `orchestrator/workspace/**`; another owns `orchestrator/**` | The narrower `orchestrator/workspace/**` claim wins overlap resolution on that subtree before task-class precedence is considered |
+| Docs overlaps refactor | A `docs_task` and a `refactor_task` both claim `docs/api/client.md` | Both attempts are admitted; the new attempt receives overlap-risk metadata and becomes stale if the other task merges changes in that file |
+| Migration overlaps test task | A `migration_task` owns `db/migrations/**` and dependent `app/models/**`; a `test_task` later requests edits in `app/models/**` | The test attempt is admitted with overlap-risk metadata unless a future explicit exclusive schema resource lock exists |
+| Dependency change lands during refactors | A `dependency_task` merges changes to `package.json` and `pnpm-lock.yaml` while several `refactor_task` attempts are running | Existing refactors keep running, but any affected attempt is re-evaluated for staleness under dependency-sensitive rules and may require full Tier 2 or redispatch |
+| Specific glob narrows risk | One attempt owns `orchestrator/workspace/**`; another owns `orchestrator/**` | The narrower `orchestrator/workspace/**` claim identifies the more specific stale-risk surface before task-class precedence is considered |
 
 ## Appendix B. Terminology Glossary
 
