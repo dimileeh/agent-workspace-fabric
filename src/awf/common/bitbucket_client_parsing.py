@@ -96,7 +96,7 @@ class _PRContext:
         )
 
 
-def effective_merge_strategies(ctx: _PRContext) -> list[str] | None:
+def effective_merge_strategies(ctx: _PRContext) -> list[str]:
     """Resolve the destination branch's merge strategies, defaulting if needed.
 
     BitBucket may expose only ``destination.branch.default_merge_strategy`` while
