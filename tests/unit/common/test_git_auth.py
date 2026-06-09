@@ -93,6 +93,10 @@ def test_bitbucket_git_config_entries_rewrite_ssh_remotes_to_https() -> None:
     ]
     assert "git@bitbucket.org:" in insteadof_values
     assert "ssh://git@bitbucket.org/" in insteadof_values
+    # The explicit-default-port shape must be covered too: the preflight accepts
+    # ``ssh://git@bitbucket.org:22/…`` as canonical, but ``insteadOf`` matches its
+    # source as a literal prefix so the bare no-port rule does not cover ``:22``.
+    assert "ssh://git@bitbucket.org:22/" in insteadof_values
 
 
 @pytest.mark.unit
@@ -161,8 +165,11 @@ def test_apply_bitbucket_git_auth_noop_when_not_configured(
 @pytest.mark.unit
 def test_worker_bitbucket_git_config_entries_unchanged_byte_for_byte() -> None:
     # The worker credential-helper path is an independent mechanism from the
-    # agent askpass + insteadOf path (#465/#466) and must stay byte-for-byte
-    # unchanged. This locks the exact worker entries as a regression guard.
+    # agent askpass + insteadOf path (#465/#466). This locks the exact worker
+    # entries as a regression guard. The credential-helper and useHttpPath
+    # entries stay byte-for-byte as shipped (#461/#464/#467); the ``insteadOf``
+    # rewrites cover every SSH shape the preflight accepts as canonical, which
+    # includes the explicit-default-port ``ssh://git@bitbucket.org:22/`` source.
     assert bitbucket_git_config_entries() == (
         ("credential.https://bitbucket.org.helper", ""),
         (
@@ -174,7 +181,25 @@ def test_worker_bitbucket_git_config_entries_unchanged_byte_for_byte() -> None:
         ("credential.https://bitbucket.org.useHttpPath", "true"),
         ("url.https://bitbucket.org/.insteadOf", "git@bitbucket.org:"),
         ("url.https://bitbucket.org/.insteadOf", "ssh://git@bitbucket.org/"),
+        ("url.https://bitbucket.org/.insteadOf", "ssh://git@bitbucket.org:22/"),
     )
+
+
+@pytest.mark.unit
+def test_worker_bitbucket_rewrite_covers_explicit_default_port_ssh() -> None:
+    # Regression: the worker preflight accepts ``ssh://git@bitbucket.org:22/…`` as
+    # canonical, but ``insteadOf`` matches its source as a literal prefix, so the
+    # bare ``ssh://git@bitbucket.org/`` source does not cover the ``:22`` shape.
+    # Without the ``:22`` source git would leave the URL as SSH and a token-only
+    # worker would fall back to SSH and fail instead of using the credential helper.
+    entries = bitbucket_git_config_entries()
+    insteadof = tuple(
+        (key, value) for key, value in entries if key == "url.https://bitbucket.org/.insteadOf"
+    )
+    rewritten = _apply_instead_of("ssh://git@bitbucket.org:22/ws/repo.git", insteadof)
+    assert rewritten == "https://bitbucket.org/ws/repo.git"
+    # The HTTPS rewrite target never re-matches any SSH source rule (no loop).
+    assert _apply_instead_of(rewritten, insteadof) == rewritten
 
 
 @pytest.mark.unit
@@ -337,15 +362,17 @@ def _apply_instead_of(url: str, entries: tuple[tuple[str, str], ...]) -> str:
     git rewrites a URL by replacing the longest configured ``insteadOf`` *source*
     (the config *value*) that is a literal prefix of the URL with the URL embedded
     in the config *key* (``url.<rewritten>.insteadOf``). This lets the test assert
-    the end-to-end effect of the config without invoking git.
+    the end-to-end effect of the config without invoking git. The rewrite target is
+    derived from the matching entry's own key, so it works for both the worker
+    (``url.https://bitbucket.org/.insteadOf``) and agent (sentinel-username) keys.
     """
-    target = _AGENT_INSTEADOF_KEY[len("url.") : -len(".insteadOf")]
-    best_source = ""
-    for _key, source in entries:
+    best_key, best_source = "", ""
+    for key, source in entries:
         if url.startswith(source) and len(source) > len(best_source):
-            best_source = source
+            best_key, best_source = key, source
     if not best_source:
         return url
+    target = best_key[len("url.") : -len(".insteadOf")]
     return target + url[len(best_source) :]
 
 

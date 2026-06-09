@@ -28,8 +28,9 @@ There are **two** Bitbucket git-auth paths because they cross different layers:
   a host-scoped shell **credential helper** wired straight into the worker's git
   process environment. No compose layer sits between the helper string and git,
   so embedding a token-referencing ``$BITBUCKET_API_TOKEN`` shell snippet is
-  safe. This path is already shipped (#461/#464/#467) and is left byte-for-byte
-  unchanged.
+  safe. This path is already shipped (#461/#464/#467); its ``insteadOf`` rewrites
+  cover the same SSH shapes the preflight accepts as canonical (including the
+  explicit ``:22`` default port).
 - **Agent** (``apply_bitbucket_agent_git_auth`` + ``bitbucket_agent_git_config_entries``
   + ``bitbucket_askpass_script``): an **askpass file + URL-username rewrite**. The
   agent env crosses four layers (Jinja2 template → YAML → docker-compose
@@ -175,11 +176,16 @@ def bitbucket_git_config_entries() -> tuple[tuple[str, str], ...]:
     ``url.https://github.com/.insteadOf = git@github.com:`` entry so an SSH-form
     bitbucket remote is rewritten to HTTPS and actually authenticates with the
     configured token instead of silently falling back to SSH and ignoring
-    ``BITBUCKET_API_TOKEN`` / ``BITBUCKET_EMAIL``. Both SSH URL shapes that
-    ``RepoRef.from_url`` accepts are covered: the scp-like
-    ``git@bitbucket.org:ws/repo.git`` form and the
-    ``ssh://git@bitbucket.org/ws/repo.git`` form (``insteadOf`` is multi-valued,
-    so both rewrites apply).
+    ``BITBUCKET_API_TOKEN`` / ``BITBUCKET_EMAIL``. Every SSH URL shape the worker
+    preflight (:func:`_reject_non_canonical_bitbucket_ssh`) accepts as canonical is
+    covered: the scp-like ``git@bitbucket.org:ws/repo.git`` form, the no-port
+    ``ssh://git@bitbucket.org/ws/repo.git`` form, and the explicit-default-port
+    ``ssh://git@bitbucket.org:22/ws/repo.git`` form. The ``:22`` entry is
+    load-bearing: ``insteadOf`` matches its source as a literal prefix, so the bare
+    ``ssh://git@bitbucket.org/`` rule does **not** cover the ``:22`` shape, yet the
+    preflight passes it (``RepoRef.from_url`` parses the host without the port).
+    Without it a token-only worker would leave a ``:22`` remote unrewritten and fall
+    back to SSH and fail. (``insteadOf`` is multi-valued, so all rewrites apply.)
     """
     return (
         ("credential.https://bitbucket.org.helper", ""),
@@ -187,6 +193,7 @@ def bitbucket_git_config_entries() -> tuple[tuple[str, str], ...]:
         ("credential.https://bitbucket.org.useHttpPath", "true"),
         ("url.https://bitbucket.org/.insteadOf", "git@bitbucket.org:"),
         ("url.https://bitbucket.org/.insteadOf", "ssh://git@bitbucket.org/"),
+        ("url.https://bitbucket.org/.insteadOf", "ssh://git@bitbucket.org:22/"),
     )
 
 

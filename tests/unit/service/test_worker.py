@@ -1159,8 +1159,10 @@ def test_service_git_environment_wires_bitbucket_helper_without_leaking_token(
     assert entries["url.https://github.com/.insteadOf"] == "git@github.com:"
     # SSH-form bitbucket remotes are rewritten to HTTPS so the token is used
     # (parity with the GitHub insteadOf rewrite above). ``insteadOf`` is
-    # multi-valued: both the scp-like ``git@bitbucket.org:`` form and the
-    # ``ssh://git@bitbucket.org/`` form are covered.
+    # multi-valued: the scp-like ``git@bitbucket.org:`` form, the no-port
+    # ``ssh://git@bitbucket.org/`` form, and the explicit-default-port
+    # ``ssh://git@bitbucket.org:22/`` form (which the preflight accepts as
+    # canonical) are all covered.
     bitbucket_insteadof = [
         env[f"GIT_CONFIG_VALUE_{index}"]
         for index in range(count)
@@ -1168,6 +1170,7 @@ def test_service_git_environment_wires_bitbucket_helper_without_leaking_token(
     ]
     assert "git@bitbucket.org:" in bitbucket_insteadof
     assert "ssh://git@bitbucket.org/" in bitbucket_insteadof
+    assert "ssh://git@bitbucket.org:22/" in bitbucket_insteadof
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     # The Atlassian token never lands in any git env value.
     assert all(secret_token not in value for value in env.values())
