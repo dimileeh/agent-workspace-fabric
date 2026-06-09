@@ -88,6 +88,7 @@ Console:
 npm --prefix apps/console run lint
 npm --prefix apps/console run typecheck
 npm --prefix apps/console run build
+npm --prefix apps/console run test:browser
 ```
 
 Coverage, when the task touches core behavior broadly:
