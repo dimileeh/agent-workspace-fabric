@@ -256,7 +256,7 @@ jobs:
           PY
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Validate control-plane image build
         uses: docker/build-push-action@v6
