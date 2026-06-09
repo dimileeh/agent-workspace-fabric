@@ -124,7 +124,8 @@ export function sanitizeStreamChannels(raw: string | null): string {
 }
 
 export function sanitizeTailBytes(raw: string | null): string {
-  const parsed = Number(raw ?? AWF_STREAM_MAX_TAIL_BYTES);
+  const trimmed = (raw ?? "").trim();
+  const parsed = Number(trimmed || AWF_STREAM_MAX_TAIL_BYTES);
   if (!Number.isFinite(parsed)) {
     return String(AWF_STREAM_MAX_TAIL_BYTES);
   }

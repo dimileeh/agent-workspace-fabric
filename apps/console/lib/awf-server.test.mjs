@@ -76,6 +76,8 @@ test("sanitizeTailBytes clamps to the supported range", () => {
 test("sanitizeTailBytes falls back to the cap for missing or non-numeric input", () => {
   assert.equal(sanitizeTailBytes(null), String(AWF_STREAM_MAX_TAIL_BYTES));
   assert.equal(sanitizeTailBytes("not-a-number"), String(AWF_STREAM_MAX_TAIL_BYTES));
+  assert.equal(sanitizeTailBytes(""), String(AWF_STREAM_MAX_TAIL_BYTES));
+  assert.equal(sanitizeTailBytes("   "), String(AWF_STREAM_MAX_TAIL_BYTES));
 });
 
 function restoreEnv(name, value) {
