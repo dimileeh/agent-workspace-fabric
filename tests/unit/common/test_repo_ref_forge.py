@@ -137,6 +137,12 @@ class TestRepoRefHostAwareBuilders:
                 "git@bitbucket.org:ws/repo.git",
             ),
             (
+                # Explicit default SSH port must stay SSH (thread
+                # PRRT_kwDOSJAM6s6IQkBd), not fall through to HTTPS.
+                "ssh://git@bitbucket.org:22/src/source.git",
+                "git@bitbucket.org:ws/repo.git",
+            ),
+            (
                 "https://bitbucket.org/src/source.git",
                 "https://bitbucket.org/ws/repo.git",
             ),
@@ -166,4 +172,9 @@ class TestRepoRefHostAwareBuilders:
         assert (
             ref.clone_url_like("https://github.com/dimileeh/source.git")
             == "https://github.com/contributor/aira-web.git"
+        )
+        # Explicit default SSH port stays SSH (thread PRRT_kwDOSJAM6s6IQkBd).
+        assert (
+            ref.clone_url_like("ssh://git@github.com:22/dimileeh/source.git")
+            == "git@github.com:contributor/aira-web.git"
         )

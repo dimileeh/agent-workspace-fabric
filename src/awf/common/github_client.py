@@ -217,10 +217,19 @@ class RepoRef:
         """Return a clone URL matching the requested transport style."""
         host = self._forge_host()
         stripped = repo_url.strip()
-        if stripped.startswith(f"git@{host}:") or stripped.startswith(f"ssh://git@{host}/"):
+        parsed = urlsplit(stripped)
+        parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        # Match SSH by scheme (not a no-port prefix) so explicit-port forms such
+        # as ssh://git@github.com:22/owner/repo.git are preserved as SSH instead
+        # of silently falling through to HTTPS (thread PRRT_kwDOSJAM6s6IQkBd).
+        is_ssh_url = (
+            parsed.scheme == "ssh"
+            and parsed_host == host
+            and (parsed.username is None or parsed.username.lower() == "git")
+        )
+        if stripped.startswith(f"git@{host}:") or is_ssh_url:
             return self.ssh_url()
 
-        parsed = urlsplit(stripped)
         if (
             parsed.scheme in {"http", "https"}
             and parsed.hostname is not None
