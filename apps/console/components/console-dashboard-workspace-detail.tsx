@@ -98,22 +98,22 @@ export function TaskDetailsModal({
       aria-modal="true"
       aria-labelledby={`${labelId} ${titleId}`}
     >
-      <div className="m-auto grid max-h-[calc(100dvh-1.5rem)] w-full max-w-5xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-md border border-slate-300 bg-white shadow-xl sm:max-h-[calc(100dvh-3rem)]">
-        <header className="flex min-h-14 items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
+      <div className="m-auto grid max-h-[calc(100dvh-1.5rem)] w-full max-w-5xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-md border border-line bg-surface shadow-xl sm:max-h-[calc(100dvh-3rem)]">
+        <header className="flex min-h-14 items-start justify-between gap-3 border-b border-line px-4 py-3">
           <div className="min-w-0">
-            <div id={labelId} className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+            <div id={labelId} className="flex items-center gap-2 text-sm font-semibold text-fg-strong">
               <FileText size={16} aria-hidden />
               Task details
             </div>
-            <h2 id={titleId} className="mt-1 line-clamp-2 text-base font-semibold text-slate-950">
+            <h2 id={titleId} className="mt-1 line-clamp-2 text-base font-semibold text-fg-strong">
               {workspace.title}
             </h2>
-            <div className="mono mt-1 truncate text-xs text-slate-500">{workspace.workspace_id}</div>
+            <div className="mono mt-1 truncate text-xs text-fg-muted">{workspace.workspace_id}</div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 transition hover:bg-slate-50"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-line bg-surface text-fg transition hover:bg-surface-2"
             aria-label="Close task details"
           >
             <X size={16} aria-hidden />
@@ -135,8 +135,8 @@ export function TaskDetailsModal({
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
           <CoordinationWarningBlock warnings={workspace.coordination_warnings} status={workspace.status} />
-          <section className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3">
-            <div className="text-xs font-semibold text-slate-500">Prompt sent to AWF</div>
+          <section className="grid gap-2 rounded-md border border-line bg-surface-2 p-3">
+            <div className="text-xs font-semibold text-fg-muted">Prompt sent to AWF</div>
             <TaskPromptBody prompt={workspace.task_prompt} />
           </section>
         </div>
@@ -149,7 +149,7 @@ export function TaskPromptBody({ prompt }: { prompt: string }) {
   const lines = prompt.trim() ? prompt.trim().split(/\r?\n/) : ["No prompt stored for this workspace."];
 
   return (
-    <div className="grid gap-1 text-sm leading-6 text-slate-800">
+    <div className="grid gap-1 text-sm leading-6 text-fg">
       {lines.map((line, index) => {
         const trimmed = line.trim();
         const key = `${index}:${line}`;
@@ -158,21 +158,21 @@ export function TaskPromptBody({ prompt }: { prompt: string }) {
         }
         if (trimmed.startsWith("### ")) {
           return (
-            <h4 key={key} className="mt-3 text-sm font-semibold text-slate-950">
+            <h4 key={key} className="mt-3 text-sm font-semibold text-fg-strong">
               {trimmed.slice(4)}
             </h4>
           );
         }
         if (trimmed.startsWith("## ")) {
           return (
-            <h3 key={key} className="mt-4 text-base font-semibold text-slate-950">
+            <h3 key={key} className="mt-4 text-base font-semibold text-fg-strong">
               {trimmed.slice(3)}
             </h3>
           );
         }
         if (trimmed.startsWith("# ")) {
           return (
-            <h3 key={key} className="text-base font-semibold text-slate-950">
+            <h3 key={key} className="text-base font-semibold text-fg-strong">
               {trimmed.slice(2)}
             </h3>
           );
@@ -180,7 +180,7 @@ export function TaskPromptBody({ prompt }: { prompt: string }) {
         if (trimmed.startsWith("- ")) {
           return (
             <div key={key} className="grid grid-cols-[16px_minmax(0,1fr)] gap-2">
-              <span className="text-slate-400">•</span>
+              <span className="text-fg-muted">•</span>
               <span className="min-w-0 whitespace-pre-wrap break-words">{trimmed.slice(2)}</span>
             </div>
           );
@@ -189,14 +189,14 @@ export function TaskPromptBody({ prompt }: { prompt: string }) {
           const [prefix, ...rest] = trimmed.split(/\s+/);
           return (
             <div key={key} className="grid grid-cols-[28px_minmax(0,1fr)] gap-2">
-              <span className="mono text-xs text-slate-400">{prefix}</span>
+              <span className="mono text-xs text-fg-muted">{prefix}</span>
               <span className="min-w-0 whitespace-pre-wrap break-words">{rest.join(" ")}</span>
             </div>
           );
         }
         if (trimmed.startsWith("```")) {
           return (
-            <div key={key} className="mono rounded-md bg-slate-900 px-2 py-1 text-xs text-slate-100">
+            <div key={key} className="mono rounded-md bg-[var(--terminal)] px-2 py-1 text-xs text-[var(--terminal-foreground)]">
               {trimmed}
             </div>
           );
@@ -246,7 +246,7 @@ export function WorkspaceSummary({
               type="button"
               onClick={onRetry}
               disabled={retryState.status === "submitting"}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface px-3 text-xs text-fg transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <RefreshCw
                 size={13}
@@ -266,19 +266,19 @@ export function WorkspaceSummary({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-lg font-semibold">{overview.title}</h2>
-            <p className="mt-1 truncate text-sm text-[var(--muted)]">{overview.repo_url}</p>
+            <p className="mt-1 truncate text-sm text-fg-muted">{overview.repo_url}</p>
           </div>
           <div className="flex flex-col items-end gap-1">
             <div className="flex items-center gap-1">
               <Badge value={overview.status} />
               {overview.status === "running" && overview.subphase ? (
-                <span className="inline-flex h-6 items-center rounded-md border border-slate-200 bg-slate-100 px-2 text-[11px] font-medium text-slate-800">
+                <span className="inline-flex h-6 items-center rounded-md border border-line bg-surface-2 px-2 text-[11px] font-medium text-fg">
                   ({overview.subphase})
                 </span>
               ) : null}
             </div>
             {overview.is_stale_running ? (
-              <span className="inline-flex h-6 items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
+              <span className="inline-flex h-6 items-center gap-1 rounded-md border border-attention-border bg-attention-soft px-2 text-[11px] font-medium text-attention-text">
                 <AlertCircle size={12} aria-hidden />
                 <span>Stale execution (check logs)</span>
               </span>
@@ -318,21 +318,21 @@ export function WorkspaceSummary({
         ) : null}
         <CoordinationWarningBlock warnings={coordinationWarnings} status={overview.status} />
         {overview.failure_reason || overview.failure_message ? (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+          <div className="rounded-md border border-danger-border bg-danger-soft p-3 text-sm text-danger-text">
             <div className="font-semibold">{overview.failure_reason ?? "failure"}</div>
-            <div className="mt-1 text-red-800">{overview.failure_message ?? "No details."}</div>
+            <div className="mt-1 text-danger-text">{overview.failure_message ?? "No details."}</div>
           </div>
         ) : null}
         {retryState.status === "success" ? (
-          <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+          <div className="rounded-md border border-healthy-border bg-healthy-soft p-3 text-sm text-healthy-text">
             Retry queued as{" "}
             <span className="mono font-semibold">{retryState.newWorkspaceId}</span>
-            <span className="text-emerald-800"> / operation </span>
+            <span className="text-healthy-text"> / operation </span>
             <span className="mono">{compactId(retryState.operationId, 10)}</span>
           </div>
         ) : null}
         {retryState.status === "error" ? (
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+          <div className="rounded-md border border-danger-border bg-danger-soft p-3 text-sm text-danger-text">
             {retryState.message}
           </div>
         ) : null}
@@ -353,11 +353,11 @@ export function WorkspaceRecoveryBlock({
   if (!item) {
     const validation = summarizeValidationProvenance(workspace?.validation_provenance);
     return (
-      <div className="grid gap-2 rounded-md border border-slate-200 bg-white p-2 text-xs">
+      <div className="grid gap-2 rounded-md border border-line bg-surface p-2 text-xs">
         <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
           <div className="min-w-0">
-            <div className="font-semibold text-slate-900">Validation freshness</div>
-            <div className="mono mt-0.5 truncate text-[11px] text-slate-500">
+            <div className="font-semibold text-fg-strong">Validation freshness</div>
+            <div className="mono mt-0.5 truncate text-[11px] text-fg-muted">
               {workspace?.branch_name ?? overview.branch_name ?? "no branch"} / {overview.base_branch}
             </div>
           </div>
@@ -396,11 +396,11 @@ export function WorkspaceRecoveryBlock({
 
   const recovery = summarizeRecovery(item);
   return (
-    <div className="grid gap-2 rounded-md border border-slate-200 bg-white p-2 text-xs">
+    <div className="grid gap-2 rounded-md border border-line bg-surface p-2 text-xs">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
-          <div className="font-semibold text-slate-900">Validation freshness</div>
-          <div className="mono mt-0.5 truncate text-[11px] text-slate-500">
+          <div className="font-semibold text-fg-strong">Validation freshness</div>
+          <div className="mono mt-0.5 truncate text-[11px] text-fg-muted">
             {item.branch_name ?? "no branch"} / {item.base_branch}
           </div>
         </div>
@@ -505,11 +505,11 @@ export function OperatorControlsBlock({
   }
 
   return (
-    <div className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+    <div className="grid gap-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="font-semibold text-slate-900">Operator controls</span>
+        <span className="font-semibold text-fg-strong">Operator controls</span>
         {busy ? (
-          <span className="mono text-[11px] text-slate-500">{submittingAction} active</span>
+          <span className="mono text-[11px] text-fg-muted">{submittingAction} active</span>
         ) : null}
       </div>
       <div className="flex flex-wrap gap-2">
@@ -523,8 +523,8 @@ export function OperatorControlsBlock({
           const destructive = control.action === "cancel";
           const tooltip = reason ? `${control.label}: ${reason}` : null;
           const buttonClassName = destructive
-            ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-white px-2.5 text-[11px] font-medium text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-            : "inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
+            ? "inline-flex h-8 items-center gap-1.5 rounded-md border border-danger-border bg-surface px-2.5 text-[11px] font-medium text-danger-text transition hover:bg-danger-soft disabled:cursor-not-allowed disabled:opacity-50"
+            : "inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-[11px] font-medium text-fg transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50";
           return (
             <div
               key={control.action}
@@ -547,7 +547,7 @@ export function OperatorControlsBlock({
                 <span
                   id={`operator-control-tip-${workspaceId}-${control.action}`}
                   role="tooltip"
-                  className="pointer-events-none absolute left-0 top-[calc(100%+6px)] z-20 sr-only max-w-56 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[11px] font-medium text-white shadow-lg group-focus-within:not-sr-only group-hover:not-sr-only"
+                  className="pointer-events-none absolute left-0 top-[calc(100%+6px)] z-20 sr-only max-w-56 rounded-md border border-line-strong bg-elevated px-2 py-1 text-[11px] font-medium text-fg shadow-lg group-focus-within:not-sr-only group-hover:not-sr-only"
                 >
                   {tooltip}
                 </span>
@@ -559,7 +559,7 @@ export function OperatorControlsBlock({
       {confirming === "cancel" && cancelConfirmEnabled ? (
         <div
           data-testid="operator-cancel-confirm"
-          className="grid gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-red-900"
+          className="grid gap-2 rounded-md border border-danger-border bg-danger-soft px-2 py-1.5 text-danger-text"
         >
           <span className="min-w-0 break-words">
             Cancel workspace <span className="mono">{workspaceId}</span>? This stops its stack and ends the run.
@@ -575,7 +575,7 @@ export function OperatorControlsBlock({
                 setConfirming(null);
               }}
               disabled={!cancelConfirmEnabled}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-red-300 bg-red-600 px-2.5 text-[11px] font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-danger-border bg-danger px-2.5 text-[11px] font-medium text-canvas transition hover:bg-danger-text disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Ban size={13} aria-hidden />
               Confirm cancel
@@ -583,7 +583,7 @@ export function OperatorControlsBlock({
             <button
               type="button"
               onClick={() => setConfirming(null)}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-[11px] font-medium text-fg transition hover:bg-surface-2"
             >
               Dismiss
             </button>
@@ -591,13 +591,13 @@ export function OperatorControlsBlock({
         </div>
       ) : null}
       {state.status === "success" ? (
-        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-emerald-900">
+        <div className="rounded-md border border-healthy-border bg-healthy-soft px-2 py-1.5 text-healthy-text">
           <span>{state.message}</span>
-          <span className="mono ml-2 text-emerald-800">{compactId(state.operationId, 10)}</span>
+          <span className="mono ml-2 text-healthy-text">{compactId(state.operationId, 10)}</span>
         </div>
       ) : null}
       {state.status === "success" && state.warnings.length > 0 ? (
-        <div className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-900">
+        <div className="grid gap-1 rounded-md border border-attention-border bg-attention-soft px-2 py-1.5 text-attention-text">
           {state.warnings.map((warning) => (
             <div key={`${warning.warning_code}:${warning.message}`} className="flex min-w-0 items-start gap-1.5">
               <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
@@ -607,7 +607,7 @@ export function OperatorControlsBlock({
         </div>
       ) : null}
       {state.status === "error" ? (
-        <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-red-900">
+        <div className="rounded-md border border-danger-border bg-danger-soft px-2 py-1.5 text-danger-text">
           {state.message}
         </div>
       ) : null}
@@ -660,25 +660,25 @@ export function UsageSummaryBlock({
     )
   ) {
     return (
-      <div data-testid="llm-usage" className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+      <div data-testid="llm-usage" className="rounded-md border border-line bg-surface-2 px-3 py-2 text-xs">
         <div className="flex items-center justify-between gap-2">
-          <span className="font-semibold text-slate-900">LLM usage</span>
+          <span className="font-semibold text-fg-strong">LLM usage</span>
           <Badge value="unavailable" />
         </div>
-        <div className="mt-2 truncate text-[11px] text-slate-500">
+        <div className="mt-2 truncate text-[11px] text-fg-muted">
           {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
         </div>
       </div>
     );
   }
   return (
-    <div data-testid="llm-usage" className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+    <div data-testid="llm-usage" className="rounded-md border border-line bg-surface-2 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-semibold text-slate-900">LLM usage</span>
+        <span className="font-semibold text-fg-strong">LLM usage</span>
         <div className="flex items-center gap-1.5">
           {pricing ? (
             <span
-              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${pricing.is_current ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}
+              className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${pricing.is_current ? "bg-healthy-soft text-healthy-text" : "bg-attention-soft text-attention-text"}`}
               title={`${pricing.provider} / ${pricing.model} — ${pricing.unit}`}
             >
               {pricing.provider} / {pricing.model}
@@ -702,12 +702,12 @@ export function UsageSummaryBlock({
           }
         />
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-fg-muted">
         {formatUsageProvenance(safeUsage.source, safeUsage.reason)}
         {pricingReason && !showCost ? (
           <>
-            <span className="text-slate-300">|</span>
-            <span className="text-amber-600">{pricingReason}</span>
+            <span className="text-fg-faint">|</span>
+            <span className="text-attention-text">{pricingReason}</span>
           </>
         ) : null}
       </div>
@@ -730,7 +730,7 @@ export function ProviderReadinessPreflightBlock({
   return (
     <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(tone)}`}>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-        <span className="font-semibold text-slate-900">Provider preflight</span>
+        <span className="font-semibold text-fg-strong">Provider preflight</span>
         <span className="mono truncate text-[11px]">{preflight.reason_code}</span>
       </div>
       <div className="mt-2 grid gap-1 sm:grid-cols-2 xl:grid-cols-4">
@@ -746,7 +746,7 @@ export function ProviderReadinessPreflightBlock({
         ))}
       </div>
       {preflight.override_reason ? (
-        <div className="mt-2 truncate text-[11px] text-slate-600">
+        <div className="mt-2 truncate text-[11px] text-fg-muted">
           override: {preflight.override_reason}
         </div>
       ) : null}
@@ -763,13 +763,13 @@ export function RecoveryCallout({
 }) {
   const callout = formatRecoveryCallout(recovery, status);
   return (
-    <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+    <div className="rounded-md border border-attention-border bg-attention-soft p-3 text-sm text-attention-text">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2 font-semibold">
           <RefreshCw size={14} aria-hidden />
           <span className="truncate">{callout.title}</span>
         </div>
-        <span className="mono rounded-md border border-amber-300 bg-white/70 px-2 py-0.5 text-[11px] text-amber-900">
+        <span className="mono rounded-md border border-attention-border bg-surface px-2 py-0.5 text-[11px] text-attention-text">
           {callout.reason}
         </span>
       </div>
@@ -778,7 +778,7 @@ export function RecoveryCallout({
         <Fact label="Current" value={callout.current} />
         <Fact label="Started" value={formatDateTime(recovery.started_at)} />
       </div>
-      <div className="mt-2 text-xs text-amber-900">{callout.body}</div>
+      <div className="mt-2 text-xs text-attention-text">{callout.body}</div>
     </div>
   );
 }
@@ -795,17 +795,17 @@ export function CoordinationWarningBlock({
     return null;
   }
   return (
-    <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+    <div className="rounded-md border border-attention-border bg-attention-soft p-3 text-sm text-attention-text">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2 font-semibold">
           <AlertCircle size={14} aria-hidden />
           <span className="truncate">Coordination</span>
         </div>
-        <span className="rounded-md border border-amber-300 bg-white/70 px-2 py-0.5 text-[11px] text-amber-900">
+        <span className="rounded-md border border-attention-border bg-surface px-2 py-0.5 text-[11px] text-attention-text">
           {summary.label}
         </span>
       </div>
-      <div className="mt-2 text-xs text-amber-900">{summary.detail}</div>
+      <div className="mt-2 text-xs text-attention-text">{summary.detail}</div>
     </div>
   );
 }
@@ -813,8 +813,8 @@ export function CoordinationWarningBlock({
 export function UsageMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <div className="text-[11px] font-medium text-slate-500">{label}</div>
-      <div className="mono truncate text-sm text-slate-950">{value}</div>
+      <div className="text-[11px] font-medium text-fg-muted">{label}</div>
+      <div className="mono truncate text-sm text-fg-strong">{value}</div>
     </div>
   );
 }
