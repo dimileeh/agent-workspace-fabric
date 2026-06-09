@@ -134,6 +134,30 @@ def test_checker_flags_duplicate_allowlist_entries(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_checker_does_not_mark_duplicate_allowlist_entry_stale(
+    tmp_path: Path,
+) -> None:
+    """A duplicate allowlist directive is not also reported as stale."""
+    template = _write_template(
+        tmp_path / "duplicate_stale_allow.yml.j2",
+        (
+            "{# awf-j2-tojson-allow: workspace_id -- Former raw identifier. #}\n"
+            "{# awf-j2-tojson-allow: workspace_id -- Duplicate copy. #}\n"
+            "name: {{ workspace_id | tojson }}\n"
+        ),
+    )
+
+    result = _run_checker(template)
+
+    diagnostics = result.stderr.splitlines()
+    assert result.returncode == 1
+    assert len(diagnostics) == 2
+    assert any(f"{template}:1: stale allowlist entry" in line for line in diagnostics)
+    assert any(f"{template}:2: duplicate allowlist entry" in line for line in diagnostics)
+    assert not any(f"{template}:2: stale allowlist entry" in line for line in diagnostics)
+
+
+@pytest.mark.unit
 def test_checker_flags_allowlist_entries_without_rationale(tmp_path: Path) -> None:
     """Allowlist directives must include a non-empty human rationale."""
     template = _write_template(

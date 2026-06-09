@@ -287,7 +287,7 @@ def _diagnostics_for_template(template: TemplateFile) -> list[Diagnostic]:
             )
         )
 
-    for directive in allow_directives:
+    for directive in allow_by_expression.values():
         if directive.expression not in used_allowlist_expressions:
             diagnostics.append(
                 Diagnostic(
