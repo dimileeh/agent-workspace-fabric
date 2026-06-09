@@ -918,7 +918,7 @@ const searchParams = useSearchParams();
       <div className="grid min-h-[calc(100vh-137px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
         <aside
           id="awf-workspaces"
-          className="min-w-0 scroll-mt-14 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0"
+          className="min-w-0 scroll-mt-14 border-b border-[var(--border)] bg-surface xl:border-r xl:border-b-0"
         >
           <WorkspaceFilters
             statusFilters={statusFilters}
