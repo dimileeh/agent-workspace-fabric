@@ -22,7 +22,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INSTALLER = REPO_ROOT / "packaging" / "install.sh"
 UNINSTALLER = REPO_ROOT / "packaging" / "uninstall.sh"
-REPOSITORY_URL = "https://github.com/dimileeh/aira-agent-workspace-fabric"
+REPOSITORY_URL = "https://github.com/dimileeh/agent-workspace-fabric"
 
 
 @pytest.fixture

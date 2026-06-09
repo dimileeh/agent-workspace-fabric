@@ -101,7 +101,7 @@ async def test_create_or_start_monitor_operation_stores_pre_redacted_payload_dir
         factory,
         status=WorkspaceStatus.monitoring_pr,
         updated_at=datetime.now(UTC),
-        pr_url="https://github.com/dimileeh/aira-agent-workspace-fabric/pull/111",
+        pr_url="https://github.com/dimileeh/agent-workspace-fabric/pull/111",
     )
 
     async with factory() as session:
@@ -157,7 +157,7 @@ async def test_create_or_start_monitor_operation_starts_existing_pending_operati
         factory,
         status=WorkspaceStatus.monitoring_pr,
         updated_at=datetime.now(UTC),
-        pr_url="https://github.com/dimileeh/aira-agent-workspace-fabric/pull/112",
+        pr_url="https://github.com/dimileeh/agent-workspace-fabric/pull/112",
     )
 
     async with factory() as session:
@@ -197,7 +197,7 @@ async def test_finish_monitor_operation_returns_terminal_operation_without_mutat
         factory,
         status=WorkspaceStatus.monitoring_pr,
         updated_at=datetime.now(UTC),
-        pr_url="https://github.com/dimileeh/aira-agent-workspace-fabric/pull/113",
+        pr_url="https://github.com/dimileeh/agent-workspace-fabric/pull/113",
     )
 
     async with factory() as session:
@@ -237,7 +237,7 @@ async def test_begin_monitor_state_operation_records_wait_and_finishes_idempoten
         factory,
         status=WorkspaceStatus.monitoring_pr,
         updated_at=datetime.now(UTC),
-        pr_url="https://github.com/dimileeh/aira-agent-workspace-fabric/pull/114",
+        pr_url="https://github.com/dimileeh/agent-workspace-fabric/pull/114",
     )
 
     async with factory() as session:
@@ -273,7 +273,7 @@ async def test_begin_monitor_state_operation_records_wait_and_finishes_idempoten
             "reason": "CI checks are still pending with [redacted]",
             "reason_code": "CHECK_WAIT",
             "pr_number": 114,
-            "pr_url": "https://github.com/dimileeh/aira-agent-workspace-fabric/pull/114",
+            "pr_url": "https://github.com/dimileeh/agent-workspace-fabric/pull/114",
             "source_head_sha": "b" * 40,
             "source_base_sha": "a" * 40,
             "target_branch": "main",

@@ -16,7 +16,7 @@ from scripts.release_smoke import _print_invocation, build_smoke_manifest, smoke
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "release_smoke.py"
 INSTALLER = REPO_ROOT / "packaging" / "install.sh"
-REPOSITORY_URL = "https://github.com/dimileeh/aira-agent-workspace-fabric"
+REPOSITORY_URL = "https://github.com/dimileeh/agent-workspace-fabric"
 GENERATED_AT = "2026-05-29T00:00:00Z"
 
 

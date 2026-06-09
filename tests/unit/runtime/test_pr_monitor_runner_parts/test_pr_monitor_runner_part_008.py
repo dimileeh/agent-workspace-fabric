@@ -208,7 +208,7 @@ async def test_run_retries_remote_tracking_ref_lock_race_and_completes(
             "'refs/remotes/origin/codex/awf-post-merge-fixes': is at "
             "dffa1db03af61da5db52e16a6e79163c35b88d5d but expected "
             "cc82a8d265b6d63593417a13d3d9507cc0ede8d5\n"
-            "From https://github.com/dimileeh/aira-agent-workspace-fabric\n"
+            "From https://github.com/dimileeh/agent-workspace-fabric\n"
             " ! cc82a8d2..dffa1db0  codex/awf-post-merge-fixes -> "
             "origin/codex/awf-post-merge-fixes  (unable to update local ref)"
         ),

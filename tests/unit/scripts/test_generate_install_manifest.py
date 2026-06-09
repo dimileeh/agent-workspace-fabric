@@ -21,7 +21,7 @@ from scripts.generate_install_manifest import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "generate_install_manifest.py"
-REPOSITORY_URL = "https://github.com/dimileeh/aira-agent-workspace-fabric"
+REPOSITORY_URL = "https://github.com/dimileeh/agent-workspace-fabric"
 GITHUB_ACTIONS_REF_ENV_KEYS = (
     "GITHUB_ACTIONS",
     "GITHUB_EVENT_NAME",
@@ -573,7 +573,7 @@ def test_manifest_normalizes_repository_url_path_separators(tmp_path: Path) -> N
         tmp_path,
         dist_dir=dist_dir,
         checksums_file=checksums_file,
-        repository_url="https://github.com//dimileeh///aira-agent-workspace-fabric//",
+        repository_url="https://github.com//dimileeh///agent-workspace-fabric//",
     )
 
     assert result.returncode == 0, result.stderr

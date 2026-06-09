@@ -273,7 +273,7 @@ class TestFetchPrStatusPart002:
                         "databaseId": 4390521275,
                         "body": (
                             "\n### 💡 Codex Review\n\n"
-                            "https://github.com/dimileeh/aira-agent-workspace-fabric/"
+                            "https://github.com/dimileeh/agent-workspace-fabric/"
                             "blob/49c0c400de80f2b7ffb4f67bb6a76868f4d0e6ae/"
                             "src/awf/runtime/pr_monitor_runner.py#L940-L941\n"
                             "**P2 Preserve action-specific base-fetch retry counts**\n\n"

@@ -169,7 +169,7 @@ def installer_fixture_command(
         "schema_version": 1,
         "source": {
             "commit": None,
-            "repository": "https://github.com/dimileeh/aira-agent-workspace-fabric",
+            "repository": "https://github.com/dimileeh/agent-workspace-fabric",
             "tag": f"v{_FIXTURE_VERSION}",
         },
         "version": _FIXTURE_VERSION,
