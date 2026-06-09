@@ -29,6 +29,7 @@ from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
+    _mark_review_thread_addressed,
     _review_thread_needs_attention,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -37,6 +38,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_TRANSIENT_RETRY_REASON,
 )
 from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 
 # Verdicts whose now-OUTDATED threads this hygiene step may resolve. This is the
@@ -48,6 +50,71 @@ from awf.runtime.pr_monitor_runner.logging import _log
 # (``fix_committed`` / ``false_positive``) both mean "handled, thread should
 # close, no human follow-up".
 _OUTDATED_RESOLVABLE_THREAD_VERDICTS = _RESOLVABLE_THREAD_VERDICTS - frozenset({"defer"})
+
+
+async def _seed_outdated_thread_verdicts_from_branch_evidence(
+    self: Any,
+    *,
+    workspace_id: str,
+    status: PRStatus,
+    state: MonitorState,
+) -> None:
+    """Seed missing verdicts for outdated threads the PR branch already addressed (#484).
+
+    After a re-adoption / instance handoff, an outdated thread a PRIOR instance
+    addressed (via an in-place ``fix: address …`` commit) carries no verdict in
+    THIS instance's ``state.threads_addressed_ids``. The #473 resolution below
+    gates on a recorded verdict, and outdated threads are dropped from the
+    actionable feed, so without one the thread can never be resolved and GitHub
+    keeps the PR BLOCKED on an invisible (collapsed) conversation while the monitor
+    reports ``unresolved_threads=0`` and loops on ``NotifyHuman``.
+
+    Reconcile the verdict from durable branch evidence: a commit on the worktree
+    HEAD whose message references BOTH the unique thread id (``PRRT_…``) AND the
+    ``fix: address`` prefix — the two shapes AWF emits for review-thread fixes
+    (``comments.py``: ``fix: address PR review thread <id>``; ``monitor_prompts.py``:
+    ``fix: address <id> — …``). A match is strong proof THIS branch already fixed
+    the feedback, so record ``fix_committed``. Use ``_mark_review_thread_addressed``
+    (not bare ``state.mark_addressed``) so the current body-hash snapshot is stored
+    too — otherwise the resolve loop's ``_review_thread_needs_attention`` guard
+    would skip the freshly-seeded thread.
+
+    Best-effort and self-contained: runs only for outdated threads lacking a
+    verdict (no git call in steady state), uses a bounded ``git log -n 1`` grep,
+    and leaves a thread untouched on a non-``ok`` git result or no match. Never
+    raises.
+    """
+    unseeded = [
+        thread
+        for thread in status.outdated_unresolved_inline_threads
+        if state.threads_addressed_ids.get(thread.thread_id) is None
+    ]
+    if not unseeded:
+        return
+    worktree_path = self._worktrees_root / workspace_id
+    for thread in unseeded:
+        # ``-F --all-match`` requires BOTH literal substrings (the unique thread id
+        # AND ``fix: address``) present in one commit message — matching both AWF
+        # commit shapes while staying specific enough not to seed a thread the
+        # branch never addressed.
+        result = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "log",
+                "-n",
+                "1",
+                "--format=%H",
+                "-F",
+                "--all-match",
+                "--grep",
+                thread.thread_id,
+                "--grep",
+                "fix: address",
+                "HEAD",
+            )
+        )
+        if result.ok and result.stdout.strip():
+            _mark_review_thread_addressed(state, thread, "fix_committed")
 
 
 async def _resolve_addressed_outdated_threads(
@@ -84,6 +151,16 @@ async def _resolve_addressed_outdated_threads(
     is in-memory only, matching the rest of the transient path.
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
+    # #484: seed verdicts for outdated threads a prior instance already addressed
+    # (re-adoption / handoff) from durable branch evidence, so the resolve loop
+    # below — which gates on a recorded verdict — can resolve them this iteration
+    # instead of leaving the PR permanently BLOCKED on an invisible conversation.
+    await _seed_outdated_thread_verdicts_from_branch_evidence(
+        self,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
         if state.threads_addressed_ids.get(tid) not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:

@@ -474,6 +474,19 @@ async def _run_fix_cycle(
         if status is not None
         else set()
     )
+    # Threads the settle re-poll reports as already OUTDATED (#484). An in-place
+    # fix can flip a thread to ``isOutdated`` on the forge; a resolve fault on such
+    # a thread must NOT clear its fix verdict. Clearing strands it: outdated threads
+    # are dropped from the actionable feed, so the fix cycle never re-addresses them,
+    # and the next poll's outdated-resolution step skips a thread with no recorded
+    # verdict — leaving the conversation permanently unresolved and the PR BLOCKED.
+    # Preserving ``fix_committed`` lets that step retry the resolve (or escalate to
+    # ``needs_human`` via its own permanent path) instead.
+    outdated_thread_ids = (
+        {t.thread_id for t in status.outdated_unresolved_inline_threads}
+        if status is not None
+        else set()
+    )
     for tid in threads_to_resolve:
         if tid in stale_thread_ids:
             continue
@@ -519,7 +532,11 @@ async def _run_fix_cycle(
                 # and re-surfaces, so it re-routes through AddressComments and the
                 # agent re-addresses already-handled content (redundant but harmless;
                 # the permanent path below special-cases tasks to needs_human).
-                _clear_addressed_state_by_id(state, tid)
+                # #484: an already-OUTDATED thread is the exception — preserve its
+                # verdict so the next poll's outdated-resolution step retries it,
+                # since it can never re-route through AddressComments.
+                if tid not in outdated_thread_ids:
+                    _clear_addressed_state_by_id(state, tid)
                 await self._record_pr_monitor_audit_event(
                     workspace_id=workspace_id,
                     event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -587,7 +604,13 @@ async def _run_fix_cycle(
             # addressed-state: decide() filters addressed IDs before it returns
             # AddressComments, so retaining a failed resolve would make the next poll
             # treat an open thread as handled forever.
-            _clear_addressed_state_by_id(state, tid)
+            # #484: an already-OUTDATED thread is the exception — clearing strands it
+            # (it can never re-route through AddressComments), so preserve its
+            # verdict and let the next poll's outdated-resolution step retry the
+            # resolve or escalate it to ``needs_human`` via that path's own permanent
+            # arm — never silently merging over it.
+            if tid not in outdated_thread_ids:
+                _clear_addressed_state_by_id(state, tid)
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
