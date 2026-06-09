@@ -163,6 +163,43 @@ def test_apply_bitbucket_git_auth_noop_when_not_configured(
 
 
 @pytest.mark.unit
+def test_apply_bitbucket_git_auth_bearer_mode_needs_token_only() -> None:
+    # BITBUCKET_AUTH_MODE=bearer authenticates with the token alone (the git
+    # credential helper always uses the sentinel username, never the email), so a
+    # token-only bearer workspace must wire the helper rather than no-op. This
+    # mirrors BitbucketAuth.from_env, which requires the email only in basic mode.
+    env: dict[str, str] = {}
+    applied = apply_bitbucket_git_auth(
+        env,
+        {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_AUTH_MODE": "bearer"},
+    )
+
+    assert applied is True
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    count = int(env["GIT_CONFIG_COUNT"])
+    rendered = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(count)}
+    assert "credential.https://bitbucket.org.helper" in rendered
+    assert all(_TOKEN not in value for value in env.values())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "source_env",
+    [
+        {"BITBUCKET_AUTH_MODE": "bearer"},  # bearer but no token
+        {"BITBUCKET_API_TOKEN": "  ", "BITBUCKET_AUTH_MODE": "bearer"},  # blank token
+    ],
+)
+def test_apply_bitbucket_git_auth_bearer_mode_still_needs_token(
+    source_env: dict[str, str],
+) -> None:
+    # Bearer mode relaxes the email requirement, not the token requirement.
+    env: dict[str, str] = {}
+    assert apply_bitbucket_git_auth(env, source_env) is False
+    assert env == {}
+
+
+@pytest.mark.unit
 def test_worker_bitbucket_git_config_entries_unchanged_byte_for_byte() -> None:
     # The worker credential-helper path is an independent mechanism from the
     # agent askpass + insteadOf path (#465/#466). This locks the exact worker
@@ -570,6 +607,33 @@ def test_verify_bitbucket_git_auth_raises_reason_coded_when_missing(
     assert "BITBUCKET_API_TOKEN" in message or "BITBUCKET_EMAIL" in message
     assert _TOKEN not in message
     assert _EMAIL not in message
+
+
+@pytest.mark.unit
+def test_verify_bitbucket_git_auth_passes_bearer_mode_token_only() -> None:
+    # In bearer mode the git credential helper authenticates with the sentinel
+    # username + token; BITBUCKET_EMAIL is never consumed, so a token-only bearer
+    # HTTPS workspace must clear the preflight (mirroring BitbucketAuth.from_env).
+    verify_bitbucket_git_auth(
+        "https://bitbucket.org/ws/repo.git",
+        {"BITBUCKET_API_TOKEN": _TOKEN, "BITBUCKET_AUTH_MODE": "bearer"},
+    )
+
+
+@pytest.mark.unit
+def test_verify_bitbucket_git_auth_bearer_mode_still_requires_token() -> None:
+    # Bearer mode drops the email requirement, not the token requirement.
+    with pytest.raises(GitAuthNotConfiguredError) as raised:
+        verify_bitbucket_git_auth(
+            "https://bitbucket.org/ws/repo.git",
+            {"BITBUCKET_AUTH_MODE": "bearer"},
+        )
+
+    assert raised.value.reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED
+    message = str(raised.value)
+    assert "BITBUCKET_API_TOKEN" in message
+    # Email is not required in bearer mode, so it must not be named as missing.
+    assert "BITBUCKET_EMAIL" not in message
 
 
 @pytest.mark.unit

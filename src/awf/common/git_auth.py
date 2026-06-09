@@ -56,6 +56,27 @@ BITBUCKET_GIT_HOST = "bitbucket.org"
 
 _BITBUCKET_TOKEN_ENV = "BITBUCKET_API_TOKEN"
 _BITBUCKET_EMAIL_ENV = "BITBUCKET_EMAIL"
+# Auth-mode selector, mirroring ``BitbucketAuth.from_env``: ``basic`` (default)
+# needs ``email:token``, ``bearer`` needs the token alone. ``BITBUCKET_EMAIL`` is
+# never consumed by the git credential helper (which always authenticates with the
+# fixed sentinel username + token) — it is only required by the REST client's
+# ``basic`` mode, so the git-auth preflight must gate the email requirement on the
+# mode rather than demanding it unconditionally.
+_BITBUCKET_AUTH_MODE_ENV = "BITBUCKET_AUTH_MODE"
+_BITBUCKET_BEARER_MODE = "bearer"
+
+
+def _bitbucket_email_required(source_env: Mapping[str, str]) -> bool:
+    """Return whether ``BITBUCKET_EMAIL`` is required for the configured auth mode.
+
+    Mirrors :meth:`BitbucketAuth.from_env`: ``bearer`` mode authenticates with the
+    token alone (the email is unused), so the email is required only for the default
+    ``basic`` mode. Any unrecognized mode is treated conservatively as requiring the
+    email — the REST client rejects it later with a clear reason code regardless.
+    """
+    mode = (source_env.get(_BITBUCKET_AUTH_MODE_ENV) or "basic").strip().lower()
+    return mode != _BITBUCKET_BEARER_MODE
+
 
 # Host-scoped credential helper. The git username for an Atlassian API token over
 # HTTPS is the fixed, account-agnostic sentinel ``x-bitbucket-api-token-auth`` —
@@ -358,17 +379,29 @@ def add_git_config_entries(
 
 
 def bitbucket_credentials_present(source_env: Mapping[str, str]) -> bool:
-    """Return whether both Bitbucket git credentials are present in ``source_env``."""
+    """Return whether the Bitbucket git credentials are present in ``source_env``.
+
+    Always requires ``BITBUCKET_API_TOKEN``. ``BITBUCKET_EMAIL`` is required only in
+    the default ``basic`` auth mode; ``BITBUCKET_AUTH_MODE=bearer`` authenticates with
+    the token alone (mirroring :meth:`BitbucketAuth.from_env`), so a token-only bearer
+    workspace is correctly reported as configured.
+    """
     token = (source_env.get(_BITBUCKET_TOKEN_ENV) or "").strip()
+    if not token:
+        return False
+    if not _bitbucket_email_required(source_env):
+        return True
     email = (source_env.get(_BITBUCKET_EMAIL_ENV) or "").strip()
-    return bool(token and email)
+    return bool(email)
 
 
 def apply_bitbucket_git_auth(env: dict[str, str], source_env: Mapping[str, str]) -> bool:
     """Wire bitbucket.org HTTPS auth into ``env`` in place; return whether applied.
 
-    No-op (returns ``False``, ``env`` untouched) unless both
-    ``BITBUCKET_API_TOKEN`` and ``BITBUCKET_EMAIL`` are present in ``source_env``.
+    No-op (returns ``False``, ``env`` untouched) unless the configured Bitbucket
+    credentials are present in ``source_env`` (see :func:`bitbucket_credentials_present`):
+    ``BITBUCKET_API_TOKEN`` always, plus ``BITBUCKET_EMAIL`` in the default ``basic``
+    auth mode (``BITBUCKET_AUTH_MODE=bearer`` needs the token alone).
     When applied, sets ``GIT_TERMINAL_PROMPT=0`` (fail fast instead of hanging on
     a TTY prompt) and **accumulates** the host-scoped ``GIT_CONFIG_*`` helper
     entries onto any existing ``GIT_CONFIG_COUNT`` so it composes with the GitHub
@@ -402,8 +435,10 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
     (``urlsplit`` lowercases the scheme), but the agent-side ``insteadOf`` rewrites and
     askpass cover only the literal lowercase ``https://bitbucket.org/…`` prefix, so such
     a URL would clear the preflight yet never authenticate, failing opaquely. For an
-    HTTPS bitbucket.org repo missing
-    ``BITBUCKET_API_TOKEN`` and/or ``BITBUCKET_EMAIL``,
+    HTTPS bitbucket.org repo missing the credentials required by the configured auth
+    mode — ``BITBUCKET_API_TOKEN`` always, plus ``BITBUCKET_EMAIL`` in the default
+    ``basic`` mode (``BITBUCKET_AUTH_MODE=bearer`` needs only the token, mirroring
+    :meth:`BitbucketAuth.from_env`) —
     raises :class:`GitAuthNotConfiguredError` with
     ``reason_code == BITBUCKET_GIT_AUTH_NOT_CONFIGURED`` and a message that names
     only the missing env var(s) — never any value — turning an otherwise opaque
@@ -471,11 +506,10 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
                 "https://bitbucket.org/<workspace>/<repo>.git."
             ),
         )
-    missing = [
-        name
-        for name in (_BITBUCKET_TOKEN_ENV, _BITBUCKET_EMAIL_ENV)
-        if not (env.get(name) or "").strip()
-    ]
+    required = [_BITBUCKET_TOKEN_ENV]
+    if _bitbucket_email_required(env):
+        required.append(_BITBUCKET_EMAIL_ENV)
+    missing = [name for name in required if not (env.get(name) or "").strip()]
     if missing:
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
