@@ -38,7 +38,7 @@ services:
       {% for cp, hp in s.ports %}- "{{ hp }}:{{ cp }}"
       {% endfor %}
     {% endif %}{% if s.volumes %}volumes:
-      {% for src, tgt in s.volumes %}- "{{ src }}:{{ tgt }}"
+      {% for src, tgt in s.volumes %}- {{ (src ~ ":" ~ tgt) | tojson }}
       {% endfor %}
     {% endif %}networks:
       - awf_net

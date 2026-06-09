@@ -442,6 +442,38 @@ class TestRender:
         assert "privileged" not in agent
 
     @pytest.mark.unit
+    def test_profile_service_volume_entry_is_escaped_against_yaml_injection(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """Malicious volume source/target strings cannot inject sibling keys.
+
+        ``ProfileService.volumes`` yields plain ``(source, target)`` strings, and
+        ``_resolve_volume_source`` only rewrites repo-relative sources — quotes or
+        newlines in a named-volume source or target survive. The template must
+        JSON-escape the whole ``source:target`` entry (like ``image``/``command``)
+        so it renders as one scalar instead of breaking out to inject keys such as
+        ``privileged``.
+        """
+        bad_source = '/host/data"\n    privileged: true\n    x: "'
+        bad_target = '/data"\n    y: "'
+        spec = _spec(
+            tmp_path,
+            services=(
+                ComposeService(
+                    name="svc",
+                    image="ok:latest",
+                    volumes=((bad_source, bad_target),),
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        svc = parsed["services"]["svc"]
+        assert svc["volumes"] == [f"{bad_source}:{bad_target}"]
+        assert "privileged" not in svc
+
+    @pytest.mark.unit
     def test_companion_with_prebuilt_image_renders_image_not_build(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
