@@ -883,6 +883,65 @@ class TestWorkspaceWebSocket:
         assert fake_websocket.accepted is True
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("requested_tail_bytes", "expected_tail_bytes"),
+        [
+            (ws_route.MAX_TAIL_BYTES * 4, ws_route.MAX_TAIL_BYTES),
+            (-1, 0),
+            (4_096, 4_096),
+        ],
+    )
+    async def test_workspace_socket_clamps_tail_bytes(
+        self,
+        requested_tail_bytes: int,
+        expected_tail_bytes: int,
+    ) -> None:
+        class CapturingWebSocket:
+            def __init__(self) -> None:
+                self.app = type(
+                    "App",
+                    (),
+                    {"state": type("State", (), {"db_session_factory": object()})()},
+                )()
+
+            async def accept(self) -> None:
+                return None
+
+        captured: dict[str, int] = {}
+
+        async def fake_send_initial_state(
+            websocket: object,
+            factory: object,
+            workspace_id: str,
+            selected: set[str],
+            seen_event_ids: set[str],
+            tail_bytes: int,
+        ) -> bool:
+            captured["tail_bytes"] = tail_bytes
+            return True
+
+        async def fake_stream_live_frames(websocket: object, **_kwargs: object) -> None:
+            raise WebSocketDisconnect(code=1000)
+
+        fake_websocket = CapturingWebSocket()
+        original_send_initial_state = ws_route._send_initial_state
+        original_stream_live_frames = ws_route._stream_live_frames
+        try:
+            ws_route._send_initial_state = fake_send_initial_state  # type: ignore[assignment]
+            ws_route._stream_live_frames = fake_stream_live_frames  # type: ignore[assignment]
+            await ws_route.workspace_socket(
+                fake_websocket,  # type: ignore[arg-type]
+                "ws_clamp",
+                channels="agent",
+                tail_bytes=requested_tail_bytes,
+            )
+        finally:
+            ws_route._send_initial_state = original_send_initial_state
+            ws_route._stream_live_frames = original_stream_live_frames
+
+        assert captured["tail_bytes"] == expected_tail_bytes
+
+    @pytest.mark.unit
     async def test_workspace_socket_returns_when_events_initial_state_fails(self) -> None:
         class ClosingWebSocket:
             def __init__(self) -> None:

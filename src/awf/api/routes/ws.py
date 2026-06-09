@@ -23,6 +23,13 @@ from awf.service.workspaces import workspace_response
 
 router = APIRouter(tags=["workspace-streams"])
 
+# Upper bound for the initial log-tail snapshot, mirroring the REST log
+# endpoint's ``limit_bytes`` cap (see ``routes/logs.py``). Authenticated
+# callers connecting directly to the WebSocket bypass the console proxy
+# sanitizer, so the server clamps ``tail_bytes`` itself to avoid reading and
+# serializing an unbounded log tail into the initial snapshot.
+MAX_TAIL_BYTES = 1_048_576
+
 
 @router.websocket(
     "/v1/workspaces/{workspace_id}/ws",
@@ -34,6 +41,7 @@ async def workspace_socket(
     channels: str = "events,agent,validation,services",
     tail_bytes: int = 65_536,
 ) -> None:
+    tail_bytes = min(max(tail_bytes, 0), MAX_TAIL_BYTES)
     factory: async_sessionmaker[AsyncSession] | None = getattr(
         websocket.app.state,
         "db_session_factory",
