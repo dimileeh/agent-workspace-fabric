@@ -641,7 +641,7 @@ class BitBucketClient:
         repo: RepoRef,
         branch: str,  # noqa: ARG002 - BitBucket strategies come from the PR dest branch
     ) -> tuple[str, ...] | None:
-        """Return base-branch merge-method constraints, or ``None`` when unconstrained.
+        """Return base-branch merge-method constraints, or ``None`` without PR context.
 
         BitBucket models this as the destination branch's ``merge_strategies`` (NOT
         branch-restrictions, which are permissions/merge-checks), falling back to
