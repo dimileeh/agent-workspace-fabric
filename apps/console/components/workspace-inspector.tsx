@@ -29,7 +29,7 @@ export function WorkspaceInspector({
     <>
       {isOpen && (
         <div
-          className="fixed inset-0 z-40 bg-slate-900/20 backdrop-blur-sm sm:hidden"
+          className="fixed inset-0 z-40 bg-overlay backdrop-blur-sm sm:hidden"
           onClick={onClose}
           aria-hidden="true"
         />

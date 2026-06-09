@@ -57,6 +57,8 @@
   --color-idle-border: var(--idle-border);
   --color-idle-text: var(--idle-text);
 
+  --color-overlay: var(--overlay);
+
   --radius-control: 4px;
   --radius-panel: 8px;
 }
@@ -112,6 +114,9 @@
 
   --terminal: #0b1220;
   --terminal-foreground: #e7edf6;
+
+  /* modal/drawer scrim — neutral dark wash with opacity baked in; theme-stable */
+  --overlay: rgb(15 23 42 / 20%);
 
   --focus-ring: #2f6fe0;
   --focus-shadow: rgb(47 111 224 / 18%);
