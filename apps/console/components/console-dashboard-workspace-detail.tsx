@@ -60,6 +60,13 @@ formatPrLinkLabel,
 formatTokenCount
 } from "./console-dashboard-shared";
 
+// useLayoutEffect warns during Next.js SSR ("does nothing on the server").
+// The scroll-lock effect must freeze the body before paint to avoid a
+// scroll-position jump when the modal opens, so we keep layout timing on the
+// client and fall back to useEffect on the server where there is no layout.
+const useIsomorphicLayoutEffect =
+  typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
 export function TaskDetailsModal({
   workspace,
   onClose,
@@ -70,7 +77,7 @@ export function TaskDetailsModal({
   const labelId = `task-details-label-${workspace.workspace_id}`;
   const titleId = `task-details-title-${workspace.workspace_id}`;
 
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     const scrollY = window.scrollY;
     const previousBodyOverflow = document.body.style.overflow;
     const previousHtmlOverflow = document.documentElement.style.overflow;
