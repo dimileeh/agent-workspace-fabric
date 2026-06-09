@@ -259,7 +259,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Validate control-plane image build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/control-plane.Dockerfile
@@ -267,7 +267,7 @@ jobs:
           push: false
 
       - name: Validate agent-runtime image build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/agent-runtime.Dockerfile
