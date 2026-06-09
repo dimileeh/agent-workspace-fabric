@@ -81,8 +81,8 @@ services:
     {% endif %}
 
 {% if named_volumes %}volumes:
-  {% for v in named_volumes %}{{ v }}:
-    name: "awf-{{ workspace_id }}-{{ v }}"
+  {% for v in named_volumes %}{{ v | tojson }}:
+    name: {{ ("awf-" ~ workspace_id ~ "-" ~ v) | tojson }}
   {% endfor %}
 {% else %}volumes: {}
 {% endif %}

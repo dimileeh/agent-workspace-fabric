@@ -366,6 +366,38 @@ class TestRender:
         assert "volumes" not in svc
 
     @pytest.mark.unit
+    def test_named_volume_key_is_escaped_against_yaml_injection(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        """A malicious named-volume source cannot inject top-level compose keys.
+
+        A named volume source (no ``/`` and no leading ``.``) is collected by
+        ``_named_volumes_for`` and emitted as a top-level ``volumes:`` key — and
+        into that volume's ``name:`` — by the template. ``ProfileService.volumes``
+        bounds neither character set nor name pattern, so a profile from a project
+        repo could embed a newline plus an outdented key. The template must
+        JSON-escape both the key and the ``name`` value so the source renders as a
+        single scalar instead of injecting sibling top-level entries.
+        """
+        malicious = 'evil"\n  injected_top_level:\n    name: "x'
+        spec = _spec(
+            tmp_path,
+            services=(
+                ComposeService(
+                    name="svc",
+                    image="ok:latest",
+                    volumes=((malicious, "/data"),),
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        assert set(parsed.keys()) == {"services", "volumes", "networks"}
+        assert "injected_top_level" not in parsed["volumes"]
+        assert parsed["volumes"][malicious]["name"] == f"awf-ws_test123-{malicious}"
+
+    @pytest.mark.unit
     def test_profile_service_env_file_is_escaped_against_yaml_injection(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
