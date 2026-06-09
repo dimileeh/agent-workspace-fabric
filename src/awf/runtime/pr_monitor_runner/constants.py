@@ -69,7 +69,7 @@ _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 
 _BITBUCKET_TRANSIENT_RETRY_REASON = "BITBUCKET_TRANSIENT_RETRY"
 
-# BitBucket HTTP statuses that the monitor treats as recoverable server-side
+# Bitbucket HTTP statuses that the monitor treats as recoverable server-side
 # blips (symmetric to GitHub's 5xx transient markers).
 _BITBUCKET_TRANSIENT_HTTP_STATUSES = frozenset({500, 502, 503, 504})
 

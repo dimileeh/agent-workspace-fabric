@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.bitbucket_client import (
     BITBUCKET_PIPELINE_NOT_RERUNNABLE,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
@@ -905,24 +905,24 @@ async def test_rerun_transient_ci_records_failed_request_on_bitbucket_not_rerunn
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A BitBucket non-rerunnable pipeline logs a failed rerun, not a terminate.
+    """A Bitbucket non-rerunnable pipeline logs a failed rerun, not a terminate.
 
-    Regression for issue:4640573294: on BitBucket ``rerun_failed_workflow_jobs``
-    raises ``BitBucketClientError(BITBUCKET_PIPELINE_NOT_RERUNNABLE)`` when it
+    Regression for issue:4640573294: on Bitbucket ``rerun_failed_workflow_jobs``
+    raises ``BitbucketClientError(BITBUCKET_PIPELINE_NOT_RERUNNABLE)`` when it
     cannot reconstruct a custom/manual pipeline target. The transient-rerun call
-    site previously caught only ``GitHubClientError``, so the BitBucket error
+    site previously caught only ``GitHubClientError``, so the Bitbucket error
     escaped ``_execute`` and the runner's non-transient handler permanently
     terminated the workspace. It must instead be recorded as a failed transient
     rerun and the workspace must keep monitoring.
     """
 
-    class NotRerunnableBitBucketGh(DefaultMergeMethodGitHubClient):
+    class NotRerunnableBitbucketGh(DefaultMergeMethodGitHubClient):
         async def rerun_failed_workflow_jobs(self, *, repo: RepoRef, run_id: str) -> None:
             del repo, run_id
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket rerun_failed_workflow_jobs",
                 status=None,
-                body="BitBucket PR pipeline target could not be reconstructed.",
+                body="Bitbucket PR pipeline target could not be reconstructed.",
                 reason_code=BITBUCKET_PIPELINE_NOT_RERUNNABLE,
             )
 
@@ -936,7 +936,7 @@ async def test_rerun_transient_ci_records_failed_request_on_bitbucket_not_rerunn
         adapter=adapter,
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        gh=NotRerunnableBitBucketGh(cmd),
+        gh=NotRerunnableBitbucketGh(cmd),
     )
     failure = CheckFailure(
         name="pipeline",

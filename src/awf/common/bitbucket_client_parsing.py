@@ -1,21 +1,21 @@
-"""Pure BitBucket-Cloud-JSON → neutral-type assembly for the PR monitor.
+"""Pure Bitbucket-Cloud-JSON → neutral-type assembly for the PR monitor.
 
 Mirrors the ``github_client_parsing`` split: this module holds the side-effect-free
-transforms that turn BitBucket Cloud REST v2.0 payloads into the provider-neutral
+transforms that turn Bitbucket Cloud REST v2.0 payloads into the provider-neutral
 ``PRStatus`` / ``CheckFailure`` / ``ReviewThread`` types the monitor consumes. The
-``BitBucketClient`` performs the I/O (pagination, the pipeline-log chain) and hands
+``BitbucketClient`` performs the I/O (pagination, the pipeline-log chain) and hands
 already-fetched payloads here. Keeping the assembly pure keeps it trivially
-unit-testable with hand-rolled BitBucket JSON, exactly like the GitHub path.
+unit-testable with hand-rolled Bitbucket JSON, exactly like the GitHub path.
 
 Neutral-type contract is owned by ``runtime.pr_monitor`` (do NOT change it). We only
-*assemble* into it. BitBucket-specific notes that shape the mapping:
+*assemble* into it. Bitbucket-specific notes that shape the mapping:
 
-* BitBucket Cloud has no GitHub-style ``mergeStateStatus``. ``decide()`` waits forever
+* Bitbucket Cloud has no GitHub-style ``mergeStateStatus``. ``decide()`` waits forever
   on ``MergeStateStatus.UNKNOWN`` (gate 6), so an OPEN PR maps to ``CLEAN`` /
   ``MERGEABLE``; "behind base" is driven by the caller-supplied ``base_behind_count``
   (local git, same contract as GitHub) and a genuine conflict surfaces as a 409 at
   merge time rather than a pre-merge state signal.
-* Review threads are reconstructed from BitBucket's flat inline-comment list by
+* Review threads are reconstructed from Bitbucket's flat inline-comment list by
   following ``parent`` links to a thread root; the root's ``resolution`` marks the
   thread resolved. The neutral ``thread_id`` encodes ``repo``/``pr``/``comment`` so
   ``resolve_thread`` (whose Protocol signature carries no repo/pr) can recover them.
@@ -43,11 +43,11 @@ if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
 
 # Hashable, order-stable representation of query params, used as part of the
-# ETag-cache key in ``BitBucketClient`` (one entry per ``(method, path, params)``).
+# ETag-cache key in ``BitbucketClient`` (one entry per ``(method, path, params)``).
 _FrozenParams = tuple[tuple[str, str], ...]
 
 # ── Merge-method vocabulary mapping (issue #345 decision D5) ───────────────
-# AWF speaks GitHub's three method names through the merge gate; BitBucket Cloud
+# AWF speaks GitHub's three method names through the merge gate; Bitbucket Cloud
 # uses ``merge_commit`` / ``squash`` / ``fast_forward``. ``fast_forward`` is
 # first-class (NOT aliased to rebase); the merge gate filters it out today — see
 # the #352 seam flagged in the plan/PR.
@@ -62,7 +62,7 @@ _AWF_TO_BB_MERGE_STRATEGY: dict[str, str] = {
     "fast_forward": "fast_forward",
 }
 
-# BitBucket Cloud allows all three native strategies on a repo with no explicit
+# Bitbucket Cloud allows all three native strategies on a repo with no explicit
 # merge-strategy configuration; an unrestricted PR enumerates none of them (#479).
 _BB_CLOUD_DEFAULT_MERGE_STRATEGIES: tuple[str, ...] = ("merge_commit", "squash", "fast_forward")
 
@@ -99,11 +99,11 @@ class _PRContext:
 def effective_merge_strategies(ctx: _PRContext) -> list[str]:
     """Resolve the destination branch's merge strategies, defaulting if needed.
 
-    BitBucket may expose only ``destination.branch.default_merge_strategy`` while
+    Bitbucket may expose only ``destination.branch.default_merge_strategy`` while
     omitting or leaving ``merge_strategies`` empty. The default strategy is by
     definition an enabled one, so treat it as the sole allowed strategy in that
     case rather than reporting an empty policy that would wedge the merge gate.
-    When NEITHER field is present the repo is unrestricted: BitBucket Cloud only
+    When NEITHER field is present the repo is unrestricted: Bitbucket Cloud only
     enumerates strategies once branch restrictions narrow them, so an unrestricted
     repo allows all three native strategies. Return that default set rather than
     ``None`` (which resolved to "no method allowed" and wedged the merge gate, #479).
@@ -129,7 +129,7 @@ def decode_thread_id(thread_id: str) -> tuple[str, str, int, str]:
     """
     match = _THREAD_ID_RE.match(thread_id)
     if match is None:
-        raise ValueError(f"Not a BitBucket thread id: {thread_id!r}")
+        raise ValueError(f"Not a Bitbucket thread id: {thread_id!r}")
     return (
         match.group("owner"),
         match.group("name"),
@@ -160,7 +160,7 @@ def decode_task_id(thread_id: str) -> tuple[str, str, int, str]:
     """
     match = _TASK_ID_RE.match(thread_id)
     if match is None:
-        raise ValueError(f"Not a BitBucket task id: {thread_id!r}")
+        raise ValueError(f"Not a Bitbucket task id: {thread_id!r}")
     return (
         match.group("owner"),
         match.group("name"),
@@ -170,12 +170,12 @@ def decode_task_id(thread_id: str) -> tuple[str, str, int, str]:
 
 
 def is_task_thread_id(thread_id: str) -> bool:
-    """Return whether ``thread_id`` encodes a BitBucket reviewer task (not a comment)."""
+    """Return whether ``thread_id`` encodes a Bitbucket reviewer task (not a comment)."""
     return _TASK_ID_RE.match(thread_id) is not None
 
 
 def map_bb_merge_methods(strategies: Any) -> tuple[str, ...]:
-    """Map BitBucket merge-strategy values to AWF method names, preserving order."""
+    """Map Bitbucket merge-strategy values to AWF method names, preserving order."""
     methods: list[str] = []
     if isinstance(strategies, list):
         for strategy in strategies:
@@ -186,12 +186,12 @@ def map_bb_merge_methods(strategies: Any) -> tuple[str, ...]:
 
 
 def bb_merge_strategy_for_method(method: str) -> str | None:
-    """Return the BitBucket strategy value for an AWF merge method, or ``None``."""
+    """Return the Bitbucket strategy value for an AWF merge method, or ``None``."""
     return _AWF_TO_BB_MERGE_STRATEGY.get(method)
 
 
 def parse_bb_datetime(value: Any) -> datetime | None:
-    """Parse a BitBucket ISO-8601 timestamp into an aware UTC ``datetime``."""
+    """Parse a Bitbucket ISO-8601 timestamp into an aware UTC ``datetime``."""
     if not isinstance(value, str) or not value.strip():
         return None
     raw = value.strip()
@@ -215,7 +215,7 @@ def _clean_optional_str(value: Any) -> str | None:
 
 
 def _comment_author(comment: dict[str, Any]) -> str | None:
-    """Resolve a display name for a BitBucket comment/PR user object."""
+    """Resolve a display name for a Bitbucket comment/PR user object."""
     user = comment.get("user")
     if not isinstance(user, dict):
         return None
@@ -223,7 +223,7 @@ def _comment_author(comment: dict[str, Any]) -> str | None:
 
 
 def _comment_account_id(comment: dict[str, Any]) -> str | None:
-    """Return the BitBucket ``account_id`` of a comment's author, if present."""
+    """Return the Bitbucket ``account_id`` of a comment's author, if present."""
     user = comment.get("user")
     if not isinstance(user, dict):
         return None
@@ -231,7 +231,7 @@ def _comment_account_id(comment: dict[str, Any]) -> str | None:
 
 
 def html_href(obj: Any) -> str | None:
-    """Return ``links.html.href`` from a BitBucket resource object, if present."""
+    """Return ``links.html.href`` from a Bitbucket resource object, if present."""
     if not isinstance(obj, dict):
         return None
     links = obj.get("links")
@@ -244,14 +244,14 @@ def html_href(obj: Any) -> str | None:
 
 
 def _comment_url(comment: dict[str, Any]) -> str | None:
-    """Return the ``links.html.href`` for a BitBucket comment, if present."""
+    """Return the ``links.html.href`` for a Bitbucket comment, if present."""
     return html_href(comment)
 
 
 def parse_pr_terminal_state(pr: dict[str, Any]) -> tuple[bool, bool, str | None]:
-    """Return ``(merged, closed, merge_commit_sha)`` from a BitBucket PR payload.
+    """Return ``(merged, closed, merge_commit_sha)`` from a Bitbucket PR payload.
 
-    BitBucket PR ``state`` ∈ {OPEN, MERGED, DECLINED, SUPERSEDED}. MERGED maps to
+    Bitbucket PR ``state`` ∈ {OPEN, MERGED, DECLINED, SUPERSEDED}. MERGED maps to
     ``merged`` (gate 0 → ShortCircuitCompleted); DECLINED/SUPERSEDED map to
     ``closed`` (gate 0 → Abort(pr_closed_externally)).
     """
@@ -266,9 +266,9 @@ def parse_pr_terminal_state(pr: dict[str, Any]) -> tuple[bool, bool, str | None]
 
 
 def mergeable_state_for(*, merged: bool, closed: bool) -> MergeableState:
-    """Map BitBucket terminal-state flags to a neutral ``MergeableState``.
+    """Map Bitbucket terminal-state flags to a neutral ``MergeableState``.
 
-    BitBucket Cloud exposes no pre-merge conflict flag on the PR GET, so an OPEN
+    Bitbucket Cloud exposes no pre-merge conflict flag on the PR GET, so an OPEN
     PR is reported ``MERGEABLE`` (a real conflict surfaces as a 409 at merge time
     and the merge loop falls back to NotifyHuman). Terminal PRs are ``UNKNOWN``.
     """
@@ -278,7 +278,7 @@ def mergeable_state_for(*, merged: bool, closed: bool) -> MergeableState:
 
 
 def merge_state_status_for(*, merged: bool, closed: bool) -> MergeStateStatus:
-    """Map BitBucket terminal-state flags to a neutral ``MergeStateStatus``.
+    """Map Bitbucket terminal-state flags to a neutral ``MergeStateStatus``.
 
     ``decide()`` waits forever on ``UNKNOWN`` (gate 6), so an OPEN PR maps to
     ``CLEAN``. "Behind base" is driven by the caller-supplied ``base_behind_count``
@@ -289,16 +289,16 @@ def merge_state_status_for(*, merged: bool, closed: bool) -> MergeStateStatus:
     return MergeStateStatus.CLEAN
 
 
-# BitBucket build-status states per the commit-statuses endpoint. Known
+# Bitbucket build-status states per the commit-statuses endpoint. Known
 # in-progress states (INPROGRESS/PENDING) need no allow-list of their own: any
 # state that is neither FAILED nor explicitly SUCCESSFUL is treated as not-yet-
-# green, which also covers unrecognized/new BitBucket states conservatively.
+# green, which also covers unrecognized/new Bitbucket states conservatively.
 _BB_STATUS_FAILED = {"FAILED", "STOPPED"}
 _BB_STATUS_SUCCESS = {"SUCCESSFUL"}
 
 
 def parse_check_state(statuses: list[dict[str, Any]]) -> CheckState:
-    """Reduce BitBucket commit build-statuses to a neutral aggregate ``CheckState``.
+    """Reduce Bitbucket commit build-statuses to a neutral aggregate ``CheckState``.
 
     No statuses reported → PENDING; any FAILED/STOPPED → FAILURE; else
     SUCCESS only when *every* status is explicitly SUCCESSFUL; otherwise
@@ -311,7 +311,7 @@ def parse_check_state(statuses: list[dict[str, Any]]) -> CheckState:
     missing rollup to PENDING (see ``github_client`` ``fetch_pr_status``).
 
     SUCCESS requires an allow-list match (``_BB_STATUS_SUCCESS``): an
-    unrecognized or newly introduced BitBucket state is treated as
+    unrecognized or newly introduced Bitbucket state is treated as
     not-yet-green (PENDING) rather than silently passing the WaitForCI gate.
     """
     if not statuses:
@@ -329,7 +329,7 @@ def parse_check_state(statuses: list[dict[str, Any]]) -> CheckState:
 
 
 def parse_check_timings(statuses: list[dict[str, Any]]) -> tuple[CheckTiming, ...]:
-    """Parse BitBucket commit build-statuses into neutral ``CheckTiming`` rows."""
+    """Parse Bitbucket commit build-statuses into neutral ``CheckTiming`` rows."""
     timings: list[CheckTiming] = []
     for status in statuses:
         name = _clean_optional_str(status.get("name") or status.get("key"))
@@ -408,7 +408,7 @@ def _iter_unresolved_inline_threads(
     Resolved threads, viewer-authored-only threads, and threads with no remaining
     external comment are dropped from both — exactly as the GitHub path does. The
     neutral ``thread_id`` encodes repo/PR/comment so ``resolve_thread`` can
-    recover BitBucket context from the Protocol's repo-less signature.
+    recover Bitbucket context from the Protocol's repo-less signature.
     """
     inline = [
         comment
@@ -435,7 +435,7 @@ def _iter_unresolved_inline_threads(
             key=lambda member: (
                 parse_bb_datetime(member.get("created_on")) or datetime.min.replace(tzinfo=UTC),
                 # Numeric tiebreak for replies sharing a ``created_on`` timestamp:
-                # BitBucket comment ids are integers, so a ``str(id)`` key would sort
+                # Bitbucket comment ids are integers, so a ``str(id)`` key would sort
                 # them lexicographically ("10" < "9") and could mis-order which
                 # comment surfaces as the thread's first external comment.
                 int(member["id"]),
@@ -447,7 +447,7 @@ def _iter_unresolved_inline_threads(
             continue
         first = external[0]
         inline_meta = root.get("inline") if isinstance(root.get("inline"), dict) else {}
-        # An inline comment BitBucket marks ``outdated`` after a new push no
+        # An inline comment Bitbucket marks ``outdated`` after a new push no
         # longer describes the current diff (the feedback was addressed by an
         # edit elsewhere). Mirror the GitHub path: such threads are non-blocking
         # for merge, so they are kept out of the actionable feed but still
@@ -525,7 +525,7 @@ def build_outdated_unresolved_review_threads(
     pr_number: int,
     account_id: str | None,
 ) -> tuple[ReviewThread, ...]:
-    """Reconstruct ONLY the inline threads BitBucket marks ``outdated`` (#473).
+    """Reconstruct ONLY the inline threads Bitbucket marks ``outdated`` (#473).
 
     ``build_review_threads`` drops these from the actionable feed because they no
     longer describe the current diff and are non-blocking for merge. The monitor
@@ -541,9 +541,9 @@ def build_outdated_unresolved_review_threads(
 
 
 def _task_is_resolved(task: dict[str, Any]) -> bool:
-    """Return whether a BitBucket PR task is in a resolved state.
+    """Return whether a Bitbucket PR task is in a resolved state.
 
-    BitBucket task ``state`` is ``RESOLVED`` or ``UNRESOLVED``; anything that is not
+    Bitbucket task ``state`` is ``RESOLVED`` or ``UNRESOLVED``; anything that is not
     explicitly ``UNRESOLVED`` is treated as not-blocking so a resolved (or
     unrecognized terminal) task never wedges the merge gate.
     """
@@ -557,9 +557,9 @@ def _task_creator(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def _task_creator_id(task: dict[str, Any]) -> str | None:
-    """Return the BitBucket identity of a task creator, if present.
+    """Return the Bitbucket identity of a task creator, if present.
 
-    Mirrors ``_comment_account_id``: BitBucket may return a creator carrying only
+    Mirrors ``_comment_account_id``: Bitbucket may return a creator carrying only
     ``uuid`` (no ``account_id``), and the viewer identity itself falls back to
     ``uuid``. Comparing ``account_id`` alone would fail to recognize a self-authored
     task in that shape, leaking AWF's own task into reviewer feedback and driving the
@@ -576,9 +576,9 @@ def build_unresolved_task_threads(
     pr_number: int,
     account_id: str | None,
 ) -> tuple[ReviewThread, ...]:
-    """Map UNRESOLVED BitBucket reviewer tasks to neutral inline review threads.
+    """Map UNRESOLVED Bitbucket reviewer tasks to neutral inline review threads.
 
-    BitBucket exposes reviewer *tasks* separately from comments (the ``/tasks``
+    Bitbucket exposes reviewer *tasks* separately from comments (the ``/tasks``
     endpoint). A PR with open tasks but no comments would otherwise assemble empty
     feedback and reach ``Merge`` (issue #445). Mapping each unresolved task to a
     ``ReviewThread`` routes it through the existing address-comments gate (so the
@@ -638,7 +638,7 @@ def build_general_review_comments(
     *,
     account_id: str | None,
 ) -> tuple[ReviewComment, ...]:
-    """Map BitBucket top-level (non-inline) PR comments to neutral ``ReviewComment``s.
+    """Map Bitbucket top-level (non-inline) PR comments to neutral ``ReviewComment``s.
 
     Mirrors GitHub's issue-comment handling: viewer-authored, deleted, and empty
     comments are dropped so AWF never triages its own notifications.
@@ -649,7 +649,7 @@ def build_general_review_comments(
             continue
         if _is_viewer(comment, account_id):
             continue
-        # Mirror the inline-thread path: a top-level BitBucket comment the author
+        # Mirror the inline-thread path: a top-level Bitbucket comment the author
         # already resolved is settled feedback. Downstream gates treat every
         # ``unresolved_review_comment`` as pending work, so emitting a resolved one
         # would drive needless comment cycles or block the merge. Drop it.
@@ -734,13 +734,13 @@ def build_blocking_reviews(
     *,
     account_id: str | None,
 ) -> tuple[ReviewComment, ...]:
-    """Map BitBucket "Request changes" reviewers to merge-blocking reviews.
+    """Map Bitbucket "Request changes" reviewers to merge-blocking reviews.
 
-    BitBucket Cloud records a reviewer's *Request changes* decision on the PR
+    Bitbucket Cloud records a reviewer's *Request changes* decision on the PR
     ``participants`` entry (``state == "changes_requested"``), not in the
     ``/comments`` list — so a reviewer can block a PR without leaving an
     unresolved comment. ``decide()``'s review-blocker gate consults
-    ``PRStatus.blocking_reviews``; without this the BitBucket path would proceed
+    ``PRStatus.blocking_reviews``; without this the Bitbucket path would proceed
     to merge despite an active requested-changes review. Viewer-authored states
     are excluded so AWF never blocks on its own account, mirroring the GitHub
     ``_effective_blocking_reviews`` contract (latest state per reviewer).
@@ -778,7 +778,7 @@ def build_blocking_reviews(
 
 
 def extract_diffstat_paths(entries: list[dict[str, Any]]) -> tuple[str, ...]:
-    """Collect changed file paths from BitBucket PR diffstat entries."""
+    """Collect changed file paths from Bitbucket PR diffstat entries."""
     paths: list[str] = []
     for entry in entries:
         for side in ("new", "old"):
@@ -808,7 +808,7 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 
 def is_pipeline_owned_status(status: dict[str, Any]) -> bool:
-    """True when a commit build-status belongs to BitBucket Pipelines itself.
+    """True when a commit build-status belongs to Bitbucket Pipelines itself.
 
     Pipelines posts its own commit status (key ``PIPELINE``, url pointing at the
     repo's ``/pipelines/`` results); that status is already covered by the

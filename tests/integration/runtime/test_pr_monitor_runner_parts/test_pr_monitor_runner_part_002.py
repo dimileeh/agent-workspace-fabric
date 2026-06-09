@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
@@ -711,11 +711,11 @@ class TestGitHubApiError:
             assert "github error" in (ws.failure_message or "")
 
 
-class _BitBucketErrorForgeClient:
+class _BitbucketErrorForgeClient:
     """Forge client stub whose ``fetch_pr_status`` raises like a real
-    ``BitBucketClient`` does on an API/transport failure."""
+    ``BitbucketClient`` does on an API/transport failure."""
 
-    def __init__(self, exc: BitBucketClientError) -> None:
+    def __init__(self, exc: BitbucketClientError) -> None:
         self._exc = exc
         self.closed = False
 
@@ -726,11 +726,11 @@ class _BitBucketErrorForgeClient:
         self.closed = True
 
 
-class _SequencedBitBucketForgeClient:
+class _SequencedBitbucketForgeClient:
     """Forge stub whose ``fetch_pr_status`` raises a queued sequence of
-    ``BitBucketClientError``s, one per poll, to drive multi-iteration paths."""
+    ``BitbucketClientError``s, one per poll, to drive multi-iteration paths."""
 
-    def __init__(self, excs: list[BitBucketClientError]) -> None:
+    def __init__(self, excs: list[BitbucketClientError]) -> None:
         self._excs = list(excs)
         self.calls = 0
         self.closed = False
@@ -743,7 +743,7 @@ class _SequencedBitBucketForgeClient:
         self.closed = True
 
 
-class TestBitBucketApiError:
+class TestBitbucketApiError:
     @pytest.mark.unit
     async def test_bitbucket_api_error_terminates_with_failure(
         self,
@@ -753,7 +753,7 @@ class TestBitBucketApiError:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """A *deterministic* ``BitBucketClientError`` from ``fetch_pr_status``
+        """A *deterministic* ``BitbucketClientError`` from ``fetch_pr_status``
         must terminate the workspace failed with the exception's reason code
         preserved — not escape ``run()`` and crash the background monitor task
         (PR #443 review). Recoverable blips (rate-limit/transport/5xx) instead
@@ -761,8 +761,8 @@ class TestBitBucketApiError:
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        gh = _BitBucketErrorForgeClient(
-            BitBucketClientError(
+        gh = _BitbucketErrorForgeClient(
+            BitbucketClientError(
                 operation="bitbucket fetch_pr_status",
                 status=404,
                 body="boom",
@@ -801,7 +801,7 @@ class TestBitBucketApiError:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """A recoverable BitBucket blip (5xx) must wait and re-poll like the
+        """A recoverable Bitbucket blip (5xx) must wait and re-poll like the
         GitHub path, rather than terminating immediately (PR #443 review). Here
         the first poll hits a transient 503 (retry) and the second hits a
         deterministic 404 (terminate), exercising both branches."""
@@ -810,15 +810,15 @@ class TestBitBucketApiError:
         for _ in range(2):
             cmd.queue_result(returncode=0)  # git fetch origin <base>
             cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        gh = _SequencedBitBucketForgeClient(
+        gh = _SequencedBitbucketForgeClient(
             [
-                BitBucketClientError(
+                BitbucketClientError(
                     operation="bitbucket fetch_pr_status",
                     status=503,
                     body="Service Unavailable",
                     reason_code="BITBUCKET_API_ERROR",
                 ),
-                BitBucketClientError(
+                BitbucketClientError(
                     operation="bitbucket fetch_pr_status",
                     status=404,
                     body="not found",

@@ -95,8 +95,8 @@ This lane uses inspectable source and installs a global `awf` executable from
 that checkout.
 
 ```bash
-git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
-cd aira-agent-workspace-fabric
+git clone https://github.com/dimileeh/agent-workspace-fabric.git
+cd agent-workspace-fabric
 uv tool install . --force
 awf setup --source-checkout "$PWD"
 awf start --source-checkout "$PWD"
@@ -128,8 +128,8 @@ This lane keeps AWF fully inspectable and avoids installing a global executable.
 Run AWF through `uv run` from the checkout.
 
 ```bash
-git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
-cd aira-agent-workspace-fabric
+git clone https://github.com/dimileeh/agent-workspace-fabric.git
+cd agent-workspace-fabric
 uv sync --extra dev
 uv run --python 3.12 --extra dev awf setup --source-checkout "$PWD"
 uv run --python 3.12 --extra dev awf start --source-checkout "$PWD"

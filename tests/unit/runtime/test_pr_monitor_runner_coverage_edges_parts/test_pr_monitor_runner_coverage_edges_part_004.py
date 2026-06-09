@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.enums import OperationStatus, WorkspaceStatus
@@ -55,16 +55,16 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 
-class _BitBucketPostCommentClient(DefaultMergeMethodGitHubClient):
-    """Command-based gh double whose ``post_comment`` raises a BitBucket error.
+class _BitbucketPostCommentClient(DefaultMergeMethodGitHubClient):
+    """Command-based gh double whose ``post_comment`` raises a Bitbucket error.
 
-    A BitBucket workspace's ``self._deps.gh`` is a ``BitBucketClient`` that raises
-    ``BitBucketClientError`` (not ``GitHubClientError``) from ``post_comment``.
+    A Bitbucket workspace's ``self._deps.gh`` is a ``BitbucketClient`` that raises
+    ``BitbucketClientError`` (not ``GitHubClientError``) from ``post_comment``.
     Overriding only that method keeps the SyncBase push flow command-based while
-    exercising the best-effort workflow-scope-notification BitBucket arm.
+    exercising the best-effort workflow-scope-notification Bitbucket arm.
     """
 
-    def __init__(self, runner: FakeCommandRunner, exc: BitBucketClientError) -> None:
+    def __init__(self, runner: FakeCommandRunner, exc: BitbucketClientError) -> None:
         super().__init__(runner)
         self._post_comment_exc = exc
 
@@ -387,7 +387,7 @@ async def test_execute_sync_base_workflow_scope_bitbucket_notification_failure_s
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A BitBucket notification failure must degrade to a logged warning so the
+    """A Bitbucket notification failure must degrade to a logged warning so the
     terminal workflow-scope handling still runs instead of escaping uncaught."""
     cmd = FakeCommandRunner()
     workspace_id = await seed_monitoring_workspace(factory)
@@ -407,9 +407,9 @@ async def test_execute_sync_base_workflow_scope_bitbucket_notification_failure_s
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketPostCommentClient(
+        gh=_BitbucketPostCommentClient(
             cmd,
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket post_comment",
                 status=403,
                 body="forbidden: missing scope",

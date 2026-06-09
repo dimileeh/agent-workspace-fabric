@@ -2,7 +2,7 @@
 
 This keeps forge-specific git credential plumbing in one place so the generic
 ``node.git_manager`` and ``service.worker`` stay forge-agnostic. Today it covers
-**BitBucket Cloud** (``bitbucket.org``); the GitHub credential helper lives in
+**Bitbucket Cloud** (``bitbucket.org``); the GitHub credential helper lives in
 ``service.worker`` and is intentionally left untouched.
 
 Security contract (mirrors how the GitHub token reaches git):
@@ -10,7 +10,7 @@ Security contract (mirrors how the GitHub token reaches git):
 - The Atlassian API token is **never** embedded in a clone/push URL, in
   git-config text, or in a log/error message.
 - The git username is the fixed, account-agnostic sentinel
-  ``x-bitbucket-api-token-auth`` (BitBucket rejects the email as the git
+  ``x-bitbucket-api-token-auth`` (Bitbucket rejects the email as the git
   username with 401 — only the REST API accepts ``email:token``; see #467).
 - The host-scoped credential helper references the token env var *name* only
   (``$BITBUCKET_API_TOKEN``). git invokes the helper and reads the secret value
@@ -22,7 +22,7 @@ Security contract (mirrors how the GitHub token reaches git):
 Two intentionally divergent mechanisms (#465/#466)
 --------------------------------------------------
 
-There are **two** BitBucket git-auth paths because they cross different layers:
+There are **two** Bitbucket git-auth paths because they cross different layers:
 
 - **Worker** (``apply_bitbucket_git_auth`` + ``bitbucket_git_config_entries``):
   a host-scoped shell **credential helper** wired straight into the worker's git
@@ -58,7 +58,7 @@ _BITBUCKET_EMAIL_ENV = "BITBUCKET_EMAIL"
 
 # Host-scoped credential helper. The git username for an Atlassian API token over
 # HTTPS is the fixed, account-agnostic sentinel ``x-bitbucket-api-token-auth`` —
-# **not** the account email. BitBucket's git endpoint rejects the email with 401
+# **not** the account email. Bitbucket's git endpoint rejects the email with 401
 # (the REST API accepts ``email:token`` Basic auth, but git over HTTPS does not;
 # see issue #467). Only ``$BITBUCKET_API_TOKEN`` is expanded — by the shell git
 # spawns for the helper at call time — so the literal token never appears in this
@@ -100,7 +100,7 @@ def _is_ssh_transport(repo_url: str) -> bool:
     """Return whether ``repo_url`` uses git's SSH transport (not HTTPS).
 
     SSH clones (``git@bitbucket.org:…`` scp-like form or ``ssh://git@bitbucket.org/…``)
-    authenticate with SSH keys, not the HTTPS credential helper, so the BitBucket
+    authenticate with SSH keys, not the HTTPS credential helper, so the Bitbucket
     HTTPS-credential preflight must not apply to them.
     """
     value = repo_url.strip()
@@ -153,7 +153,7 @@ def _reject_non_canonical_bitbucket_ssh(repo_url: str) -> None:
     raise GitAuthNotConfiguredError(
         reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
         message=(
-            "BitBucket git authentication requires the canonical lowercase SSH form "
+            "Bitbucket git authentication requires the canonical lowercase SSH form "
             f"ssh://git@{BITBUCKET_GIT_HOST}[:22]/<workspace>/<repo>.git: a "
             "non-canonical scheme/host casing or an unsupported port slips past forge "
             "detection but the agent-side insteadOf rewrites that map SSH bitbucket "
@@ -165,7 +165,7 @@ def _reject_non_canonical_bitbucket_ssh(repo_url: str) -> None:
 
 
 def bitbucket_git_config_entries() -> tuple[tuple[str, str], ...]:
-    """Return host-scoped git-config entries wiring the BitBucket credential helper.
+    """Return host-scoped git-config entries wiring the Bitbucket credential helper.
 
     The first (empty) helper value clears any inherited helper, then the real
     helper is appended (standard git multi-value semantics). ``useHttpPath``
@@ -217,7 +217,7 @@ def bitbucket_askpass_script(token_env_var: str) -> str:
 
     ``GIT_ASKPASS`` is **process-wide**: git invokes it for *every* credential
     prompt, not just bitbucket.org ones, so an unconditional script would hand the
-    BitBucket token to any other HTTPS remote that happens to prompt for
+    Bitbucket token to any other HTTPS remote that happens to prompt for
     credentials (e.g. a later ``git fetch`` against a different host that 401s).
     The script therefore gates on both the prompt **scheme** and **host** — git's
     askpass prompt embeds the target URL (``Password for 'https://…@bitbucket.org': ``)
@@ -330,7 +330,7 @@ def add_git_config_entries(
     """Accumulate ``entries`` onto the ``GIT_CONFIG_KEY_n/VALUE_n/COUNT`` protocol.
 
     Appends onto any existing ``GIT_CONFIG_COUNT`` so multiple callers (e.g. the
-    GitHub block then the BitBucket block) compose without clobbering each other.
+    GitHub block then the Bitbucket block) compose without clobbering each other.
 
     A malformed (non-integer) existing ``GIT_CONFIG_COUNT`` — which a profile env
     lease could inject into the resolver env before this runs — is tolerated as
@@ -351,7 +351,7 @@ def add_git_config_entries(
 
 
 def bitbucket_credentials_present(source_env: Mapping[str, str]) -> bool:
-    """Return whether both BitBucket git credentials are present in ``source_env``."""
+    """Return whether both Bitbucket git credentials are present in ``source_env``."""
     token = (source_env.get(_BITBUCKET_TOKEN_ENV) or "").strip()
     email = (source_env.get(_BITBUCKET_EMAIL_ENV) or "").strip()
     return bool(token and email)
@@ -458,7 +458,7 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
             message=(
-                "BitBucket git authentication requires HTTPS: the agent-side "
+                "Bitbucket git authentication requires HTTPS: the agent-side "
                 "insteadOf rewrites and askpass mechanism only cover "
                 "https://bitbucket.org/… URLs. Use "
                 "https://bitbucket.org/<workspace>/<repo>.git."
@@ -473,7 +473,7 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
             message=(
-                "BitBucket git authentication is not configured for a bitbucket.org "
+                "Bitbucket git authentication is not configured for a bitbucket.org "
                 f"repository: missing {', '.join(missing)}. Set these in the AWF "
                 "service environment so git can authenticate over HTTPS."
             ),
@@ -506,7 +506,7 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
             message=(
-                "BitBucket git authentication requires the canonical lowercase host "
+                "Bitbucket git authentication requires the canonical lowercase host "
                 f"{BITBUCKET_GIT_HOST!r} with no port or :443: a mixed-case host or an "
                 "unsupported port slips past forge detection but the agent-side "
                 "insteadOf rewrites and askpass host check are case-sensitive and cover "
@@ -526,7 +526,7 @@ def verify_bitbucket_git_auth(repo_url: str, env: Mapping[str, str]) -> None:
         raise GitAuthNotConfiguredError(
             reason_code=BITBUCKET_GIT_AUTH_NOT_CONFIGURED,
             message=(
-                "BitBucket git authentication cannot use the credentials embedded "
+                "Bitbucket git authentication cannot use the credentials embedded "
                 "in the bitbucket.org repository URL: Atlassian API-token auth over "
                 f"HTTPS requires the fixed username {_BITBUCKET_GIT_USERNAME!r}. "
                 "Remove the userinfo from the repo URL (use "

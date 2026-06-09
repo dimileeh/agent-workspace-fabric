@@ -1,4 +1,4 @@
-"""BitBucketClient pipeline/rerun/merge-method tests (issue #345 Part 2).
+"""BitbucketClient pipeline/rerun/merge-method tests (issue #345 Part 2).
 
 Covers the failing-check-log pipeline-lookup chain (status → pipelines → steps →
 log) and the external-status pytest fallback, the whole-pipeline rerun (full rerun
@@ -15,11 +15,11 @@ import pytest
 from awf.common.bitbucket_client import (
     BITBUCKET_AUTH_NOT_CONFIGURED,
     BITBUCKET_PIPELINE_NOT_RERUNNABLE,
-    BitBucketClient,
-    BitBucketClientError,
+    BitbucketClient,
+    BitbucketClientError,
 )
 
-from ._helpers import FakeBitBucket, make_client, pr_payload, repo
+from ._helpers import FakeBitbucket, make_client, pr_payload, repo
 
 pytestmark = pytest.mark.unit
 
@@ -29,7 +29,7 @@ _PR = f"{_REPO}/pullrequests/42"
 _PIPELINES = f"{_REPO}/pipelines/"
 
 
-def _seed_fetch_status(fake: FakeBitBucket, *, pr: dict | None = None) -> None:
+def _seed_fetch_status(fake: FakeBitbucket, *, pr: dict | None = None) -> None:
     fake.enqueue("GET", _PR, json=pr if pr is not None else pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
@@ -42,7 +42,7 @@ def _seed_fetch_status(fake: FakeBitBucket, *, pr: dict | None = None) -> None:
 
 
 async def test_failing_check_logs_pipeline_chain() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -74,7 +74,7 @@ async def test_failing_check_logs_pipeline_chain() -> None:
 
 
 async def test_failing_check_logs_no_failed_statuses_returns_empty() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -86,7 +86,7 @@ async def test_failing_check_logs_no_failed_statuses_returns_empty() -> None:
 
 
 async def test_failing_check_logs_external_status_falls_back_to_pytest() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -108,7 +108,7 @@ async def test_failing_check_logs_external_status_falls_back_to_pytest() -> None
 
 
 async def test_failing_check_logs_pipeline_without_failing_step_falls_back() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -136,7 +136,7 @@ async def test_failing_check_logs_stopped_pipeline_step_keeps_log_evidence() -> 
     fell through to the external fallback with ``run_id=None`` and an empty log,
     silently discarding the real pipeline UUID and partial step output.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -181,7 +181,7 @@ async def test_failing_check_logs_surfaces_external_status_alongside_failing_ste
     returned early and dropped every other FAILED/STOPPED commit status (e.g. an
     external linter), so those checks never became CheckFailure rows for triage.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -215,7 +215,7 @@ async def test_failing_check_logs_surfaces_external_status_alongside_failing_ste
 async def test_failing_check_logs_skips_pipeline_status_identified_by_url() -> None:
     """The pipeline's own commit status (recognised by its /pipelines/ url) is not
     double-counted on top of the per-step failures, even without a ``PIPELINE`` key."""
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -246,12 +246,12 @@ async def test_failing_check_logs_skips_pipeline_status_identified_by_url() -> N
 async def test_failing_check_logs_scopes_statuses_by_refname() -> None:
     """Scope the commit-statuses fetch by the PR source branch (refname).
 
-    BitBucket statuses are ref-scoped; ``fetch_pr_status`` already filters by the
+    Bitbucket statuses are ref-scoped; ``fetch_pr_status`` already filters by the
     source branch, so ``fetch_failing_check_logs`` must use the same refname (from
     remembered PR context) or the two calls can disagree about which statuses exist
     for the head commit.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)  # primes _pr_context with source branch "feature/head"
     fake.page(
         "GET",
@@ -270,7 +270,7 @@ async def test_failing_check_logs_scopes_statuses_by_refname() -> None:
 
 async def test_failing_check_logs_omits_refname_without_pr_context() -> None:
     """Without remembered PR context, fall back to an unscoped statuses fetch."""
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.page(
         "GET",
         f"{_REPO}/commit/{_HEAD}/statuses",
@@ -294,7 +294,7 @@ async def test_fake_serves_distinct_responses_by_query_params() -> None:
     prove that different params yield different observable behavior — not merely
     that a param was sent. The path-only enqueue still resolves the unscoped call.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     path = f"{_REPO}/commit/{_HEAD}/statuses"
     fake.page("GET", path, values=[{"state": "SUCCESSFUL", "name": "unscoped"}])
     fake.page(
@@ -318,7 +318,7 @@ async def test_failing_check_logs_pipeline_scoped_to_pr_ref() -> None:
     ref context. With both a branch and a PR pipeline on one commit, choosing the
     newest by ``target.commit.hash`` alone could tail steps from a different ref.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)  # primes _pr_context with source branch "feature/head"
     fake.page(
         "GET",
@@ -359,7 +359,7 @@ async def test_failing_check_logs_pipeline_wrong_ref_falls_back_to_external() ->
     failing status, so the lookup yields no pipeline and the status falls back to
     the external (pytest) evidence path instead.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     fake.page(
         "GET",
@@ -386,7 +386,7 @@ async def test_failing_check_logs_other_pr_pipeline_falls_back_to_external() -> 
     (pytest) fallback instead of attaching the other PR's step log via
     ``pipelines[0]``.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)  # this monitor is PR 42 on branch "feature/head"
     fake.page(
         "GET",
@@ -413,7 +413,7 @@ async def test_failing_check_logs_pipeline_without_ref_metadata_keeps_newest() -
     Older pipeline payloads may omit target ref metadata; rather than drop the
     log evidence, fall back to the most recent pipeline by commit.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     fake.page(
         "GET",
@@ -447,7 +447,7 @@ async def test_failing_check_logs_prefers_pr_pipeline_over_branch_pipeline() -> 
     tail the unrelated branch pipeline's steps. The lookup must prefer the
     pipeline whose ``target.pullrequest.id`` is this PR.
     """
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)  # primes _pr_context with source branch "feature/head"
     fake.page(
         "GET",
@@ -488,7 +488,7 @@ async def test_failing_check_logs_prefers_pr_pipeline_over_branch_pipeline() -> 
 
 
 async def test_rerun_reconstructs_pr_pipeline_target() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake)
     fake.enqueue("POST", _PIPELINES, json={"uuid": "new-pipe"})
     client = make_client(fake)
@@ -501,29 +501,29 @@ async def test_rerun_reconstructs_pr_pipeline_target() -> None:
     assert target["destination"] == "development"
     assert target["commit"]["hash"] == "s" * 40
     assert target["pullrequest"]["id"] == 42
-    # BitBucket's PR pipeline selector type is the hyphenated "pull-requests"
+    # Bitbucket's PR pipeline selector type is the hyphenated "pull-requests"
     # (verified against the live POST /pipelines docs); an underscore would not
     # match the pull-requests pipeline definition.
     assert target["selector"] == {"type": "pull-requests", "pattern": "**"}
 
 
 async def test_rerun_without_pr_context_is_not_rerunnable() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.rerun_failed_workflow_jobs(repo=repo(), run_id="x")
     assert excinfo.value.reason_code == BITBUCKET_PIPELINE_NOT_RERUNNABLE
     assert fake.calls("POST") == []  # never triggered a wrong pipeline
 
 
 async def test_rerun_incomplete_context_is_not_rerunnable() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     pr = pr_payload()
     del pr["destination"]["commit"]  # no destination commit → cannot reconstruct safely
     _seed_fetch_status(fake, pr=pr)
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.rerun_failed_workflow_jobs(repo=repo(), run_id="x")
     assert excinfo.value.reason_code == BITBUCKET_PIPELINE_NOT_RERUNNABLE
     assert fake.calls("POST") == []
@@ -533,7 +533,7 @@ async def test_rerun_incomplete_context_is_not_rerunnable() -> None:
 
 
 async def test_fetch_repo_merge_methods_maps_from_pr_context() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(
         fake, pr=pr_payload(merge_strategies=["merge_commit", "squash", "fast_forward"])
     )
@@ -544,14 +544,14 @@ async def test_fetch_repo_merge_methods_maps_from_pr_context() -> None:
 
 
 async def test_fetch_repo_merge_methods_without_context_is_empty() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     client = make_client(fake)
     methods = await client.fetch_repo_merge_methods(repo=repo())
     assert methods == ()
 
 
 async def test_fetch_repo_merge_methods_falls_back_to_default_when_strategies_absent() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     # PR payload exposes only the default strategy; ``merge_strategies`` is omitted.
     _seed_fetch_status(fake, pr=pr_payload(default_merge_strategy="squash"))
     client = make_client(fake)
@@ -561,7 +561,7 @@ async def test_fetch_repo_merge_methods_falls_back_to_default_when_strategies_ab
 
 
 async def test_fetch_repo_merge_methods_falls_back_to_default_when_strategies_empty() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     # Empty ``merge_strategies`` with only the default present must not block merges.
     _seed_fetch_status(
         fake, pr=pr_payload(merge_strategies=[], default_merge_strategy="merge_commit")
@@ -573,8 +573,8 @@ async def test_fetch_repo_merge_methods_falls_back_to_default_when_strategies_em
 
 
 async def test_fetch_repo_merge_methods_defaults_to_bb_cloud_set_when_unconstrained() -> None:
-    fake = FakeBitBucket()
-    # #479 reproduction at the client boundary: an unrestricted BitBucket Cloud repo
+    fake = FakeBitbucket()
+    # #479 reproduction at the client boundary: an unrestricted Bitbucket Cloud repo
     # enumerates neither merge_strategies nor default_merge_strategy on the dest
     # branch, yet allows all three native strategies — so the repo must report them.
     _seed_fetch_status(fake, pr=pr_payload())
@@ -585,7 +585,7 @@ async def test_fetch_repo_merge_methods_defaults_to_bb_cloud_set_when_unconstrai
 
 
 async def test_fetch_repo_merge_methods_prefers_explicit_strategies_over_default() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(
         fake,
         pr=pr_payload(merge_strategies=["squash"], default_merge_strategy="merge_commit"),
@@ -597,7 +597,7 @@ async def test_fetch_repo_merge_methods_prefers_explicit_strategies_over_default
 
 
 async def test_fetch_branch_merge_methods_falls_back_to_default_when_strategies_absent() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, pr=pr_payload(default_merge_strategy="fast_forward"))
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -608,7 +608,7 @@ async def test_fetch_branch_merge_methods_falls_back_to_default_when_strategies_
 
 
 async def test_fetch_branch_merge_methods_fast_forward_only() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, pr=pr_payload(merge_strategies=["fast_forward"]))
     client = make_client(fake)
     await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -619,8 +619,8 @@ async def test_fetch_branch_merge_methods_fast_forward_only() -> None:
 
 
 async def test_fetch_branch_merge_methods_absent_defaults_to_bb_cloud_set() -> None:
-    fake = FakeBitBucket()
-    # No merge_strategies/default on the dest branch → unrestricted BitBucket Cloud
+    fake = FakeBitbucket()
+    # No merge_strategies/default on the dest branch → unrestricted Bitbucket Cloud
     # repo, which allows all three native strategies by default (#479). The branch
     # constraint therefore reports the full BB-Cloud set rather than ``None``.
     _seed_fetch_status(fake, pr=pr_payload())
@@ -636,15 +636,15 @@ async def test_fetch_branch_merge_methods_absent_defaults_to_bb_cloud_set() -> N
 
 
 def test_from_env_builds_client() -> None:
-    client = BitBucketClient.from_env(
+    client = BitbucketClient.from_env(
         {"BITBUCKET_AUTH_MODE": "bearer", "BITBUCKET_API_TOKEN": "tok"}
     )
-    assert isinstance(client, BitBucketClient)
+    assert isinstance(client, BitbucketClient)
 
 
 def test_from_env_invalid_config_raises() -> None:
-    with pytest.raises(BitBucketClientError) as excinfo:
-        BitBucketClient.from_env({})
+    with pytest.raises(BitbucketClientError) as excinfo:
+        BitbucketClient.from_env({})
     assert excinfo.value.reason_code == BITBUCKET_AUTH_NOT_CONFIGURED
 
 
@@ -652,14 +652,14 @@ def test_from_env_invalid_config_raises() -> None:
 
 
 async def test_aclose_closes_underlying_httpx_client() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     client = make_client(fake)
     await client.aclose()
     assert client._client.is_closed
 
 
 async def test_async_context_manager_closes_on_exit() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     client = make_client(fake)
     async with client as entered:
         assert entered is client

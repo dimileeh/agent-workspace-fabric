@@ -7,13 +7,13 @@ Two responsibilities:
    an explicit push URL, AWF omits ``-u`` so credentialed URLs are not persisted
    in branch upstream config. The push is forge-neutral plain git.
 2. Open the PR via the injected :class:`~awf.common.forge.ForgeClient` when one
-   does not already exist. The forge client (GitHub or BitBucket) is resolved by
+   does not already exist. The forge client (GitHub or Bitbucket) is resolved by
    the caller and passed in per-call, so ``PullRequestCreator`` stays
    forge-agnostic and stateless. The client returns the PR URL directly.
 
 ``PullRequestCreator`` shells plain ``git`` for the push but never shells the
 forge CLI itself — the resolved ``ForgeClient`` owns the forge-specific PR-open
-call (``gh pr create`` for GitHub, the REST API for BitBucket).
+call (``gh pr create`` for GitHub, the REST API for Bitbucket).
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ class PullRequestError(Exception):
         self.stderr = stderr
         self.head_sha = head_sha
         # Forge clients that carry an actionable reason code (e.g.
-        # ``BitBucketClientError`` with auth / rate-limit / transport codes)
+        # ``BitbucketClientError`` with auth / rate-limit / transport codes)
         # propagate it here so the executor records the specific doctor
         # guidance on the failed workspace instead of a generic
         # ``PR_CREATE_FAILED``. ``GitHubClientError`` has no reason code, and
@@ -179,12 +179,12 @@ class PullRequestCreator:
             )
 
         # Step 2: open the PR through the resolved forge client. The client
-        # (GitHub or BitBucket) owns auth and the forge-specific call and returns
-        # the PR URL directly — no github-shaped regex, so a BitBucket URL is
-        # accepted verbatim (D7). ``BitBucketClientError`` is imported lazily so
+        # (GitHub or Bitbucket) owns auth and the forge-specific call and returns
+        # the PR URL directly — no github-shaped regex, so a Bitbucket URL is
+        # accepted verbatim (D7). ``BitbucketClientError`` is imported lazily so
         # the GitHub-only hot path never pays for the httpx import that the
-        # BitBucket client drags in (mirrors ``forge.make_forge_client``).
-        from awf.common.bitbucket_client import BitBucketClientError
+        # Bitbucket client drags in (mirrors ``forge.make_forge_client``).
+        from awf.common.bitbucket_client import BitbucketClientError
 
         if forge_client is None:  # pragma: no cover - open path always supplies one
             # The reuse path (``existing_pr_url`` set) returns above without ever
@@ -218,13 +218,13 @@ class PullRequestCreator:
                 stderr=exc.stderr,
                 head_sha=head_sha,
             ) from exc
-        except BitBucketClientError as exc:
-            # BitBucket uses HTTP status (``None`` for transport errors) and a
+        except BitbucketClientError as exc:
+            # Bitbucket uses HTTP status (``None`` for transport errors) and a
             # redacted ``body`` where GitHub uses returncode/stderr — map them
             # onto the same structured PullRequestError fields. Preserve
             # ``exc.reason_code`` (auth / rate-limit / transport) so the
             # executor records the specific doctor guidance instead of a
-            # generic ``PR_CREATE_FAILED`` (mirrors the other BitBucket
+            # generic ``PR_CREATE_FAILED`` (mirrors the other Bitbucket
             # handoff paths that flow ``reason_code`` end-to-end).
             raise PullRequestError(
                 operation=exc.operation,

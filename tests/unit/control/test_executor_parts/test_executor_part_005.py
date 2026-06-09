@@ -1127,7 +1127,7 @@ class TestPrNumberExtraction:
             ("https://github.com/dimileeh/aira-web/pull/123/files", 123),
             ("https://github.com/dimileeh/aira-web/pull/123?notification_referrer_id=abc", 123),
             ("https://github.com/dimileeh/aira-web/pull/123#discussion_r3275054005", 123),
-            # BitBucket PRs use ``/pull-requests/<n>`` — the forge-neutral
+            # Bitbucket PRs use ``/pull-requests/<n>`` — the forge-neutral
             # creation path persists this URL verbatim, so extraction must
             # accept it or the monitor fails with ``missing_pr_number``.
             ("https://bitbucket.org/workspace/repo/pull-requests/7", 7),

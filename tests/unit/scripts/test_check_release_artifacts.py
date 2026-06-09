@@ -15,7 +15,7 @@ from scripts.generate_install_manifest import ManifestError, build_manifest, wri
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHECK_SCRIPT = REPO_ROOT / "scripts" / "check_release_artifacts.py"
-REPOSITORY_URL = "https://github.com/dimileeh/aira-agent-workspace-fabric"
+REPOSITORY_URL = "https://github.com/dimileeh/agent-workspace-fabric"
 GENERATED_AT = "2026-05-29T00:00:00Z"
 
 

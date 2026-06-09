@@ -22,7 +22,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_TASK_TIMEOUT,
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TRANSPORT_ERROR,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.github_client import GitHubClientError
 from awf.control.state_machine import WorkspaceStateMachine
@@ -533,8 +533,8 @@ def _merge_rejection_reason(stderr: str) -> str:
     return "GitHub rejected the merge attempt"
 
 
-def _bitbucket_merge_rejection_reason(exc: BitBucketClientError) -> str:
-    """Describe a deterministic BitBucket merge failure for a human notification.
+def _bitbucket_merge_rejection_reason(exc: BitbucketClientError) -> str:
+    """Describe a deterministic Bitbucket merge failure for a human notification.
 
     Mirrors :func:`_merge_rejection_reason`. ``exc`` already carries a redacted
     body (set at construction) and always renders a non-empty
@@ -542,7 +542,7 @@ def _bitbucket_merge_rejection_reason(exc: BitBucketClientError) -> str:
     whitespace and cap to match the GitHub wording.
     """
     detail = " ".join(str(exc).split())[:240]
-    return f"BitBucket rejected the merge attempt: {detail}"
+    return f"Bitbucket rejected the merge attempt: {detail}"
 
 
 def _transient_github_retry_payload(
@@ -564,7 +564,7 @@ def _transient_github_retry_payload(
 
 
 def _transient_bitbucket_retry_payload(
-    exc: BitBucketClientError,
+    exc: BitbucketClientError,
     *,
     context: str,
     pr_number: int,
@@ -622,8 +622,8 @@ def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
     return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
 
 
-def _is_transient_bitbucket_client_error(exc: BitBucketClientError) -> bool:
-    """Classify BitBucket failures that should keep the monitor polling.
+def _is_transient_bitbucket_client_error(exc: BitbucketClientError) -> bool:
+    """Classify Bitbucket failures that should keep the monitor polling.
 
     Symmetric to :func:`_is_transient_github_client_error`: recoverable blips
     should make the monitor wait and re-poll rather than terminating the
@@ -632,7 +632,7 @@ def _is_transient_bitbucket_client_error(exc: BitBucketClientError) -> bool:
     reset/refused, timeout, DNS — surfaced as ``BITBUCKET_TRANSPORT_ERROR``),
     a 409 on the merge POST signalling an already-in-flight merge
     (``BITBUCKET_MERGE_IN_PROGRESS``), an exhausted async-merge poll budget while
-    the merge task was still PENDING (``BITBUCKET_MERGE_TASK_TIMEOUT`` — BitBucket
+    the merge task was still PENDING (``BITBUCKET_MERGE_TASK_TIMEOUT`` — Bitbucket
     may still complete it server-side), and 5xx server faults. Deterministic
     faults — auth, other 4xx, JSON parse, and
     the pagination/SSRF safety aborts (which also carry ``status=None`` but

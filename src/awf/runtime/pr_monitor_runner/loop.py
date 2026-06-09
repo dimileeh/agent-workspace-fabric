@@ -12,7 +12,7 @@ from dataclasses import (
 from pathlib import Path
 from typing import Any, cast
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
@@ -97,8 +97,8 @@ async def _post_workflow_scope_notification_best_effort(
             blocker_reason=blocker_reason,
         )
     except ForgeClientError as exc:
-        # A BitBucket workspace posts the human hint through ``BitBucketClient``,
-        # whose ``post_comment`` raises ``BitBucketClientError`` (not
+        # A Bitbucket workspace posts the human hint through ``BitbucketClient``,
+        # whose ``post_comment`` raises ``BitbucketClientError`` (not
         # ``GitHubClientError``). Catch it alongside the GitHub error so a
         # transient or permanent comment failure degrades to a logged warning
         # here too, instead of escaping this best-effort helper and aborting the
@@ -555,7 +555,7 @@ async def _execute(
                 try:
                     await self._deps.gh.rerun_failed_workflow_jobs(repo=repo, run_id=run_id)
                 except ForgeClientError:
-                    # A BitBucket forge raises ``BitBucketClientError`` here (e.g.
+                    # A Bitbucket forge raises ``BitbucketClientError`` here (e.g.
                     # ``BITBUCKET_PIPELINE_NOT_RERUNNABLE`` for a custom/manual
                     # pipeline target it cannot reconstruct). Catch it alongside
                     # the GitHub error so it is recorded as a failed transient
@@ -1353,11 +1353,11 @@ async def _execute(
         except ForgeClientError as exc:
             # Both forges post the human notification through ``self._deps.gh``;
             # either raises a ``ForgeClientError`` subclass. Catching the shared base
-            # keeps a BitBucket fault from escaping ``_execute`` uncaught. A transient
+            # keeps a Bitbucket fault from escaping ``_execute`` uncaught. A transient
             # blip waits then keeps polling; a permanent fault finishes the operation
             # as failed and re-raises. The operation outcome/error-code strings stay
             # forge-specific (catalogued reason codes) via the selection below.
-            is_bitbucket = isinstance(exc, BitBucketClientError)
+            is_bitbucket = isinstance(exc, BitbucketClientError)
             transient_outcome = (
                 "transient_bitbucket_error" if is_bitbucket else "transient_github_error"
             )

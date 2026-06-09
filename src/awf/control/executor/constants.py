@@ -157,7 +157,7 @@ _RUFF_DIAGNOSTIC_PATTERN = re.compile(r"^\s*[A-Z]+[0-9]+\s*(?P<fixable>\[\*\])?"
 _RUFF_DIAGNOSTIC_PATH_PATTERN = re.compile(r"^\s*-->\s+(?P<path>.+?):\d+:\d+")
 
 # Forge-neutral PR-number extraction. GitHub PR URLs use ``/pull/<n>``;
-# BitBucket uses ``/pull-requests/<n>``. The optional ``-requests`` segment
+# Bitbucket uses ``/pull-requests/<n>``. The optional ``-requests`` segment
 # accepts both so a forge-neutral ``pr_url`` (persisted verbatim from the
 # resolved ForgeClient) yields a pr_number for the monitor on either forge.
 _PR_NUMBER_RE = re.compile(r"/pull(?:-requests)?/(\d+)(?=[/?#]|$)")

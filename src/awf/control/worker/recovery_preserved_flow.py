@@ -319,7 +319,7 @@ async def _recover_preserved_active_execution(
         repo_url=repo_url,
         branch_name=lookup_branch_name,
         expected_head_repo_slug=expected_head_repo_slug,
-        # Honor the persisted/resolved forge so a bare-slug BitBucket workspace
+        # Honor the persisted/resolved forge so a bare-slug Bitbucket workspace
         # fails fast instead of slipping into the GitHub-only resolver.
         resolved_forge=resolved_forge,
         # A preserved branch PR may have been retargeted after creation.

@@ -1,6 +1,6 @@
-"""Shared ``httpx.MockTransport`` fake for BitBucketClient unit tests.
+"""Shared ``httpx.MockTransport`` fake for BitbucketClient unit tests.
 
-This is the BitBucket parity of the GitHub ``FakeCommandRunner``: instead of canned
+This is the Bitbucket parity of the GitHub ``FakeCommandRunner``: instead of canned
 subprocess output it serves canned HTTP responses keyed by ``(method, path)`` and
 records every request so tests can assert verb/path/body and ``Authorization``
 redaction. Queued responses for the same ``(method, path)`` are served FIFO so a
@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from awf.common.bitbucket_client import BitBucketAuth, BitBucketClient
+from awf.common.bitbucket_client import BitbucketAuth, BitbucketClient
 from awf.common.github_client import RepoRef
 
 _BASE_URL = "https://api.bitbucket.org"
@@ -40,8 +40,8 @@ class RecordingSleep:
         self.delays.append(seconds)
 
 
-class FakeBitBucket:
-    """Queue canned BitBucket responses and capture requests for assertions."""
+class FakeBitbucket:
+    """Queue canned Bitbucket responses and capture requests for assertions."""
 
     def __init__(self) -> None:
         self._routes: dict[tuple[Any, ...], list[_Queued]] = {}
@@ -57,7 +57,7 @@ class FakeBitBucket:
         text: str | None = None,
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
-    ) -> FakeBitBucket:
+    ) -> FakeBitbucket:
         """Queue one response for the next request.
 
         Keyed by ``(method, path)`` by default. When ``params`` is given, the
@@ -84,8 +84,8 @@ class FakeBitBucket:
         next_url: str | None = None,
         headers: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
-    ) -> FakeBitBucket:
-        """Queue one BitBucket paginated page (``{values, next}``)."""
+    ) -> FakeBitbucket:
+        """Queue one Bitbucket paginated page (``{values, next}``)."""
         body: dict[str, Any] = {"values": values}
         if next_url is not None:
             body["next"] = next_url
@@ -123,23 +123,23 @@ class FakeBitBucket:
 
 
 def make_client(
-    fake: FakeBitBucket,
+    fake: FakeBitbucket,
     *,
-    auth: BitBucketAuth | None = None,
+    auth: BitbucketAuth | None = None,
     sleep: RecordingSleep | None = None,
     **kwargs: Any,
-) -> BitBucketClient:
-    """Construct a ``BitBucketClient`` over the fake transport."""
-    return BitBucketClient(
+) -> BitbucketClient:
+    """Construct a ``BitbucketClient`` over the fake transport."""
+    return BitbucketClient(
         client=fake.client(),
-        auth=auth or BitBucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
+        auth=auth or BitbucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
         sleep=sleep or RecordingSleep(),
         **kwargs,
     )
 
 
 def repo() -> RepoRef:
-    """Return a canonical BitBucket ``RepoRef`` for tests."""
+    """Return a canonical Bitbucket ``RepoRef`` for tests."""
     return RepoRef(owner="workspace", name="repo", forge="bitbucket")
 
 
@@ -156,7 +156,7 @@ def pr_payload(
     merge_commit_hash: str | None = None,
     html_url: str = "https://bitbucket.org/workspace/repo/pull-requests/42",
 ) -> dict[str, Any]:
-    """Build a BitBucket PR GET payload."""
+    """Build a Bitbucket PR GET payload."""
     branch: dict[str, Any] = {"name": dest_branch}
     if merge_strategies is not None:
         branch["merge_strategies"] = merge_strategies

@@ -4,7 +4,7 @@ PR creation is forge-neutral (issue #451): ``push_and_open`` does a forge-neutra
 ``git push`` and then routes the PR-open step through an injected
 :class:`~awf.common.forge.ForgeClient`. GitHub workspaces pass a real
 :class:`~awf.common.github_client.GitHubClient` (exercising the full ``gh`` path);
-BitBucket and error paths use a recording/​raising fake forge client.
+Bitbucket and error paths use a recording/​raising fake forge client.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import pytest
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
     BITBUCKET_AUTH_NOT_CONFIGURED,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, RepoRef
@@ -149,7 +149,7 @@ class TestPushAndOpen:
 
     @pytest.mark.unit
     async def test_opens_pr_on_bitbucket_via_forge_client(self) -> None:
-        # R-bb: a BitBucket workspace opens its PR via the forge client; the
+        # R-bb: a Bitbucket workspace opens its PR via the forge client; the
         # returned URL is used verbatim (no github-shaped regex parse) and no
         # `gh pr create` command hits the runner.
         runner = FakeCommandRunner()
@@ -182,14 +182,14 @@ class TestPushAndOpen:
 
     @pytest.mark.unit
     async def test_bitbucket_failure_raises_pull_request_error(self) -> None:
-        # R-err-bb: a BitBucketClientError maps to PullRequestError with the HTTP
+        # R-err-bb: a BitbucketClientError maps to PullRequestError with the HTTP
         # status as returncode, redacted body as stderr, and head_sha preserved.
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=0)  # git push
 
         forge = _FakeForgeClient(
-            error=BitBucketClientError(
+            error=BitbucketClientError(
                 operation="bitbucket create_pull_request",
                 status=403,
                 body="forbidden",
@@ -210,12 +210,12 @@ class TestPushAndOpen:
         assert exc.value.returncode == 403
         assert exc.value.head_sha == "abc123def4567890"
         assert "forbidden" in exc.value.stderr
-        # The BitBucketClientError's default reason_code flows through verbatim.
+        # The BitbucketClientError's default reason_code flows through verbatim.
         assert exc.value.reason_code == BITBUCKET_API_ERROR
 
     @pytest.mark.unit
     async def test_bitbucket_failure_preserves_actionable_reason_code(self) -> None:
-        # PRRT_kwDOSJAM6s6HqvLL: a BitBucketClientError carrying an actionable
+        # PRRT_kwDOSJAM6s6HqvLL: a BitbucketClientError carrying an actionable
         # reason_code (auth / rate-limit / transport) must propagate it onto the
         # PullRequestError so the executor records the specific doctor guidance
         # instead of a generic PR_CREATE_FAILED.
@@ -224,7 +224,7 @@ class TestPushAndOpen:
         runner.queue_result(returncode=0)  # git push
 
         forge = _FakeForgeClient(
-            error=BitBucketClientError(
+            error=BitbucketClientError(
                 operation="bitbucket create_pull_request",
                 status=401,
                 body="BITBUCKET_API_TOKEN is required.",
@@ -252,7 +252,7 @@ class TestPushAndOpen:
         runner.queue_result(returncode=0)  # git push
 
         forge = _FakeForgeClient(
-            error=BitBucketClientError(
+            error=BitbucketClientError(
                 operation="bitbucket create_pull_request",
                 status=None,
                 body="connection reset",
@@ -369,7 +369,7 @@ class TestPushAndOpen:
     async def test_reuses_existing_pr_without_a_forge_client(self) -> None:
         # Reuse needs no forge client at all: the caller may omit it (passing
         # ``None``) because the reuse path returns after the git push and never
-        # touches the client. This lets the executor skip resolving a BitBucket
+        # touches the client. This lets the executor skip resolving a Bitbucket
         # client (and its env-dependent ``from_env()``) on a reuse push.
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)

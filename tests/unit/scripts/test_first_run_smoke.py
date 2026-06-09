@@ -959,7 +959,7 @@ def _write_release_fixture(dist_dir: Path) -> Path:
         "schema_version": 1,
         "source": {
             "commit": None,
-            "repository": "https://github.com/dimileeh/aira-agent-workspace-fabric",
+            "repository": "https://github.com/dimileeh/agent-workspace-fabric",
             "tag": "v0.1.0",
         },
         "version": "0.1.0",

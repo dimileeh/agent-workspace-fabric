@@ -40,7 +40,7 @@
 set -euo pipefail
 
 PACKAGE="agent-workspace-fabric"
-DEFAULT_REPO_URL="https://github.com/dimileeh/aira-agent-workspace-fabric"
+DEFAULT_REPO_URL="https://github.com/dimileeh/agent-workspace-fabric"
 MANIFEST_BASENAME="awf-install-manifest.json"
 
 # Base dir for AWF host state. Matches the host setup default (~/.awf; see
@@ -1372,7 +1372,7 @@ run_install() {
     say "  awf start"
     say "  awf init <path>"
     say ""
-    say "Quickstart: https://github.com/dimileeh/aira-agent-workspace-fabric/blob/development/docs/QUICKSTART.md"
+    say "Quickstart: https://github.com/dimileeh/agent-workspace-fabric/blob/development/docs/QUICKSTART.md"
 }
 
 main() {

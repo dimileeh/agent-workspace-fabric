@@ -86,7 +86,7 @@ def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
     ``_pr_monitor_factory`` builds the forge client *before* invoking the monitor
     builder, and the runner only releases that client in ``run()``'s ``finally``.
     If the builder raises, ``run()`` never executes, so the freshly built client
-    would otherwise leak — for a ``BitBucketClient`` that strands an ``httpx``
+    would otherwise leak — for a ``BitbucketClient`` that strands an ``httpx``
     connection pool until GC (a ``GitHubClient`` close is a no-op). Closing here
     keeps the per-monitor client's lifecycle bounded on the build-error path too.
 
@@ -216,15 +216,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             else build_release_pr_monitor
         )
         # Build the forge client from the persisted resolved forge (reconstructed,
-        # never re-resolved). github → GitHubClient; bitbucket → BitBucketClient
+        # never re-resolved). github → GitHubClient; bitbucket → BitbucketClient
         # (issue #345). A genuinely-unknown forge raises ForgeNotSupportedError so
         # the monitor build fails fast rather than mis-routing to GitHub. Use
         # concrete_forge_for_repo (not plain concrete_forge) to mirror the
         # executor forge gate: a legacy/missing snapshot normalizes profile.forge
         # to "auto", so fall back to the workspace repo_url's host. Without this,
         # a monitor rebuild that runs before the executor gate on a pre-Phase-1
-        # BitBucket snapshot would silently construct a GitHubClient instead of
-        # routing to BitBucket. This client owns resources (a BitBucketClient holds
+        # Bitbucket snapshot would silently construct a GitHubClient instead of
+        # routing to Bitbucket. This client owns resources (a BitbucketClient holds
         # an httpx connection pool); the monitor runner closes it via gh.aclose()
         # when its run() finishes, so the per-monitor client is not leaked. If the
         # builder below raises before that handoff, run() never closes it, so the
@@ -261,7 +261,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             # The runner takes ownership of ``gh`` and closes it in run()'s
             # finally, but only once the monitor is built. A build failure means
             # run() never executes, so release the freshly built client here to
-            # avoid leaking a BitBucket httpx pool (PRRT_kwDOSJAM6s6HnRTp).
+            # avoid leaking a Bitbucket httpx pool (PRRT_kwDOSJAM6s6HnRTp).
             _release_forge_client_after_build_error(gh)
             raise
 
@@ -408,9 +408,9 @@ def _service_git_environment(host_home: Path, *, github_token: str | None = None
                 ("url.https://github.com/.insteadOf", "git@github.com:"),
             ),
         )
-    # BitBucket git-over-HTTPS auth, host-scoped to bitbucket.org so the GitHub
+    # Bitbucket git-over-HTTPS auth, host-scoped to bitbucket.org so the GitHub
     # path above is byte-for-byte unchanged. Reads the live process environment
-    # (where ``BitBucketClient.from_env`` also reads its credentials) and never
+    # (where ``BitbucketClient.from_env`` also reads its credentials) and never
     # places the token in any returned env value — git invokes the helper, which
     # reads the secret from the environment on demand.
     apply_bitbucket_git_auth(env, os.environ)

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.runtime.logs import WorkspaceLogSink
@@ -103,7 +103,7 @@ async def _resolve_addressed_outdated_threads(
             await self._deps.gh.resolve_thread(thread_id=tid)
         except ForgeClientError as exc:
             # Both forges resolve threads through ``self._deps.gh`` (GitHub or
-            # BitBucket), each raising a ``ForgeClientError`` subclass. Catching
+            # Bitbucket), each raising a ``ForgeClientError`` subclass. Catching
             # the shared base keeps either fault from escaping into the runner's
             # poll loop. Transient blips wait and leave the thread for the next
             # poll (already-resolved races are tolerated by the same broad catch
@@ -111,7 +111,7 @@ async def _resolve_addressed_outdated_threads(
             # permanent audit reason codes stay forge-specific.
             transient_retry_reason = (
                 _BITBUCKET_TRANSIENT_RETRY_REASON
-                if isinstance(exc, BitBucketClientError)
+                if isinstance(exc, BitbucketClientError)
                 else _GITHUB_TRANSIENT_RETRY_REASON
             )
             if await self._wait_after_transient_forge_error(
@@ -166,7 +166,7 @@ async def _resolve_addressed_outdated_threads(
             # gate treats an outdated ``needs_human`` thread as a merge blocker
             # (``NotifyHuman``), so the unresolved-but-handled thread surfaces to an
             # operator instead of being silently merged over. ``redacted_detail()``
-            # normalizes the human detail across forges (gh stderr / BitBucket body).
+            # normalizes the human detail across forges (gh stderr / Bitbucket body).
             _log.warning(
                 "monitor.resolve_outdated_thread_failed",
                 thread_id=tid,

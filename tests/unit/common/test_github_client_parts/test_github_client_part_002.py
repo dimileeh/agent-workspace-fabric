@@ -1470,7 +1470,7 @@ async def test_aclose_is_a_noop_and_runs_no_commands() -> None:
     # GitHubClient wraps a stateless command runner, so aclose() owns nothing to
     # release. It exists to satisfy the ForgeClient.aclose contract (issue
     # :4640573294) so callers close any forge client uniformly without branching
-    # on the concrete forge — for a BitBucketClient aclose() releases an httpx
+    # on the concrete forge — for a BitbucketClient aclose() releases an httpx
     # connection pool.
     fake = FakeCommandRunner()
     client = GitHubClient(fake)

@@ -1,4 +1,4 @@
-"""Forge-neutral git-over-HTTPS auth wiring tests (BitBucket Cloud).
+"""Forge-neutral git-over-HTTPS auth wiring tests (Bitbucket Cloud).
 
 Security focus: the Atlassian API token must never appear in a git-config
 value, a clone/push URL, or an error message. The credential helper references
@@ -66,7 +66,7 @@ def test_bitbucket_git_config_entries_reference_env_names_not_token() -> None:
     helper = entries["credential.https://bitbucket.org.helper"]
     # The git username for an Atlassian API token over HTTPS is the fixed
     # account-agnostic sentinel ``x-bitbucket-api-token-auth`` — NOT the email.
-    # BitBucket's git endpoint rejects the email with 401 (the REST API accepts
+    # Bitbucket's git endpoint rejects the email with 401 (the REST API accepts
     # email:token, but git over HTTPS does not). See issue #467.
     assert "x-bitbucket-api-token-auth" in helper
     # The token is still expanded from its env var *name* at git call time.
@@ -268,7 +268,7 @@ def test_bitbucket_askpass_script_emits_token_only_for_bitbucket_host(prompt: st
     "prompt",
     [
         # GIT_ASKPASS is process-wide: a foreign HTTPS host that prompts for
-        # credentials must NOT receive the BitBucket token.
+        # credentials must NOT receive the Bitbucket token.
         "Password for 'https://github.com': ",
         "Password for 'https://x@github.com': ",
         "Password for 'https://gitlab.com/foo': ",

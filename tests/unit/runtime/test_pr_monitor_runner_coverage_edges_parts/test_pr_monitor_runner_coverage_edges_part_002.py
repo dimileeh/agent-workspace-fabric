@@ -12,7 +12,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_AUTH_FAILED,
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TASK_RESOLVE_FORBIDDEN,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
@@ -57,16 +57,16 @@ from tests.unit.runtime._monitor_runner_fixtures import (
 )
 
 
-class _BitBucketResolveThreadClient(DefaultMergeMethodGitHubClient):
-    """Command-based gh double whose ``resolve_thread`` raises a BitBucket error.
+class _BitbucketResolveThreadClient(DefaultMergeMethodGitHubClient):
+    """Command-based gh double whose ``resolve_thread`` raises a Bitbucket error.
 
-    A BitBucket workspace's ``self._deps.gh`` is a ``BitBucketClient`` that raises
-    ``BitBucketClientError`` (not ``GitHubClientError``) from ``resolve_thread``.
+    A Bitbucket workspace's ``self._deps.gh`` is a ``BitbucketClient`` that raises
+    ``BitbucketClientError`` (not ``GitHubClientError``) from ``resolve_thread``.
     Overriding only that method keeps the push/settle-poll flow command-based while
-    exercising the fix cycle's forge-neutral BitBucket resolve arm.
+    exercising the fix cycle's forge-neutral Bitbucket resolve arm.
     """
 
-    def __init__(self, runner: FakeCommandRunner, exc: BitBucketClientError) -> None:
+    def __init__(self, runner: FakeCommandRunner, exc: BitbucketClientError) -> None:
         super().__init__(runner)
         self._resolve_exc = exc
 
@@ -75,16 +75,16 @@ class _BitBucketResolveThreadClient(DefaultMergeMethodGitHubClient):
         raise self._resolve_exc
 
 
-class _BitBucketSettlePollClient(DefaultMergeMethodGitHubClient):
-    """Command-based gh double whose ``fetch_pr_status`` raises a BitBucket error.
+class _BitbucketSettlePollClient(DefaultMergeMethodGitHubClient):
+    """Command-based gh double whose ``fetch_pr_status`` raises a Bitbucket error.
 
-    A BitBucket workspace's ``self._deps.gh`` is a ``BitBucketClient`` that raises
-    ``BitBucketClientError`` (not ``GitHubClientError``) from ``fetch_pr_status``.
+    A Bitbucket workspace's ``self._deps.gh`` is a ``BitbucketClient`` that raises
+    ``BitbucketClientError`` (not ``GitHubClientError``) from ``fetch_pr_status``.
     Overriding only that method keeps the push/resolve flow command-based while
-    exercising the fix cycle's settle re-poll BitBucket arm.
+    exercising the fix cycle's settle re-poll Bitbucket arm.
     """
 
-    def __init__(self, runner: FakeCommandRunner, exc: BitBucketClientError) -> None:
+    def __init__(self, runner: FakeCommandRunner, exc: BitbucketClientError) -> None:
         super().__init__(runner)
         self._fetch_exc = exc
 
@@ -95,16 +95,16 @@ class _BitBucketSettlePollClient(DefaultMergeMethodGitHubClient):
         raise self._fetch_exc
 
 
-class _BitBucketPostCommentClient(DefaultMergeMethodGitHubClient):
-    """Command-based gh double whose ``post_comment`` raises a BitBucket error.
+class _BitbucketPostCommentClient(DefaultMergeMethodGitHubClient):
+    """Command-based gh double whose ``post_comment`` raises a Bitbucket error.
 
-    A BitBucket workspace's ``self._deps.gh`` is a ``BitBucketClient`` that raises
-    ``BitBucketClientError`` (not ``GitHubClientError``) from ``post_comment``.
+    A Bitbucket workspace's ``self._deps.gh`` is a ``BitbucketClient`` that raises
+    ``BitbucketClientError`` (not ``GitHubClientError``) from ``post_comment``.
     Overriding only that method keeps the rest of the flow command-based while
-    exercising the human-notification BitBucket arms.
+    exercising the human-notification Bitbucket arms.
     """
 
-    def __init__(self, runner: FakeCommandRunner, exc: BitBucketClientError) -> None:
+    def __init__(self, runner: FakeCommandRunner, exc: BitbucketClientError) -> None:
         super().__init__(runner)
         self._post_comment_exc = exc
 
@@ -418,8 +418,8 @@ async def test_transient_bitbucket_human_notification_comment_error_retries(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # A BitBucket workspace posts the NotifyHuman comment through BitBucketClient,
-    # whose post_comment raises BitBucketClientError (not GitHubClientError). A
+    # A Bitbucket workspace posts the NotifyHuman comment through BitbucketClient,
+    # whose post_comment raises BitbucketClientError (not GitHubClientError). A
     # transient blip (rate limit) must wait and keep polling instead of escaping
     # _execute uncaught — mirroring the GitHub transient arm.
     workspace_id = await seed_monitoring_workspace(factory)
@@ -431,9 +431,9 @@ async def test_transient_bitbucket_human_notification_comment_error_retries(
         adapter=FakeAdapter(),
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketPostCommentClient(
+        gh=_BitbucketPostCommentClient(
             cmd,
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket post_comment",
                 status=429,
                 body="rate limited",
@@ -482,7 +482,7 @@ async def test_non_transient_bitbucket_human_notification_comment_error_raises(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # A permanent BitBucket fault (403, token lacks the scope) during the
+    # A permanent Bitbucket fault (403, token lacks the scope) during the
     # NotifyHuman comment must propagate like the GitHub non-transient arm rather
     # than being swallowed.
     workspace_id = await seed_monitoring_workspace(factory)
@@ -493,9 +493,9 @@ async def test_non_transient_bitbucket_human_notification_comment_error_raises(
         adapter=FakeAdapter(),
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketPostCommentClient(
+        gh=_BitbucketPostCommentClient(
             cmd,
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket post_comment",
                 status=403,
                 body="forbidden: missing scope",
@@ -503,7 +503,7 @@ async def test_non_transient_bitbucket_human_notification_comment_error_raises(
         ),
     )
 
-    with pytest.raises(BitBucketClientError, match="forbidden: missing scope"):
+    with pytest.raises(BitbucketClientError, match="forbidden: missing scope"):
         await runner._execute(
             action=NotifyHuman(message="manual review needed"),
             workspace_id=workspace_id,
@@ -666,9 +666,9 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # BitBucket workspaces resolve threads via BitBucketClient, which raises
-    # BitBucketClientError (not GitHubClientError). A transient blip (rate limit)
-    # must requeue the thread and keep the monitor polling — without the BitBucket
+    # Bitbucket workspaces resolve threads via BitbucketClient, which raises
+    # BitbucketClientError (not GitHubClientError). A transient blip (rate limit)
+    # must requeue the thread and keep the monitor polling — without the Bitbucket
     # resolve arm the error escapes the fix cycle and the runner terminates the
     # workspace instead of re-addressing the still-open thread.
     workspace_id = await seed_monitoring_workspace(factory)
@@ -685,9 +685,9 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
         adapter=adapter,
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketResolveThreadClient(
+        gh=_BitbucketResolveThreadClient(
             cmd,
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket resolve_thread",
                 status=429,
                 body="rate limited",
@@ -724,7 +724,7 @@ async def test_resolve_thread_transient_bitbucket_failure_requeues_thread_safely
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
-        # Not terminated: the BitBucket resolve fault is handled in-loop.
+        # Not terminated: the Bitbucket resolve fault is handled in-loop.
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         retry_events = [
             event
@@ -757,7 +757,7 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # A permanent BitBucket fault (403, token lacks the scope) during resolve_thread
+    # A permanent Bitbucket fault (403, token lacks the scope) during resolve_thread
     # must forward the forge-native reason code (BITBUCKET_AUTH_FAILED here) and clear
     # the addressed marker WITHOUT escaping the fix cycle — mirroring the GitHub arm's
     # "do NOT drop out of the monitor" behaviour rather than terminating the workspace,
@@ -776,9 +776,9 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
         adapter=adapter,
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketResolveThreadClient(
+        gh=_BitbucketResolveThreadClient(
             cmd,
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket resolve_thread",
                 status=403,
                 body="forbidden: missing scope",
@@ -795,7 +795,7 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     )
     state = MonitorState()
 
-    # No raise: the BitBucket resolve fault is caught and handled in-loop.
+    # No raise: the Bitbucket resolve fault is caught and handled in-loop.
     await runner._run_fix_cycle(
         workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
@@ -848,10 +848,10 @@ async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # BitBucket workspaces re-poll the PR during the settle window via
-    # BitBucketClient, which raises BitBucketClientError (not GitHubClientError).
+    # Bitbucket workspaces re-poll the PR during the settle window via
+    # BitbucketClient, which raises BitbucketClientError (not GitHubClientError).
     # A transient blip must break settle and proceed to push the locally committed
-    # fixes — without the BitBucket settle arm the error escapes _execute and the
+    # fixes — without the Bitbucket settle arm the error escapes _execute and the
     # runner continues the monitor instead, stranding the committed fixes.
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
@@ -866,9 +866,9 @@ async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
         adapter=adapter,
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketSettlePollClient(
+        gh=_BitbucketSettlePollClient(
             cmd,
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket fetch_pr_status",
                 status=429,
                 body="rate limited",
@@ -909,7 +909,7 @@ async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
-        # Not terminated: the BitBucket settle fault is handled in-loop.
+        # Not terminated: the Bitbucket settle fault is handled in-loop.
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         retry_events = [
             event
@@ -926,7 +926,7 @@ async def test_fix_cycle_reraises_permanent_bitbucket_settle_poll_error(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # A permanent BitBucket fault (403, token lacks the scope) during the settle
+    # A permanent Bitbucket fault (403, token lacks the scope) during the settle
     # re-poll must propagate like the GitHub arm's non-transient branch rather than
     # being swallowed.
     cmd = FakeCommandRunner()
@@ -938,9 +938,9 @@ async def test_fix_cycle_reraises_permanent_bitbucket_settle_poll_error(
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketSettlePollClient(
+        gh=_BitbucketSettlePollClient(
             cmd,
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket fetch_pr_status",
                 status=403,
                 body="forbidden: missing scope",
@@ -955,7 +955,7 @@ async def test_fix_cycle_reraises_permanent_bitbucket_settle_poll_error(
         author="review-bot",
     )
 
-    with pytest.raises(BitBucketClientError, match="forbidden: missing scope"):
+    with pytest.raises(BitbucketClientError, match="forbidden: missing scope"):
         await runner._run_fix_cycle(
             workspace_id="ws_bb_settle_perm",
             repo=RepoRef(owner="dimileeh", name="aira-web"),
@@ -1233,7 +1233,7 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A BitBucket reviewer task whose resolution PUT is forbidden (403) must
+    """A Bitbucket reviewer task whose resolution PUT is forbidden (403) must
     downgrade to ``needs_human`` rather than clear the addressed marker (#445).
 
     Clearing it like a comment thread would re-route the task to AddressComments
@@ -1257,9 +1257,9 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
         adapter=adapter,
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
-        gh=_BitBucketResolveThreadClient(
+        gh=_BitbucketResolveThreadClient(
             cmd,
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket resolve_task",
                 status=403,
                 body="no task-resolution scope",

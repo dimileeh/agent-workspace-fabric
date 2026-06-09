@@ -116,7 +116,7 @@ async def test_run_closes_forge_client_on_exit(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # Regression (issue:4640573294): the per-monitor forge client (a BitBucket
+    # Regression (issue:4640573294): the per-monitor forge client (a Bitbucket
     # client owns an httpx connection pool) must be released when run() finishes,
     # not leaked until GC. run() owns the lifecycle of the client the factory
     # built for it, so it calls gh.aclose() in its finally on every exit path.
@@ -208,7 +208,7 @@ async def test_run_retries_remote_tracking_ref_lock_race_and_completes(
             "'refs/remotes/origin/codex/awf-post-merge-fixes': is at "
             "dffa1db03af61da5db52e16a6e79163c35b88d5d but expected "
             "cc82a8d265b6d63593417a13d3d9507cc0ede8d5\n"
-            "From https://github.com/dimileeh/aira-agent-workspace-fabric\n"
+            "From https://github.com/dimileeh/agent-workspace-fabric\n"
             " ! cc82a8d2..dffa1db0  codex/awf-post-merge-fixes -> "
             "origin/codex/awf-post-merge-fixes  (unable to update local ref)"
         ),

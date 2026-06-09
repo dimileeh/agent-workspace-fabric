@@ -190,7 +190,7 @@ class TestFetchPrStatusCiSignal:
         # GitHubClientError, never degrade to a mergeable no-checks PRStatus that
         # the require_ci opt-out could then merge blind (#469 safety regression).
         # ``_graphql`` raises before ``no_checks_observed`` is ever computed; this
-        # mirrors the BitBucket
+        # mirrors the Bitbucket
         # ``test_fetch_pr_status_statuses_fetch_failure_raises_not_no_checks``.
         fake = FakeCommandRunner()
         fake.queue_result(returncode=1, stderr="rate limited")

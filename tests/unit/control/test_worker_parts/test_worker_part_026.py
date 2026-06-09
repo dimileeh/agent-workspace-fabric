@@ -1126,10 +1126,10 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        # A preserved-active BitBucket workspace must never reach the GitHub-only
+        # A preserved-active Bitbucket workspace must never reach the GitHub-only
         # ``gh pr list`` path: dropping the forge would query bitbucket.org's
         # owner/repo as a same-slug GitHub repo and could attach the wrong
-        # monitor. The lookup must fail fast instead. BitBucket Cloud *is* a
+        # monitor. The lookup must fail fast instead. Bitbucket Cloud *is* a
         # supported forge (issue #345 Part 2), so the reason code must be the
         # honest ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` (the resolver is
         # GitHub-only), NOT the generic ``FORGE_NOT_SUPPORTED`` whose fix text
@@ -1160,7 +1160,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
             "failure": "open_pr_resolver_forge_not_supported",
             "source": "open_pr_resolver",
         }
-        # The GitHub-only resolver must never be queried for a BitBucket repo.
+        # The GitHub-only resolver must never be queried for a Bitbucket repo.
         assert resolver.calls == []
 
     @pytest.mark.unit
@@ -1168,9 +1168,9 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
         self,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        # A BitBucket workspace configured with ``forge: bitbucket`` but a bare
+        # A Bitbucket workspace configured with ``forge: bitbucket`` but a bare
         # ``owner/repo`` slug has no host, so ``detect_forge_from_url`` resolves it
-        # as GitHub. URL detection alone would let this BitBucket workspace reach
+        # as GitHub. URL detection alone would let this Bitbucket workspace reach
         # the GitHub-only resolver and attach a same-slug GitHub PR. The gate must
         # honor the persisted/resolved forge first and fail fast instead.
         branch_name = "awf/ws_branch"
@@ -1200,7 +1200,7 @@ class TestRunOnceStaleActiveExecutionRecoveryPart011:
             "failure": "open_pr_resolver_forge_not_supported",
             "source": "open_pr_resolver",
         }
-        # The GitHub-only resolver must never be queried for a BitBucket repo.
+        # The GitHub-only resolver must never be queried for a Bitbucket repo.
         assert resolver.calls == []
 
     @pytest.mark.unit

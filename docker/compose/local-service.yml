@@ -41,8 +41,8 @@ x-awf-service: &awf-service
     AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
     GH_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
     GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
-    # BitBucket Cloud credentials (Atlassian API token). Consumed by the REST
-    # ForgeClient (BitBucketAuth.from_env) and by git over HTTPS for bitbucket.org
+    # Bitbucket Cloud credentials (Atlassian API token). Consumed by the REST
+    # ForgeClient (BitbucketAuth.from_env) and by git over HTTPS for bitbucket.org
     # repos (clone + push). Default empty so GitHub-only setups are unaffected.
     BITBUCKET_API_TOKEN: ${BITBUCKET_API_TOKEN:-}
     BITBUCKET_EMAIL: ${BITBUCKET_EMAIL:-}

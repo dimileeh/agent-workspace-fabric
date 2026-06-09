@@ -1,20 +1,20 @@
-"""BitBucket Cloud client — REST API v2.0 over an injected ``httpx.AsyncClient``.
+"""Bitbucket Cloud client — REST API v2.0 over an injected ``httpx.AsyncClient``.
 
 The provider-neutral ``ForgeClient`` peer of ``GitHubClient`` (issue #345 Part 2).
-Where GitHub shells out to ``gh`` through an ``AsyncCommandRunner``, BitBucket Cloud
+Where GitHub shells out to ``gh`` through an ``AsyncCommandRunner``, Bitbucket Cloud
 has no first-party CLI for these operations, so this client talks HTTPS directly via
 an injected ``httpx.AsyncClient``. Tests inject ``httpx.MockTransport`` and queue
-canned responses — the BitBucket parity of the GitHub ``FakeCommandRunner`` seam.
+canned responses — the Bitbucket parity of the GitHub ``FakeCommandRunner`` seam.
 
 Architecture decisions (issue #345, locked):
 
 * **D1 transport = httpx.** ``__init__`` takes the client + auth; :meth:`from_env`
   builds the production client (``https://api.bitbucket.org``) and auth.
 * **D2 shared ``_request``** with exponential backoff honoring ``Retry-After`` on
-  HTTP 429, full cursor pagination following BitBucket's ``next`` links, ETag /
+  HTTP 429, full cursor pagination following Bitbucket's ``next`` links, ETag /
   ``If-None-Match`` conditional requests (304 → cached body) on cacheable GETs, and a
   proactive slow-down when ``X-RateLimit-NearLimit`` is set. The ETag cache is bounded
-  and keyed per ``(method, path, params)`` (i.e. per repo/PR/resource). BitBucket rate
+  and keyed per ``(method, path, params)`` (i.e. per repo/PR/resource). Bitbucket rate
   limits are per user/token, not per repo.
 * **D6 auth = explicit credential mode.** ``basic`` (``email:api_token``) or ``bearer``
   (``Authorization: Bearer <token>``); app passwords are NOT supported. The token is
@@ -23,7 +23,7 @@ Architecture decisions (issue #345, locked):
 
 Several ``ForgeClient`` methods (``resolve_thread``, ``create_issue``,
 ``fetch_repo_merge_methods``, ``fetch_branch_*``) carry no PR context in their
-signatures. BitBucket needs it, so ``fetch_pr_status`` remembers per-repo PR context
+signatures. Bitbucket needs it, so ``fetch_pr_status`` remembers per-repo PR context
 (branches, commits, merge strategies) on the instance, and ``resolve_thread`` recovers
 repo/PR/comment from the neutral ``thread_id`` string those statuses encode.
 """
@@ -54,8 +54,8 @@ from awf.common.bitbucket_client_errors import (
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TASK_RESOLVE_FORBIDDEN,
     BITBUCKET_TRANSPORT_ERROR,
-    BitBucketAuth,
-    BitBucketClientError,
+    BitbucketAuth,
+    BitbucketClientError,
     _is_bitbucket_merge_in_progress_body,
 )
 from awf.common.bitbucket_client_parsing import (
@@ -98,7 +98,7 @@ from awf.runtime.pr_monitor import CheckFailure, PRStatus
 
 _log = get_logger(__name__)
 
-# Public surface. ``BitBucketClientError``, ``BitBucketAuth``, and the reason codes
+# Public surface. ``BitbucketClientError``, ``BitbucketAuth``, and the reason codes
 # now live in ``bitbucket_client_errors`` (file-size guardrail); re-export them here so
 # ``from awf.common.bitbucket_client import …`` keeps working and mypy treats them as
 # explicit exports.
@@ -117,9 +117,9 @@ __all__ = [
     "BITBUCKET_RATE_LIMITED",
     "BITBUCKET_TASK_RESOLVE_FORBIDDEN",
     "BITBUCKET_TRANSPORT_ERROR",
-    "BitBucketAuth",
-    "BitBucketClient",
-    "BitBucketClientError",
+    "BitbucketAuth",
+    "BitbucketClient",
+    "BitbucketClientError",
 ]
 
 _DEFAULT_BASE_URL = "https://api.bitbucket.org"
@@ -138,7 +138,7 @@ _DEFAULT_MAX_PAGES = 50
 # origin-checked first). A single hop is the documented shape — the cap only bounds a
 # degraded/adversarial redirect chain.
 _DEFAULT_MAX_REDIRECTS = 5
-# BitBucket Cloud performs every merge asynchronously: a fast merge answers 200 with
+# Bitbucket Cloud performs every merge asynchronously: a fast merge answers 200 with
 # the merged PR, but a slow one answers 202 with a ``Location`` header pointing at
 # ``merge/task-status/{task_id}`` that must be polled to a terminal status. These bound
 # that poll loop so a stuck task cannot hang the monitor.
@@ -146,13 +146,13 @@ _DEFAULT_MAX_MERGE_POLLS = 30
 _DEFAULT_MERGE_POLL_DELAY_SECONDS = 2.0
 
 
-class BitBucketClient:
-    """Stateful façade over BitBucket Cloud REST v2.0. Re-entrant per repo."""
+class BitbucketClient:
+    """Stateful façade over Bitbucket Cloud REST v2.0. Re-entrant per repo."""
 
     def __init__(
         self,
         client: httpx.AsyncClient,
-        auth: BitBucketAuth,
+        auth: BitbucketAuth,
         *,
         sleep: Any = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
@@ -190,10 +190,10 @@ class BitBucketClient:
             self._sleep = sleep
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> BitBucketClient:
-        """Build the production client + auth from the BitBucket env contract."""
+    def from_env(cls, env: Mapping[str, str] | None = None) -> BitbucketClient:
+        """Build the production client + auth from the Bitbucket env contract."""
         resolved_env = os.environ if env is None else env
-        auth = BitBucketAuth.from_env(resolved_env)
+        auth = BitbucketAuth.from_env(resolved_env)
         client = httpx.AsyncClient(base_url=_DEFAULT_BASE_URL, timeout=_DEFAULT_TIMEOUT)
         return cls(client=client, auth=auth)
 
@@ -206,7 +206,7 @@ class BitBucketClient:
         """
         await self._client.aclose()
 
-    async def __aenter__(self) -> BitBucketClient:
+    async def __aenter__(self) -> BitbucketClient:
         """Enter an ``async with`` block, returning this client unchanged."""
         return self
 
@@ -240,10 +240,10 @@ class BitBucketClient:
         )
         url = html_href(data)
         if url is None:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket create_pull_request",
                 status=None,
-                body="BitBucket create-PR response omitted links.html.href",
+                body="Bitbucket create-PR response omitted links.html.href",
             )
         return url
 
@@ -257,7 +257,7 @@ class BitBucketClient:
         """Assemble a ``PRStatus`` from the PR, commit statuses, and comments.
 
         ``base_behind_count`` is computed by the caller (local git), matching the
-        GitHub contract — BitBucket Cloud has no GitHub-style merge-state signal.
+        GitHub contract — Bitbucket Cloud has no GitHub-style merge-state signal.
         """
         pr = await self._request_json(
             "GET",
@@ -266,19 +266,19 @@ class BitBucketClient:
             cache=True,
         )
         if not isinstance(pr, dict):
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket fetch_pr_status",
                 status=None,
                 body=f"PR {repo.slug()}#{pr_number} not found",
             )
         head_sha = self._pr_head_sha(pr)
         if head_sha is None:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket fetch_pr_status",
                 status=None,
                 body=f"PR {repo.slug()}#{pr_number} has no source commit hash",
             )
-        # BitBucket Cloud serves ``source.commit.hash`` in the abbreviated 12-char
+        # Bitbucket Cloud serves ``source.commit.hash`` in the abbreviated 12-char
         # form, but AWF's pre-merge validation-provenance gate matches the PR head
         # against the full 40-char ``ValidationRun.target_head_sha`` by exact
         # equality (#477). Resolve the full hash here so an abbreviated SHA never
@@ -353,7 +353,7 @@ class BitBucketClient:
             ci_failures=(),  # populated by fetch_failing_check_logs when needed
             checks=parse_check_timings(statuses),
             # Authoritative "no checks observed": the commit-statuses list was
-            # fully paginated above, so an empty list means BitBucket reported
+            # fully paginated above, so an empty list means Bitbucket reported
             # zero commit statuses for this head (for example Pipelines disabled).
             no_checks_observed=not statuses,
             changed_paths=extract_diffstat_paths(diffstat),
@@ -380,11 +380,11 @@ class BitBucketClient:
         log_tail_chars: int = 3000,
         pytest_fallback_commands: Sequence[str] = (),
     ) -> tuple[CheckFailure, ...]:
-        """Fetch logs for failing checks via the BitBucket pipeline-lookup chain.
+        """Fetch logs for failing checks via the Bitbucket pipeline-lookup chain.
 
         Commit statuses do not carry pipeline/step UUIDs, so for FAILED statuses we
         locate the pipeline by commit, find its failing steps, and tail each step
-        log. External (non-Pipelines) failing statuses have no BitBucket logs and
+        log. External (non-Pipelines) failing statuses have no Bitbucket logs and
         fall back to ``pytest_fallback_commands`` (same evidence path as GitHub).
         """
         ctx = self._pr_context.get(repo.slug())
@@ -459,11 +459,11 @@ class BitBucketClient:
         self,
         *,
         repo: RepoRef,
-        run_id: str,  # noqa: ARG002 - BitBucket reconstructs the PR target, not a run id
+        run_id: str,  # noqa: ARG002 - Bitbucket reconstructs the PR target, not a run id
     ) -> None:
         """Rerun the PR pipeline.
 
-        BitBucket Cloud has no failed-only rerun API (UI-only), so this reruns the
+        Bitbucket Cloud has no failed-only rerun API (UI-only), so this reruns the
         WHOLE pipeline by reconstructing the ``pipeline_pullrequest_target`` from the
         remembered PR context, emitting ``BITBUCKET_PIPELINE_FULL_RERUN``. If the
         target cannot be safely reconstructed, it emits
@@ -477,11 +477,11 @@ class BitBucketClient:
                 reason_code=BITBUCKET_PIPELINE_NOT_RERUNNABLE,
                 has_context=ctx is not None,
             )
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket rerun_failed_workflow_jobs",
                 status=None,
                 body=(
-                    "BitBucket PR pipeline target could not be reconstructed "
+                    "Bitbucket PR pipeline target could not be reconstructed "
                     "(custom/manual pipeline or missing commit metadata)."
                 ),
                 reason_code=BITBUCKET_PIPELINE_NOT_RERUNNABLE,
@@ -527,10 +527,10 @@ class BitBucketClient:
         try:
             owner, name, pr_number, comment_id = decode_thread_id(thread_id)
         except ValueError as exc:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket resolve_thread",
                 status=None,
-                body=f"unrecognized BitBucket thread id: {thread_id!r}",
+                body=f"unrecognized Bitbucket thread id: {thread_id!r}",
             ) from exc
         path = (
             f"/2.0/repositories/{quote(owner, safe='')}/{quote(name, safe='')}"
@@ -564,9 +564,9 @@ class BitBucketClient:
                 operation="bitbucket resolve_task",
                 json_body={"state": "RESOLVED"},
             )
-        except BitBucketClientError as exc:
+        except BitbucketClientError as exc:
             if exc.status == 403:
-                raise BitBucketClientError(
+                raise BitbucketClientError(
                     operation="bitbucket resolve_task",
                     status=exc.status,
                     body=exc.body,
@@ -590,7 +590,7 @@ class BitBucketClient:
         content as a PR comment (using remembered PR context), returning that comment
         URL and emitting ``BITBUCKET_ISSUE_TRACKER_DISABLED``. If that fallback POST
         also fails (e.g. a 403 lacking comment permission), or there is no remembered
-        PR context to comment on, the ``BitBucketClientError`` propagates rather than
+        PR context to comment on, the ``BitbucketClientError`` propagates rather than
         returning a PR- or issues-page URL: nothing durable was captured, so the
         deferred-capture caller must treat it as a failure and downgrade to human
         attention instead of resolving the thread (fail safe, mirroring the GitHub path).
@@ -605,7 +605,7 @@ class BitBucketClient:
                 operation="bitbucket create_issue",
                 json_body={"title": title, "content": {"raw": body}},
             )
-        except BitBucketClientError as exc:
+        except BitbucketClientError as exc:
             if exc.status == 404:
                 return await self._issue_fallback_to_comment(repo, title, body)
             raise
@@ -619,7 +619,7 @@ class BitBucketClient:
     async def fetch_repo_merge_methods(self, *, repo: RepoRef) -> tuple[str, ...]:
         """Return enabled merge methods from the remembered PR destination branch.
 
-        The BitBucket repo object does not expose merge settings, so these come from
+        The Bitbucket repo object does not expose merge settings, so these come from
         the PR's ``destination.branch.merge_strategies`` captured by
         ``fetch_pr_status``, falling back to ``default_merge_strategy`` when the
         explicit list is absent or empty. Without any PR context (no prior status
@@ -639,14 +639,14 @@ class BitBucketClient:
         self,
         *,
         repo: RepoRef,
-        branch: str,  # noqa: ARG002 - BitBucket strategies come from the PR dest branch
+        branch: str,  # noqa: ARG002 - Bitbucket strategies come from the PR dest branch
     ) -> tuple[str, ...] | None:
         """Return base-branch merge-method constraints, or ``None`` without PR context.
 
-        BitBucket models this as the destination branch's ``merge_strategies`` (NOT
+        Bitbucket models this as the destination branch's ``merge_strategies`` (NOT
         branch-restrictions, which are permissions/merge-checks), falling back to
         ``default_merge_strategy`` when that list is absent or empty. Absent both →
-        BitBucket Cloud's default allowed set (an unrestricted repo enumerates no
+        Bitbucket Cloud's default allowed set (an unrestricted repo enumerates no
         strategies but allows all three, #479); ``None`` only without PR context.
         """
         ctx = self._pr_context.get(repo.slug())
@@ -664,20 +664,20 @@ class BitBucketClient:
     ) -> str:
         """Merge a PR with the given method and return the merge commit hash.
 
-        BitBucket Cloud runs every merge asynchronously: a fast merge answers 200
+        Bitbucket Cloud runs every merge asynchronously: a fast merge answers 200
         with the merged PR object, but a slow one answers 202 Accepted with a
         ``Location`` header pointing at ``merge/task-status/{task_id}`` and no
         ``merge_commit.hash`` yet. That 202 path is polled to a terminal task
         status before deciding success/failure — otherwise a valid long-running
-        merge would be misrecorded as a missing-hash ``BitBucketClientError`` even
-        though BitBucket may still complete it.
+        merge would be misrecorded as a missing-hash ``BitbucketClientError`` even
+        though Bitbucket may still complete it.
         """
         strategy = bb_merge_strategy_for_method(method)
         if strategy is None:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket merge_pr",
                 status=None,
-                body=f"unsupported merge method for BitBucket: {method!r}",
+                body=f"unsupported merge method for Bitbucket: {method!r}",
                 reason_code=BITBUCKET_MERGE_METHOD_UNSUPPORTED,
             )
         merge_path = f"{self._pr_path(repo, pr_number)}/merge"
@@ -688,9 +688,9 @@ class BitBucketClient:
                 operation="bitbucket merge_pr",
                 json_body={"merge_strategy": strategy, "close_source_branch": delete_branch},
             )
-        except BitBucketClientError as exc:
+        except BitbucketClientError as exc:
             if exc.status == 409 and _is_bitbucket_merge_in_progress_body(exc.body):
-                # A 409 whose body marks an in-flight merge means BitBucket already
+                # A 409 whose body marks an in-flight merge means Bitbucket already
                 # has a merge running for this PR — typically a prior 202 async
                 # merge whose task-status poll was interrupted by a transient fault
                 # and re-issued when the monitor re-entered the loop — or that the PR
@@ -698,12 +698,12 @@ class BitBucketClient:
                 # ``BITBUCKET_MERGE_IN_PROGRESS`` reason so the monitor waits and
                 # re-polls ``fetch_pr_status`` — observing the eventual MERGED state
                 # — instead of terminating the workspace on a merge that may still be
-                # completing. BitBucket overloads 409 for non-recoverable failures
+                # completing. Bitbucket overloads 409 for non-recoverable failures
                 # too (conflicts, unmet merge checks); those lack the in-progress
                 # signal and fall through to the deterministic ``raise`` below so
                 # they surface ``BITBUCKET_API_ERROR`` and notify a human rather
                 # than polling forever.
-                raise BitBucketClientError(
+                raise BitbucketClientError(
                     operation="bitbucket merge_pr",
                     status=exc.status,
                     body=exc.body,
@@ -722,18 +722,18 @@ class BitBucketClient:
         # A terminal merge that returns no commit hash is an unusable payload: a
         # silent ``""`` would be recorded downstream as a successful merge with an
         # empty marker. Raise instead so the miss is diagnosable and routes through
-        # the monitor's BitBucketClientError handling rather than masking success.
-        raise BitBucketClientError(
+        # the monitor's BitbucketClientError handling rather than masking success.
+        raise BitbucketClientError(
             operation="bitbucket merge_pr",
             status=None,
-            body="BitBucket merge response omitted merge_commit.hash",
+            body="Bitbucket merge response omitted merge_commit.hash",
         )
 
     async def _poll_merge_task(self, response: httpx.Response, merge_path: str) -> Any:
         """Poll an async (202) merge task until it reaches a terminal status.
 
         Returns the ``merge_result`` PR object on ``SUCCESS``; raises a
-        ``BitBucketClientError`` if the task reports a non-success terminal status,
+        ``BitbucketClientError`` if the task reports a non-success terminal status,
         answers with an error envelope (a failed merge — conflict, unmet merge
         checks), or does not complete within the bounded poll budget. The poll loop
         is bounded so a stuck task cannot hang the monitor.
@@ -761,7 +761,7 @@ class BitBucketClient:
             if task_status == "SUCCESS":
                 return merge_result
             if not task_status and isinstance(error_envelope, dict):
-                # A failed BitBucket async merge (conflict, unmet merge checks)
+                # A failed Bitbucket async merge (conflict, unmet merge checks)
                 # answers the task-status endpoint with an error envelope instead of
                 # a ``task_status`` value (per Atlassian's task-status contract). An
                 # HTTP-level error would already have raised in ``_request``; a 200
@@ -773,10 +773,10 @@ class BitBucketClient:
                 # same reason as the non-success and timeout branches below.
                 message = _clean_optional_str(error_envelope.get("message"))
                 detail = f": {message}" if message else ""
-                raise BitBucketClientError(
+                raise BitbucketClientError(
                     operation=operation,
                     status=None,
-                    body=f"BitBucket merge task reported an error{detail}",
+                    body=f"Bitbucket merge task reported an error{detail}",
                 )
             if task_status and task_status != "PENDING":
                 # ``response`` is the original 202 POST; the poll GET that surfaced
@@ -785,20 +785,20 @@ class BitBucketClient:
                 # as ``status=202`` and make it indistinguishable from a poll-budget
                 # timeout. The diagnostic signal is the task status itself, so omit
                 # the HTTP status (rendered ``n/a``) and carry ``task_status`` in the body.
-                raise BitBucketClientError(
+                raise BitbucketClientError(
                     operation=operation,
                     status=None,
-                    body=f"BitBucket merge task ended in non-success status {task_status!r}",
+                    body=f"Bitbucket merge task ended in non-success status {task_status!r}",
                 )
         # ``response`` is the original 202 merge POST, not the final poll: reusing
         # ``response.status_code`` would label a poll-budget timeout ``status=202``,
         # indistinguishable from a 202 Accepted and from a non-success terminal status
         # (which already omits the HTTP status above). Omit it (rendered ``n/a``); the
         # diagnostic signal is the exhausted poll budget carried in the body.
-        raise BitBucketClientError(
+        raise BitbucketClientError(
             operation=operation,
             status=None,
-            body=f"BitBucket merge task did not complete within {self._max_merge_polls} polls",
+            body=f"Bitbucket merge task did not complete within {self._max_merge_polls} polls",
             reason_code=BITBUCKET_MERGE_TASK_TIMEOUT,
         )
 
@@ -819,10 +819,10 @@ class BitBucketClient:
         task_id = _clean_optional_str(body.get("task_id")) if isinstance(body, dict) else None
         if task_id:
             return f"{merge_path}/task-status/{quote(task_id, safe='')}"
-        raise BitBucketClientError(
+        raise BitbucketClientError(
             operation=operation,
             status=response.status_code,
-            body="BitBucket 202 merge response carried no task-status poll location",
+            body="Bitbucket 202 merge response carried no task-status poll location",
         )
 
     # ── Pipeline-chain internals ───────────────────────────────────────────
@@ -916,7 +916,7 @@ class BitBucketClient:
         status: dict[str, Any],
         pytest_fallback_commands: Sequence[str],
     ) -> CheckFailure:
-        """Build a ``CheckFailure`` for an external status with no BitBucket logs."""
+        """Build a ``CheckFailure`` for an external status with no Bitbucket logs."""
         name = _clean_optional_str(status.get("name") or status.get("key")) or "external-check"
         evidence = extract_ci_failure_evidence(
             "",
@@ -947,7 +947,7 @@ class BitBucketClient:
             # Returning a repo issues-page URL here would let the deferred-capture
             # call site in fix_cycle.py record a capture that never happened and
             # resolve the reviewer's thread, dropping the follow-up. Raise instead
-            # so create_issue propagates and the call site's BitBucketClientError
+            # so create_issue propagates and the call site's BitbucketClientError
             # handler downgrades to needs_human (this fault is non-transient, so it
             # blocks the merge), matching create_issue's documented fail-safe
             # contract — same reasoning as the comment-POST-failure path below.
@@ -962,7 +962,7 @@ class BitBucketClient:
                 reason_code=BITBUCKET_ISSUE_CAPTURE_FAILED,
                 has_pr_context=False,
             )
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket create_issue comment-fallback",
                 status=404,
                 body="issue tracker disabled and no PR context to comment on",
@@ -982,14 +982,14 @@ class BitBucketClient:
                 operation="bitbucket create_issue comment-fallback",
                 json_body={"content": {"raw": comment_body}},
             )
-        except BitBucketClientError as exc:
+        except BitbucketClientError as exc:
             # The fallback POST can itself fail (e.g. 403 when the bot lacks comment
             # permission, or a transport error). Do NOT swallow it: no issue was filed
             # and no comment was posted, so nothing durable was captured. Returning a
             # PR-page URL here would let the deferred-capture call site in fix_cycle.py
             # record a capture that never happened and resolve the reviewer's thread,
             # dropping the follow-up. Propagate instead — create_issue re-raises and the
-            # call site's BitBucketClientError handler requeues transient blips or
+            # call site's BitbucketClientError handler requeues transient blips or
             # downgrades permanent faults to needs_human, matching create_issue's
             # documented fail-safe contract (leave the thread unresolved on failure).
             _log.warning(
@@ -1004,7 +1004,7 @@ class BitBucketClient:
     async def _current_account_id(self) -> str | None:
         """Return the authenticated account id (cached) to filter own comments.
 
-        Propagates ``BitBucketClientError`` instead of swallowing it. A silent
+        Propagates ``BitbucketClientError`` instead of swallowing it. A silent
         ``/2.0/user`` failure leaves ``account_id`` unset, so the comment parsers
         cannot mark ``viewer_did_author`` and AWF's own PR comments look like
         unresolved external feedback — sending the agent into needless comment
@@ -1051,9 +1051,9 @@ class BitBucketClient:
         )
 
     async def _resolve_full_commit_sha(self, repo: RepoRef, sha: str) -> str:
-        """Resolve an abbreviated BitBucket commit hash to its full 40-char SHA.
+        """Resolve an abbreviated Bitbucket commit hash to its full 40-char SHA.
 
-        BitBucket Cloud's PR GET serves ``source.commit.hash`` abbreviated (e.g.
+        Bitbucket Cloud's PR GET serves ``source.commit.hash`` abbreviated (e.g.
         12 chars), but AWF assumes full 40-char SHAs everywhere it matches a head
         (the pre-merge validation-provenance gate compares by exact equality). A
         hash already ``>= 40`` chars is returned unchanged with NO HTTP call; an
@@ -1078,7 +1078,7 @@ class BitBucketClient:
         # head, recording statuses and validation provenance for the WRONG commit
         # and letting the monitor make merge decisions for a different head.
         if resolved is None or len(resolved) < 40 or not resolved.lower().startswith(sha.lower()):
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket resolve_commit_sha",
                 status=None,
                 body=(
@@ -1110,7 +1110,7 @@ class BitBucketClient:
     def _issue_url_from_id(self, data: Any, repo: RepoRef) -> str | None:
         """Build the canonical issue URL from a created issue's numeric ``id``.
 
-        BitBucket's create-issue response carries an integer ``id`` even when it
+        Bitbucket's create-issue response carries an integer ``id`` even when it
         omits ``links.html.href``; deriving ``.../issues/{id}`` from it keeps the
         tracking URL pointing at the specific filed issue instead of the generic
         list. Returns ``None`` when ``data`` is not a dict or lacks a usable id.
@@ -1158,10 +1158,10 @@ class BitBucketClient:
                 if cache_key is not None:
                     self._etag_cache_set(cache_key, cached[0], cached[1])
                 return cached[1]
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation=operation,
                 status=304,
-                body="BitBucket returned 304 without a cached body",
+                body="Bitbucket returned 304 without a cached body",
             )
         parsed = self._parse_json(response, operation)
         if cache_key is not None:
@@ -1178,7 +1178,7 @@ class BitBucketClient:
         params: Mapping[str, str] | None = None,
         cache: bool = False,
     ) -> list[dict[str, Any]]:
-        """Follow BitBucket ``next`` cursor links, collecting all ``values``.
+        """Follow Bitbucket ``next`` cursor links, collecting all ``values``.
 
         The traversal is bounded two ways so a misbehaving or adversarial response
         cannot hang or redirect the monitor: a hard page cap (``max_pages``) and an
@@ -1197,11 +1197,11 @@ class BitBucketClient:
             if not isinstance(next_url, str) or not next_url:
                 break
             if pages >= self._max_pages:
-                raise BitBucketClientError(
+                raise BitbucketClientError(
                     operation=operation,
                     status=None,
                     body=(
-                        f"BitBucket pagination exceeded the {self._max_pages}-page cap; "
+                        f"Bitbucket pagination exceeded the {self._max_pages}-page cap; "
                         "aborting a likely runaway 'next' chain"
                     ),
                     reason_code=BITBUCKET_API_ERROR,
@@ -1218,7 +1218,7 @@ class BitBucketClient:
     def _validate_next_url(self, next_url: str, operation: str) -> None:
         """Reject a cursor ``next`` link that points off the configured forge host.
 
-        BitBucket's ``next`` is an absolute URL that httpx honors verbatim, bypassing
+        Bitbucket's ``next`` is an absolute URL that httpx honors verbatim, bypassing
         ``base_url`` — so a compromised response could steer an authenticated request
         (carrying the ``Authorization`` header) at an internal service (SSRF). A
         relative ``next`` is resolved against the safe ``base_url`` and is allowed.
@@ -1263,11 +1263,11 @@ class BitBucketClient:
         if self._is_forge_origin(url):
             return
         parsed = urlsplit(url)
-        raise BitBucketClientError(
+        raise BitbucketClientError(
             operation=operation,
             status=None,
             body=(
-                f"BitBucket {what} pointed at unexpected origin "
+                f"Bitbucket {what} pointed at unexpected origin "
                 f"{parsed.scheme}://{parsed.hostname}; expected host {self._client.base_url.host}"
             ),
             reason_code=BITBUCKET_API_ERROR,
@@ -1283,17 +1283,17 @@ class BitBucketClient:
     ) -> str:
         """Fetch a raw text body (logs); returns ``""`` on any error response.
 
-        BitBucket's pipeline step-log endpoint answers a documented 307 redirect to an
+        Bitbucket's pipeline step-log endpoint answers a documented 307 redirect to an
         off-origin signed log-storage URL. The shared redirect path origin-checks every
         ``Location`` (SSRF guard) and would reject that hop, so log fetches enable
         ``allow_log_redirect`` to follow it — but the forge ``Authorization`` header is
         stripped before the off-origin hop, so credentials never reach the storage host.
 
         Log fetching is best-effort: a transport timeout/reset on the step-log endpoint
-        or its signed storage redirect raises ``BitBucketClientError``, which is tolerated
+        or its signed storage redirect raises ``BitbucketClientError``, which is tolerated
         the same way a 4xx/5xx response is — by returning ``""``. Without this, the error
         escapes to ``_fetch_status_for_decision``, which treats the whole PR status poll
-        as a transient BitBucket fault and retries indefinitely; a persistent log-storage
+        as a transient Bitbucket fault and retries indefinitely; a persistent log-storage
         outage would then block the monitor from acting on the failing CI.
         """
         try:
@@ -1305,7 +1305,7 @@ class BitBucketClient:
                 strict=False,
                 allow_log_redirect=True,
             )
-        except BitBucketClientError:
+        except BitbucketClientError:
             return ""
         if response.status_code >= 400:
             return ""
@@ -1342,7 +1342,7 @@ class BitBucketClient:
                         method, target, json=json_body, params=target_params, headers=headers
                     )
                 except httpx.RequestError as exc:
-                    raise BitBucketClientError(
+                    raise BitbucketClientError(
                         operation=operation,
                         status=None,
                         body=self._redact(str(exc)),
@@ -1363,11 +1363,11 @@ class BitBucketClient:
             # the Authorization header. ``Location`` already carries the resolved
             # query, so the original params are dropped on the next hop.
             if redirects >= self._max_redirects:
-                raise BitBucketClientError(
+                raise BitbucketClientError(
                     operation=operation,
                     status=None,
                     body=(
-                        f"BitBucket redirects exceeded the {self._max_redirects}-hop cap; "
+                        f"Bitbucket redirects exceeded the {self._max_redirects}-hop cap; "
                         "aborting a likely runaway redirect chain"
                     ),
                     reason_code=BITBUCKET_API_ERROR,
@@ -1380,12 +1380,12 @@ class BitBucketClient:
                 # storage host (the SSRF guard's core concern). The redirected body is
                 # only read as a redacted, truncated log excerpt and never re-acted on.
                 headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
-                # Consume the single-use grant: BitBucket documents exactly ONE
+                # Consume the single-use grant: Bitbucket documents exactly ONE
                 # off-origin storage hop, so any *further* off-origin redirect (a
                 # compromised or adversarial storage host bouncing the now-unauthenticated
                 # client toward an internal/arbitrary target) is anomalous and must hit
                 # the strict ``_assert_forge_origin`` guard below instead of being chased.
-                # ``_request_text`` tolerates the resulting ``BitBucketClientError`` by
+                # ``_request_text`` tolerates the resulting ``BitbucketClientError`` by
                 # returning ``""``, so a genuine multi-hop storage chain degrades to an
                 # empty log rather than an unbounded off-origin redirect chain.
                 log_redirect_allowed = False
@@ -1421,7 +1421,7 @@ class BitBucketClient:
         return float(self._backoff_base_seconds * (2**attempt))
 
     async def _maybe_slow_for_near_limit(self, response: httpx.Response) -> None:
-        """Proactively slow down when BitBucket signals it is near the rate limit."""
+        """Proactively slow down when Bitbucket signals it is near the rate limit."""
         near_limit = response.headers.get("X-RateLimit-NearLimit")
         if near_limit and near_limit.strip().lower() in {"true", "1", "yes"}:
             _log.info("bitbucket.rate_limit_near", delay_seconds=self._near_limit_delay_seconds)
@@ -1435,14 +1435,14 @@ class BitBucketClient:
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation=f"{operation} (json parse)",
                 status=response.status_code,
                 body=self._redact(f"{exc}; body was: {text[:400]}"),
             ) from exc
 
-    def _error_for(self, response: httpx.Response, operation: str) -> BitBucketClientError:
-        """Build a redacted ``BitBucketClientError`` for a non-2xx response.
+    def _error_for(self, response: httpx.Response, operation: str) -> BitbucketClientError:
+        """Build a redacted ``BitbucketClientError`` for a non-2xx response.
 
         A 429 that survives retry exhaustion is mapped to the dedicated
         ``BITBUCKET_RATE_LIMITED`` reason code so quota exhaustion is diagnosably
@@ -1454,7 +1454,7 @@ class BitBucketClient:
             reason = BITBUCKET_RATE_LIMITED
         else:
             reason = BITBUCKET_API_ERROR
-        return BitBucketClientError(
+        return BitbucketClientError(
             operation=operation,
             status=response.status_code,
             body=self._redact(response.text[:_ERROR_BODY_LIMIT]),

@@ -1,4 +1,4 @@
-"""Agent-container BitBucket git-over-HTTPS auth: rendered/launched boundary.
+"""Agent-container Bitbucket git-over-HTTPS auth: rendered/launched boundary.
 
 These tests cover the agent path added for issues #465/#466 (the worker path is
 unchanged). The mechanism is leak-proof by construction: a static ``GIT_ASKPASS``

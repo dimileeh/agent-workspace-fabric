@@ -1,6 +1,6 @@
 """``decide()`` coverage for the operator ``require_ci`` opt-out (#469).
 
-A BitBucket (or any) repo that runs NO CI reports ``check_state=PENDING`` with an
+A Bitbucket (or any) repo that runs NO CI reports ``check_state=PENDING`` with an
 empty status set forever, so the default ``require_ci=True`` keeps the monitor in
 ``WaitForCI("pending_checks")``. When an operator sets ``require_ci=False`` AND the
 forge authoritatively reports an empty check set (``no_checks_observed=True``),

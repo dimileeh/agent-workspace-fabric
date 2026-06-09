@@ -1,6 +1,6 @@
-"""BitBucket reviewer-task gating tests (issue #445).
+"""Bitbucket reviewer-task gating tests (issue #445).
 
-BitBucket exposes reviewer *tasks* separately from comments; a PR with open tasks
+Bitbucket exposes reviewer *tasks* separately from comments; a PR with open tasks
 but no comments must not reach ``Merge``. These cover the ``/tasks`` fetch +
 pagination, task→inline-thread mapping (so the address-comments gate blocks merge
 and routes to AddressComments), the task-discriminated thread-id codec, and the
@@ -15,7 +15,7 @@ import pytest
 
 from awf.common.bitbucket_client import (
     BITBUCKET_TASK_RESOLVE_FORBIDDEN,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.bitbucket_client_parsing import (
     build_unresolved_task_threads,
@@ -25,7 +25,7 @@ from awf.common.bitbucket_client_parsing import (
 )
 from awf.runtime.pr_monitor import Merge, MonitorConfig, MonitorState, decide
 
-from ._helpers import FakeBitBucket, make_client, pr_payload, repo
+from ._helpers import FakeBitbucket, make_client, pr_payload, repo
 
 pytestmark = pytest.mark.unit
 
@@ -52,7 +52,7 @@ def _task(
 
 
 def _seed_fetch_status(
-    fake: FakeBitBucket,
+    fake: FakeBitbucket,
     *,
     comments: list[dict] | None = None,
     tasks: list[dict] | None = None,
@@ -79,7 +79,7 @@ def test_task_id_round_trip() -> None:
 def test_task_id_discriminated_from_comment_thread_id() -> None:
     # A comment thread id (``bb:``) must not be mistaken for a task id.
     assert is_task_thread_id("bb:workspace/repo#42:100") is False
-    with pytest.raises(ValueError, match="Not a BitBucket task id"):
+    with pytest.raises(ValueError, match="Not a Bitbucket task id"):
         decode_task_id("bb:workspace/repo#42:100")
 
 
@@ -126,7 +126,7 @@ def test_viewer_authored_task_is_dropped() -> None:
 
 
 def test_viewer_authored_task_with_uuid_only_creator_is_dropped() -> None:
-    # BitBucket may return a creator carrying only ``uuid`` (no ``account_id``), and
+    # Bitbucket may return a creator carrying only ``uuid`` (no ``account_id``), and
     # the viewer identity itself falls back to ``uuid``. Mirroring the comment identity
     # logic, a self-authored task in that shape must still be dropped — otherwise AWF
     # addresses/re-anchors on its own task.
@@ -161,7 +161,7 @@ def test_empty_and_idless_tasks_are_dropped() -> None:
 
 
 async def test_open_task_without_comments_blocks_merge() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, comments=[], tasks=[_task(7, "please add a test")])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -174,7 +174,7 @@ async def test_open_task_without_comments_blocks_merge() -> None:
 
 
 async def test_tasks_paginate() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("GET", _PR, json=pr_payload())
     fake.page("GET", f"{_REPO}/commit/{_HEAD}/statuses", values=[])
     fake.page("GET", f"{_PR}/comments", values=[])
@@ -194,7 +194,7 @@ async def test_tasks_paginate() -> None:
 
 
 async def test_resolved_task_does_not_block() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     _seed_fetch_status(fake, tasks=[_task(7, "done", state="RESOLVED")])
     client = make_client(fake)
     status = await client.fetch_pr_status(repo=repo(), pr_number=42, base_behind_count=0)
@@ -205,7 +205,7 @@ async def test_resolved_task_does_not_block() -> None:
 
 
 async def test_resolve_task_issues_put_with_resolved_state() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("PUT", f"{_PR}/tasks/7", json={"id": 7, "state": "RESOLVED"})
     client = make_client(fake)
     await client.resolve_thread(thread_id="bbtask:workspace/repo#42:7")
@@ -215,10 +215,10 @@ async def test_resolve_task_issues_put_with_resolved_state() -> None:
 
 
 async def test_resolve_task_forbidden_maps_to_stable_reason_code() -> None:
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("PUT", f"{_PR}/tasks/7", status=403, json={"error": {"message": "no scope"}})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.resolve_thread(thread_id="bbtask:workspace/repo#42:7")
     assert excinfo.value.reason_code == BITBUCKET_TASK_RESOLVE_FORBIDDEN
     assert excinfo.value.status == 403
@@ -228,10 +228,10 @@ async def test_resolve_task_non_forbidden_failure_propagates_unchanged() -> None
     # A non-403 task-resolve failure (e.g. 500) propagates with its original reason
     # code so the fix-cycle treats it like any other resolve fault (transient wait or
     # generic blocker) rather than the task-scope human escalation.
-    fake = FakeBitBucket()
+    fake = FakeBitbucket()
     fake.enqueue("PUT", f"{_PR}/tasks/7", status=500, json={"error": {"message": "boom"}})
     client = make_client(fake)
-    with pytest.raises(BitBucketClientError) as excinfo:
+    with pytest.raises(BitbucketClientError) as excinfo:
         await client.resolve_thread(thread_id="bbtask:workspace/repo#42:7")
     assert excinfo.value.reason_code != BITBUCKET_TASK_RESOLVE_FORBIDDEN
     assert excinfo.value.status == 500

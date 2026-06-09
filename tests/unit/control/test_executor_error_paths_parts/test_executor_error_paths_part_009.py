@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.common.forge import ForgeNotSupportedError
 from awf.control.executor import monitor_handoff as executor_monitor_handoff
@@ -248,7 +248,7 @@ class TestExecutorCoverageEdgesPart003:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """An unsupported forge (e.g. BitBucket) detected while the monitor
+        """An unsupported forge (e.g. Bitbucket) detected while the monitor
         factory builds its forge client must surface as ``FORGE_NOT_SUPPORTED``,
         not the generic ``MONITOR_RECOVERY_FAILED``.
 
@@ -263,7 +263,7 @@ class TestExecutorCoverageEdgesPart003:
         def _factory(*_args: Any) -> object:
             raise ForgeNotSupportedError(
                 message=(
-                    "BitBucket forge support is not yet implemented "
+                    "Bitbucket forge support is not yet implemented "
                     "(issue #345 Phase 1 adds detection only)."
                 )
             )
@@ -279,7 +279,7 @@ class TestExecutorCoverageEdgesPart003:
             assert ws.failure_reason == "infrastructure_failure"
             assert ws.events[-1].reason_code == "FORGE_NOT_SUPPORTED"
             assert "monitor recovery" in (ws.failure_message or "")
-            assert "BitBucket forge support is not yet implemented" in (ws.failure_message or "")
+            assert "Bitbucket forge support is not yet implemented" in (ws.failure_message or "")
             # Must not be flattened into the generic build-failed reason/message.
             assert "failed to build PR monitor" not in (ws.failure_message or "")
             assert not [
@@ -293,16 +293,16 @@ class TestExecutorCoverageEdgesPart003:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """A BitBucket workspace missing credentials raises ``BitBucketClientError``
+        """A Bitbucket workspace missing credentials raises ``BitbucketClientError``
         (e.g. ``BITBUCKET_AUTH_NOT_CONFIGURED``) when the monitor factory builds its
         forge client. The resume path must preserve that actionable auth reason code
         instead of flattening it into the generic ``MONITOR_RECOVERY_FAILED`` —
-        mirroring the initial handoff path's ``BitBucketClientError`` catch.
+        mirroring the initial handoff path's ``BitbucketClientError`` catch.
         """
         ws_id = await _seed_monitoring_pr(factory)
 
         def _factory(*_args: Any) -> object:
-            raise BitBucketClientError(
+            raise BitbucketClientError(
                 operation="bitbucket_client_from_env",
                 status=None,
                 body="BITBUCKET_API_TOKEN/BITBUCKET_EMAIL not configured",

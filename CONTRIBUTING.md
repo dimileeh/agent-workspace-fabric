@@ -61,8 +61,8 @@ explicitly marked as Core work.
 ### Contributor Setup
 
 ```bash
-git clone git@github.com:dimileeh/aira-agent-workspace-fabric.git
-cd aira-agent-workspace-fabric
+git clone git@github.com:dimileeh/agent-workspace-fabric.git
+cd agent-workspace-fabric
 
 uv sync --extra dev
 ```

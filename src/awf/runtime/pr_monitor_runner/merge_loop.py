@@ -11,7 +11,7 @@ from typing import Any, cast
 from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_MERGE_TASK_TIMEOUT,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import GitHubClientError, RepoRef
@@ -59,15 +59,15 @@ from awf.service.merge_queue import MergeQueueBlocker
 
 # ``fast_forward`` is intentionally LAST so squash stays the default and the
 # GitHub precedence (squash > merge > rebase) is unchanged: it only ever wins on a
-# repo/branch policy that allows no other method (e.g. a fast-forward-only BitBucket
+# repo/branch policy that allows no other method (e.g. a fast-forward-only Bitbucket
 # repo, which previously wedged on a spurious MERGE_METHOD_MISMATCH — issue #448).
-# AWF preference wins among allowed strategies; BitBucket's ``default_merge_strategy``
+# AWF preference wins among allowed strategies; Bitbucket's ``default_merge_strategy``
 # is ignored, uniform with GitHub.
 _MERGE_METHOD_PREFERENCE = ("squash", "merge", "rebase", "fast_forward")
 _KNOWN_MERGE_METHODS = frozenset(_MERGE_METHOD_PREFERENCE)
 _MERGE_METHOD_MISMATCH_REASON = "MERGE_METHOD_MISMATCH"
 
-# BitBucket reason codes whose merge attempt is still in flight server-side rather
+# Bitbucket reason codes whose merge attempt is still in flight server-side rather
 # than a deterministic failure: the 409 already-in-progress signal and the exhausted
 # async-merge poll budget. Both are cancelled (never failed) so a later
 # ``fetch_pr_status`` observing the eventual MERGED state can complete the workspace
@@ -92,7 +92,7 @@ class _MergeAttemptResult:
 
     outcome: _MergeAttemptOutcome
     merge_sha: str | None = None
-    blocker: GitHubClientError | BitBucketClientError | None = None
+    blocker: GitHubClientError | BitbucketClientError | None = None
     notification_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -191,7 +191,7 @@ def _merge_method_mismatch_message(
 def _merge_method_preflight_rejection_reason(exc: GitHubClientError) -> str:
     """Build an operator-facing reason for merge-method policy preflight failures.
 
-    Only called with ``GitHubClientError``; ``BitBucketClientError`` has no
+    Only called with ``GitHubClientError``; ``BitbucketClientError`` has no
     ``stderr`` attribute and is handled separately by
     ``_bitbucket_merge_rejection_reason``.
     """
@@ -375,9 +375,9 @@ async def _attempt_merge_method(
                 notification_reason=notification_reason,
             )
         return _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER, blocker=exc)
-    except BitBucketClientError as exc:
-        # BitBucket workspaces merge through ``BitBucketClient.merge_pr``, which
-        # raises ``BitBucketClientError`` (not ``GitHubClientError``) on a
+    except BitbucketClientError as exc:
+        # Bitbucket workspaces merge through ``BitbucketClient.merge_pr``, which
+        # raises ``BitbucketClientError`` (not ``GitHubClientError``) on a
         # deterministic merge failure — branch restrictions, unresolved tasks,
         # missing approvals, or a permanent 4xx. Without this arm the error
         # escapes ``_attempt_merge_method`` and terminates the workspace at the
@@ -385,7 +385,7 @@ async def _attempt_merge_method(
         # of failure as a merge blocker that notifies a human and keeps polling.
         # Mirror that: finish the operation as failed, record the audit event,
         # and return a BLOCKER so the merge-blocker arm waits on transient blips
-        # and otherwise notifies-and-keeps-polling. BitBucket carries no
+        # and otherwise notifies-and-keeps-polling. Bitbucket carries no
         # per-method rejection signal to retry alternative methods against, so
         # every fault is a generic blocker.
         #
@@ -407,7 +407,7 @@ async def _attempt_merge_method(
         # orphan it indefinitely and pollute active-operation/recovery state.
         # Cancel it instead (neither failed nor succeeded — this attempt was
         # superseded by the still-running merge) so it is terminal without
-        # contradicting the eventual completion. Unlike GitHub, BitBucket has a
+        # contradicting the eventual completion. Unlike GitHub, Bitbucket has a
         # transient blocker that later succeeds, so this case is unique to it.
         if exc.reason_code not in _BITBUCKET_IN_FLIGHT_MERGE_REASON_CODES:
             # Forward ``exc.reason_code`` as the primary audit field rather than a
@@ -457,7 +457,7 @@ async def _attempt_merge_method(
                 },
             )
             # Record an audit breadcrumb for the cancellation. Every other merge
-            # arm — GitHub failure, BitBucket deterministic failure, success —
+            # arm — GitHub failure, Bitbucket deterministic failure, success —
             # emits a ``merge_result`` event; without one here a long-running
             # async merge that spans several poll cycles produces a chain of
             # silently cancelled operations, leaving operators unable to tell
@@ -721,10 +721,10 @@ async def handle_merge_action(
         fresh_status: PRStatus | None = None
         merge_sha: str | None = None
         # Keep the explicit two-member union (not the ``ForgeClientError`` base): the
-        # ``else`` arm below narrows ``not isinstance(..., BitBucketClientError)`` to
+        # ``else`` arm below narrows ``not isinstance(..., BitbucketClientError)`` to
         # ``GitHubClientError`` to read ``.stderr``. Collapsing to the base drops that
         # narrowing and fails type-checking.
-        merge_blocker: GitHubClientError | BitBucketClientError | None = None
+        merge_blocker: GitHubClientError | BitbucketClientError | None = None
         merge_method_preflight_error: GitHubClientError | None = None
         merge_method_notification_reason: str | None = None
         recheck_forge_error: ForgeClientError | None = None
@@ -991,11 +991,11 @@ async def handle_merge_action(
                         # Intentionally narrow to ``GitHubClientError`` (not the shared
                         # ``ForgeClientError`` base): ``_resolve_effective_merge_methods``
                         # only reaches the GitHub merge-method endpoints, while
-                        # ``BitBucketClient.fetch_repo_merge_methods`` /
+                        # ``BitbucketClient.fetch_repo_merge_methods`` /
                         # ``fetch_branch_pull_request_allowed_merge_methods`` serve from
                         # cached ``_pr_context`` and never make HTTP calls, so no
-                        # ``BitBucketClientError`` can surface here today. Load-bearing
-                        # invariant: if a BitBucket method is ever changed to make a live
+                        # ``BitbucketClientError`` can surface here today. Load-bearing
+                        # invariant: if a Bitbucket method is ever changed to make a live
                         # request, widen this to ``ForgeClientError`` so the fault still
                         # routes through ``merge_method_preflight_error`` instead of
                         # escaping ``handle_merge_action`` uncaught.
@@ -1212,7 +1212,7 @@ async def handle_merge_action(
             # forward the forge's ``reason_code`` for both forges so the same GitHub
             # fault class persists ``GITHUB_API_ERROR`` here as it does there, rather
             # than this branch decaying GitHub to the ``MONITOR_ABORT`` default while
-            # the other paths preserve it. BitBucket carries its specific code.
+            # the other paths preserve it. Bitbucket carries its specific code.
             if await self._wait_after_transient_forge_error(
                 recheck_forge_error,
                 workspace_id=workspace_id,
@@ -1222,7 +1222,7 @@ async def handle_merge_action(
             ):
                 return False
             forge_label = (
-                "bitbucket" if isinstance(recheck_forge_error, BitBucketClientError) else "github"
+                "bitbucket" if isinstance(recheck_forge_error, BitbucketClientError) else "github"
             )
             await self._terminate_failed(
                 workspace_id,
@@ -1272,7 +1272,7 @@ async def handle_merge_action(
                 # Both forges post the human notification through ``self._deps.gh``;
                 # either raises a ``ForgeClientError`` subclass. A transient blip
                 # waits then keeps polling; a permanent fault re-raises. Catching the
-                # shared base keeps a BitBucket comment failure during the
+                # shared base keeps a Bitbucket comment failure during the
                 # merge-method-preflight rejection notification from escaping
                 # uncaught instead of being retried or surfaced.
                 if await self._wait_after_transient_forge_error(
@@ -1315,8 +1315,8 @@ async def handle_merge_action(
             )
 
         if merge_blocker is not None:
-            if isinstance(merge_blocker, BitBucketClientError):
-                # Recoverable BitBucket blips (rate limit/transport/5xx) wait and
+            if isinstance(merge_blocker, BitbucketClientError):
+                # Recoverable Bitbucket blips (rate limit/transport/5xx) wait and
                 # re-poll; a deterministic merge fault falls through to the
                 # notify-and-keep-polling path, symmetric to the GitHub arm.
                 if await self._wait_after_transient_bitbucket_error(

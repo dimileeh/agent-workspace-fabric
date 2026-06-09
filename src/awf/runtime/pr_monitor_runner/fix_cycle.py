@@ -14,7 +14,7 @@ import time as time
 from pathlib import Path
 from typing import Any, cast
 
-from awf.common.bitbucket_client import BitBucketClientError
+from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.bitbucket_client_parsing import is_task_thread_id
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import (
@@ -329,10 +329,10 @@ async def _run_fix_cycle(
             )
         except ForgeClientError as exc:
             # Both forges re-poll the PR through ``self._deps.gh`` (a GitHub or
-            # BitBucket client); either raises a ``ForgeClientError`` subclass. A
+            # Bitbucket client); either raises a ``ForgeClientError`` subclass. A
             # transient blip during the settle re-poll must wait then break settle
             # (proceed to push the fixes already committed); a permanent fault
-            # re-raises. Catching the shared base means a BitBucket fault can no
+            # re-raises. Catching the shared base means a Bitbucket fault can no
             # longer escape to the runner's outer handler and silently skip the push.
             if await self._wait_after_transient_forge_error(
                 exc,
@@ -489,8 +489,8 @@ async def _run_fix_cycle(
             await self._deps.gh.resolve_thread(thread_id=tid)
         except ForgeClientError as exc:
             # Both forges resolve threads through ``self._deps.gh`` (GitHub or
-            # BitBucket), each raising a ``ForgeClientError`` subclass on API/
-            # transport faults. Catching the shared base keeps a BitBucket fault
+            # Bitbucket), each raising a ``ForgeClientError`` subclass on API/
+            # transport faults. Catching the shared base keeps a Bitbucket fault
             # from escaping ``_execute`` to the runner's generic handler, which
             # would terminate the workspace on a permanent fault instead of keeping
             # the poll loop alive — and would skip the addressed-state rollback, so
@@ -499,11 +499,11 @@ async def _run_fix_cycle(
             # wait and requeue (``continue``); permanent faults clear the addressed
             # marker and record the forge-native ``exc.reason_code`` without dropping
             # out of the monitor. Both the transient-retry and permanent-failure audit
-            # reason codes stay forge-specific so a BitBucket fault keeps its actionable
+            # reason codes stay forge-specific so a Bitbucket fault keeps its actionable
             # code (e.g. ``BITBUCKET_AUTH_FAILED``) instead of a generic placeholder.
             transient_retry_reason = (
                 _BITBUCKET_TRANSIENT_RETRY_REASON
-                if isinstance(exc, BitBucketClientError)
+                if isinstance(exc, BitbucketClientError)
                 else _GITHUB_TRANSIENT_RETRY_REASON
             )
             if await self._wait_after_transient_forge_error(
@@ -515,7 +515,7 @@ async def _run_fix_cycle(
             ):
                 # Transient fault: clear the addressed marker so the next poll
                 # re-attempts the resolve. ``bbtask:`` reviewer tasks clear the same
-                # way as comment threads — the task is still UNRESOLVED on BitBucket
+                # way as comment threads — the task is still UNRESOLVED on Bitbucket
                 # and re-surfaces, so it re-routes through AddressComments and the
                 # agent re-addresses already-handled content (redundant but harmless;
                 # the permanent path below special-cases tasks to needs_human).
@@ -543,20 +543,20 @@ async def _run_fix_cycle(
                 )
                 continue
             # ``redacted_detail()`` normalizes the human detail across forges (gh
-            # stderr / BitBucket body, both already redacted).
+            # stderr / Bitbucket body, both already redacted).
             _log.warning(
                 "monitor.resolve_thread_failed",
                 thread_id=tid,
                 stderr=exc.redacted_detail(),
             )
             if is_task_thread_id(tid):
-                # A BitBucket reviewer task whose resolution PUT failed permanently
+                # A Bitbucket reviewer task whose resolution PUT failed permanently
                 # (e.g. 403 ``BITBUCKET_TASK_RESOLVE_FORBIDDEN`` — the token lacks
                 # task-resolution scope). Clearing the addressed marker like a comment
                 # thread would re-route the task to AddressComments next poll and re-run
                 # the agent forever (a retry storm) against a fault the agent cannot
                 # fix. Instead downgrade the verdict to ``needs_human``: the task stays
-                # UNRESOLVED on BitBucket so the merge gate keeps blocking, decide()
+                # UNRESOLVED on Bitbucket so the merge gate keeps blocking, decide()
                 # routes it to NotifyHuman (not AddressComments), and an operator grants
                 # the scope or resolves the task. The reason code flows into the audit
                 # event so the escalation is diagnosable.
@@ -594,7 +594,7 @@ async def _run_fix_cycle(
                 action="resolve_thread",
                 outcome="failed",
                 # Forward the forge-native reason code (GitHub: GITHUB_API_ERROR;
-                # BitBucket: e.g. BITBUCKET_API_ERROR / BITBUCKET_AUTH_FAILED) so a
+                # Bitbucket: e.g. BITBUCKET_API_ERROR / BITBUCKET_AUTH_FAILED) so a
                 # permanent comment-resolve fault stays diagnosable — matching the
                 # task path above rather than collapsing to a generic placeholder.
                 reason_code=exc.reason_code,
@@ -748,8 +748,8 @@ async def _capture_deferred_review_thread(
     except ForgeClientError as exc:
         # Both forges file the tracking issue through ``self._deps.gh``; either
         # raises a ``ForgeClientError`` subclass (e.g. a 403 when the token lacks
-        # the issues-create scope, which BitBucket cannot fall back to a comment).
-        # Catching the shared base keeps a BitBucket fault from escaping to the
+        # the issues-create scope, which Bitbucket cannot fall back to a comment).
+        # Catching the shared base keeps a Bitbucket fault from escaping to the
         # runner's generic handler and terminating the monitor instead of
         # downgrading to ``needs_human``. Transient blips clear the verdict to
         # re-attempt next poll (``None``); permanent faults downgrade to
@@ -757,7 +757,7 @@ async def _capture_deferred_review_thread(
         # operator is notified. The transient-retry audit reason stays forge-specific.
         transient_retry_reason = (
             _BITBUCKET_TRANSIENT_RETRY_REASON
-            if isinstance(exc, BitBucketClientError)
+            if isinstance(exc, BitbucketClientError)
             else _GITHUB_TRANSIENT_RETRY_REASON
         )
         if await self._wait_after_transient_forge_error(
@@ -790,7 +790,7 @@ async def _capture_deferred_review_thread(
             return None
         # Permanent failure (e.g. token missing the issues scope). ``str(exc)``
         # already redacts; redact again defensively before logging/persisting.
-        # ``redacted_detail()`` normalizes the human detail (gh stderr / BitBucket
+        # ``redacted_detail()`` normalizes the human detail (gh stderr / Bitbucket
         # body) across forges.
         redacted_error = _redact_and_truncate_forge_error(str(exc))
         _log.warning(
@@ -831,7 +831,7 @@ async def _capture_deferred_review_thread(
     except ForgeClientError as exc:
         # The tracking issue is already filed and recorded; this explanatory
         # comment is best-effort courtesy, so a failure on either forge is
-        # swallowed. Catching the shared base keeps a BitBucket fault from escaping
+        # swallowed. Catching the shared base keeps a Bitbucket fault from escaping
         # and terminating the monitor after the durable capture is already done.
         # ``redacted_detail()`` normalizes the human detail across forges.
         _log.warning(

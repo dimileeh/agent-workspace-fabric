@@ -126,8 +126,8 @@ Two layers. For MVP:
 
 2. **Host cron entry** (manual setup, documented in README):
    ```
-   0 */4 * * *  cd ~/Projects/aira-agent-workspace-fabric && .venv/bin/python scripts/schedule_release_pr.py --repo git@github.com:dimileeh/aira-agent.git >> ~/.awf/release-pr.log 2>&1
-   0 */4 * * *  cd ~/Projects/aira-agent-workspace-fabric && .venv/bin/python scripts/schedule_release_pr.py --repo git@github.com:dimileeh/aira-web.git >> ~/.awf/release-pr.log 2>&1
+   0 */4 * * *  cd ~/Projects/agent-workspace-fabric && .venv/bin/python scripts/schedule_release_pr.py --repo git@github.com:dimileeh/aira-agent.git >> ~/.awf/release-pr.log 2>&1
+   0 */4 * * *  cd ~/Projects/agent-workspace-fabric && .venv/bin/python scripts/schedule_release_pr.py --repo git@github.com:dimileeh/aira-web.git >> ~/.awf/release-pr.log 2>&1
    ```
    Every 4 hours, for each repo, fire a `sync_release_pr` workspace.
 

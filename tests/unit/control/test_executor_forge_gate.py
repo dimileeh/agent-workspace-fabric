@@ -1,13 +1,13 @@
 """Executor forge-support gate (issue #345).
 
-Part 1 made a BitBucket workspace fail fast at this gate with
-``FORGE_NOT_SUPPORTED``. Part 2 flips the gate: BitBucket Cloud is now a supported
+Part 1 made a Bitbucket workspace fail fast at this gate with
+``FORGE_NOT_SUPPORTED``. Part 2 flips the gate: Bitbucket Cloud is now a supported
 forge, so ``unsupported_forge_error`` returns ``None`` (the workspace proceeds) for
 github and bitbucket alike, and only fires for a genuinely-unknown forge.
 
 These are focused unit tests of the pure gate decision (``unsupported_forge_error``).
 The earlier end-to-end ``execute()`` fail-fast scenarios are gone because the gate no
-longer trips for bitbucket; full BitBucket monitor execution is gated by the
+longer trips for bitbucket; full Bitbucket monitor execution is gated by the
 forge-neutral-error integration work flagged in the issue #345 Part 2 PR (the
 ``pr_monitor_runner`` still catches ``GitHubClientError`` specifically).
 """
@@ -70,8 +70,8 @@ def test_unknown_forge_still_fails_fast() -> None:
 @pytest.mark.parametrize(
     "resolved_profile, repo_url",
     [
-        # Explicit BitBucket forge, detected BitBucket URL, and a legacy snapshot
-        # whose URL detects as BitBucket all resolve to bitbucket → new-PR gated.
+        # Explicit Bitbucket forge, detected Bitbucket URL, and a legacy snapshot
+        # whose URL detects as Bitbucket all resolve to bitbucket → new-PR gated.
         ({"forge": "bitbucket"}, "git@github.com:owner/repo.git"),
         (None, "git@bitbucket.org:workspace/repo.git"),
         ({}, "https://bitbucket.org/workspace/repo"),
@@ -88,7 +88,7 @@ def test_new_pr_on_bitbucket_without_existing_pr_fails_fast(
 @pytest.mark.unit
 def test_new_pr_with_existing_pr_proceeds_on_bitbucket() -> None:
     # An existing PR is reused via push_and_open without `gh pr create`, so a
-    # BitBucket recovery / sync workspace (pr_url set) is never gated.
+    # Bitbucket recovery / sync workspace (pr_url set) is never gated.
     ws = _new_pr_ws(
         {"forge": "bitbucket"},
         "git@bitbucket.org:workspace/repo.git",

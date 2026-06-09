@@ -454,7 +454,7 @@ class TestGetDirect:
         session: AsyncSession,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        """WorkspaceResponse must include pr_number so the console can show it for BitBucket PRs."""
+        """WorkspaceResponse must include pr_number so the console can show it for Bitbucket PRs."""
         created = await create_workspace(
             payload=_payload(
                 provider_readiness_override=True,

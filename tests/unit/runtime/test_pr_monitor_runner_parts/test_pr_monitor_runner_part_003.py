@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentRunError
 from awf.adapters.provider_failures import AGENT_PROVIDER_CAPACITY_EXHAUSTED
-from awf.common.bitbucket_client import BitBucketAuth, BitBucketClient
+from awf.common.bitbucket_client import BitbucketAuth, BitbucketClient
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.enums import (
@@ -1017,11 +1017,11 @@ async def test_run_fails_workspace_when_base_fetch_cannot_be_refreshed(
         assert "could not refresh base branch" in workspace.failure_message
 
 
-def _bitbucket_forge_client() -> BitBucketClient:
-    """A BitBucketClient instance for forge detection (no HTTP calls are made)."""
-    return BitBucketClient(
+def _bitbucket_forge_client() -> BitbucketClient:
+    """A BitbucketClient instance for forge detection (no HTTP calls are made)."""
+    return BitbucketClient(
         client=httpx.AsyncClient(base_url="https://api.bitbucket.org"),
-        auth=BitBucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
+        auth=BitbucketAuth(mode="bearer", api_token="bb-token-aaaaaaaaaaaa"),
     )
 
 
@@ -1030,10 +1030,10 @@ async def test_bitbucket_feedback_resolution_records_bitbucket_provenance(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A BitBucket workspace records feedback provenance under the bitbucket provider.
+    """A Bitbucket workspace records feedback provenance under the bitbucket provider.
 
     Regression for #445: ``feedback_state`` previously hardcoded
-    ``scm_provider="github"`` + a github.com PR URL, so BitBucket feedback poisoned
+    ``scm_provider="github"`` + a github.com PR URL, so Bitbucket feedback poisoned
     GitHub provenance/replay rows. The provider + URL must derive from the resolved
     forge client instead.
     """

@@ -30,8 +30,8 @@ awf service status --format pretty
 For contributor checkouts, install from source instead:
 
 ```bash
-git clone https://github.com/dimileeh/aira-agent-workspace-fabric.git
-cd aira-agent-workspace-fabric
+git clone https://github.com/dimileeh/agent-workspace-fabric.git
+cd agent-workspace-fabric
 uv tool install . --force
 cp .env.example .env
 awf setup

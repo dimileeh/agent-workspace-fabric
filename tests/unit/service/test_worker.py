@@ -460,10 +460,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     # Regression (issue:4596733729): the PR-monitor factory must mirror the
     # executor forge gate's URL-aware resolution (concrete_forge_for_repo), not
     # plain concrete_forge. A legacy/missing snapshot normalizes profile.forge to
-    # "auto"; if such a workspace's repo_url is a BitBucket URL the factory must
+    # "auto"; if such a workspace's repo_url is a Bitbucket URL the factory must
     # route to the bitbucket forge so make_forge_client raises
     # FORGE_NOT_SUPPORTED — never silently constructing a GitHubClient for a
-    # BitBucket repo when the factory runs before the executor gate (e.g. a
+    # Bitbucket repo when the factory runs before the executor gate (e.g. a
     # monitor rebuild on a pre-Phase-1 snapshot). With plain concrete_forge this
     # would resolve "github".
     created.pop("forge_client_forge", None)
@@ -1153,7 +1153,7 @@ def test_service_git_environment_wires_bitbucket_helper_without_leaking_token(
     entries = {
         env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
     }
-    # BitBucket host-scoped helper is wired alongside the (unchanged) GitHub one.
+    # Bitbucket host-scoped helper is wired alongside the (unchanged) GitHub one.
     assert "credential.https://bitbucket.org.helper" in entries
     assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
     assert entries["url.https://github.com/.insteadOf"] == "git@github.com:"

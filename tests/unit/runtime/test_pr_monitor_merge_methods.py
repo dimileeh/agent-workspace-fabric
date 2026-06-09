@@ -14,7 +14,7 @@ from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_METHOD_UNSUPPORTED,
     BITBUCKET_MERGE_TASK_TIMEOUT,
     BITBUCKET_RATE_LIMITED,
-    BitBucketClientError,
+    BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClientError, RepoRef
@@ -95,7 +95,7 @@ def test_effective_merge_methods_intersect_repo_and_branch_constraints() -> None
 
 @pytest.mark.unit
 def test_effective_merge_methods_resolves_fast_forward_only_repo() -> None:
-    """A fast-forward-only BitBucket repo must resolve to ``fast_forward`` (#448).
+    """A fast-forward-only Bitbucket repo must resolve to ``fast_forward`` (#448).
 
     Before #448 ``fast_forward`` was absent from ``_MERGE_METHOD_PREFERENCE`` so the
     intersection silently dropped it to an empty tuple, wedging every merge on a
@@ -269,8 +269,8 @@ class _MergeMethodClient:
         branch_methods: tuple[str, ...] | None = None,
         repo_error: GitHubClientError | None = None,
         branch_error: GitHubClientError | None = None,
-        merge_results: list[str | GitHubClientError | BitBucketClientError] | None = None,
-        post_comment_error: GitHubClientError | BitBucketClientError | None = None,
+        merge_results: list[str | GitHubClientError | BitbucketClientError] | None = None,
+        post_comment_error: GitHubClientError | BitbucketClientError | None = None,
     ) -> None:
         """Configure repository policy, branch policy, and merge outcomes."""
         self.repo_methods = repo_methods
@@ -331,7 +331,7 @@ class _MergeMethodClient:
         assert delete_branch is True
         self.merge_calls.append(method)
         result = self.merge_results.pop(0)
-        if isinstance(result, GitHubClientError | BitBucketClientError):
+        if isinstance(result, GitHubClientError | BitbucketClientError):
             raise result
         return result
 
@@ -433,7 +433,7 @@ async def test_fast_forward_only_base_merges_without_method_mismatch(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A fast-forward-only BitBucket repo resolves to fast_forward and merges (#448).
+    """A fast-forward-only Bitbucket repo resolves to fast_forward and merges (#448).
 
     The repo/branch policy intersection previously dropped ``fast_forward`` to an
     empty tuple, recording a MERGE_METHOD_MISMATCH blocker and never merging.
@@ -594,8 +594,8 @@ async def test_merge_method_preflight_notification_transient_bitbucket_error_ret
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A BitBucket workspace posts the preflight-rejection notification through
-    BitBucketClient, whose post_comment raises BitBucketClientError (not
+    """A Bitbucket workspace posts the preflight-rejection notification through
+    BitbucketClient, whose post_comment raises BitbucketClientError (not
     GitHubClientError). A transient blip must wait and keep polling instead of
     escaping the merge loop uncaught — mirroring the GitHub transient arm."""
     gh = _MergeMethodClient(
@@ -606,7 +606,7 @@ async def test_merge_method_preflight_notification_transient_bitbucket_error_ret
             returncode=1,
             stderr="HTTP 403 Resource not accessible by integration",
         ),
-        post_comment_error=BitBucketClientError(
+        post_comment_error=BitbucketClientError(
             operation="bitbucket post_comment",
             status=429,
             body="rate limited",
@@ -634,7 +634,7 @@ async def test_merge_method_preflight_notification_permanent_bitbucket_error_rai
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A permanent BitBucket fault (403) during the preflight-rejection
+    """A permanent Bitbucket fault (403) during the preflight-rejection
     notification must propagate like the GitHub non-transient arm rather than
     being swallowed."""
     gh = _MergeMethodClient(
@@ -645,14 +645,14 @@ async def test_merge_method_preflight_notification_permanent_bitbucket_error_rai
             returncode=1,
             stderr="HTTP 403 Resource not accessible by integration",
         ),
-        post_comment_error=BitBucketClientError(
+        post_comment_error=BitbucketClientError(
             operation="bitbucket post_comment",
             status=403,
             body="forbidden: missing scope",
         ),
     )
 
-    with pytest.raises(BitBucketClientError, match="forbidden: missing scope"):
+    with pytest.raises(BitbucketClientError, match="forbidden: missing scope"):
         await _execute_merge(
             factory=factory,
             tmp_path=tmp_path,
@@ -1128,10 +1128,10 @@ async def test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A permanent BitBucket merge fault notifies a human instead of terminating.
+    """A permanent Bitbucket merge fault notifies a human instead of terminating.
 
-    BitBucket workspaces merge through ``BitBucketClient.merge_pr``, which raises
-    ``BitBucketClientError`` (not ``GitHubClientError``). A deterministic failure
+    Bitbucket workspaces merge through ``BitbucketClient.merge_pr``, which raises
+    ``BitbucketClientError`` (not ``GitHubClientError``). A deterministic failure
     (branch restrictions, unresolved tasks, a 4xx) must follow the GitHub
     merge-blocker behaviour — post a human notification and keep polling — rather
     than escaping ``_attempt_merge_method`` and terminating the workspace.
@@ -1140,7 +1140,7 @@ async def test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling(
         repo_methods=("squash",),
         branch_methods=("squash",),
         merge_results=[
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="merge_pr",
                 status=403,
                 body="merge checks have not passed",
@@ -1157,7 +1157,7 @@ async def test_deterministic_bitbucket_merge_failure_notifies_and_keeps_polling(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert len(gh.comments) == 1
-    assert "BitBucket rejected the merge attempt" in gh.comments[0]
+    assert "Bitbucket rejected the merge attempt" in gh.comments[0]
     assert sleep_fn.calls == [60]
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
@@ -1172,7 +1172,7 @@ async def test_deterministic_bitbucket_merge_failure_forwards_specific_reason_co
     """The failed merge operation forwards ``exc.reason_code`` end-to-end.
 
     A specific code such as ``BITBUCKET_MERGE_METHOD_UNSUPPORTED`` (raised when a
-    merge method maps to no BitBucket strategy) must surface in the operation
+    merge method maps to no Bitbucket strategy) must surface in the operation
     record and audit event rather than being flattened to a generic
     ``BITBUCKET_MERGE_FAILED`` — otherwise an operator inspecting events has to
     read the prose ``error_message`` to recover the real cause.
@@ -1181,10 +1181,10 @@ async def test_deterministic_bitbucket_merge_failure_forwards_specific_reason_co
         repo_methods=("squash",),
         branch_methods=("squash",),
         merge_results=[
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="merge_pr",
                 status=None,
-                body="unsupported merge method for BitBucket: 'rebase'",
+                body="unsupported merge method for Bitbucket: 'rebase'",
                 reason_code=BITBUCKET_MERGE_METHOD_UNSUPPORTED,
             )
         ],
@@ -1228,12 +1228,12 @@ async def test_transient_bitbucket_merge_failure_waits_without_notify(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """A transient BitBucket merge blip waits and re-polls without notifying."""
+    """A transient Bitbucket merge blip waits and re-polls without notifying."""
     gh = _MergeMethodClient(
         repo_methods=("squash",),
         branch_methods=("squash",),
         merge_results=[
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="merge_pr",
                 status=429,
                 body="rate limited",
@@ -1278,7 +1278,7 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
         repo_methods=("squash",),
         branch_methods=("squash",),
         merge_results=[
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="merge_pr",
                 status=409,
                 body="merge already in progress",
@@ -1322,7 +1322,7 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     assert not any(op.status == OperationStatus.running.value for op in operations)
     # The cancellation must leave an audit breadcrumb so operators can tell
     # "superseded by an in-flight merge" apart from an unexplained cancelled
-    # operation — every other merge arm (GitHub, BitBucket failure, success)
+    # operation — every other merge arm (GitHub, Bitbucket failure, success)
     # records a merge_result event, so this transient arm must too.
     in_progress_events = [
         event for event in audit_events if event.reason_code == BITBUCKET_MERGE_IN_PROGRESS
@@ -1340,7 +1340,7 @@ async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
 ) -> None:
     """An exhausted async-merge poll budget cancels (never fails) the operation.
 
-    ``BitBucketClient`` raises ``BITBUCKET_MERGE_TASK_TIMEOUT`` when the bounded
+    ``BitbucketClient`` raises ``BITBUCKET_MERGE_TASK_TIMEOUT`` when the bounded
     poll budget is exhausted while the merge task is still PENDING. The merge may
     still complete server-side, so this is treated exactly like
     ``BITBUCKET_MERGE_IN_PROGRESS``: the attempt operation is cancelled (not
@@ -1352,10 +1352,10 @@ async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
         repo_methods=("squash",),
         branch_methods=("squash",),
         merge_results=[
-            BitBucketClientError(
+            BitbucketClientError(
                 operation="bitbucket merge_pr (task-status)",
                 status=None,
-                body="BitBucket merge task did not complete within 30 polls",
+                body="Bitbucket merge task did not complete within 30 polls",
                 reason_code=BITBUCKET_MERGE_TASK_TIMEOUT,
             )
         ],

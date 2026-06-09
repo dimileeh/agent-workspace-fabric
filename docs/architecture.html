@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Workspace Fabric — Architecture</title>
+<style>
+  :root{
+    --bg:#0b1020; --panel:#111c30; --panel2:#0d1428; --line:#243049;
+    --ink:#e6edf6; --muted:#93a0b8; --faint:#5d6b86;
+    --amber:#f59e0b; --green:#34d399; --blue:#60a5fa; --purple:#c084fc; --rose:#fb7185;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,#0b1020,#131a2e);color:var(--ink);padding:40px 24px}
+  .wrap{max-width:1140px;margin:0 auto}
+  h1{font-size:30px;margin:0 0 4px;letter-spacing:.3px}
+  .sub{color:var(--muted);margin:0 0 28px;font-size:15px}
+  .sub b{color:var(--amber)}
+  .flow{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;align-items:stretch}
+  .col{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;position:relative}
+  .col h2{font-size:12px;letter-spacing:1.6px;text-transform:uppercase;color:var(--faint);margin:0 0 10px;font-weight:700}
+  .box{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:9px}
+  .box:last-child{margin-bottom:0}
+  .box .t{font-weight:700;font-size:14px}
+  .box .d{color:var(--muted);font-size:12px;margin-top:3px;line-height:1.4}
+  .tag{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:1px 7px;border-radius:999px;margin-right:5px}
+  .arrow{position:absolute;right:-13px;top:50%;transform:translateY(-50%);color:var(--faint);font-size:20px;z-index:2}
+  .accent-amber{border-left:3px solid var(--amber)} .accent-green{border-left:3px solid var(--green)}
+  .accent-blue{border-left:3px solid var(--blue)} .accent-purple{border-left:3px solid var(--purple)}
+  .accent-rose{border-left:3px solid var(--rose)}
+  .section-label{color:var(--faint);font-size:12px;letter-spacing:1.6px;text-transform:uppercase;font-weight:700;margin:30px 0 12px}
+  .life{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .st{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:7px 13px;font-size:13px;font-weight:600;white-space:nowrap}
+  .st.terminal{border-color:#1f7a52;color:var(--green)}
+  .st.fail{border-color:#7a2e3a;color:var(--rose)}
+  .chev{color:var(--faint);font-size:14px}
+  .foot{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px}
+  .fcard{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+  .fcard .t{font-weight:700;font-size:14px;margin-bottom:6px}
+  .fcard .d{color:var(--muted);font-size:12.5px;line-height:1.5}
+  .legend{color:var(--faint);font-size:12.5px;margin-top:22px;text-align:center}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:#cbd5e1;background:#0b1020;padding:1px 5px;border-radius:5px}
+  @media(max-width:880px){.flow{grid-template-columns:1fr 1fr}.arrow{display:none}.foot{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Agent Workspace Fabric</h1>
+  <p class="sub">The <b>control plane</b> that runs AI coding agents as disciplined contributors. Dependencies flow left → right; the agent owns code changes, AWF owns lifecycle &amp; policy, GitHub/Bitbucket stay the source of truth.</p>
+
+  <div class="flow">
+    <div class="col">
+      <h2>Client surfaces</h2>
+      <div class="box accent-blue"><div class="t">api/ <span class="tag" style="background:#1e3a5f;color:#93c5fd">FastAPI /v1</span></div><div class="d">Thin REST routes; no business logic. Schemas reused by MCP.</div></div>
+      <div class="box accent-blue"><div class="t">cli/ <span class="tag" style="background:#1e3a5f;color:#93c5fd">Typer · awf</span></div><div class="d">httpx client over REST. Needs a running API.</div></div>
+      <div class="box accent-blue"><div class="t">mcp/ <span class="tag" style="background:#1e3a5f;color:#93c5fd">FastMCP</span></div><div class="d">In-process server for AI assistants; mirrors the REST contract 1:1.</div></div>
+      <div class="arrow">→</div>
+    </div>
+
+    <div class="col">
+      <h2>Business logic</h2>
+      <div class="box accent-amber"><div class="t">service/</div><div class="d">Stateless operations over the DB: <code>WorkspaceService</code>, controls, scheduler, capacity, GC, merge queue.</div></div>
+      <div class="box accent-amber"><div class="t">state machine</div><div class="d">Guards every status transition. Direct <code>status=</code> writes are bugs.</div></div>
+      <div class="arrow">→</div>
+    </div>
+
+    <div class="col">
+      <h2>Orchestration</h2>
+      <div class="box accent-green"><div class="t">control/worker</div><div class="d">Polls the DB, claims pending workspaces via leases, dispatches each cycle.</div></div>
+      <div class="box accent-green"><div class="t">control/executor</div><div class="d">Drives one workspace: agent run → validate → push → PR → monitor handoff.</div></div>
+      <div class="box accent-green"><div class="t">runtime/ · adapters/</div><div class="d">PR-monitor loop + Plan→Execute→Compare; one <code>run()</code> contract per agent CLI.</div></div>
+      <div class="arrow">→</div>
+    </div>
+
+    <div class="col">
+      <h2>Execution substrate</h2>
+      <div class="box accent-purple"><div class="t">node/ git worktrees</div><div class="d">Per-repo bare mirrors + linked worktrees, chowned to the unprivileged agent.</div></div>
+      <div class="box accent-purple"><div class="t">node/ Compose stacks</div><div class="d">One per-workspace Docker Compose stack, rendered from a Jinja2 template.</div></div>
+      <div class="box accent-rose"><div class="t">forge</div><div class="d"><span class="tag" style="background:#14361f;color:#86efac">GitHub</span><span class="tag" style="background:#102a4d;color:#93c5fd">Bitbucket</span> via one <code>ForgeClient</code> seam.</div></div>
+    </div>
+  </div>
+
+  <div class="section-label">Workspace task lifecycle &nbsp;·&nbsp; guarded by the state machine</div>
+  <div class="life">
+    <span class="st">requested</span><span class="chev">▸</span>
+    <span class="st">provisioning</span><span class="chev">▸</span>
+    <span class="st">ready</span><span class="chev">▸</span>
+    <span class="st">running</span><span class="chev">▸</span>
+    <span class="st">validating</span><span class="chev">▸</span>
+    <span class="st">pushing</span><span class="chev">▸</span>
+    <span class="st">monitoring_pr</span><span class="chev">▸</span>
+    <span class="st terminal">completed</span>
+    <span class="chev" style="margin-left:10px">·</span>
+    <span class="st fail">failed</span><span class="st">cancelled</span><span class="st">destroyed</span>
+  </div>
+
+  <div class="foot">
+    <div class="fcard"><div class="t" style="color:var(--amber)">monitoring_pr — AWF as PR owner</div><div class="d">A pure decision core returns exactly one action: address comments, report CI failure, sync base, wait for CI, merge, or notify a human. Merge gates are conservative: comments addressed, checks green, mergeable, not behind, final settle.</div></div>
+    <div class="fcard"><div class="t" style="color:var(--green)">Cross-cutting foundation</div><div class="d"><code>db/</code> async SQLAlchemy repos (Postgres) · <code>common/</code> forge clients, redaction, audit, reason codes · <code>profiles/</code> the <code>workspace.yml</code> schema (runtime, services, phases, validation, security, secrets).</div></div>
+    <div class="fcard"><div class="t" style="color:var(--purple)">Invariants that bite</div><div class="d">Transitions route through the state machine · repositories flush, the boundary commits · reason codes flow end-to-end · redaction is mandatory · profiles resolve once at provision time.</div></div>
+  </div>
+
+  <p class="legend">Agent Workspace Fabric — alpha local Core (Python 3.12 · FastAPI · SQLAlchemy 2.0 async · Docker SDK). See <code>docs/CONCEPTS.md</code> for the authoritative architecture &amp; glossary.</p>
+</div>
+</body>
+</html>

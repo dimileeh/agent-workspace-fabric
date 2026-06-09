@@ -38,7 +38,7 @@ _log = get_logger(__name__)
 NO_CHANGES_REASON_CODE = "NO_CHANGES_TO_SYNC"
 
 # Distinct from ``FORGE_NOT_SUPPORTED``: the forge itself *is* supported (GitHub or
-# BitBucket Cloud), but release-PR sync is GitHub-only — it shells ``gh pr list`` /
+# Bitbucket Cloud), but release-PR sync is GitHub-only — it shells ``gh pr list`` /
 # ``gh pr view`` and parses github.com-only PR URLs. Mirrors
 # ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.
 RELEASE_SYNC_FORGE_NOT_SUPPORTED_REASON_CODE = "RELEASE_SYNC_FORGE_NOT_SUPPORTED"
@@ -56,13 +56,13 @@ def ensure_release_sync_forge_supported(
     Release-PR sync is GitHub-only: the open-PR lookup shells ``gh pr list``,
     adoption metadata shells ``gh pr view``, and the created-PR URL is parsed with
     the github.com-only ``parse_github_pull_request_url`` — only
-    ``gh.create_pull_request`` is forge-neutral. BitBucket Cloud is a *supported*
+    ``gh.create_pull_request`` is forge-neutral. Bitbucket Cloud is a *supported*
     forge (issue #345 Part 2), so it clears the executor forge gate; without this
     guard those GitHub-only steps would mis-route to github.com for the same
     owner/repo slug (a different repository) or reject the bitbucket.org create URL
     as ``RELEASE_SYNC_PR_URL_INVALID``. Callers invoke this both inside
     :func:`find_or_create_release_pr` and *before constructing the forge client* in
-    the executor handoff, so a missing-credential ``BitBucketClient.from_env()``
+    the executor handoff, so a missing-credential ``BitbucketClient.from_env()``
     cannot mask this honest reason code with ``BITBUCKET_AUTH_NOT_CONFIGURED``.
     Mirrors ``OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED`` and
     ``PR_ADOPTION_METADATA_FETCH_GITHUB_ONLY``.

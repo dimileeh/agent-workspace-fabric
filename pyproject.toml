@@ -61,8 +61,8 @@ dev = [
 awf = "awf.cli.main:app"
 
 [project.urls]
-Repository = "https://github.com/dimileeh/aira-agent-workspace-fabric"
-Issues = "https://github.com/dimileeh/aira-agent-workspace-fabric/issues"
+Repository = "https://github.com/dimileeh/agent-workspace-fabric"
+Issues = "https://github.com/dimileeh/agent-workspace-fabric/issues"
 
 [build-system]
 requires = ["hatchling"]
