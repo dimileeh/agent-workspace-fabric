@@ -1,8 +1,10 @@
 name: CI
 
 on:
-  push:
-    branches: [main, development]
+  # CI runs only on pull requests (open / new commit / reopen), any base branch.
+  # Pushes to main/development are not re-tested: every change lands via a PR,
+  # so the pull_request run is the authoritative gate and a push run would just
+  # re-test an already-validated merge commit.
   pull_request:
 
 concurrency:
