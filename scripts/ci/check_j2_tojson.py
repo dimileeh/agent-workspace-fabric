@@ -51,10 +51,17 @@ class Diagnostic:
     template: str
     line: int
     message: str
+    title: str = "Jinja2 raw interpolation"
 
     def format(self) -> str:
-        """Return the diagnostic in path:line form."""
-        return f"{self.template}:{self.line}: {self.message}"
+        """Return the diagnostic as a GitHub Actions annotation."""
+        message = f"{self.template}:{self.line}: {self.message}"
+        return (
+            f"::error file={_escape_workflow_command_property(self.template)},"
+            f"line={self.line},"
+            f"title={_escape_workflow_command_property(self.title)}::"
+            f"{_escape_workflow_command_data(message)}"
+        )
 
 
 class TemplateReadError(Exception):
@@ -62,6 +69,16 @@ class TemplateReadError(Exception):
 
 
 _ENVIRONMENT = Environment()
+
+
+def _escape_workflow_command_data(value: str) -> str:
+    """Escape GitHub Actions workflow command message data."""
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def _escape_workflow_command_property(value: str) -> str:
+    """Escape GitHub Actions workflow command property values."""
+    return _escape_workflow_command_data(value).replace(":", "%3A").replace(",", "%2C")
 
 
 def _format_expression_tokens(tokens: Sequence[str]) -> str:
@@ -180,7 +197,14 @@ def _scan_template(
                 in_comment = False
                 directive = _parse_allow_directive("".join(comment_parts))
                 if isinstance(directive, str):
-                    diagnostics.append(Diagnostic(template.label, comment_line, directive))
+                    diagnostics.append(
+                        Diagnostic(
+                            template.label,
+                            comment_line,
+                            directive,
+                            title="Jinja2 allowlist directive",
+                        )
+                    )
                 elif directive is not None:
                     expression, rationale = directive
                     allow_directives.append(
@@ -227,7 +251,21 @@ def _is_escaped(expression: str) -> bool:
 def _diagnostics_for_template(template: TemplateFile) -> list[Diagnostic]:
     """Return lint diagnostics for one template."""
     interpolations, allow_directives, diagnostics = _scan_template(template)
-    allow_by_expression = {directive.expression: directive for directive in allow_directives}
+    allow_by_expression: dict[str, AllowDirective] = {}
+    for directive in allow_directives:
+        if directive.expression in allow_by_expression:
+            diagnostics.append(
+                Diagnostic(
+                    template=template.label,
+                    line=directive.line,
+                    message=(
+                        f"duplicate allowlist entry for raw interpolation: {directive.expression}"
+                    ),
+                    title="Jinja2 allowlist directive",
+                )
+            )
+            continue
+        allow_by_expression[directive.expression] = directive
     used_allowlist_expressions: set[str] = set()
 
     for interpolation in interpolations:
@@ -256,6 +294,7 @@ def _diagnostics_for_template(template: TemplateFile) -> list[Diagnostic]:
                     template=template.label,
                     line=directive.line,
                     message=f"stale allowlist entry for raw interpolation: {directive.expression}",
+                    title="Jinja2 allowlist directive",
                 )
             )
 

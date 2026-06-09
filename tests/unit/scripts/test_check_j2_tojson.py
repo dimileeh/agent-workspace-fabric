@@ -40,6 +40,7 @@ def test_checker_fails_on_raw_scalar_value_interpolation(tmp_path: Path) -> None
     result = _run_checker(template)
 
     assert result.returncode == 1
+    assert f"::error file={template},line=3,title=Jinja2 raw interpolation::" in result.stderr
     assert f"{template}:3:" in result.stderr
     assert "image" in result.stderr
     assert "tojson" in result.stderr
@@ -110,6 +111,26 @@ def test_checker_allows_documented_inline_exceptions(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+@pytest.mark.unit
+def test_checker_flags_duplicate_allowlist_entries(tmp_path: Path) -> None:
+    """Duplicate allowlist entries are reported even when the expression is used."""
+    template = _write_template(
+        tmp_path / "duplicate_allow.yml.j2",
+        (
+            "{# awf-j2-tojson-allow: workspace_id -- AWF-generated identifier. #}\n"
+            "{# awf-j2-tojson-allow: workspace_id -- Duplicate copy. #}\n"
+            'name: "awf-{{ workspace_id }}-agent"\n'
+        ),
+    )
+
+    result = _run_checker(template)
+
+    assert result.returncode == 1
+    assert f"{template}:2:" in result.stderr
+    assert "duplicate allowlist entry" in result.stderr
+    assert "workspace_id" in result.stderr
 
 
 @pytest.mark.unit
