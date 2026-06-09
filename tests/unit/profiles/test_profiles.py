@@ -579,6 +579,56 @@ def test_profile_schema_rejects_non_string_normalized_fields(payload: dict[str, 
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "dep",
+    [
+        "postgres\n        privileged: true",
+        "postgres:\n        condition: service_healthy\n    privileged",
+        "bad name",
+        "with:colon",
+        "",
+    ],
+)
+def test_profile_service_rejects_unsafe_depends_on(dep: str) -> None:
+    # ``depends_on`` values are emitted as raw YAML keys in the compose template;
+    # an unvalidated string carrying YAML syntax (e.g. a newline + outdented
+    # ``privileged:``) could inject service-level settings or break the file.
+    # The item pattern must reject anything that is not a bare service name.
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "unsafe-depends-on",
+                "services": [
+                    {
+                        "name": "app",
+                        "image": "example/app:latest",
+                        "depends_on": [dep],
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_profile_service_accepts_valid_depends_on() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "valid-depends-on",
+            "services": [
+                {
+                    "name": "app",
+                    "image": "example/app:latest",
+                    "depends_on": ["postgres", "redis-cache", "svc.1_2"],
+                }
+            ],
+        }
+    )
+
+    app = {s.name: s for s in profile.services}["app"]
+    assert app.depends_on == ["postgres", "redis-cache", "svc.1_2"]
+
+
+@pytest.mark.unit
 def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
     profile = WorkspaceProfile.model_validate(
         {

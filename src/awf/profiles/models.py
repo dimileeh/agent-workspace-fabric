@@ -468,7 +468,13 @@ class ProfileService(BaseModel):
     dockerfile: str = "Dockerfile"
     env_file: str | None = Field(default=None, max_length=1024)
     environment: dict[str, str] = Field(default_factory=dict)
-    depends_on: list[str] = Field(default_factory=list)
+    # Each value is emitted as a raw YAML key in the compose template, so it
+    # must be a bare service name. Mirror ``name``'s pattern to reject strings
+    # carrying YAML syntax (newlines, colons) that could otherwise inject
+    # service-level settings or invalidate the generated compose file.
+    depends_on: list[
+        Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")]
+    ] = Field(default_factory=list)
     healthcheck_cmd: str | None = Field(default=None, max_length=4096)
     ports: list[tuple[int, int]] = Field(default_factory=list)
     command: str | None = Field(default=None, max_length=4096)
