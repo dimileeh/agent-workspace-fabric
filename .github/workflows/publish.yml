@@ -67,7 +67,7 @@ jobs:
             --output artifacts/release/awf-install-manifest.json \
             --version "${VERSION}" \
             --tag "${TAG}" \
-            --repository-url "https://github.com/dimileeh/agent-workspace-fabric" \
+            --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --channel auto
           # Expose the resolved version/tag to the drift-gate step below.
           {
@@ -99,7 +99,7 @@ jobs:
               --manifest artifacts/release/awf-install-manifest.json \
               --version "${AWF_RELEASE_VERSION}" \
               --tag "${AWF_RELEASE_TAG}" \
-              --repository-url "https://github.com/dimileeh/agent-workspace-fabric" \
+              --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
               --commit "${GITHUB_SHA}"
           else
             echo "SKIP: no manifest generated for this ref; nothing to drift-check"
