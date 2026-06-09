@@ -95,7 +95,7 @@ export function LogsPanel({
           <button
             type="button"
             onClick={onToggleSortDirection}
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-800 transition hover:bg-slate-50"
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs text-fg transition hover:bg-surface-2"
             title={sortDirection === "desc" ? "Descending" : "Ascending"}
           >
             {sortDirection === "desc" ? <ArrowDown size={13} aria-hidden /> : <ArrowUp size={13} aria-hidden />}
@@ -105,7 +105,7 @@ export function LogsPanel({
             type="button"
             onClick={onOpenFullscreen}
             disabled={streams.length === 0}
-            className="inline-flex h-8 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex h-8 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-fg transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Maximize2 size={13} aria-hidden />
             Fullscreen
@@ -114,7 +114,7 @@ export function LogsPanel({
             type="button"
             onClick={onReload}
             disabled={selectedStreams.length === 0}
-            className="inline-flex h-8 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex h-8 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-fg transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <RefreshCw size={13} aria-hidden />
             Tail
@@ -182,14 +182,14 @@ export function MultiWorkspaceLogsFullscreen({
       aria-describedby={dialogDescriptionId}
       className="fixed inset-0 z-50 bg-slate-950/40 p-3 md:p-4"
     >
-      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-slate-300 bg-white shadow-2xl">
-        <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-3">
+      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
+        <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-b border-line px-3">
           <div className="min-w-0">
             <h2 id={dialogTitleId} className="flex items-center gap-2 text-sm font-semibold">
               <Terminal size={16} aria-hidden />
               Logs
             </h2>
-            <p id={dialogDescriptionId} className="text-[11px] text-slate-500">
+            <p id={dialogDescriptionId} className="text-[11px] text-fg-muted">
               {workspaces.length} workspace columns
             </p>
           </div>
@@ -197,7 +197,7 @@ export function MultiWorkspaceLogsFullscreen({
             <button
               type="button"
               onClick={onToggleSortDirection}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-800 transition hover:bg-slate-50"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs text-fg transition hover:bg-surface-2"
               title={sortDirection === "desc" ? "Descending" : "Ascending"}
             >
               {sortDirection === "desc" ? <ArrowDown size={13} aria-hidden /> : <ArrowUp size={13} aria-hidden />}
@@ -206,7 +206,7 @@ export function MultiWorkspaceLogsFullscreen({
             <button
               type="button"
               onClick={onTailAll}
-              className="inline-flex h-8 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-8 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-fg transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <RefreshCw size={13} aria-hidden />
               Tail all
@@ -214,7 +214,7 @@ export function MultiWorkspaceLogsFullscreen({
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex h-8 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50"
+              className="inline-flex h-8 items-center gap-2 rounded-md border border-line bg-surface px-3 text-xs text-fg transition hover:bg-surface-2"
             >
               <X size={13} aria-hidden />
               Close
@@ -450,12 +450,12 @@ export function WorkspaceLogColumn({
   }, [workspace.workspace_id]);
 
   return (
-    <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-slate-200 bg-white">
-      <div className="flex min-h-14 items-start justify-between gap-2 border-b border-slate-100 px-3 py-2">
+    <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface">
+      <div className="flex min-h-14 items-start justify-between gap-2 border-b border-line px-3 py-2">
         <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-slate-950">{workspace.title}</h3>
-          <p className="mono truncate text-[11px] text-slate-500">{workspace.workspace_id}</p>
-          <p className="truncate text-[11px] text-slate-500">
+          <h3 className="truncate text-sm font-semibold text-fg-strong">{workspace.title}</h3>
+          <p className="mono truncate text-[11px] text-fg-muted">{workspace.workspace_id}</p>
+          <p className="truncate text-[11px] text-fg-muted">
             {formatAgentLabel(workspace)} / {workspace.status} / stream {streamState}
           </p>
         </div>
@@ -466,7 +466,7 @@ export function WorkspaceLogColumn({
           <button
             type="button"
             onClick={onRemove}
-            className="inline-flex h-6 items-center rounded-md border border-slate-300 bg-white px-2 text-[11px] text-slate-700 transition hover:bg-slate-50"
+            className="inline-flex h-6 items-center rounded-md border border-line bg-surface px-2 text-[11px] text-fg transition hover:bg-surface-2"
           >
             <X size={11} aria-hidden />
           </button>
@@ -474,7 +474,7 @@ export function WorkspaceLogColumn({
       </div>
       <div className="min-h-0 flex-1 p-2">
         {error ? (
-          <div className="mb-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-800">
+          <div className="mb-2 rounded-md border border-danger-border bg-danger-soft px-2 py-1.5 text-xs text-danger-text">
             {error}
           </div>
         ) : null}
@@ -530,7 +530,7 @@ export function LogBrowser({
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-3">
       <div className="grid gap-2">
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-fg-muted">
           <span>
             {selectedStreams.length} selected / {bytes(selectedBytes)} / {selectedLines} lines
           </span>
@@ -571,21 +571,21 @@ export function LogStreamPicker({
 
   const selectedSet = new Set(selectedStreams);
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-2 py-1.5">
-        <span className="text-[11px] font-medium text-slate-600">Streams</span>
+    <div className="rounded-md border border-line bg-surface-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-2 py-1.5">
+        <span className="text-[11px] font-medium text-fg-muted">Streams</span>
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={onSelectAll}
-            className="h-6 rounded-md border border-slate-300 bg-white px-2 text-[11px] text-slate-700 hover:bg-slate-50"
+            className="h-6 rounded-md border border-line bg-surface px-2 text-[11px] text-fg hover:bg-surface-2"
           >
             All
           </button>
           <button
             type="button"
             onClick={onClear}
-            className="h-6 rounded-md border border-slate-300 bg-white px-2 text-[11px] text-slate-700 hover:bg-slate-50"
+            className="h-6 rounded-md border border-line bg-surface px-2 text-[11px] text-fg hover:bg-surface-2"
           >
             Clear
           </button>
@@ -595,7 +595,7 @@ export function LogStreamPicker({
         {streams.map((stream) => (
           <label
             key={stream.stream_id}
-            className="flex min-w-0 items-start gap-2 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs"
+            className="flex min-w-0 items-start gap-2 rounded-md border border-line bg-surface px-2 py-1.5 text-xs"
           >
             <input
               type="checkbox"
@@ -604,8 +604,8 @@ export function LogStreamPicker({
               className="mt-0.5 h-3.5 w-3.5 shrink-0"
             />
             <span className="min-w-0">
-              <span className="mono block truncate text-slate-950">{stream.stream_id}</span>
-              <span className="block truncate text-[11px] text-slate-500">
+              <span className="mono block truncate text-fg-strong">{stream.stream_id}</span>
+              <span className="block truncate text-[11px] text-fg-muted">
                 {bytes(stream.byte_count)} / {stream.line_count} lines
               </span>
             </span>
@@ -673,7 +673,7 @@ export function LogOutput({
           scrollTop: node.scrollTop,
         };
       }}
-      className={`mono min-h-0 overflow-auto whitespace-pre-wrap rounded-md bg-[var(--terminal)] p-3 text-[11px] leading-relaxed break-words text-slate-100 ${heightClass}`}
+      className={`mono min-h-0 overflow-auto whitespace-pre-wrap rounded-md bg-[var(--terminal)] p-3 text-[11px] leading-relaxed break-words text-[var(--terminal-foreground)] ${heightClass}`}
     >
       {value || "No log data loaded."}
     </pre>
