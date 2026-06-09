@@ -112,6 +112,39 @@ test("fullscreen logs reload tails after clearing and reselecting the same strea
   await expect(output).toContainText("active line 000 poll 99");
 });
 
+test("fullscreen logs trap keyboard focus and restore it to the trigger on close", async ({ page }) => {
+  await mockAwfApi(page);
+  await page.goto("/");
+  await waitForConsoleReady(page);
+
+  const trigger = page
+    .getByTestId("workspace-card-ws_logs")
+    .getByRole("button", { name: "Logs", exact: true });
+  await trigger.click();
+
+  const modal = page.locator(".fixed.inset-0.z-50");
+  await expect(modal.getByRole("heading", { name: "Logs" })).toBeVisible();
+
+  // Focus moves into the dialog on open.
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute("role"))).toBe("dialog");
+
+  // Tabbing from the last focusable element cycles back inside the dialog,
+  // never escaping to the page behind the overlay.
+  for (let i = 0; i < 30; i += 1) {
+    await page.keyboard.press("Tab");
+    const insideDialog = await page.evaluate(() => {
+      const dialog = document.querySelector('[role="dialog"]');
+      return dialog ? dialog.contains(document.activeElement) : false;
+    });
+    expect(insideDialog).toBe(true);
+  }
+
+  // Escape closes the dialog and restores focus to the element that opened it.
+  await page.keyboard.press("Escape");
+  await expect(modal).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
 async function waitForConsoleReady(page: Page) {
   await expect(page.locator("header").filter({ hasText: "AWF Console" })).toBeVisible();
   await expect(page.getByText("API: ok")).toBeVisible();

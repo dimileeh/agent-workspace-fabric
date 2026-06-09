@@ -158,16 +158,61 @@ export function MultiWorkspaceLogsFullscreen({
 }) {
   const dialogTitleId = useId();
   const dialogDescriptionId = useId();
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  // Keep the latest onClose without re-running the focus-trap effect (which
+  // would steal focus back to the dialog on every parent re-render).
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
+    const dialog = dialogRef.current;
+    // Capture the trigger so focus can be restored when the dialog closes.
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    dialog?.focus();
+
+    const focusableSelector =
+      'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const getFocusable = () =>
+      dialog ? Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector)) : [];
+
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onClose();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) {
+        return;
+      }
+      const focusable = getFocusable();
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey) {
+        if (active === first || active === dialog || !dialog.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || active === dialog || !dialog.contains(active)) {
+        event.preventDefault();
+        first.focus();
       }
     };
+
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus?.();
+    };
+    // Mount once: focus capture/restoration and the listener must not reset on
+    // every render. onClose is read live via onCloseRef.
+  }, []);
 
   const gridStyle = {
     gridTemplateColumns: `repeat(${workspaces.length}, minmax(280px, 1fr))`,
@@ -176,11 +221,13 @@ export function MultiWorkspaceLogsFullscreen({
 
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby={dialogTitleId}
       aria-describedby={dialogDescriptionId}
-      className="fixed inset-0 z-50 bg-slate-950/40 p-3 md:p-4"
+      tabIndex={-1}
+      className="fixed inset-0 z-50 bg-slate-950/40 p-3 md:p-4 outline-none"
     >
       <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
         <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-b border-line px-3">
