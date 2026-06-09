@@ -50,6 +50,13 @@ trimLogEntries,
 updateLogStreamActivity
 } from "./console-dashboard-shared";
 
+// useLayoutEffect warns during Next.js SSR ("does nothing on the server").
+// The log-output effect must measure and adjust scroll position before paint
+// to avoid tail-follow flicker, so we keep layout timing on the client and
+// fall back to useEffect on the server where there is no layout to measure.
+const useIsomorphicLayoutEffect =
+  typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
 export function LogsPanel({
   streams,
   selectedStreams,
@@ -626,7 +633,7 @@ export function LogOutput({
   const previousSortRef = useRef(sortDirection);
   const previousTailSignalRef = useRef(tailSignal);
 
-  useLayoutEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     const node = ref.current;
     if (!node) {
       return;
