@@ -189,6 +189,27 @@ def test_publish_workflow_publish_job_keeps_manual_trusted_publishing_gate() -> 
 
 
 @pytest.mark.unit
+def test_publish_workflow_gates_real_pypi_publishes_on_tag_ref() -> None:
+    """Real PyPI publishes must be limited to tag dispatches, not arbitrary branches.
+
+    ``workflow_dispatch`` can target any branch, so without an explicit guard a
+    development branch could select ``publish_target=pypi`` and push straight to
+    the production index, bypassing the tagged-release path. The publish
+    condition must require either a non-pypi target or a tag ref. ``testpypi``
+    dispatches from a branch stay unrestricted (AC4), so the guard must only
+    bind ``pypi``.
+    """
+    workflow = _publish_workflow()
+    publish_job = _job(workflow, "publish")
+    condition = str(publish_job.get("if", ""))
+
+    # pypi is only permitted when the dispatch is for a tag ref...
+    assert "inputs.publish_target != 'pypi' || github.ref_type == 'tag'" in condition
+    # ...but the guard must not also restrict testpypi (still branch-allowed).
+    assert "inputs.publish_target != 'testpypi'" not in condition
+
+
+@pytest.mark.unit
 def test_publish_workflow_publish_job_gated_on_installer_smoke() -> None:
     """Publishing must depend on installer-smoke so a failed smoke check blocks release."""
     workflow = _publish_workflow()

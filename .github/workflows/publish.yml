@@ -180,10 +180,17 @@ jobs:
     # branch (AC4). Gate explicitly on dependency results instead: build must
     # have produced artifacts, and a *failed* (or cancelled) smoke still blocks
     # the release, while a *skipped* smoke leaves the manual publish to proceed.
+    #
+    # Real PyPI publishes are additionally gated on a tag ref: workflow_dispatch
+    # can target any branch, so without this guard an arbitrary branch could
+    # bypass the tagged-release path and push straight to the production index.
+    # Branch dispatches remain free to use testpypi (publish_target != 'pypi');
+    # only publish_target == 'pypi' requires github.ref_type == 'tag'.
     if: >-
       ${{ always()
           && github.event_name == 'workflow_dispatch'
           && inputs.publish_target != 'none'
+          && (inputs.publish_target != 'pypi' || github.ref_type == 'tag')
           && needs.build.result == 'success'
           && needs.installer-smoke.result != 'failure'
           && needs.installer-smoke.result != 'cancelled' }}
