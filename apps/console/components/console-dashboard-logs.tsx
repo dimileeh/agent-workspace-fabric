@@ -339,15 +339,22 @@ export function WorkspaceLogColumn({
     if (selected.length === 0) {
       return;
     }
-    const results = await Promise.all(
-      selected.map((stream) =>
-        readLogTailEntry(
-          workspace.workspace_id,
-          stream,
-          logStreamActivityFor(streamActivityRef.current, workspace.workspace_id, stream),
+    let results: Awaited<ReturnType<typeof readLogTailEntry>>[];
+    try {
+      results = await Promise.all(
+        selected.map((stream) =>
+          readLogTailEntry(
+            workspace.workspace_id,
+            stream,
+            logStreamActivityFor(streamActivityRef.current, workspace.workspace_id, stream),
+          ),
         ),
-      ),
-    );
+      );
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to refresh log tails.");
+      return;
+    }
     const byStream = new Map(results.map((result) => [result.entry.streamId, result]));
     setEntries((current) =>
       trimLogEntries([
