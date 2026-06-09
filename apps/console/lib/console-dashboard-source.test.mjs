@@ -17,13 +17,20 @@ const dashboardSource = {
 test("task details modal locks body scroll in a layout effect", () => {
   const modalSource = extractFunctionSource("TaskDetailsModal");
   const scrollLockEffect = modalSource.match(
-    /use(?:Layout)?Effect\(\(\) => \{\s*const scrollY = window\.scrollY;[\s\S]*?document\.body\.style\.overflow = "hidden";[\s\S]*?\}, \[\]\);/,
+    /use(?:Isomorphic)?(?:Layout)?Effect\(\(\) => \{\s*const scrollY = window\.scrollY;[\s\S]*?document\.body\.style\.overflow = "hidden";[\s\S]*?\}, \[\]\);/,
   );
 
   assert.ok(scrollLockEffect, "Expected TaskDetailsModal to lock and restore body scroll");
-  assert.ok(
-    scrollLockEffect[0].startsWith("useLayoutEffect("),
-    "Expected the modal scroll lock to use useLayoutEffect so it runs before paint",
+  assert.match(
+    scrollLockEffect[0],
+    /^use(?:Layout|IsomorphicLayout)Effect\(/,
+    "Expected the modal scroll lock to use layout timing (useLayoutEffect / useIsomorphicLayoutEffect) so it runs before paint",
+  );
+  // The isomorphic alias must resolve to useLayoutEffect on the client; otherwise
+  // the scroll lock would run after paint and the position would visibly jump.
+  assert.match(
+    dashboardSource.detail,
+    /useIsomorphicLayoutEffect =\s*typeof window !== "undefined" \? useLayoutEffect : useEffect;/,
   );
 });
 
