@@ -561,7 +561,7 @@ def test_project_onboarding_doc_has_provider_prompts() -> None:
     # README links to the onboarding doc
     assert "PROJECT_ONBOARDING.md" in readme
 
-    providers = ["Codex", "Claude Code", "Gemini", "OpenCode", "OpenClaw"]
+    providers = ["Codex", "Claude Code", "Gemini", "OpenCode", "Grok"]
     for provider in providers:
         # Each provider must have a clear heading
         assert f"### {provider}" in doc, f"missing heading for {provider}"
