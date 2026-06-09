@@ -965,6 +965,44 @@ def test_profile_schema_rejects_service_with_both_image_and_build_context() -> N
 
 
 @pytest.mark.unit
+def test_profile_schema_rejects_duplicate_service_names() -> None:
+    with pytest.raises(ValidationError, match="duplicate service name: db"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad",
+                "services": [
+                    {"name": "db", "image": "postgres:16"},
+                    {"name": "db", "image": "postgres:15"},
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_profile_schema_rejects_service_named_docker_when_dind() -> None:
+    with pytest.raises(ValidationError, match="reserved for the managed"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad",
+                "docker": {"mode": "dind"},
+                "services": [{"name": "docker", "image": "docker:27-dind"}],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_profile_schema_allows_service_named_docker_without_dind() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "ok",
+            "services": [{"name": "docker", "image": "docker:27-dind"}],
+        }
+    )
+
+    assert profile.services[0].name == "docker"
+
+
+@pytest.mark.unit
 def test_profile_secret_accepts_safe_mount_without_provider_ref_pair() -> None:
     secret = ProfileSecret(name="ssh", target="/run/awf/secrets/ssh")
 

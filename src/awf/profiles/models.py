@@ -36,6 +36,13 @@ class DockerMode(StrEnum):
     dind = "dind"
 
 
+# Compose service name AWF prepends for the managed Docker-in-Docker daemon when
+# ``docker.mode`` is ``dind`` (see ``ComposeManager._services_for``). It is also
+# the host the agent reaches via ``DOCKER_HOST=tcp://docker:2375``, so a
+# profile-declared service of the same name would shadow the managed daemon.
+_MANAGED_DIND_SERVICE_NAME = "docker"
+
+
 class EndpointVisibility(StrEnum):
     """Where a profile app endpoint should be exposed."""
 
@@ -773,6 +780,29 @@ class WorkspaceProfile(BaseModel):
     pricing: ProfilePricing | None = None
     ports: dict[str, str] = Field(default_factory=dict)
     app_endpoints: list[ProfileAppEndpoint] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_service_names(self) -> WorkspaceProfile:
+        """Reject ambiguous service names before they reach Compose rendering.
+
+        Each service becomes a top-level key in the generated Compose file, so two
+        entries sharing a name would emit duplicate keys (Compose rejects the file
+        or one definition silently shadows the other). In ``dind`` mode AWF also
+        prepends its own managed ``docker`` daemon; a profile-declared ``docker``
+        service would collide with it and leave the agent's
+        ``DOCKER_HOST=tcp://docker:2375`` pointing at the wrong container.
+        """
+        seen: set[str] = set()
+        for service in self.services:
+            if service.name in seen:
+                raise ValueError(f"duplicate service name: {service.name}")
+            seen.add(service.name)
+        if self.docker.mode == DockerMode.dind and _MANAGED_DIND_SERVICE_NAME in seen:
+            raise ValueError(
+                f"service name {_MANAGED_DIND_SERVICE_NAME!r} is reserved for the "
+                "managed Docker-in-Docker daemon when docker.mode is 'dind'"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_app_endpoints(self) -> WorkspaceProfile:
