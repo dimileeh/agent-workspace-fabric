@@ -128,37 +128,39 @@ export function ResourceCapacityPanel({
       stale={stale || summaryStale}
       dimBody={false}
     >
-      {!saturation ? (
-        <MutedLine>{error ? `Unable to load capacity: ${error}` : "Capacity snapshot loading."}</MutedLine>
-      ) : (
-        <div className="grid gap-3">
-          {error ? (
-            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
-              Showing last capacity snapshot. Refresh failed: {error}
-            </div>
-          ) : null}
-          {workspaceSummaryError ? (
-            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
-              Unable to load workspace reliability metrics: {workspaceSummaryError}
-            </div>
-          ) : null}
-          {/* Reliability-summary facts dim with the summary feed only — kept out
-              of the saturation region so a stale saturation snapshot can't fade
-              freshly-refreshed Stuck / Reason coverage. */}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-            <Fact
-              label="Stuck"
-              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
-              stale={summaryStale}
-            />
-            <Fact
-              label="Reason Coverage"
-              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
-              stale={summaryStale}
-            />
+      <div className="grid gap-3">
+        {workspaceSummaryError ? (
+          <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
+            Unable to load workspace reliability metrics: {workspaceSummaryError}
           </div>
-          {/* Saturation-driven content dims with the saturation feed. */}
-          <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
+        ) : null}
+        {/* Reliability-summary facts dim with the summary feed only and render
+            independently of the saturation feed — a failed or still-loading
+            saturation snapshot must not hide freshly-refreshed Stuck / Reason
+            coverage, so they live outside the saturation gate below. */}
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <Fact
+            label="Stuck"
+            value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"}
+            stale={summaryStale}
+          />
+          <Fact
+            label="Reason Coverage"
+            value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"}
+            stale={summaryStale}
+          />
+        </div>
+        {!saturation ? (
+          <MutedLine>{error ? `Unable to load capacity: ${error}` : "Capacity snapshot loading."}</MutedLine>
+        ) : (
+          <>
+            {error ? (
+              <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("warn")}`}>
+                Showing last capacity snapshot. Refresh failed: {error}
+              </div>
+            ) : null}
+            {/* Saturation-driven content dims with the saturation feed. */}
+            <div data-awf-stale={stale ? "true" : undefined} className="grid gap-3">
           <div className={`rounded-md border px-3 py-2 text-xs ${toneClass("info")}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold">Scheduler capacity source</span>
@@ -275,9 +277,10 @@ export function ResourceCapacityPanel({
           <div className="text-[11px] text-fg-muted">
             generated {relativeTime(saturation.generated_at)}
           </div>
-          </div>
-        </div>
-      )}
+            </div>
+          </>
+        )}
+      </div>
     </Panel>
   );
 }
