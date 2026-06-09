@@ -89,7 +89,7 @@ Implemented now:
 - SQLAlchemy control-plane models for workspaces, operations, and events.
 - Profile-driven workspace resolution.
 - Per-workspace Docker Compose stack generation.
-- Codex, Claude Code, Gemini, and OpenCode adapters.
+- Codex, Claude Code, Cursor, Gemini, OpenCode, and Grok adapters.
 - Central default model/effort map for agent adapters.
 - AWF-owned Plan -> Execute -> Compare lifecycle policy.
 - Generic phase-based validation.
@@ -154,9 +154,31 @@ See:
 
 ## Installation
 
-AWF currently has three runnable first-run lanes. The public curl installer lane
-is release-gated until its hosted installer URL, manifest, checksums, and
-release artifacts are published and verified.
+If you already use Claude Code or Codex, the fastest path is to let your agent
+install AWF and onboard your repo — it's the only lane that ends with *your*
+repository profiled and a green smoke. Paste this prompt (replace `<PATH>` with
+your project's path):
+
+```text
+Set up Agent Workspace Fabric (AWF) on this machine and onboard my repo.
+1. Clone https://github.com/dimileeh/agent-workspace-fabric and READ
+   skills/awf-scheduler/SKILL.md and docs/QUICKSTART.md before doing anything.
+2. Check prerequisites (Docker running, uv, git, and gh authenticated if I want PR
+   automation). If any are missing, STOP and tell me — do not guess.
+3. Install via the source lane: uv tool install . --force, then awf setup, awf start,
+   and awf service status --format pretty.
+4. Onboard my project at <PATH>: awf init <PATH> --write-profile --yes, then
+   awf smoke run --project <PATH> --mocked-local --format pretty.
+5. Stop when the mocked smoke is green and report the profile summary. Do not create
+   a real workspace or open a PR unless I ask.
+```
+
+It reads the bundled `skills/awf-scheduler/SKILL.md` (the operator skill for
+driving AWF) so its steps track the current commands.
+
+For a deterministic, reproducible install, AWF has three runnable first-run lanes.
+The public curl installer lane is release-gated until its hosted installer URL,
+manifest, checksums, and release artifacts are published and verified.
 
 | Lane | Use When | Install |
 | --- | --- | --- |

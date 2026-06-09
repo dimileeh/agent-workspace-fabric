@@ -103,4 +103,4 @@ workspace controls.
 
 MCP does not expose arbitrary shell, Docker exec, host filesystem browsing, or
 secret material. Agent runtimes currently implemented inside AWF workspaces are
-Codex, Claude Code, Cursor, Gemini, and OpenCode.
+Codex, Claude Code, Cursor, Gemini, OpenCode, and Grok.

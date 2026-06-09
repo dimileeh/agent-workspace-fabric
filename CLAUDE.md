@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 AWF (Agent Workspace Fabric) is the **control plane** for running AI coding agents (Codex,
-Claude Code, Gemini, OpenCode) as disciplined contributors. Each coding task gets an isolated
+Claude Code, Cursor, Gemini, OpenCode, Grok) as disciplined contributors. Each coding task gets an isolated
 git worktree, a per-workspace Docker Compose stack, profile-driven validation, a created PR,
 and a PR-monitor loop that handles review comments, CI fixes, base sync, and auto-merge gates
 before cleanup. AWF owns lifecycle/policy; the agent owns code changes; profiles own

@@ -242,14 +242,14 @@ docker-group resolution).
 ## Operator Override
 
 There is no operator override today. The agent runtime UID/GID is the
-hard-coded constant `_AGENT_RUNTIME_UID = 1000` / `_AGENT_RUNTIME_GID = 1000`
-in `src/awf/service/worker.py`, and it is wired into `GitManager` and
-`ServiceAuthMountResolver`.
+hard-coded constant `AGENT_RUNTIME_UID = 1000` / `AGENT_RUNTIME_GID = 1000`
+in `src/awf/node/git_manager.py`, imported by `worker.py` and wired into
+`GitManager` and `ServiceAuthMountResolver`.
 
 If we ship an `AWF_LOCAL_AGENT_UID` / `AWF_LOCAL_AGENT_GID` override later,
 the agent-runtime image must be parameterized to create the `agent` user at
 the requested UID/GID. The current image (`docker/agent-runtime.Dockerfile`
-line 141) hard-codes the UID/GID via `useradd --create-home --shell /bin/bash
+line 236) hard-codes the UID/GID via `useradd --create-home --shell /bin/bash
 agent`, which uses the next available UID (typically `1000`). Until that
 parameterization ships, an override would silently mismatch and the agent
 container would be unable to write its mounted worktree.
@@ -309,11 +309,12 @@ The decision is locked by the following tests:
 - [`docs/AWF_CORE_TRUST_MODEL.md`](AWF_CORE_TRUST_MODEL.md) — local Core
   trust boundary; the Docker daemon plus root-in-control-plane combination
   is the privileged local seam this strategy depends on.
-- `src/awf/node/git_manager.py` — `_prepare_agent_writable_worktree`,
-  `_agent_writable_git_targets`, `_chown_targets`, `_chown_tree`.
+- `src/awf/node/git_manager.py` — `AGENT_RUNTIME_UID`/`AGENT_RUNTIME_GID`
+  constants, `_prepare_agent_writable_worktree`, `_agent_writable_git_targets`,
+  `_chown_targets`, `_chown_tree`.
 - `src/awf/node/auth_mounts.py` — `_chown_workspace_auth_sources`.
-- `src/awf/service/worker.py` — `_AGENT_RUNTIME_UID`, `_AGENT_RUNTIME_GID`,
-  and the wiring into `GitManager` and `ServiceAuthMountResolver`.
+- `src/awf/service/worker.py` — imports `AGENT_RUNTIME_UID`/`AGENT_RUNTIME_GID`
+  and wires them into `GitManager` and `ServiceAuthMountResolver`.
 - `docker/agent-runtime.Dockerfile` — the `agent` user (UID/GID `1000`)
   baked into the agent runtime image.
 - `docker/compose/local-service.yml` — the local control-plane stack with

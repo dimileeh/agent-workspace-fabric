@@ -40,7 +40,7 @@ are working on the console outside the local Core Compose stack.
 | `--project` | `.` | Path to the project to smoke |
 | `--format` | `json` | Output format: `json` or `pretty` |
 | `--mocked-local` | off | Run without live external services; all phases become advisory |
-| `--demo-path` | `examples/awf-core-demo` | Fallback when `--project` has no profile |
+| `--demo-path` | `(none)` | Explicit demo project to smoke when `--project` has no profile; there is no implicit fallback unless you pass this |
 
 ## Examples
 

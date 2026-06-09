@@ -36,7 +36,11 @@ docker compose version
 
 ### Installation
 
-AWF currently has three runnable first-run lanes:
+If you already use Claude Code or Codex, the fastest path is to let your agent
+install AWF and onboard your repo — see
+[Quickstart → Lane 0](QUICKSTART.md#lane-0-let-your-coding-agent-install-it). It
+is the only lane that ends with your repository profiled and a green smoke. For a
+deterministic manual install, AWF has three runnable first-run lanes:
 
 - `uv tool` / `pipx` for a release-installed package.
 - Source checkout with a global tool install for inspectable source plus an

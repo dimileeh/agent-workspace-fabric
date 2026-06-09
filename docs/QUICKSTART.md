@@ -1,11 +1,12 @@
 # Quickstart
 
-Pick one lane and follow only that lane. Each currently runnable lane installs
+Pick one lane and follow only that lane. **Lane 0** lets a coding agent install
+AWF for you; **Lanes 1–3** are deterministic manual installs. Each lane installs
 AWF, runs setup, starts local Core, initializes a project, and runs mocked smoke.
 
 The public curl installer lane is release-gated until the hosted installer URL,
 manifest, checksums, and release artifacts are published and verified. Until
-then, use one of the three lanes below.
+then, use one of the lanes below.
 
 ## Prerequisites
 
@@ -28,6 +29,34 @@ Use any checked-out project repository, or create a throwaway eval project:
 ```bash
 mkdir -p "$HOME/awf-eval-project"
 ```
+
+## Lane 0: Let your coding agent install it
+
+AWF orchestrates coding agents, so the fastest path is to have one set it up for
+you — it clones the repo, installs AWF, brings up local Core, and onboards your
+project, adapting to whatever your machine needs along the way. This is the only
+lane that ends with *your* repo onboarded and a green smoke. Paste this into
+Claude Code, Codex, or any agent with shell access (replace `<PATH>` with your
+project's path):
+
+```text
+Set up Agent Workspace Fabric (AWF) on this machine and onboard my repo.
+1. Clone https://github.com/dimileeh/agent-workspace-fabric and READ
+   skills/awf-scheduler/SKILL.md and docs/QUICKSTART.md before doing anything.
+2. Check prerequisites (Docker running, uv, git, and gh authenticated if I want PR
+   automation). If any are missing, STOP and tell me — do not guess.
+3. Install via the source lane: uv tool install . --force, then awf setup, awf start,
+   and awf service status --format pretty.
+4. Onboard my project at <PATH>: awf init <PATH> --write-profile --yes, then
+   awf smoke run --project <PATH> --mocked-local --format pretty.
+5. Stop when the mocked smoke is green and report the profile summary. Do not create
+   a real workspace or open a PR unless I ask.
+```
+
+The agent reads the bundled `skills/awf-scheduler/SKILL.md` (the operator skill
+for driving AWF) so its steps stay grounded in the current commands. Want a
+deterministic, reproducible install for CI or scripted setup instead? Use one of
+the manual lanes below.
 
 ## Lane 1: uv tool or pipx
 

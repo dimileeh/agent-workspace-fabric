@@ -261,6 +261,27 @@ curl -X POST "http://localhost:8000/v1/workspaces/ws_123/remonitor" \
 
 ---
 
+## Guide
+
+Inject an operator `directive` into a live monitoring workspace — the agent
+instruction is acted on the next monitor cycle. This is the purpose-named way to
+close a `NotifyHuman` loop without cancel + re-adopt; prefer it over overloading
+`remonitor --reason`. `directive` is the instruction; `reason` is audit-only.
+Auth required. Requires `Idempotency-Key` and supports `If-Match`.
+
+```bash
+curl -X POST "http://localhost:8000/v1/workspaces/ws_123/guide" \
+  -H "Authorization: Bearer $AWF_API_TOKEN" \
+  -H "Idempotency-Key: guide-ws-123-001" \
+  -H "If-Match: 9" \
+  -H "Content-Type: application/json" \
+  -d '{"directive": "Re-run the failing migration test and push the fix.", "reason": "operator nudge"}'
+```
+
+Returns a workspace control response.
+
+---
+
 ## Retry
 
 Retry a terminal (failed/cancelled) workspace by creating a new workspace

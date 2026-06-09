@@ -35,7 +35,9 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces. See
 | `awf_list_workspace_events` | List one workspace's immutable events newest-first, returning a `WorkspaceEventListResponse` envelope. |
 | `awf_list_workspace_logs` | List indexed durable log streams for one workspace. |
 | `awf_read_workspace_log` | Read a bounded log chunk by stream id and byte offset. |
+| `awf_read_workspace_artifact` | Read a bounded chunk of one workspace artifact's content by path. |
 | `awf_get_overlap_graph` | Fetch the advisory owned-path overlap graph. |
+| `awf_get_egress_audit_evidence` | Fetch recorded outbound egress audit evidence, optionally filtered by workspace. |
 | `awf_list_tasks` | List task records backed by workspace attempts. |
 | `awf_list_task_attempts` | List attempts for one task reference. |
 | `awf_list_locks` | List owned-path reservations and overlap-risk summaries. |

@@ -38,7 +38,7 @@ sources only.
 
 ## One-message prompt
 
-Use this with Codex, Claude Code, Cursor, Gemini, OpenCode, OpenClaw, or a human
+Use this with Codex, Claude Code, Cursor, Gemini, OpenCode, Grok, or a human
 operator:
 
 ```text
@@ -110,10 +110,10 @@ Use `opencode run` to inspect this repository for AWF onboarding. Do not launch 
 Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
 
-### OpenClaw
+### Grok
 
 ```text
-Inspect this repository for AWF onboarding via your OpenClaw runtime. Do not launch a workspace yet.
+Inspect this repository for AWF onboarding. Do not launch a workspace yet.
 
 1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
 2. Run `awf profile preview .` to preview the resolved profile.
