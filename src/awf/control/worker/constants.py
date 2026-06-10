@@ -264,6 +264,15 @@ raises for expected partial/permission cases — it returns a report dict — so
 fires only for an unexpected failure of the injected closure (e.g. the blocking
 ``rmtree`` raising an unhandled error)."""
 
+_TERMINAL_WORKSPACE_GC_REAP_FAILED_REASON_CODE = "TERMINAL_WORKSPACE_GC_SWEEP_FAILED"
+"""Reason code logged when the worker terminal-workspace auth-dir GC sweep fails (#513).
+
+Worker-internal structured-log reason code only, not a doctor/catalog entry
+(mirrors ``_CLAUDE_BASE_REAP_SWEEP_FAILED_REASON_CODE``). The driven GC itself never
+raises for expected partial/skipped cases — it returns a ``WorkspaceGCResult`` report
+dict — so this fires only for an unexpected failure of the injected closure (e.g. the
+blocking ``rmtree`` or DB work raising an unhandled error)."""
+
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,

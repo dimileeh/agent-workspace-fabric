@@ -524,6 +524,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
             claude_base_reaper: object = None,
+            terminal_gc_reaper: object = None,
             auth_overlay_work_dir: object = None,
         ) -> None:
             created["worker_session_factory"] = session_factory
@@ -535,6 +536,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             created["worker_orphan_dir_reconciler"] = orphan_dir_reconciler
             created["worker_classified_orphan_reaper"] = classified_orphan_reaper
             created["worker_claude_base_reaper"] = claude_base_reaper
+            created["worker_terminal_gc_reaper"] = terminal_gc_reaper
             created["worker_auth_overlay_work_dir"] = auth_overlay_work_dir
 
         async def run_once(self) -> int:
@@ -614,6 +616,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["worker_orphan_dir_reconciler"] is not None
     assert created["worker_classified_orphan_reaper"] is not None
     assert created["worker_claude_base_reaper"] is not None
+    assert created["worker_terminal_gc_reaper"] is not None
     assert created["provisioner_config"].node_id == "node-1"
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2
