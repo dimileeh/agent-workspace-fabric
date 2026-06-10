@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,7 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
     """Collect artifact upload paths declared by a workflow job."""
     paths: set[str] = set()
     for step in _steps(job):
-        if step.get("uses") != "actions/upload-artifact@v7":
+        if str(step.get("uses", "")).split("@", 1)[0] != "actions/upload-artifact":
             continue
         with_config = step.get("with", {})
         assert isinstance(with_config, dict)
@@ -62,6 +63,84 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
         elif isinstance(raw_path, list):
             paths.update(str(line).strip() for line in raw_path if str(line).strip())
     return paths
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("action", "ref"),
+    [
+        ("actions/checkout", "v4"),
+        ("astral-sh/setup-uv", "v7"),
+        ("actions/upload-artifact", "v7"),
+        ("actions/download-artifact", "v4"),
+        ("pypa/gh-action-pypi-publish", "release/v1"),
+    ],
+)
+def test_publish_workflow_actions_pinned_to_sha_with_version_comment(action: str, ref: str) -> None:
+    """Every ``uses:`` ref is pinned to a 40-char SHA with the Dependabot ``# <ref>`` comment."""
+    text = PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    # No floating-ref refs remain for this action.
+    assert not re.search(rf"{re.escape(action)}@{re.escape(ref)}(?=\s|$)", text), action
+    # Every ``uses:`` occurrence is pinned to a 40-char SHA with the version comment, so a
+    # single mis-pinned duplicate cannot hide behind a correctly pinned sibling.
+    uses_lines = re.findall(rf"^\s*(?:-\s*)?uses:\s*{re.escape(action)}@\S+.*", text, re.MULTILINE)
+    assert uses_lines, f"No occurrences of {action} found"
+    for line in uses_lines:
+        assert re.search(
+            rf"uses:\s*{re.escape(action)}@[0-9a-f]{{40}}\s+# {re.escape(ref)}\b", line
+        ), f"Action {action} in line '{line}' is not pinned to a 40-char SHA with comment '# {ref}'"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("job_name", ["build", "installer-smoke"])
+def test_publish_workflow_checkouts_disable_persisted_credentials(job_name: str) -> None:
+    """Every checkout in publish.yml sets ``persist-credentials: false``.
+
+    The build job builds and checksums the PyPI distributions, so leaving the
+    GITHUB_TOKEN persisted in ``.git/config`` is the highest-stakes omission in
+    the repo. This mirrors the same zizmor-driven hardening already enforced on
+    every ci.yml checkout.
+    """
+    job = _job(_publish_workflow(), job_name)
+    checkouts = [
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).split("@", 1)[0] == "actions/checkout"
+    ]
+    assert checkouts, f"{job_name} job has no checkout step"
+    for checkout in checkouts:
+        with_config = checkout.get("with", {})
+        assert isinstance(with_config, dict)
+        assert with_config.get("persist-credentials") is False, (
+            f"checkout in {job_name} must set persist-credentials: false"
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("job_name", ["build", "installer-smoke"])
+def test_publish_workflow_setup_uv_disables_cache(job_name: str) -> None:
+    """Every ``setup-uv`` in publish.yml sets ``enable-cache: false``.
+
+    The build job builds/checksums the PyPI distributions and installer-smoke
+    verifies those checksums, so restoring or uploading a shared uv cache is a
+    cache-poisoning vector (flagged by zizmor). ``enable-cache`` defaults to
+    ``auto`` (on for GitHub-hosted runners), so the flag must be set
+    explicitly; this guard keeps the hardening from silently regressing.
+    """
+    job = _job(_publish_workflow(), job_name)
+    setup_uv_steps = [
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).split("@", 1)[0] == "astral-sh/setup-uv"
+    ]
+    assert setup_uv_steps, f"{job_name} job has no setup-uv step"
+    for setup_uv in setup_uv_steps:
+        with_config = setup_uv.get("with", {})
+        assert isinstance(with_config, dict)
+        assert with_config.get("enable-cache") is False, (
+            f"setup-uv in {job_name} must set enable-cache: false"
+        )
 
 
 @pytest.mark.unit
@@ -120,7 +199,7 @@ def test_publish_workflow_has_installer_smoke_job_consuming_release_artifacts() 
     downloaded = {
         step.get("with", {}).get("name")
         for step in _steps(smoke_job)
-        if step.get("uses") == "actions/download-artifact@v4"
+        if str(step.get("uses", "")).split("@", 1)[0] == "actions/download-artifact"
     }
     assert "python-distributions" in downloaded
     assert "python-distribution-checksums" in downloaded
@@ -184,7 +263,8 @@ def test_publish_workflow_publish_job_keeps_manual_trusted_publishing_gate() -> 
 
     publish_steps = _steps(publish_job)
     assert any(
-        step.get("uses") == "pypa/gh-action-pypi-publish@release/v1" for step in publish_steps
+        str(step.get("uses", "")).split("@", 1)[0] == "pypa/gh-action-pypi-publish"
+        for step in publish_steps
     )
 
 
