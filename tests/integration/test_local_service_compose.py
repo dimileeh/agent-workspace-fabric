@@ -266,6 +266,16 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         # GC-B base reaper is default-on, so its kill-switch must be forwarded into
         # the API/worker containers or operators could never disable it.
         assert environment["AWF_CLAUDE_BASE_GC_ENABLED"] == ("${AWF_CLAUDE_BASE_GC_ENABLED:-true}")
+        # The terminal-workspace auth-dir reaper (#513) is likewise default-on and
+        # driven from the worker, so its kill-switch and scan interval must be
+        # forwarded or operators could never disable it / retune it (the image does
+        # not copy the operator's .env).
+        assert environment["AWF_TERMINAL_WORKSPACE_GC_ENABLED"] == (
+            "${AWF_TERMINAL_WORKSPACE_GC_ENABLED:-true}"
+        )
+        assert environment["AWF_TERMINAL_WORKSPACE_GC_SCAN_INTERVAL_SECONDS"] == (
+            "${AWF_TERMINAL_WORKSPACE_GC_SCAN_INTERVAL_SECONDS:-3600}"
+        )
         assert environment["AWF_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS"] == (
             "${AWF_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS:-3600}"
         )
