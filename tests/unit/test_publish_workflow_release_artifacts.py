@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,7 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
     """Collect artifact upload paths declared by a workflow job."""
     paths: set[str] = set()
     for step in _steps(job):
-        if step.get("uses") != "actions/upload-artifact@v7":
+        if str(step.get("uses", "")).split("@", 1)[0] != "actions/upload-artifact":
             continue
         with_config = step.get("with", {})
         assert isinstance(with_config, dict)
@@ -62,6 +63,29 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
         elif isinstance(raw_path, list):
             paths.update(str(line).strip() for line in raw_path if str(line).strip())
     return paths
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("action", "ref"),
+    [
+        ("actions/checkout", "v4"),
+        ("astral-sh/setup-uv", "v7"),
+        ("actions/upload-artifact", "v7"),
+        ("actions/download-artifact", "v4"),
+        ("pypa/gh-action-pypi-publish", "release/v1"),
+    ],
+)
+def test_publish_workflow_actions_pinned_to_sha_with_version_comment(action: str, ref: str) -> None:
+    """Every ``uses:`` ref is pinned to a 40-char SHA with the Dependabot ``# <ref>`` comment."""
+    text = PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    # No floating-ref refs remain for this action.
+    assert not re.search(rf"{re.escape(action)}@{re.escape(ref)}(?=\s|$)", text), action
+    # The action is pinned to an immutable SHA with the version preserved as a comment.
+    assert re.search(rf"{re.escape(action)}@[0-9a-f]{{40}}\s+# {re.escape(ref)}(?=\s|$)", text), (
+        action
+    )
 
 
 @pytest.mark.unit
@@ -120,7 +144,7 @@ def test_publish_workflow_has_installer_smoke_job_consuming_release_artifacts() 
     downloaded = {
         step.get("with", {}).get("name")
         for step in _steps(smoke_job)
-        if step.get("uses") == "actions/download-artifact@v4"
+        if str(step.get("uses", "")).split("@", 1)[0] == "actions/download-artifact"
     }
     assert "python-distributions" in downloaded
     assert "python-distribution-checksums" in downloaded
@@ -184,7 +208,8 @@ def test_publish_workflow_publish_job_keeps_manual_trusted_publishing_gate() -> 
 
     publish_steps = _steps(publish_job)
     assert any(
-        step.get("uses") == "pypa/gh-action-pypi-publish@release/v1" for step in publish_steps
+        str(step.get("uses", "")).split("@", 1)[0] == "pypa/gh-action-pypi-publish"
+        for step in publish_steps
     )
 
 

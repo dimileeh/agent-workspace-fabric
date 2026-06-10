@@ -26,12 +26,12 @@ jobs:
       manifest_generated: ${{ steps.build.outputs.manifest_generated }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-tags: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           version: "0.5.31"
           github-token: ""
@@ -106,14 +106,14 @@ jobs:
           fi
 
       - name: Upload distributions
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: python-distributions
           path: dist/*
           if-no-files-found: error
 
       - name: Upload release audit artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: python-distribution-checksums
           path: |
@@ -131,22 +131,22 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Download distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: python-distributions
           path: dist
 
       - name: Download release audit artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: python-distribution-checksums
           path: artifacts/release
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:
           version: "0.5.31"
           github-token: ""
@@ -204,12 +204,12 @@ jobs:
       id-token: write
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: python-distributions
           path: dist
 
       - name: Publish via PyPI Trusted Publishing
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
         with:
           repository-url: ${{ inputs.publish_target == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
