@@ -24,6 +24,13 @@ class WorkerConfig:
     terminal_runtime_release_max_per_scan: int = 5
     orphan_reconcile_scan_interval_seconds: float = 3600.0
     classified_orphan_reap_scan_interval_seconds: float = 3600.0
+    # Kill-switch for the worker-side superseded-Claude-base reaper sweep, sourced
+    # from ``settings.claude_base_gc_enabled`` (the same flag the API ``/v1/service/gc``
+    # path already honours). The worker holds CAP_SYS_ADMIN and shares the agent's
+    # mount namespace, so unlike the API container its ``/proc/mounts`` live-mount
+    # verification is trustworthy and it can actually reap superseded bases (#509).
+    claude_base_gc_enabled: bool = True
+    claude_base_reap_scan_interval_seconds: float = 3600.0
     # NOTE: the interval fields above are read by the worker cleanup loops. The
     # two fields below are informational mirrors of the same settings: the
     # *effective* values are captured by the ``_reconcile_orphan_dirs`` closure

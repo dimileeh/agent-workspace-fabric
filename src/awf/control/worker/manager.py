@@ -94,6 +94,7 @@ class ControlWorker(WorkerDelegatesMixin):
         open_pr_resolver: BranchOpenPullRequestResolverProtocol | None = None,
         orphan_dir_reconciler: Callable[[], Awaitable[OrphanDirReconcileResult]] | None = None,
         classified_orphan_reaper: Callable[[], Awaitable[OrphanReapResult]] | None = None,
+        claude_base_reaper: Callable[[], Awaitable[dict[str, object]]] | None = None,
         auth_overlay_work_dir: Path | None = None,
         config: WorkerConfig,
     ) -> None:
@@ -105,6 +106,11 @@ class ControlWorker(WorkerDelegatesMixin):
         self._open_pr_resolver = open_pr_resolver
         self._orphan_dir_reconciler = orphan_dir_reconciler
         self._classified_orphan_reaper = classified_orphan_reaper
+        # CAP_SYS_ADMIN-context reaper for superseded shared ``~/.claude`` overlay
+        # bases (#509). Only the worker can trust the live-mount verification, so
+        # the API ``/v1/service/gc`` path self-protects and reaps nothing; this
+        # closure (built in ``service/worker.py``) drives the real reclaim.
+        self._claude_base_reaper = claude_base_reaper
         # The host work dir that backs ``auth/<id>/claude/...`` overlays. When set,
         # the terminal-runtime-release sweep unmounts a reaped workspace's overlay
         # in the worker's (CAP_SYS_ADMIN) mount namespace before GC removes the dir.
@@ -130,6 +136,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._next_terminal_runtime_release_scan_at = 0.0
         self._next_orphan_reconcile_scan_at = 0.0
         self._next_classified_orphan_reap_scan_at = 0.0
+        self._next_claude_base_reap_scan_at = 0.0
         self._requested_capacity_resume_after: SchedulerOrderCursor | None = None
         self._requested_capacity_resume_signature: _AllocatedReservationSignature | None = None
         self._requested_capacity_resume_queue_signature: _RequestedCapacityQueueSignature | None = (
@@ -188,6 +195,7 @@ class ControlWorker(WorkerDelegatesMixin):
         await self._maybe_release_terminal_runtime()
         await self._maybe_reconcile_orphan_dirs()
         await self._maybe_reap_classified_orphans()
+        await self._maybe_reap_superseded_claude_bases()
 
         if self._executor is not None:
             # Preserved-active-validation redispatches enqueued during recovery
