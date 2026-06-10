@@ -212,6 +212,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            claude_base_reaper: object = None,
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
@@ -864,6 +865,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            claude_base_reaper: object = None,
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
@@ -953,6 +955,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            claude_base_reaper: object = None,
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
@@ -1338,6 +1341,7 @@ def _stub_worker_runtime_dependencies(
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            claude_base_reaper: object = None,
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:

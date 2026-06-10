@@ -43,6 +43,7 @@ from awf.control.worker.config import (
 )
 from awf.control.worker.constants import (
     _CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE,
+    _CLAUDE_BASE_REAP_SWEEP_FAILED_REASON_CODE,
     _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE,
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
@@ -243,6 +244,83 @@ async def _maybe_reap_classified_orphans(self: Any) -> None:
 
     interval = max(0.0, self._config.classified_orphan_reap_scan_interval_seconds)
     self._next_classified_orphan_reap_scan_at = monotonic() + interval
+
+
+async def _maybe_reap_superseded_claude_bases(self: Any) -> None:
+    """Periodically reap superseded shared ``~/.claude`` overlay bases (#509).
+
+    The shared-base reaper (``service.gc_claude_base.reap_superseded_claude_bases``)
+    must run in a CAP_SYS_ADMIN context to trust its ``/proc/mounts`` live-mount
+    verification — only the worker holds that capability and shares the agent's
+    mount namespace, so the API ``/v1/service/gc`` path conservatively protects
+    every base and reaps nothing. This loop drives the reaper from the worker so
+    superseded bases (~1.7 GB each) are actually reclaimed.
+
+    No-op when no reaper callback is wired or the kill-switch
+    (``claude_base_gc_enabled``) is off, in which case the cursor is left eligible
+    so enabling the flag does not wait out a stale interval (mirrors
+    ``_maybe_reap_classified_orphans``'s ``auto_cleanup_orphans`` gate). The reaper
+    closure wraps a blocking multi-GB ``rmtree`` in ``asyncio.to_thread`` and never
+    raises for expected partial/permission cases — it returns a report dict — so
+    failures are summarised and the cursor is always rescheduled. Unlike the
+    classified-orphan loop the reaper does no DB I/O, so there is no transient-DB
+    branch; any unexpected exception is logged loudly via ``_log.exception`` and
+    swallowed so one failed sweep cannot block provisioning or dispatch.
+    ``asyncio.CancelledError`` propagates for cooperative shutdown.
+    """
+    if self._claude_base_reaper is None:
+        return
+    if not self._config.claude_base_gc_enabled:
+        return
+
+    now = monotonic()
+    if now < self._next_claude_base_reap_scan_at:
+        return
+
+    try:
+        report = await self._claude_base_reaper()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.exception(
+            "worker.claude_base_reap_failed",
+            reason_code=_CLAUDE_BASE_REAP_SWEEP_FAILED_REASON_CODE,
+        )
+    else:
+        _log_claude_base_reap_summary(report)
+
+    interval = max(0.0, self._config.claude_base_reap_scan_interval_seconds)
+    self._next_claude_base_reap_scan_at = monotonic() + interval
+
+
+def _log_claude_base_reap_summary(report: dict[str, object]) -> None:
+    """Emit a structured summary for a completed Claude-base reap sweep.
+
+    Logs ``info`` when bases were reclaimed and ``warning`` when the reaper
+    self-protected to a ``partial`` (e.g. a permission-denied removal or an
+    unverifiable live mount). A clean ``skipped`` no-op (nothing superseded, or a
+    dry-run preview) is intentionally silent to avoid log noise each interval. Base
+    contents/secrets are never logged — only signature names the reaper already
+    surfaces in its report.
+    """
+    reaped = report.get("reaped") or []
+    # Independent conditions, not mutually exclusive: a ``partial`` pass can still
+    # have reclaimed some bases while another base errored, so surface both the
+    # reclaim (info) and the partial (warning) rather than masking one behind the
+    # other.
+    if reaped:
+        _log.info(
+            "worker.claude_base_superseded_reaped",
+            reason_code=report.get("reason_code"),
+            reaped=reaped,
+        )
+    if report.get("status") == "partial":
+        _log.warning(
+            "worker.claude_base_reap_partial",
+            reason_code=report.get("reason_code"),
+            errors=report.get("errors") or [],
+            unverifiable=report.get("unverifiable") or [],
+        )
 
 
 async def _release_terminal_runtime_resources(self: Any) -> None:
