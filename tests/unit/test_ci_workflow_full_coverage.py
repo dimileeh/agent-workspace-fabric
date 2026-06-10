@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,19 @@ DOCKER_SKIP_ENV = "AWF_SKIP_DOCKER_TESTS"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 GITHUB_HOSTED_RUNNER = "ubuntu-latest"
 SETUP_UV_VERSION = "0.5.31"
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _assert_sha_pinned(uses: object, expected_action: str) -> None:
+    """Assert a ``uses:`` ref pins ``expected_action`` to a full 40-char commit SHA."""
+    assert isinstance(uses, str), (
+        f"expected 'uses' to be a string, but got {type(uses).__name__} (action: {expected_action})"
+    )
+    action, sep, ref = uses.partition("@")
+    assert sep == "@" and action == expected_action, (
+        f"expected action '{expected_action}', but got '{uses}'"
+    )
+    assert _SHA_RE.fullmatch(ref), f"{expected_action} must be pinned to a 40-char SHA: {uses}"
 
 
 def _workflow() -> dict[str, Any]:
@@ -67,7 +81,7 @@ def _step_run(job: dict[str, Any], name: str) -> str:
 
 def _setup_uv_step(workflow: dict[str, Any], job_name: str) -> dict[str, Any]:
     step = _named_step(_job(workflow, job_name), "Install uv")
-    assert step.get("uses") == "astral-sh/setup-uv@v7"
+    _assert_sha_pinned(step.get("uses"), "astral-sh/setup-uv")
     return step
 
 
@@ -195,7 +209,7 @@ def test_ci_has_parallel_python_coverage_shards() -> None:
 
     upload_step = _named_step(job, "Upload coverage shard")
     assert upload_step.get("if") == "${{ always() }}"
-    assert upload_step.get("uses") == "actions/upload-artifact@v7"
+    _assert_sha_pinned(upload_step.get("uses"), "actions/upload-artifact")
     assert upload_step.get("with") == {
         "name": "python-coverage-shard-${{ matrix.shard }}",
         "path": "coverage-artifacts/.coverage.shard-${{ matrix.shard }}",
@@ -241,7 +255,7 @@ def test_ci_has_authoritative_python_full_coverage_gate() -> None:
     assert "exit 1" in verify_run
 
     download_step = _named_step(job, "Download coverage shards")
-    assert download_step.get("uses") == "actions/download-artifact@v4"
+    _assert_sha_pinned(download_step.get("uses"), "actions/download-artifact")
     assert download_step.get("with") == {
         "pattern": "python-coverage-shard-*",
         "path": "coverage-artifacts",
@@ -399,7 +413,8 @@ def test_publish_workflow_builds_on_tags_and_uses_trusted_publishing() -> None:
 
     publish_steps = _steps(publish_job)
     assert any(
-        step.get("uses") == "pypa/gh-action-pypi-publish@release/v1" for step in publish_steps
+        str(step.get("uses", "")).split("@", 1)[0] == "pypa/gh-action-pypi-publish"
+        for step in publish_steps
     )
     assert "secrets.PYPI_API_TOKEN" not in PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8")
 
@@ -419,6 +434,91 @@ def test_required_ci_gate_rolls_up_full_coverage_and_required_jobs() -> None:
     commands = _run_steps(job)
     assert "A required CI job did not pass." in commands
     assert '!= "success"' in commands
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("action", "ref"),
+    [
+        ("actions/checkout", "v4"),
+        ("astral-sh/setup-uv", "v7"),
+        ("actions/upload-artifact", "v7"),
+        ("actions/download-artifact", "v4"),
+        ("actions/setup-node", "v6"),
+        ("docker/setup-buildx-action", "v4"),
+        ("docker/build-push-action", "v7"),
+    ],
+)
+def test_ci_workflow_actions_pinned_to_sha_with_version_comment(action: str, ref: str) -> None:
+    """Every ``uses:`` ref is pinned to a 40-char SHA with the Dependabot ``# <ref>`` comment."""
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    # No floating-tag refs remain for this action.
+    assert not re.search(rf"{re.escape(action)}@{re.escape(ref)}(?=\s|$)", text), action
+    # Every ``uses:`` occurrence is pinned to a 40-char SHA with the version comment, so a
+    # single mis-pinned duplicate cannot hide behind a correctly pinned sibling.
+    uses_lines = re.findall(rf"^\s*(?:-\s*)?uses:\s*{re.escape(action)}@\S+.*", text, re.MULTILINE)
+    assert uses_lines, f"No occurrences of {action} found"
+    for line in uses_lines:
+        assert re.search(
+            rf"uses:\s*{re.escape(action)}@[0-9a-f]{{40}}\s+# {re.escape(ref)}\b", line
+        ), f"Action {action} in line '{line}' is not pinned to a 40-char SHA with comment '# {ref}'"
+
+
+@pytest.mark.unit
+def test_ci_workflow_all_external_actions_are_sha_pinned() -> None:
+    """Every non-local ``uses:`` is SHA-pinned with a ``# <ref>`` comment, exhaustively.
+
+    The parametrized guard above only checks the actions it names, so a newly
+    added external ``uses:`` entry could regress to a floating tag and still pass.
+    This pass walks *every* non-local ``uses:`` line in ci.yml and enforces
+    ``@<40-char SHA>  # <ref>`` so the hardening cannot silently regress. Mirrors
+    ``test_publish_workflow_all_external_actions_are_sha_pinned``.
+    """
+    text = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    # Collect every uses: line that is not a local (``./``) action reference.
+    uses_lines = re.findall(r"^\s*(?:-\s*)?uses:\s*(?!\./)\S+.*", text, re.MULTILINE)
+    assert uses_lines, "No external uses: entries found in ci.yml"
+    for line in uses_lines:
+        assert re.search(r"uses:\s*[^@\s]+@[0-9a-f]{40}\s+#\s+\S+\b", line), (
+            f"External action in line '{line.strip()}' is not pinned to a "
+            "40-char SHA with a '# <ref>' comment"
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "job_name",
+    [
+        "lint-and-type",
+        "python-coverage-shards",
+        "python-full-coverage",
+        "console",
+        "release-artifacts",
+    ],
+)
+def test_ci_workflow_checkouts_disable_persisted_credentials(job_name: str) -> None:
+    """Every checkout in ci.yml sets ``persist-credentials: false``.
+
+    Mirrors ``test_publish_workflow_checkouts_disable_persisted_credentials``
+    so the two workflows are symmetrically enforced: a future edit that drops
+    the flag from any ci.yml checkout fails the suite instead of silently
+    re-persisting the GITHUB_TOKEN in ``.git/config``.
+    """
+    job = _job(_workflow(), job_name)
+    checkouts = [
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).split("@", 1)[0] == "actions/checkout"
+    ]
+    assert checkouts, f"{job_name} job has no checkout step"
+    for checkout in checkouts:
+        with_config = checkout.get("with", {})
+        assert isinstance(with_config, dict)
+        assert with_config.get("persist-credentials") is False, (
+            f"checkout in {job_name} must set persist-credentials: false"
+        )
 
 
 @pytest.mark.unit
