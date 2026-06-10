@@ -17,6 +17,7 @@ threads the monitor already recorded with a fix verdict
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -38,12 +39,15 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     PRStatus,
     ReviewThread,
+    ReviewThreadComment,
     _mark_review_thread_addressed,
     decide,
 )
 from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
 from awf.runtime.pr_monitor_runner.outdated_resolution import (
     _OUTDATED_RESOLVABLE_THREAD_VERDICTS,
+    _latest_reviewer_comment_at,
+    _parse_commit_iso,
 )
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
@@ -96,6 +100,38 @@ def _outdated_thread(
         author="greptile",
         is_resolved=False,
         is_outdated=True,
+    )
+
+
+def _outdated_thread_with_comment(
+    tid: str,
+    *,
+    comment_at: datetime,
+    viewer_did_author: bool = False,
+) -> ReviewThread:
+    """An outdated thread carrying one reviewer comment stamped ``comment_at``.
+
+    Used to exercise the post-fix-activity guard: the seed compares this
+    timestamp against the matching fix commit's committer time.
+    """
+    return ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="c1",
+                body="please fix this finding",
+                author="greptile",
+                created_at=comment_at,
+                updated_at=comment_at,
+                viewer_did_author=viewer_did_author,
+            ),
+        ),
     )
 
 
@@ -689,7 +725,7 @@ def _grep_argv(worktree_path: Path, thread_id: str) -> list[str]:
         "log",
         "-n",
         "1",
-        "--format=%H",
+        "--format=%cI",
         "-F",
         "--all-match",
         "--grep",
@@ -725,8 +761,10 @@ async def test_outdated_thread_seeded_from_branch_evidence_is_resolved(
     # no record of it.
     state = MonitorState()
     thread = _outdated_thread("PRRT_kwDOSJAM6s6IMBmJ")
-    # The branch head carries the prior instance's fix: address commit (non-empty SHA).
-    cmd.queue_result(returncode=0, stdout="7772e1ecommitsha\n")
+    # The branch head carries the prior instance's fix: address commit; ``%cI`` emits
+    # its committer time (non-empty => a match). The thread has no reviewer comments,
+    # so there is no post-fix activity to compare against and the seed is fix_committed.
+    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
 
     await _call_resolve(
         runner,
@@ -852,6 +890,162 @@ async def test_already_seeded_outdated_thread_skips_branch_evidence_grep(
     assert gh.resolved == ["PRRT_seeded"]
     # No git grep was issued — the thread already had a verdict.
     assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_outdated_thread_with_post_fix_reply_is_not_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(PRRT_kwDOSJAM6s6IbIvo) A reviewer reply that postdates the matching fix
+    commit — landing AFTER the prior instance's fix but BEFORE this re-adoption —
+    must NOT be silently resolved/merged over. The seed compares the fix commit
+    time (``%cI``) against the newest reviewer comment and, when the comment is
+    newer, seeds ``needs_human`` instead of ``fix_committed``: the resolve loop
+    leaves the thread open and ``decide`` blocks merge on it."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_comment(
+        "PRRT_postfix",
+        comment_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+    )
+    # The matching fix commit committed BEFORE the reviewer's reply.
+    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+
+    status = _status_with_outdated(thread)
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    # Not resolved — the fresh reply was never re-triaged.
+    assert gh.attempts == []
+    assert state.threads_addressed_ids["PRRT_postfix"] == "needs_human"
+    # ``decide`` holds the merge-ready PR at NotifyHuman so a human sees the reply.
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+
+
+@pytest.mark.unit
+async def test_outdated_thread_with_pre_fix_comment_is_seeded_and_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A reviewer comment that PREDATES the matching fix commit is exactly the
+    feedback the fix addressed, so the seed stays ``fix_committed`` and the thread
+    is resolved — the #484 unblock is preserved for the common case."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_comment(
+        "PRRT_prefix",
+        comment_at=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
+    )
+    # The matching fix commit committed AFTER the reviewer's original finding.
+    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == ["PRRT_prefix"]
+    assert state.threads_addressed_ids["PRRT_prefix"] == "fix_committed"
+
+
+@pytest.mark.unit
+async def test_outdated_thread_unparseable_fix_commit_time_keeps_seed_baseline(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """When the matching commit's ``%cI`` is unparseable we cannot prove post-fix
+    ordering, so the seed keeps the ``fix_committed`` baseline (the alternative —
+    never seeding — leaves the PR permanently blocked) and the thread resolves."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_comment(
+        "PRRT_badtime",
+        comment_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+    )
+    # A non-empty but unparseable committer date: a match, but no usable ordering.
+    cmd.queue_result(returncode=0, stdout="not-a-timestamp\n")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == ["PRRT_badtime"]
+    assert state.threads_addressed_ids["PRRT_badtime"] == "fix_committed"
+
+
+@pytest.mark.unit
+def test_latest_reviewer_comment_at_ignores_viewer_and_missing_stamps() -> None:
+    """The post-fix ordering input considers only non-viewer comments with a usable
+    timestamp: AWF's own (``viewer_did_author``) replies and stamp-less comments are
+    skipped, and the newest of ``created_at`` / ``updated_at`` wins."""
+    older = datetime(2026, 6, 10, 8, 0, tzinfo=UTC)
+    newer = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+    viewer_newest = datetime(2026, 6, 10, 10, 0, tzinfo=UTC)
+    thread = ReviewThread(
+        thread_id="PRRT_mix",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="finding",
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(comment_id="a", body="x", created_at=older, updated_at=newer),
+            ReviewThreadComment(comment_id="b", body="y", created_at=None, updated_at=None),
+            # AWF's own reply is newest but must be ignored.
+            ReviewThreadComment(
+                comment_id="c",
+                body="z",
+                created_at=viewer_newest,
+                updated_at=viewer_newest,
+                viewer_did_author=True,
+            ),
+        ),
+    )
+    assert _latest_reviewer_comment_at(thread) == newer
+    # A thread with no usable reviewer timestamps yields None (seed baseline).
+    assert _latest_reviewer_comment_at(_outdated_thread("PRRT_empty")) is None
+
+
+@pytest.mark.unit
+def test_parse_commit_iso() -> None:
+    """``%cI`` offset dates parse to UTC-aware datetimes; junk yields None."""
+    assert _parse_commit_iso("2026-06-10T09:00:00+02:00") == datetime(2026, 6, 10, 7, 0, tzinfo=UTC)
+    assert _parse_commit_iso("not-a-timestamp") is None
 
 
 @pytest.mark.unit
