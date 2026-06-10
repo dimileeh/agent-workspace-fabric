@@ -162,6 +162,23 @@ async def _run_bounded_transient_forge_retry(
     (classifier, payload builder, event names, reason codes).
     """
     if not spec.is_transient(exc):
+        # Deterministic (non-transient) fault: there is no retry to bound, so the
+        # bounded-retry incident this context may still be carrying is over. Clear
+        # any stale per-context counter left by a *prior* recovered transient blip
+        # before returning — otherwise the non-terminal callers (``resolve_thread``
+        # / ``capture_deferred_thread`` / ...) leave it in ``state`` and the runner
+        # persists it on the next save, so a later *unrelated* transient in the same
+        # context resumes from the old count and can exhaust the budget immediately.
+        # The exhausted path below deliberately keeps its counter (still transient →
+        # fail closed), mirroring ``merge_pr``'s ``if not blocker_is_transient``
+        # clear in ``merge_loop``. Clears (and persists) only when a counter is
+        # actually present, so the common deterministic-without-prior-blip path adds
+        # no extra DB write.
+        await self._clear_forge_transient_retry_state_on_success(
+            workspace_id=workspace_id,
+            state=state,
+            context=context,
+        )
         return False
     retry_number = _increment_forge_transient_retry_count(state, context)
     max_retries = max(self._runner_config.transient_forge_max_retries, 0)

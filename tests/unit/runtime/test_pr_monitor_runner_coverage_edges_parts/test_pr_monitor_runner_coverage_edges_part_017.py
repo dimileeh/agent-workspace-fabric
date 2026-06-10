@@ -571,3 +571,94 @@ async def test_transient_wait_persists_only_counter_not_unconfirmed_verdict(
         persisted = ws.monitor_threads_addressed or {}
         assert persisted.get(_RESOLVE_THREAD_COUNT_KEY) == "3"
         assert "PRRT_open" not in persisted
+
+
+@pytest.mark.unit
+async def test_deterministic_fault_clears_stale_prior_transient_counter(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A deterministic forge fault must clear a stale counter left by a *prior*
+    recovered transient blip in the same context.
+
+    The non-terminal callers (``resolve_thread`` / ``capture_deferred_thread``)
+    do not terminate on a deterministic fault — they keep polling and the runner
+    later persists ``state``. If the deterministic early return left the prior
+    transient counter behind, a later *unrelated* transient in the same context
+    would resume from the stale count and exhaust the bounded budget immediately,
+    downgrading or terminating an otherwise-healthy monitor. Only the deterministic
+    case clears the counter; the exhausted-transient path keeps it (still
+    transient → fail closed).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 2)
+    transient_exc = GitHubClientError(
+        operation="gh api graphql",
+        returncode=1,
+        stderr="gh: Requires authentication (HTTP 401)",
+    )
+    # A strong permanent marker ("bad credentials") => deterministic, never retried,
+    # even though the same string also carries the ambiguous ``HTTP 401`` token.
+    deterministic_exc = GitHubClientError(
+        operation="gh api graphql",
+        returncode=1,
+        stderr="gh: Bad credentials (HTTP 401)",
+    )
+    state = MonitorState()
+
+    # A prior recovered transient blip persists the counter to the DB.
+    assert (
+        await runner._wait_after_transient_github_error(
+            transient_exc,
+            workspace_id=workspace_id,
+            pr_number=42,
+            context="resolve_thread",
+            state=state,
+            monitor_log=None,
+        )
+        is True
+    )
+    assert state.threads_addressed_ids[_RESOLVE_THREAD_COUNT_KEY] == "1"
+
+    # A deterministic fault then arrives in the same context: it returns False (no
+    # retry, no backoff) AND clears the stale counter both in memory and over the DB.
+    assert (
+        await runner._wait_after_transient_github_error(
+            deterministic_exc,
+            workspace_id=workspace_id,
+            pr_number=42,
+            context="resolve_thread",
+            state=state,
+            monitor_log=None,
+        )
+        is False
+    )
+    assert _RESOLVE_THREAD_COUNT_KEY not in state.threads_addressed_ids
+    assert sleep_fn.calls == [5]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert _RESOLVE_THREAD_COUNT_KEY not in (ws.monitor_threads_addressed or {})
+
+    # A later, independent transient starts from a fresh budget rather than
+    # resuming the stale count and exhausting prematurely.
+    assert (
+        await runner._wait_after_transient_github_error(
+            transient_exc,
+            workspace_id=workspace_id,
+            pr_number=42,
+            context="resolve_thread",
+            state=state,
+            monitor_log=None,
+        )
+        is True
+    )
+    assert state.threads_addressed_ids[_RESOLVE_THREAD_COUNT_KEY] == "1"
