@@ -44,6 +44,8 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _clear_transient_forge_retry_state,
     _gate_requires_validation_recovery,
     _initial_review_grace_wait_seconds,
+    _is_transient_bitbucket_client_error,
+    _is_transient_github_client_error,
     _merge_gate_blocks,
     _merge_rejection_reason,
     _non_check_reviewer_settle_decision,
@@ -1355,6 +1357,7 @@ async def handle_merge_action(
                     return False
                 blocker_detail = str(merge_blocker)[:400]
                 blocker_reason = _bitbucket_merge_rejection_reason(merge_blocker)
+                blocker_is_transient = _is_transient_bitbucket_client_error(merge_blocker)
             else:
                 if await self._wait_after_transient_github_error(
                     merge_blocker,
@@ -1367,15 +1370,23 @@ async def handle_merge_action(
                     return False
                 blocker_detail = _redact_and_truncate_forge_error(merge_blocker.stderr)
                 blocker_reason = _merge_rejection_reason(merge_blocker.stderr)
-            # The merge call completed with a deterministic (non-transient) blocker:
-            # this incident is over, so clear any stale ``merge_pr`` retry count to
-            # give the next merge attempt a fresh bounded budget rather than resuming
-            # from blips that already recovered.
-            await self._clear_forge_transient_retry_state_on_success(
-                workspace_id=workspace_id,
-                state=state,
-                context="merge_pr",
-            )
+                blocker_is_transient = _is_transient_github_client_error(merge_blocker)
+            # Reaching here means the wait helper returned False for one of two
+            # reasons: a *deterministic* blocker (the merge call got a definitive
+            # rejection) or a still-*transient* blip whose bounded retry budget was
+            # just exhausted (an under-budget transient would have returned True and
+            # re-polled above). Only the deterministic case is "incident over", so
+            # only then clear the stale ``merge_pr`` retry count to give the next
+            # merge attempt a fresh bounded budget. On exhaustion the blocker is still
+            # transient, so keep the persisted counter — otherwise each later poll
+            # re-spends a full retry budget instead of failing closed via the
+            # exhausted path, symmetric with fetch_pr_status / pre_merge_recheck.
+            if not blocker_is_transient:
+                await self._clear_forge_transient_retry_state_on_success(
+                    workspace_id=workspace_id,
+                    state=state,
+                    context="merge_pr",
+                )
             # Branch protection / restrictions often block merges; fall back to
             # the release-PR notify flow rather than failing the workspace.
             _log.warning(
