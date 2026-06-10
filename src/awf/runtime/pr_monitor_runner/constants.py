@@ -17,9 +17,15 @@ from awf.service.staleness import (
 
 _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES = RETRYABLE_MONITOR_OPERATION_STATUSES
 
+# Strong, unambiguous permanent markers. A fault carrying any of these is a
+# genuine credential/identity/repository failure that no amount of retrying can
+# fix, so the monitor fails fast. Deliberately does NOT include the broad
+# ``"authentication"`` / ``"auth failed"`` substrings: a bare
+# ``Requires authentication (HTTP 401)`` is frequently a transient GraphQL blip
+# on a valid token (#515) and is handled as bounded-retryable below. These strong
+# markers are checked first in ``_is_transient_github_client_error`` and win, so a
+# 401 combined with e.g. ``Bad credentials`` still fails fast.
 _NON_TRANSIENT_GITHUB_ERROR_MARKERS = (
-    "authentication",
-    "auth failed",
     "bad credentials",
     "not logged in",
     "please run gh auth login",
@@ -65,9 +71,29 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
     "could not resolve proxy",
 )
 
+# Ambiguous auth blips: a bare ``HTTP 401`` / ``Requires authentication`` with no
+# strong permanent marker is a recoverable transient on the GitHub *API* client
+# path (a GraphQL blip on a valid token, #515). The strong markers above are
+# checked first and win, so a genuine bad-credentials 401 still fails fast.
+#
+# These markers apply ONLY to ``_is_transient_github_client_error``, never to raw
+# git base-fetch stderr: git's smart-HTTP transport surfaces genuine credential
+# failures as ``error: RPC failed; HTTP 401`` (a contiguous ``HTTP 401``
+# substring), which must fail fast rather than be bounded-retried. They are
+# therefore deliberately kept out of ``_TRANSIENT_GITHUB_ERROR_MARKERS`` so
+# ``_is_transient_base_fetch_error`` never matches them.
+_AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
+    "http 401",
+    "requires authentication",
+)
+
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 
+_GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON = "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
+
 _BITBUCKET_TRANSIENT_RETRY_REASON = "BITBUCKET_TRANSIENT_RETRY"
+
+_BITBUCKET_TRANSIENT_RETRY_EXHAUSTED_REASON = "BITBUCKET_TRANSIENT_RETRY_EXHAUSTED"
 
 # Bitbucket HTTP statuses that the monitor treats as recoverable server-side
 # blips (symmetric to GitHub's 5xx transient markers).
@@ -171,6 +197,11 @@ _TOKEN_RE = re.compile(
 _BROKEN_AWF_REF_RE = re.compile(r"refs/heads/awf/(ws_[A-Za-z0-9_-]+)")
 
 _BASE_FETCH_RETRY_COUNT_KEY_PREFIX = "__awf_base_fetch_retry_count:"
+
+# Per-context retry counter for transient forge (GitHub/Bitbucket) API faults,
+# parallel to ``_BASE_FETCH_RETRY_COUNT_KEY_PREFIX`` but fully separate so forge
+# and base-fetch budgets never share state (#515).
+_FORGE_TRANSIENT_RETRY_COUNT_KEY_PREFIX = "__awf_forge_transient_retry_count:"
 
 _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY = "__awf_sync_base_no_progress_signature"
 

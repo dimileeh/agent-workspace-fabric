@@ -41,8 +41,11 @@ from awf.runtime.pr_monitor_runner.gates import (
 from awf.runtime.pr_monitor_runner.helpers import (
     _bitbucket_merge_rejection_reason,
     _clear_transient_base_fetch_retry_state,
+    _clear_transient_forge_retry_state,
     _gate_requires_validation_recovery,
     _initial_review_grace_wait_seconds,
+    _is_transient_bitbucket_client_error,
+    _is_transient_github_client_error,
     _merge_gate_blocks,
     _merge_rejection_reason,
     _non_check_reviewer_settle_decision,
@@ -845,6 +848,11 @@ async def handle_merge_action(
                         state,
                         context="pre_merge_recheck",
                     )
+                    if _clear_transient_forge_retry_state(
+                        state,
+                        context="pre_merge_recheck",
+                    ):
+                        pre_merge_state_changed = True
                     if await self._refresh_pr_feedback_resolution_state(
                         workspace_id=workspace_id,
                         repo=repo,
@@ -1218,6 +1226,7 @@ async def handle_merge_action(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="pre_merge_recheck",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 return False
@@ -1239,6 +1248,7 @@ async def handle_merge_action(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="merge_method_preflight",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 return False
@@ -1280,12 +1290,29 @@ async def handle_merge_action(
                     workspace_id=workspace_id,
                     pr_number=pr_number,
                     context="post_human_notification",
+                    state=state,
                     monitor_log=monitor_log,
                 ):
                     return False
                 raise
+            # The notification posted: clear any stale ``post_human_notification``
+            # retry count so a recovered blip never accumulates toward the budget.
+            await self._clear_forge_transient_retry_state_on_success(
+                workspace_id=workspace_id,
+                state=state,
+                context="post_human_notification",
+            )
             await self._deps.sleep(self._config.poll_interval_seconds)
             return False
+
+        # Past the preflight guard with no captured error: the merge-method preflight
+        # succeeded this attempt, so clear any stale ``merge_method_preflight`` retry
+        # count to keep a recovered blip from accumulating across merge attempts.
+        await self._clear_forge_transient_retry_state_on_success(
+            workspace_id=workspace_id,
+            state=state,
+            context="merge_method_preflight",
+        )
 
         if merge_method_notification_reason is not None:
             _log.warning(
@@ -1324,22 +1351,42 @@ async def handle_merge_action(
                     workspace_id=workspace_id,
                     pr_number=pr_number,
                     context="merge_pr",
+                    state=state,
                     monitor_log=monitor_log,
                 ):
                     return False
                 blocker_detail = str(merge_blocker)[:400]
                 blocker_reason = _bitbucket_merge_rejection_reason(merge_blocker)
+                blocker_is_transient = _is_transient_bitbucket_client_error(merge_blocker)
             else:
                 if await self._wait_after_transient_github_error(
                     merge_blocker,
                     workspace_id=workspace_id,
                     pr_number=pr_number,
                     context="merge_pr",
+                    state=state,
                     monitor_log=monitor_log,
                 ):
                     return False
                 blocker_detail = _redact_and_truncate_forge_error(merge_blocker.stderr)
                 blocker_reason = _merge_rejection_reason(merge_blocker.stderr)
+                blocker_is_transient = _is_transient_github_client_error(merge_blocker)
+            # Reaching here means the wait helper returned False for one of two
+            # reasons: a *deterministic* blocker (the merge call got a definitive
+            # rejection) or a still-*transient* blip whose bounded retry budget was
+            # just exhausted (an under-budget transient would have returned True and
+            # re-polled above). Only the deterministic case is "incident over", so
+            # only then clear the stale ``merge_pr`` retry count to give the next
+            # merge attempt a fresh bounded budget. On exhaustion the blocker is still
+            # transient, so keep the persisted counter — otherwise each later poll
+            # re-spends a full retry budget instead of failing closed via the
+            # exhausted path, symmetric with fetch_pr_status / pre_merge_recheck.
+            if not blocker_is_transient:
+                await self._clear_forge_transient_retry_state_on_success(
+                    workspace_id=workspace_id,
+                    state=state,
+                    context="merge_pr",
+                )
             # Branch protection / restrictions often block merges; fall back to
             # the release-PR notify flow rather than failing the workspace.
             _log.warning(

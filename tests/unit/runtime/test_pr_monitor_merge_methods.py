@@ -480,7 +480,7 @@ async def test_transient_merge_method_preflight_error_retries_without_blocker(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.merge_calls == []
     assert gh.comments == []
     assert not any(
@@ -512,7 +512,7 @@ async def test_empty_branch_rules_slurp_preflight_error_retries_without_blocker(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.merge_calls == []
     assert gh.comments == []
     assert not any(
@@ -583,7 +583,7 @@ async def test_merge_method_preflight_notification_transient_error_retries(
     assert terminal is False
     assert gh.merge_calls == []
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
@@ -623,7 +623,7 @@ async def test_merge_method_preflight_notification_transient_bitbucket_error_ret
     assert terminal is False
     assert gh.merge_calls == []
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
@@ -939,11 +939,87 @@ async def test_transient_first_merge_failure_does_not_retry_allowed_alternative(
 
     assert terminal is False
     assert gh.merge_calls == ["squash"]
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.comments == []
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_exhausted_transient_merge_failure_preserves_retry_counter(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An exhausted *transient* merge blip must not reset the ``merge_pr`` budget.
+
+    When the bounded forge-retry helper returns ``False`` because the budget is
+    exhausted (the merge error is still transient, not a deterministic rejection),
+    the merge arm falls back to notify-and-keep-polling. It must keep the persisted
+    ``merge_pr`` retry counter so later polls fail closed via the exhausted path,
+    rather than clearing it as if the blocker were deterministic and handing each
+    subsequent merge attempt a fresh full retry budget — symmetric with
+    ``fetch_pr_status`` / ``pre_merge_recheck`` (regression for the PR #516
+    merge-path counter-reset bug).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="HTTP 502 Bad Gateway",
+            )
+        ],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    # Zero retries: the first transient blip exhausts the budget immediately and
+    # drives the merge arm down the notify-and-keep-polling fallback.
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    # The exhausted-transient counter survives in memory and in the DB instead of
+    # being wiped like a deterministic blocker; the next poll therefore exhausts
+    # immediately rather than re-spending a full bounded budget.
+    counter_key = "__awf_forge_transient_retry_count:merge_pr"
+    assert state.threads_addressed_ids.get(counter_key) == "1"
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert (ws.monitor_threads_addressed or {}).get(counter_key) == "1"
 
 
 @pytest.mark.unit
@@ -1251,7 +1327,7 @@ async def test_transient_bitbucket_merge_failure_waits_without_notify(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
 
 @pytest.mark.unit
@@ -1296,7 +1372,7 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
     async with factory() as session:
         operations = await OperationRepository(session).list_for_workspace(
@@ -1371,7 +1447,7 @@ async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
     assert gh.merge_calls == ["squash"]
     # No "merge rejected" notification while the async merge may still be running.
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
     async with factory() as session:
         operations = await OperationRepository(session).list_for_workspace(

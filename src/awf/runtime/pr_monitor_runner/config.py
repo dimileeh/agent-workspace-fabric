@@ -36,3 +36,13 @@ class MonitorRunnerConfig:
     transient_base_fetch_max_retries: int = 5
     transient_base_fetch_initial_backoff_seconds: float = 5.0
     transient_base_fetch_max_backoff_seconds: float = 120.0
+    # Transient forge (GitHub/Bitbucket) API faults — an ambiguous auth blip
+    # (a bare ``HTTP 401`` / ``Requires authentication`` with no strong permanent
+    # marker, or a Bitbucket 401/403), a 5xx, a rate-limit, or a transport fault —
+    # are bounded-retryable with exponential backoff so a momentary blip recovers
+    # instead of terminating a healthy auto-merge (#515). Kept separate from the
+    # base-fetch knobs (own config + own per-context retry count) so the two never
+    # entangle, while sharing only the pure backoff schedule.
+    transient_forge_max_retries: int = 5
+    transient_forge_initial_backoff_seconds: float = 5.0
+    transient_forge_max_backoff_seconds: float = 120.0
