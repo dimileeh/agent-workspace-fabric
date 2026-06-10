@@ -678,6 +678,182 @@ async def test_permanent_resolve_downgrade_survives_state_reload(
     assert gh.attempts == [bb_id]  # exactly one resolve attempt across both polls
 
 
+def _grep_argv(worktree_path: Path, thread_id: str) -> list[str]:
+    """The bounded ``git log`` evidence grep the seeding helper issues (#484)."""
+    return [
+        "git",
+        "-c",
+        f"safe.directory={worktree_path}",
+        "-C",
+        str(worktree_path),
+        "log",
+        "-n",
+        "1",
+        "--format=%H",
+        "-F",
+        "--all-match",
+        "--grep",
+        thread_id,
+        "--grep",
+        "fix: address",
+        "HEAD",
+    ]
+
+
+@pytest.mark.unit
+async def test_outdated_thread_seeded_from_branch_evidence_is_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(a) #484 regression — after a re-adoption / instance handoff, an outdated
+    thread whose ``fix: address PRRT_…`` commit is already on the branch head but
+    which has NO verdict in this instance's ``threads_addressed_ids`` is seeded
+    from that durable branch evidence and resolved THIS iteration — not looped on
+    ``NotifyHuman`` forever."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    # Empty state — the prior instance addressed+outdated the thread, this one has
+    # no record of it.
+    state = MonitorState()
+    thread = _outdated_thread("PRRT_kwDOSJAM6s6IMBmJ")
+    # The branch head carries the prior instance's fix: address commit (non-empty SHA).
+    cmd.queue_result(returncode=0, stdout="7772e1ecommitsha\n")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == ["PRRT_kwDOSJAM6s6IMBmJ"]
+    assert state.threads_addressed_ids["PRRT_kwDOSJAM6s6IMBmJ"] == "fix_committed"
+    worktree = tmp_path / "worktrees" / workspace_id
+    assert [c.args for c in cmd.calls] == [_grep_argv(worktree, "PRRT_kwDOSJAM6s6IMBmJ")]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        succeeded = _resolution_events(ws, outcome="succeeded")
+        assert len(succeeded) == 1
+        assert succeeded[0].reason_code == "COMMENT_REPAIR"
+
+
+@pytest.mark.unit
+async def test_outdated_thread_without_branch_evidence_is_left_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """No ``fix: address`` commit references the thread → no verdict is seeded and
+    the thread is left open (the monitor never claims a fix the branch lacks)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("PRRT_unknown")
+    # Empty stdout: no commit on HEAD matches both the thread id and ``fix: address``.
+    cmd.queue_result(returncode=0, stdout="")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.attempts == []
+    assert "PRRT_unknown" not in state.threads_addressed_ids
+    worktree = tmp_path / "worktrees" / workspace_id
+    assert [c.args for c in cmd.calls] == [_grep_argv(worktree, "PRRT_unknown")]
+
+
+@pytest.mark.unit
+async def test_outdated_thread_seeding_git_failure_is_best_effort(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A git read failure during seeding is best-effort: no crash, no verdict, no
+    resolve. The thread stays non-blocking via the existing path and a later poll
+    can re-seed once the worktree read succeeds."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("PRRT_giterr")
+    # Non-zero return: the worktree read failed (e.g. transient lock / missing ref).
+    cmd.queue_result(returncode=1, stdout="", stderr="fatal: not a git repository")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.attempts == []
+    assert "PRRT_giterr" not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_already_seeded_outdated_thread_skips_branch_evidence_grep(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An outdated thread that already carries a ``fix_committed`` verdict (recorded
+    by THIS instance) resolves through the existing #473 path WITHOUT issuing the
+    seeding grep — the git read runs only for unseeded outdated threads, so it does
+    not recur in steady state."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread("PRRT_seeded")
+    _mark_review_thread_addressed(state, thread, "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == ["PRRT_seeded"]
+    # No git grep was issued — the thread already had a verdict.
+    assert cmd.calls == []
+
+
 @pytest.mark.unit
 def test_outdated_resolvable_verdicts_exclude_defer() -> None:
     """The outdated-resolution verdict set is the fix-cycle's resolvable set MINUS
