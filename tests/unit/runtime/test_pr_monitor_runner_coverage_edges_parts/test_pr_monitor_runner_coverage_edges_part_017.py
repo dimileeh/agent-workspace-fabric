@@ -392,6 +392,75 @@ async def test_clear_on_success_resets_per_context_budget_and_persists(
 
 
 @pytest.mark.unit
+async def test_clear_on_success_persists_only_counter_not_unconfirmed_verdict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The success-path counter clear must persist ONLY the counter removal,
+    never the whole in-memory state.
+
+    In a fix cycle with multiple ``threads_to_resolve`` the in-memory state
+    already carries addressed verdicts for *later* threads whose forge resolve
+    calls have not run yet. When an earlier thread's resolve succeeds after a
+    prior transient blip, clearing its counter must not flush those later
+    unconfirmed verdicts: if the monitor is cancelled during a subsequent
+    transient resolve wait before its rollback executes, a full-state flush here
+    would reload those still-open threads as addressed and let ``decide()`` skip
+    them (#305).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 2)
+    exc = GitHubClientError(
+        operation="gh api graphql",
+        returncode=1,
+        stderr="gh: Requires authentication (HTTP 401)",
+    )
+    state = MonitorState()
+
+    # A prior transient ``resolve_thread`` blip persisted the counter to the DB.
+    assert (
+        await runner._wait_after_transient_github_error(
+            exc,
+            workspace_id=workspace_id,
+            pr_number=42,
+            context="resolve_thread",
+            state=state,
+            monitor_log=None,
+        )
+        is True
+    )
+    assert state.threads_addressed_ids[_RESOLVE_THREAD_COUNT_KEY] == "1"
+
+    # The in-memory state now also holds an addressed verdict for a *later*
+    # thread whose resolve has not yet landed — exactly the unconfirmed marker
+    # that must never reach the DB before its own resolve/rollback.
+    state.threads_addressed_ids["PRRT_later"] = "fix_committed"
+
+    # This thread's resolve then succeeds: the counter is cleared in memory and
+    # the removal is persisted, but the later unconfirmed verdict must NOT be.
+    await runner._clear_forge_transient_retry_state_on_success(
+        workspace_id=workspace_id,
+        state=state,
+        context="resolve_thread",
+    )
+    assert _RESOLVE_THREAD_COUNT_KEY not in state.threads_addressed_ids
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        persisted = ws.monitor_threads_addressed or {}
+        assert _RESOLVE_THREAD_COUNT_KEY not in persisted
+        assert "PRRT_later" not in persisted
+
+
+@pytest.mark.unit
 async def test_clear_on_success_is_noop_without_a_counter(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

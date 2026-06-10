@@ -484,6 +484,39 @@ async def _persist_forge_transient_retry_count(
         await s.commit()
 
 
+async def _remove_forge_transient_retry_count(
+    self: Any,
+    workspace_id: str,
+    *,
+    context: str,
+) -> None:
+    """Remove ONLY the bounded forge-transient retry counter for ``context``.
+
+    The success-path counterpart to :func:`_persist_forge_transient_retry_count`:
+    once a context's forge operation finally succeeds the incident is over, so the
+    persisted counter must be dropped. Like the persist side, it must touch *only*
+    the counter key, merged onto the DB-persisted state — never flush the whole
+    in-memory ``MonitorState``. Inside a fix-cycle the in-memory state can still
+    carry *unconfirmed* addressed verdicts for *later* ``threads_to_resolve`` whose
+    forge resolve calls have not run yet; the full :func:`_persist_state` would
+    flush those before their own resolve/rollback, so a cancel during a subsequent
+    transient resolve wait would reload them as addressed and let ``decide()`` skip
+    still-open feedback and merge over it (#305). Removing just the counter key
+    keeps the bounded-budget reset durable without persisting any unconfirmed
+    marker.
+    """
+    key = _forge_transient_retry_count_key(context)
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        if threads_addressed.pop(key, None) is None:
+            return
+        ws.monitor_threads_addressed = threads_addressed
+        await s.commit()
+
+
 async def _terminate_completed(
     self: Any,
     workspace_id: str,

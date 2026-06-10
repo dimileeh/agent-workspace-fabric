@@ -396,9 +396,17 @@ async def _clear_forge_transient_retry_state_on_success(
     already perform, factored into one helper so every increment context resets
     symmetrically. Persists only when a counter was actually present, so the
     common no-blip success path adds no extra DB write.
+
+    The persist removes *only* the counter key, never the whole in-memory state
+    (:func:`_remove_forge_transient_retry_count`): a fix-cycle caller can hold
+    unconfirmed addressed verdicts for *later* ``threads_to_resolve`` whose forge
+    resolve calls have not run yet, and flushing those here would let a cancel
+    during a subsequent transient resolve wait reload them as addressed so
+    ``decide()`` skips still-open feedback and merges over it (#305) — symmetric
+    with :func:`_persist_forge_transient_retry_count` on the wait path.
     """
     if _clear_transient_forge_retry_state(state, context=context):
-        await self._persist_state(workspace_id, state)
+        await self._remove_forge_transient_retry_count(workspace_id, context=context)
 
 
 async def _wait_after_transient_base_fetch_error(

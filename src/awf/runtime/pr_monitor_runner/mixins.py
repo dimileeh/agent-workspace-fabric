@@ -60,6 +60,7 @@ class RunnerDelegatesMixin:
     _refresh_operator_state_from_workspace = _lifecycle._refresh_operator_state_from_workspace
     _persist_state = _lifecycle._persist_state
     _persist_forge_transient_retry_count = _lifecycle._persist_forge_transient_retry_count
+    _remove_forge_transient_retry_count = _lifecycle._remove_forge_transient_retry_count
     _terminate_completed = _lifecycle._terminate_completed
     _reconcile_target_branch_after_merge = _lifecycle._reconcile_target_branch_after_merge
     _teardown_compose_stack = _lifecycle._teardown_compose_stack
