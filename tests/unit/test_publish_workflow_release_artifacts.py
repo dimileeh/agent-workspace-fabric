@@ -82,10 +82,14 @@ def test_publish_workflow_actions_pinned_to_sha_with_version_comment(action: str
 
     # No floating-ref refs remain for this action.
     assert not re.search(rf"{re.escape(action)}@{re.escape(ref)}(?=\s|$)", text), action
-    # The action is pinned to an immutable SHA with the version preserved as a comment.
-    assert re.search(rf"{re.escape(action)}@[0-9a-f]{{40}}\s+# {re.escape(ref)}(?=\s|$)", text), (
-        action
-    )
+    # Every ``uses:`` occurrence is pinned to a 40-char SHA with the version comment, so a
+    # single mis-pinned duplicate cannot hide behind a correctly pinned sibling.
+    uses_lines = re.findall(rf"^\s*(?:-\s*)?uses:\s*{re.escape(action)}@\S+.*", text, re.MULTILINE)
+    assert uses_lines, f"No occurrences of {action} found"
+    for line in uses_lines:
+        assert re.search(
+            rf"uses:\s*{re.escape(action)}@[0-9a-f]{{40}}\s+# {re.escape(ref)}\b", line
+        ), f"Action {action} in line '{line}' is not pinned to a 40-char SHA with comment '# {ref}'"
 
 
 @pytest.mark.unit
