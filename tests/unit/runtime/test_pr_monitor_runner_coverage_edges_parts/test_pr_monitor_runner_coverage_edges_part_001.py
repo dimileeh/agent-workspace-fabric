@@ -278,12 +278,15 @@ async def test_monitor_run_terminates_on_bitbucket_execute_error(
 
     async def fake_execute(**_kwargs: object) -> bool:
         # Model a non-merge forge call (e.g. resolve_thread) raising a
-        # deterministic Bitbucket fault the GitHubClientError-only arm misses.
+        # deterministic Bitbucket fault the GitHubClientError-only arm misses. A
+        # non-auth 4xx (``BITBUCKET_API_ERROR`` 404) is genuinely deterministic —
+        # 401/403 are now bounded-retryable (#515), so they would NOT terminate
+        # immediately here.
         raise BitbucketClientError(
             operation="bitbucket resolve_thread",
-            status=403,
-            body="thread resolution is not permitted for this token",
-            reason_code=BITBUCKET_AUTH_FAILED,
+            status=404,
+            body="thread not found",
+            reason_code=BITBUCKET_API_ERROR,
         )
 
     runner._execute = fake_execute  # type: ignore[method-assign]
@@ -300,7 +303,7 @@ async def test_monitor_run_terminates_on_bitbucket_execute_error(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert "bitbucket error" in (ws.failure_message or "")
-        assert ws.events[-1].reason_code == BITBUCKET_AUTH_FAILED
+        assert ws.events[-1].reason_code == BITBUCKET_API_ERROR
         # Deterministic fault terminates rather than entering the transient
         # re-poll loop.
         assert _bitbucket_retry_events(ws) == []
@@ -365,7 +368,7 @@ async def test_monitor_run_retries_transient_bitbucket_execute_error(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.merge_attempts == 1
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
@@ -438,7 +441,7 @@ async def test_transient_bitbucket_execute_error_discards_unconfirmed_addressed_
     )
 
     assert calls["n"] == 2
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -490,7 +493,7 @@ async def test_monitor_run_transient_status_fetch_preserves_state_operations_and
             compose_file=tmp_path / "compose.yml",
         )
 
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     worktree = tmp_path / "worktrees" / workspace_id
     assert cmd.calls[0].args == _git_worktree_command(
         worktree,
@@ -512,7 +515,13 @@ async def test_monitor_run_transient_status_fetch_preserves_state_operations_and
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         assert ws.failure_message is None
         assert ws.monitor_iter_count == 7
-        assert ws.monitor_threads_addressed == {"T_old": "defer"}
+        # The transient retry persists the per-context forge retry counter
+        # alongside the preserved pre-existing markers so the bounded budget
+        # survives the reload on the next poll (#515).
+        assert ws.monitor_threads_addressed == {
+            "T_old": "defer",
+            "__awf_forge_transient_retry_count:fetch_pr_status": "1",
+        }
         assert ws.monitor_last_commit_sha == "oldsha"
         assert _as_utc(ws.monitor_started_at) == started_at
         operation = await OperationRepository(s).get(operation_id)
@@ -529,7 +538,9 @@ async def test_monitor_run_transient_status_fetch_preserves_state_operations_and
             "operation": "gh api graphql",
             "returncode": 1,
             "pr_number": 42,
-            "wait_seconds": 60,
+            "wait_seconds": 5,
+            "retry_number": 1,
+            "max_retries": 5,
             "message": (
                 "gh api graphql failed (exit=1): HTTP 502 Bad Gateway for token <redacted>"
             ),
@@ -566,7 +577,7 @@ async def test_monitor_run_retries_transient_github_status_error(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -599,11 +610,58 @@ def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
             ),
         )
     )
+    # #515: a bare ``Requires authentication (HTTP 401)`` blip on a valid token is
+    # an ambiguous transient — it must now be bounded-retryable, not terminal.
+    assert _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="Requires authentication (HTTP 401)",
+        )
+    )
+    # The exact #515 failure string.
+    assert _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="gh api graphql failed (exit=1): gh: Requires authentication (HTTP 401)",
+        )
+    )
+    # Strong, unambiguous permanent markers still fail fast — including when
+    # combined with a 401 (the strong marker is checked first and wins).
     assert not _is_transient_github_client_error(
         GitHubClientError(
             operation="gh api graphql",
             returncode=1,
             stderr="Bad credentials",
+        )
+    )
+    assert not _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="not logged in to any GitHub hosts",
+        )
+    )
+    assert not _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh auth status",
+            returncode=1,
+            stderr="To get started with GitHub CLI, please run gh auth login",
+        )
+    )
+    assert not _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="could not resolve to a Repository with the name 'org/repo'",
+        )
+    )
+    assert not _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="Bad credentials; Requires authentication (HTTP 401)",
         )
     )
     assert not _is_transient_github_client_error(
@@ -633,6 +691,19 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
     )
     assert not _is_transient_base_fetch_error(
         BaseFetchError("git fetch origin development failed: repository not found")
+    )
+    # #515 regression: narrowing the GitHub non-transient markers (dropping the
+    # broad ``"authentication"`` substring) must NOT make git auth failures
+    # retryable — git's wording contains neither ``http 401`` nor
+    # ``requires authentication`` so it still classifies non-transient (terminate).
+    assert not _is_transient_base_fetch_error(
+        BaseFetchError("fatal: Authentication failed for 'https://github.com/org/repo.git/'")
+    )
+    assert not _is_transient_base_fetch_error(
+        BaseFetchError(
+            "fatal: unable to access 'https://github.com/org/repo.git/': "
+            "The requested URL returned error: 401"
+        )
     )
     retry_key = "__awf_base_fetch_retry_count:sync_base"
     state = MonitorState(threads_addressed_ids={retry_key: "not-an-integer"})
@@ -711,16 +782,20 @@ async def test_transient_retry_event_payload_is_structured_and_redacted(
         f"https://user:{secret}@github.com/example/repo " + ("x" * 600)
     )
 
+    state = MonitorState()
     retried = await runner._wait_after_transient_github_error(
         GitHubClientError(operation="gh api graphql", returncode=1, stderr=noisy_stderr),
         workspace_id=workspace_id,
         pr_number=42,
         context="fetch_pr_status",
+        state=state,
         monitor_log=None,
     )
 
     assert retried is True
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
+    # The bounded-retry counter is tracked per context and persisted.
+    assert state.threads_addressed_ids["__awf_forge_transient_retry_count:fetch_pr_status"] == "1"
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -734,7 +809,9 @@ async def test_transient_retry_event_payload_is_structured_and_redacted(
         assert payload["operation"] == "gh api graphql"
         assert payload["returncode"] == 1
         assert payload["pr_number"] == 42
-        assert payload["wait_seconds"] == 60
+        assert payload["wait_seconds"] == 5
+        assert payload["retry_number"] == 1
+        assert payload["max_retries"] == 5
         assert secret not in str(payload)
         assert "https://<redacted>@github.com/example/repo" in payload["stderr"]
         assert len(payload["stderr"]) <= 400
@@ -774,13 +851,15 @@ def test_is_transient_bitbucket_client_error_classifies_recoverable_blips() -> N
     assert _is_transient_bitbucket_client_error(
         err(status=None, reason_code=BITBUCKET_MERGE_TASK_TIMEOUT)
     )
+    # #515: a Bitbucket 401/403 auth fault (``BITBUCKET_AUTH_FAILED``, set only for
+    # 401/403) is now bounded-retryable, symmetric with GitHub's ambiguous-401
+    # handling — a momentary blip recovers, a real bad token exhausts the budget.
+    assert _is_transient_bitbucket_client_error(err(status=401, reason_code=BITBUCKET_AUTH_FAILED))
+    assert _is_transient_bitbucket_client_error(err(status=403, reason_code=BITBUCKET_AUTH_FAILED))
 
-    # Deterministic: auth failure, 4xx client error, JSON parse (2xx body), and
+    # Deterministic: non-auth 4xx client error, JSON parse (2xx body), and
     # the pagination/SSRF safety aborts — which also carry ``status=None`` but
     # map to ``BITBUCKET_API_ERROR`` and must fail fast, not loop.
-    assert not _is_transient_bitbucket_client_error(
-        err(status=403, reason_code=BITBUCKET_AUTH_FAILED)
-    )
     assert not _is_transient_bitbucket_client_error(
         err(status=404, reason_code=BITBUCKET_API_ERROR)
     )
@@ -814,16 +893,19 @@ async def test_wait_after_transient_bitbucket_error_retries_and_records_event(
         reason_code=BITBUCKET_API_ERROR,
     )
 
+    state = MonitorState()
     retried = await runner._wait_after_transient_bitbucket_error(
         exc,
         workspace_id=workspace_id,
         pr_number=42,
         context="fetch_pr_status",
+        state=state,
         monitor_log=None,
     )
 
     assert retried is True
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
+    assert state.threads_addressed_ids["__awf_forge_transient_retry_count:fetch_pr_status"] == "1"
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -838,7 +920,9 @@ async def test_wait_after_transient_bitbucket_error_retries_and_records_event(
         assert payload["status"] == 503
         assert payload["reason_code"] == BITBUCKET_API_ERROR
         assert payload["pr_number"] == 42
-        assert payload["wait_seconds"] == 60
+        assert payload["wait_seconds"] == 5
+        assert payload["retry_number"] == 1
+        assert payload["max_retries"] == 5
         assert secret not in str(payload)
         assert len(payload["message"]) <= 400
 
@@ -857,23 +941,29 @@ async def test_wait_after_transient_bitbucket_error_fails_fast_on_deterministic_
         sleep_fn=sleep_fn,
         worktrees_root=tmp_path / "worktrees",
     )
+    # A non-auth 4xx is genuinely deterministic: 401/403 are now bounded-retryable
+    # (#515), so use a 404 ``BITBUCKET_API_ERROR`` to exercise the fail-fast path.
     exc = BitbucketClientError(
         operation="bitbucket fetch_pr_status",
-        status=403,
-        body="forbidden",
-        reason_code=BITBUCKET_AUTH_FAILED,
+        status=404,
+        body="not found",
+        reason_code=BITBUCKET_API_ERROR,
     )
 
+    state = MonitorState()
     retried = await runner._wait_after_transient_bitbucket_error(
         exc,
         workspace_id=workspace_id,
         pr_number=42,
         context="fetch_pr_status",
+        state=state,
         monitor_log=None,
     )
 
     assert retried is False
     assert sleep_fn.calls == []
+    # A deterministic fault must not touch the bounded-retry counter.
+    assert "__awf_forge_transient_retry_count:fetch_pr_status" not in state.threads_addressed_ids
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None

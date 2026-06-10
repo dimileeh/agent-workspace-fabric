@@ -18,6 +18,7 @@ from typing import Any
 
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
+    BITBUCKET_AUTH_FAILED,
     BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_MERGE_TASK_TIMEOUT,
     BITBUCKET_RATE_LIMITED,
@@ -90,6 +91,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _AWF_VERDICT,
     _BASE_FETCH_RETRY_COUNT_KEY_PREFIX,
     _BITBUCKET_TRANSIENT_HTTP_STATUSES,
+    _FORGE_TRANSIENT_RETRY_COUNT_KEY_PREFIX,
     _NON_TRANSIENT_GITHUB_ERROR_MARKERS,
     _PENDING_CHECK_STATUSES,
     _PR_MONITOR_REASON_CODES_BY_STALE_REASON,
@@ -551,8 +553,10 @@ def _transient_github_retry_payload(
     context: str,
     pr_number: int,
     wait_seconds: float,
+    retry_number: int | None = None,
+    max_retries: int | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "context": context,
         "operation": exc.operation,
         "returncode": exc.returncode,
@@ -561,6 +565,11 @@ def _transient_github_retry_payload(
         "message": _redact_and_truncate_forge_error(str(exc)),
         "stderr": _redact_and_truncate_forge_error(exc.stderr),
     }
+    if retry_number is not None:
+        payload["retry_number"] = retry_number
+    if max_retries is not None:
+        payload["max_retries"] = max_retries
+    return payload
 
 
 def _transient_bitbucket_retry_payload(
@@ -569,10 +578,12 @@ def _transient_bitbucket_retry_payload(
     context: str,
     pr_number: int,
     wait_seconds: float,
+    retry_number: int | None = None,
+    max_retries: int | None = None,
 ) -> dict[str, object]:
     # ``exc`` already carries a redacted body (set at construction), so its
     # ``str()`` is safe to log/persist; truncate to match the GitHub payload.
-    return {
+    payload: dict[str, object] = {
         "context": context,
         "operation": exc.operation,
         "status": exc.status,
@@ -581,6 +592,11 @@ def _transient_bitbucket_retry_payload(
         "wait_seconds": wait_seconds,
         "message": str(exc)[:400],
     }
+    if retry_number is not None:
+        payload["retry_number"] = retry_number
+    if max_retries is not None:
+        payload["max_retries"] = max_retries
+    return payload
 
 
 def _transient_base_fetch_retry_payload(
@@ -633,10 +649,15 @@ def _is_transient_bitbucket_client_error(exc: BitbucketClientError) -> bool:
     a 409 on the merge POST signalling an already-in-flight merge
     (``BITBUCKET_MERGE_IN_PROGRESS``), an exhausted async-merge poll budget while
     the merge task was still PENDING (``BITBUCKET_MERGE_TASK_TIMEOUT`` — Bitbucket
-    may still complete it server-side), and 5xx server faults. Deterministic
-    faults — auth, other 4xx, JSON parse, and
-    the pagination/SSRF safety aborts (which also carry ``status=None`` but
-    map to ``BITBUCKET_API_ERROR``) — must fail fast.
+    may still complete it server-side), 5xx server faults, and — symmetric with
+    GitHub's ambiguous-401 handling (#515) — any 401/403 auth fault
+    (``BITBUCKET_AUTH_FAILED``, set only for 401/403). A momentary auth blip
+    recovers within the bounded forge-retry budget; a genuinely bad token exhausts
+    the budget and terminates. ``BITBUCKET_AUTH_NOT_CONFIGURED`` (a deterministic
+    env-config error) is a distinct code and stays non-transient. Other
+    deterministic faults — non-auth 4xx, JSON parse, and the pagination/SSRF safety
+    aborts (which also carry ``status=None`` but map to ``BITBUCKET_API_ERROR``) —
+    must fail fast.
     """
 
     if exc.reason_code in (
@@ -644,6 +665,7 @@ def _is_transient_bitbucket_client_error(exc: BitbucketClientError) -> bool:
         BITBUCKET_TRANSPORT_ERROR,
         BITBUCKET_MERGE_IN_PROGRESS,
         BITBUCKET_MERGE_TASK_TIMEOUT,
+        BITBUCKET_AUTH_FAILED,
     ):
         return True
     if exc.reason_code != BITBUCKET_API_ERROR:
@@ -683,6 +705,33 @@ def _clear_transient_base_fetch_retry_state(state: MonitorState, *, context: str
     return state.threads_addressed_ids.pop(key, None) is not None
 
 
+def _forge_transient_retry_count_key(context: str) -> str:
+    return f"{_FORGE_TRANSIENT_RETRY_COUNT_KEY_PREFIX}{context}"
+
+
+def _increment_forge_transient_retry_count(state: MonitorState, context: str) -> int:
+    """Bump and return the per-context transient-forge retry count.
+
+    Mirrors :func:`_increment_base_fetch_retry_count` (own key prefix, own
+    counter) and is corrupt-value-safe: a non-integer stored value resets to 1 so
+    a malformed resumed state can never wedge the budget.
+    """
+    key = _forge_transient_retry_count_key(context)
+    raw_count = state.threads_addressed_ids.get(key, "0")
+    try:
+        current = int(raw_count)
+    except ValueError:
+        current = 0
+    retry_number = current + 1
+    state.threads_addressed_ids[key] = str(retry_number)
+    return retry_number
+
+
+def _clear_transient_forge_retry_state(state: MonitorState, *, context: str) -> bool:
+    key = _forge_transient_retry_count_key(context)
+    return state.threads_addressed_ids.pop(key, None) is not None
+
+
 def _ci_transient_rerun_attempt(
     state: MonitorState,
     *,
@@ -719,17 +768,38 @@ def _ci_failure_payload(failure: CheckFailure) -> dict[str, object]:
     }
 
 
+def _exponential_backoff_wait_seconds(
+    *,
+    retry_number: int,
+    initial_backoff_seconds: float,
+    max_backoff_seconds: float,
+) -> float:
+    """Compute the capped exponential backoff wait for the Nth retry.
+
+    Shared by the base-fetch and forge transient-retry paths so both use a single,
+    byte-identical schedule (DRY) without coupling their separate config knobs or
+    retry counters. ``retry_number`` is 1-based: the first retry waits
+    ``initial_backoff_seconds``, the second ``2x``, and so on, capped at
+    ``max_backoff_seconds``.
+    """
+    initial = max(initial_backoff_seconds, 0.0)
+    cap = max(max_backoff_seconds, 0.0)
+    exponent = min(max(retry_number - 1, 0), 30)
+    wait_seconds = initial * float(2**exponent)
+    return wait_seconds if wait_seconds < cap else cap
+
+
 def _base_fetch_retry_wait_seconds(
     *,
     retry_number: int,
     initial_backoff_seconds: float,
     max_backoff_seconds: float,
 ) -> float:
-    initial = max(initial_backoff_seconds, 0.0)
-    cap = max(max_backoff_seconds, 0.0)
-    exponent = min(max(retry_number - 1, 0), 30)
-    wait_seconds = initial * float(2**exponent)
-    return wait_seconds if wait_seconds < cap else cap
+    return _exponential_backoff_wait_seconds(
+        retry_number=retry_number,
+        initial_backoff_seconds=initial_backoff_seconds,
+        max_backoff_seconds=max_backoff_seconds,
+    )
 
 
 def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:

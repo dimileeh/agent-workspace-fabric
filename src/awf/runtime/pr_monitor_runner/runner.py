@@ -48,6 +48,7 @@ from awf.runtime.pr_monitor_runner.config import (
 from awf.runtime.pr_monitor_runner.constants import _GIT_BASE_BEHIND_FAILED_REASON
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_transient_base_fetch_retry_state,
+    _clear_transient_forge_retry_state,
     _infer_service_work_dir,
 )
 from awf.runtime.pr_monitor_runner.mixins import RunnerDelegatesMixin
@@ -234,6 +235,7 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         workspace_id=workspace_id,
                         pr_number=pr_number,
                         context="fetch_pr_status",
+                        state=state,
                         monitor_log=monitor_log,
                     ):
                         continue
@@ -259,7 +261,12 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         reason_code=exc.reason_code,
                     )
                     return
-                if _clear_transient_base_fetch_retry_state(state, context="fetch_pr_status"):
+                cleared_retry_state = _clear_transient_base_fetch_retry_state(
+                    state, context="fetch_pr_status"
+                )
+                if _clear_transient_forge_retry_state(state, context="fetch_pr_status"):
+                    cleared_retry_state = True
+                if cleared_retry_state:
                     await self._persist_state(workspace_id, state)
                 feedback_state_changed = await self._refresh_pr_feedback_resolution_state(
                     workspace_id=workspace_id,
@@ -359,33 +366,43 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                     # subclass (e.g. the notify-permanent re-raise). Catching the
                     # shared base keeps either forge's fault from escaping ``run()``
                     # and crashing the background monitor task. Recoverable blips
-                    # wait and re-poll; deterministic faults terminate with the
-                    # preserved reason code. GitHub carries the base default
-                    # (``GITHUB_API_ERROR``); Bitbucket its specific code.
+                    # wait and re-poll (now with bounded exponential backoff so a
+                    # persistent execute-path blip exhausts the budget and
+                    # terminates instead of looping forever); deterministic faults
+                    # terminate with the preserved reason code. GitHub carries the
+                    # base default (``GITHUB_API_ERROR``); Bitbucket its specific
+                    # code.
+                    #
+                    # Pass a CLEAN state snapshot reloaded from the DB — never the
+                    # live ``state`` — to the bounded-retry helper. ``_execute``
+                    # mutates ``state`` in-memory as it works (e.g. the fix cycle
+                    # marks a thread addressed *before* the forge ``resolve_thread``
+                    # call), and when a ``ForgeClientError`` escapes ``_execute`` the
+                    # fix-cycle arms may not have run their roll-back
+                    # (``_clear_addressed_state_by_id``), so the live ``state`` can
+                    # carry unconfirmed addressed markers for threads whose API call
+                    # actually failed. The helper persists the state it is given;
+                    # persisting those markers would leave a thread
+                    # marked-addressed-but-open, and ``decide()`` filters addressed
+                    # IDs — so it would treat the still-open thread as handled
+                    # forever and let auto-merge bypass live feedback (the #305
+                    # mode). The reloaded snapshot carries only the already-committed
+                    # pre-``_execute`` mutations plus the durable per-context retry
+                    # count, so the budget accumulates across polls without leaking
+                    # in-flight markers.
+                    execute_retry_ws = await self._load_workspace(workspace_id)
+                    execute_retry_state = self._load_state(execute_retry_ws)
                     if await self._wait_after_transient_forge_error(
                         exc,
                         workspace_id=workspace_id,
                         pr_number=pr_number,
                         context="execute_action",
+                        state=execute_retry_state,
                         monitor_log=monitor_log,
                     ):
-                        # Do NOT persist ``state`` here. ``_execute`` mutates it
-                        # in-memory as it works (e.g. the fix cycle marks a thread
-                        # addressed *before* the forge ``resolve_thread`` call).
-                        # When a ``ForgeClientError`` escapes ``_execute`` the
-                        # fix-cycle arms may not have run their roll-back
-                        # (``_clear_addressed_state_by_id``), so the in-memory
-                        # ``state`` can carry unconfirmed addressed markers for
-                        # threads whose API call actually failed. Persisting them
-                        # would leave a thread marked-addressed-but-open, and
-                        # ``decide()`` filters addressed IDs — so it would treat the
-                        # still-open thread as handled forever and let auto-merge
-                        # bypass live feedback (the #305 mode). Mirror the
-                        # status-fetch transient arms (bare ``continue``): the next
-                        # outer iteration reloads clean state from the DB, and
-                        # threads genuinely resolved on the forge are not re-listed
-                        # while a failed resolve is re-addressed. Pre-``_execute``
-                        # mutations already persisted themselves above.
+                        # The next outer iteration reloads clean state from the DB,
+                        # and threads genuinely resolved on the forge are not
+                        # re-listed while a failed resolve is re-addressed.
                         continue
                     forge_label = "bitbucket" if isinstance(exc, BitbucketClientError) else "github"
                     await self._write_monitor_log(

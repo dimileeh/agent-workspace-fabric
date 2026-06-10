@@ -41,6 +41,7 @@ from awf.runtime.pr_monitor_runner.gates import (
 from awf.runtime.pr_monitor_runner.helpers import (
     _bitbucket_merge_rejection_reason,
     _clear_transient_base_fetch_retry_state,
+    _clear_transient_forge_retry_state,
     _gate_requires_validation_recovery,
     _initial_review_grace_wait_seconds,
     _merge_gate_blocks,
@@ -845,6 +846,11 @@ async def handle_merge_action(
                         state,
                         context="pre_merge_recheck",
                     )
+                    if _clear_transient_forge_retry_state(
+                        state,
+                        context="pre_merge_recheck",
+                    ):
+                        pre_merge_state_changed = True
                     if await self._refresh_pr_feedback_resolution_state(
                         workspace_id=workspace_id,
                         repo=repo,
@@ -1218,6 +1224,7 @@ async def handle_merge_action(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="pre_merge_recheck",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 return False
@@ -1239,6 +1246,7 @@ async def handle_merge_action(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="merge_method_preflight",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 return False
@@ -1280,6 +1288,7 @@ async def handle_merge_action(
                     workspace_id=workspace_id,
                     pr_number=pr_number,
                     context="post_human_notification",
+                    state=state,
                     monitor_log=monitor_log,
                 ):
                     return False
@@ -1324,6 +1333,7 @@ async def handle_merge_action(
                     workspace_id=workspace_id,
                     pr_number=pr_number,
                     context="merge_pr",
+                    state=state,
                     monitor_log=monitor_log,
                 ):
                     return False
@@ -1335,6 +1345,7 @@ async def handle_merge_action(
                     workspace_id=workspace_id,
                     pr_number=pr_number,
                     context="merge_pr",
+                    state=state,
                     monitor_log=monitor_log,
                 ):
                     return False

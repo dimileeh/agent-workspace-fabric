@@ -26,16 +26,20 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.constants import (
+    _BITBUCKET_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _BITBUCKET_TRANSIENT_RETRY_REASON,
     _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
     _GIT_FETCH_BASE_FAILED_REASON,
+    _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _base_fetch_retry_wait_seconds,
     _collect_defer_items,
+    _exponential_backoff_wait_seconds,
     _increment_base_fetch_retry_count,
+    _increment_forge_transient_retry_count,
     _is_transient_base_fetch_error,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
@@ -98,16 +102,72 @@ async def _wait_after_transient_github_error(
     workspace_id: str,
     pr_number: int,
     context: str,
+    state: MonitorState,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool:
+    """Wait and keep polling on a recoverable GitHub blip, with bounded backoff.
+
+    A transient classification (5xx, rate-limit, transport, or an ambiguous
+    ``HTTP 401`` / ``Requires authentication`` with no strong permanent marker —
+    #515) increments a per-context retry count and, while under the budget, sleeps
+    an exponential backoff and returns ``True`` (retry). Once the budget is
+    exhausted it emits a distinct exhausted event, persists state, and returns
+    ``False`` so the caller terminates via its existing path with the forge's
+    preserved ``reason_code``. A non-transient (strong permanent) fault returns
+    ``False`` immediately. Mirrors the base-fetch bounded-retry machinery with its
+    own config + per-context counter so the two never entangle.
+    """
     if not _is_transient_github_client_error(exc):
         return False
-    wait_seconds = self._config.poll_interval_seconds
+    retry_number = _increment_forge_transient_retry_count(state, context)
+    max_retries = max(self._runner_config.transient_forge_max_retries, 0)
+    if retry_number > max_retries:
+        payload = _transient_github_retry_payload(
+            exc,
+            context=context,
+            pr_number=pr_number,
+            wait_seconds=0.0,
+            retry_number=retry_number,
+            max_retries=max_retries,
+        )
+        _log.warning(
+            "monitor.github_transient_error_retry_exhausted",
+            workspace_id=workspace_id,
+            **payload,
+        )
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": "monitor.github_transient_error_retry_exhausted",
+                "workspace_id": workspace_id,
+                "reason_code": _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
+                **payload,
+            },
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="monitor.github_transient_error_retry_exhausted",
+                    reason_code=_GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
+                    payload=payload,
+                )
+            ],
+        )
+        await self._persist_state(workspace_id, state)
+        return False
+    wait_seconds = _exponential_backoff_wait_seconds(
+        retry_number=retry_number,
+        initial_backoff_seconds=self._runner_config.transient_forge_initial_backoff_seconds,
+        max_backoff_seconds=self._runner_config.transient_forge_max_backoff_seconds,
+    )
     payload = _transient_github_retry_payload(
         exc,
         context=context,
         pr_number=pr_number,
         wait_seconds=wait_seconds,
+        retry_number=retry_number,
+        max_retries=max_retries,
     )
     _log.warning(
         "monitor.github_transient_error_retrying",
@@ -133,6 +193,7 @@ async def _wait_after_transient_github_error(
             )
         ],
     )
+    await self._persist_state(workspace_id, state)
     await self._deps.sleep(wait_seconds)
     return True
 
@@ -144,23 +205,71 @@ async def _wait_after_transient_bitbucket_error(
     workspace_id: str,
     pr_number: int,
     context: str,
+    state: MonitorState,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool:
-    """Wait and keep polling on a recoverable Bitbucket blip.
+    """Wait and keep polling on a recoverable Bitbucket blip, with bounded backoff.
 
     Mirrors :func:`_wait_after_transient_github_error` so Bitbucket workspaces
-    survive transient rate-limit/transport/5xx faults instead of terminating
-    immediately. Returns ``True`` when the caller should retry (``continue``),
-    ``False`` when the error is deterministic and must fail the monitor.
+    survive transient rate-limit/transport/5xx faults — and, symmetric with
+    GitHub's ambiguous-401 handling (#515), any 401/403 auth blip — instead of
+    terminating immediately. A transient classification increments a per-context
+    retry count and, while under the budget, sleeps an exponential backoff and
+    returns ``True`` (retry); once exhausted it emits a distinct exhausted event,
+    persists state, and returns ``False`` so the caller terminates with the
+    preserved ``reason_code``. A deterministic fault returns ``False`` immediately.
     """
     if not _is_transient_bitbucket_client_error(exc):
         return False
-    wait_seconds = self._config.poll_interval_seconds
+    retry_number = _increment_forge_transient_retry_count(state, context)
+    max_retries = max(self._runner_config.transient_forge_max_retries, 0)
+    if retry_number > max_retries:
+        payload = _transient_bitbucket_retry_payload(
+            exc,
+            context=context,
+            pr_number=pr_number,
+            wait_seconds=0.0,
+            retry_number=retry_number,
+            max_retries=max_retries,
+        )
+        _log.warning(
+            "monitor.bitbucket_transient_error_retry_exhausted",
+            workspace_id=workspace_id,
+            **payload,
+        )
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": "monitor.bitbucket_transient_error_retry_exhausted",
+                "workspace_id": workspace_id,
+                "reason_code": _BITBUCKET_TRANSIENT_RETRY_EXHAUSTED_REASON,
+                **payload,
+            },
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="monitor.bitbucket_transient_error_retry_exhausted",
+                    reason_code=_BITBUCKET_TRANSIENT_RETRY_EXHAUSTED_REASON,
+                    payload=payload,
+                )
+            ],
+        )
+        await self._persist_state(workspace_id, state)
+        return False
+    wait_seconds = _exponential_backoff_wait_seconds(
+        retry_number=retry_number,
+        initial_backoff_seconds=self._runner_config.transient_forge_initial_backoff_seconds,
+        max_backoff_seconds=self._runner_config.transient_forge_max_backoff_seconds,
+    )
     payload = _transient_bitbucket_retry_payload(
         exc,
         context=context,
         pr_number=pr_number,
         wait_seconds=wait_seconds,
+        retry_number=retry_number,
+        max_retries=max_retries,
     )
     _log.warning(
         "monitor.bitbucket_transient_error_retrying",
@@ -186,6 +295,7 @@ async def _wait_after_transient_bitbucket_error(
             )
         ],
     )
+    await self._persist_state(workspace_id, state)
     await self._deps.sleep(wait_seconds)
     return True
 
@@ -197,6 +307,7 @@ async def _wait_after_transient_forge_error(
     workspace_id: str,
     pr_number: int,
     context: str,
+    state: MonitorState,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool:
     """Wait and keep polling on a recoverable forge (GitHub/Bitbucket) blip.
@@ -204,8 +315,10 @@ async def _wait_after_transient_forge_error(
     The forge-neutral entry point for the consolidated ``except ForgeClientError``
     catch arms: it dispatches to the per-forge wait helper so each keeps emitting
     its own transient-retry event and reason code (behaviour-preserving), while
-    callers no longer need to branch on the concrete forge type. Returns ``True``
-    when the caller should retry, ``False`` when the fault is deterministic.
+    callers no longer need to branch on the concrete forge type. ``state`` carries
+    the per-context bounded-retry counter through to the dispatched helper. Returns
+    ``True`` when the caller should retry, ``False`` when the fault is
+    deterministic or the bounded retry budget is exhausted.
     """
     if isinstance(exc, BitbucketClientError):
         return await _wait_after_transient_bitbucket_error(
@@ -214,6 +327,7 @@ async def _wait_after_transient_forge_error(
             workspace_id=workspace_id,
             pr_number=pr_number,
             context=context,
+            state=state,
             monitor_log=monitor_log,
         )
     if isinstance(exc, GitHubClientError):
@@ -223,6 +337,7 @@ async def _wait_after_transient_forge_error(
             workspace_id=workspace_id,
             pr_number=pr_number,
             context=context,
+            state=state,
             monitor_log=monitor_log,
         )
     # No per-forge wait helper exists for an unknown subclass, so we cannot emit

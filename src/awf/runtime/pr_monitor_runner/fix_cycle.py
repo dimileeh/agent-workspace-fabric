@@ -339,6 +339,7 @@ async def _run_fix_cycle(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="fix_cycle_settle_fetch_pr_status",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 break
@@ -524,6 +525,7 @@ async def _run_fix_cycle(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="resolve_thread",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 # Transient fault: clear the addressed marker so the next poll
@@ -788,6 +790,7 @@ async def _capture_deferred_review_thread(
             workspace_id=workspace_id,
             pr_number=pr_number,
             context="capture_deferred_thread",
+            state=state,
             monitor_log=monitor_log,
         ):
             # Transient (502 / rate-limit / reset): a temporary issue-API outage

@@ -480,7 +480,7 @@ async def test_transient_merge_method_preflight_error_retries_without_blocker(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.merge_calls == []
     assert gh.comments == []
     assert not any(
@@ -512,7 +512,7 @@ async def test_empty_branch_rules_slurp_preflight_error_retries_without_blocker(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.merge_calls == []
     assert gh.comments == []
     assert not any(
@@ -583,7 +583,7 @@ async def test_merge_method_preflight_notification_transient_error_retries(
     assert terminal is False
     assert gh.merge_calls == []
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
@@ -623,7 +623,7 @@ async def test_merge_method_preflight_notification_transient_bitbucket_error_ret
     assert terminal is False
     assert gh.merge_calls == []
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
@@ -939,7 +939,7 @@ async def test_transient_first_merge_failure_does_not_retry_allowed_alternative(
 
     assert terminal is False
     assert gh.merge_calls == ["squash"]
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.comments == []
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
@@ -1251,7 +1251,7 @@ async def test_transient_bitbucket_merge_failure_waits_without_notify(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
 
 @pytest.mark.unit
@@ -1296,7 +1296,7 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
     async with factory() as session:
         operations = await OperationRepository(session).list_for_workspace(
@@ -1371,7 +1371,7 @@ async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
     assert gh.merge_calls == ["squash"]
     # No "merge rejected" notification while the async merge may still be running.
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
     async with factory() as session:
         operations = await OperationRepository(session).list_for_workspace(

@@ -1371,6 +1371,7 @@ async def _execute(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="post_human_notification",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 await self._finish_monitor_operation(

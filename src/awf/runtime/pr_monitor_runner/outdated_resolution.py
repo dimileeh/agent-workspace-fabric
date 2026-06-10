@@ -295,6 +295,7 @@ async def _resolve_addressed_outdated_threads(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="resolve_outdated_thread",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 await self._record_pr_monitor_audit_event(
