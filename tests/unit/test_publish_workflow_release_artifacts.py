@@ -118,6 +118,32 @@ def test_publish_workflow_checkouts_disable_persisted_credentials(job_name: str)
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("job_name", ["build", "installer-smoke"])
+def test_publish_workflow_setup_uv_disables_cache(job_name: str) -> None:
+    """Every ``setup-uv`` in publish.yml sets ``enable-cache: false``.
+
+    The build job builds/checksums the PyPI distributions and installer-smoke
+    verifies those checksums, so restoring or uploading a shared uv cache is a
+    cache-poisoning vector (flagged by zizmor). ``enable-cache`` defaults to
+    ``auto`` (on for GitHub-hosted runners), so the flag must be set
+    explicitly; this guard keeps the hardening from silently regressing.
+    """
+    job = _job(_publish_workflow(), job_name)
+    setup_uv_steps = [
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).split("@", 1)[0] == "astral-sh/setup-uv"
+    ]
+    assert setup_uv_steps, f"{job_name} job has no setup-uv step"
+    for setup_uv in setup_uv_steps:
+        with_config = setup_uv.get("with", {})
+        assert isinstance(with_config, dict)
+        assert with_config.get("enable-cache") is False, (
+            f"setup-uv in {job_name} must set enable-cache: false"
+        )
+
+
+@pytest.mark.unit
 def test_publish_workflow_generates_manifest_without_removing_checksum_artifact() -> None:
     """The publish workflow creates and uploads both checksum and manifest files."""
     build_job = _job(_publish_workflow(), "build")
