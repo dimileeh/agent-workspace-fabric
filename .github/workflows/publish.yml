@@ -31,7 +31,7 @@ jobs:
           fetch-tags: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.5.31"
           github-token: ""
@@ -146,7 +146,7 @@ jobs:
           path: artifacts/release
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.5.31"
           github-token: ""
