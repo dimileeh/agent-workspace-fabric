@@ -56,9 +56,9 @@ _OUTDATED_RESOLVABLE_THREAD_VERDICTS = _RESOLVABLE_THREAD_VERDICTS - frozenset({
 
 
 def _parse_commit_iso(raw: str) -> datetime | None:
-    """Parse a ``git log --format=%cI`` committer date into a UTC-aware datetime.
+    """Parse a ``git log --format=%aI`` author date into a UTC-aware datetime.
 
-    ``%cI`` is strict ISO 8601 with a numeric offset (never ``Z``, never naive),
+    ``%aI`` is strict ISO 8601 with a numeric offset (never ``Z``, never naive),
     so a direct ``fromisoformat`` suffices; the result is normalized to UTC to
     compare cleanly against the UTC-aware review-comment timestamps. Returns
     ``None`` if git emitted something unparseable — the caller then falls back to
@@ -68,7 +68,7 @@ def _parse_commit_iso(raw: str) -> datetime | None:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    if parsed.tzinfo is None:  # pragma: no cover - %cI always carries an offset
+    if parsed.tzinfo is None:  # pragma: no cover - %aI always carries an offset
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
 
@@ -126,7 +126,7 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     already baked into the seeded hash and ``_review_thread_needs_attention`` could
     never fire for it — seeding ``fix_committed`` blindly would resolve (and possibly
     merge) over that untriaged feedback. To prevent it, the seed compares the fix
-    commit's committer time against the newest non-viewer comment timestamp: when a
+    commit's author time against the newest non-viewer comment timestamp: when a
     reviewer comment provably postdates the matching fix commit, seed ``needs_human``
     instead of ``fix_committed``. ``needs_human`` is NOT in
     ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS`` (so the resolve loop leaves the thread
@@ -157,18 +157,26 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         # ``-F --all-match`` requires BOTH literal substrings (the unique thread id
         # AND ``fix: address``) present in one commit message — matching both AWF
         # commit shapes while staying specific enough not to seed a thread the
-        # branch never addressed. ``%cI`` returns the newest matching commit's
-        # committer time so the caller can detect reviewer replies that postdate
-        # the fix. Returns ``(matched, commit_time)``: an empty / failed read means
-        # no durable evidence (no seed); a non-empty read is a match whose time may
-        # still be ``None`` if git emitted something unparseable.
+        # branch never addressed. ``%aI`` returns the newest matching commit's
+        # AUTHOR time so the caller can detect reviewer replies that postdate the
+        # fix. Author (not committer, ``%cI``) time is deliberate: AWF's rebase
+        # recovery (``control/executor/git_methods.py``) runs ``git rebase`` on a
+        # stale PR branch, which rewrites every replayed commit's COMMITTER date
+        # while preserving its author date. In the sequence fix commit → reviewer
+        # follow-up → rebase recovery → re-adoption, the rewritten committer date
+        # is newer than the follow-up, so a ``%cI`` ordering would seed
+        # ``fix_committed`` over the untriaged reply; the author date stays anchored
+        # to the original fix time and keeps the post-fix guard correct. Returns
+        # ``(matched, commit_time)``: an empty / failed read means no durable
+        # evidence (no seed); a non-empty read is a match whose time may still be
+        # ``None`` if git emitted something unparseable.
         result = await self._deps.runner.run(
             git_worktree_command(
                 worktree_path,
                 "log",
                 "-n",
                 "1",
-                "--format=%cI",
+                "--format=%aI",
                 "-F",
                 "--all-match",
                 "--grep",
