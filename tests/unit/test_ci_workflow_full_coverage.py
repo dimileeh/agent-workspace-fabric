@@ -318,6 +318,7 @@ def test_lint_and_type_job_does_not_duplicate_python_test_execution() -> None:
     assert "services" not in job
 
     commands = _run_steps(job)
+    assert "python scripts/ci/check_j2_tojson.py" in commands
     assert "ruff check ." in commands
     assert "ruff format --check ." in commands
     assert ".venv/bin/mypy" in commands

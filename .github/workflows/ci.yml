@@ -32,6 +32,9 @@ jobs:
           uv venv --python 3.12
           uv pip install -e ".[dev]"
 
+      - name: Check Jinja2 template escaping
+        run: .venv/bin/python scripts/ci/check_j2_tojson.py
+
       - name: Lint (ruff)
         run: .venv/bin/ruff check .
 
