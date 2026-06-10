@@ -50,6 +50,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _SYNC_BASE_NO_PROGRESS_SIGNATURE_KEY,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
+    _forge_transient_retry_count_key,
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
     _initial_review_grace_state_for_persistence,
@@ -446,6 +447,41 @@ async def _persist_state(self: Any, workspace_id: str, state: MonitorState) -> N
             ws.monitor_started_at = now_wall - timedelta(seconds=elapsed_seconds)
         await s.commit()
         state.clear_changed_thread_ids(newly_marked_thread_ids)
+
+
+async def _persist_forge_transient_retry_count(
+    self: Any,
+    workspace_id: str,
+    *,
+    context: str,
+    retry_number: int,
+) -> None:
+    """Persist ONLY the bounded forge-transient retry counter for ``context``.
+
+    The full :func:`_persist_state` flushes the entire in-memory ``MonitorState``.
+    Inside a fix-cycle ``_execute`` pass that state can still carry an
+    *unconfirmed* addressed verdict — e.g. a ``fix_committed`` thread whose
+    ``resolve_thread`` call, or a ``defer`` thread whose tracking-issue creation,
+    is the very forge operation being retried; the caller only rolls that verdict
+    back *after* the wait returns. Flushing the whole state during the backoff
+    would persist the unconfirmed marker before the rollback: if the monitor is
+    cancelled or restarted mid-wait, the next poll reloads the thread as addressed
+    even though the forge call failed, so ``decide()`` could skip still-open review
+    feedback and merge over it (#305). The fix-cycle safety model relies on
+    ``_execute`` never persisting unconfirmed markers (see
+    ``_resolve_addressed_outdated_threads``). Persist only the retry counter,
+    merged onto the DB-persisted state, so the bounded budget still survives across
+    polls without flushing any unconfirmed verdict.
+    """
+    key = _forge_transient_retry_count_key(context)
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        threads_addressed[key] = str(retry_number)
+        ws.monitor_threads_addressed = threads_addressed
+        await s.commit()
 
 
 async def _terminate_completed(

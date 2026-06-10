@@ -416,3 +416,89 @@ async def test_clear_on_success_is_noop_without_a_counter(
 
     # Unrelated state is untouched and no forge-retry key was introduced.
     assert state.threads_addressed_ids == {"PRRT_x": "false_positive"}
+
+
+@pytest.mark.unit
+async def test_transient_wait_persists_only_counter_not_unconfirmed_verdict(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A fix-cycle transient wait must persist ONLY the bounded retry counter,
+    never the whole in-memory state.
+
+    When ``resolve_thread`` (or deferred-issue capture) faults transiently, the
+    in-memory state still holds the thread's unconfirmed ``fix_committed`` verdict
+    — the caller only rolls it back *after* the wait returns. If the wait flushed
+    the whole state, a crash/restart during the backoff would reload the thread as
+    addressed even though the forge resolve failed, so ``decide()`` would skip the
+    still-open thread and let auto-merge bypass live feedback (#305). The counter
+    must still be persisted so the bounded budget survives across polls.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 2)
+    exc = GitHubClientError(
+        operation="gh api graphql",
+        returncode=1,
+        stderr="gh: Requires authentication (HTTP 401)",
+    )
+    # The unconfirmed addressed verdict the resolve_thread caller has not yet
+    # rolled back at the moment the wait runs.
+    state = MonitorState(threads_addressed_ids={"PRRT_open": "fix_committed"})
+
+    # Transient retry branch: returns True, persists the counter, but must NOT
+    # flush the unconfirmed verdict.
+    assert (
+        await runner._wait_after_transient_github_error(
+            exc,
+            workspace_id=workspace_id,
+            pr_number=42,
+            context="resolve_thread",
+            state=state,
+            monitor_log=None,
+        )
+        is True
+    )
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        persisted = ws.monitor_threads_addressed or {}
+        assert persisted.get(_RESOLVE_THREAD_COUNT_KEY) == "1"
+        assert "PRRT_open" not in persisted
+
+    # Exhaustion branch: also persists only the counter, never the unconfirmed
+    # verdict, so the terminal path cannot strand an addressed-but-unresolved
+    # thread in the DB either.
+    assert (
+        await runner._wait_after_transient_github_error(
+            exc,
+            workspace_id=workspace_id,
+            pr_number=42,
+            context="resolve_thread",
+            state=state,
+            monitor_log=None,
+        )
+        is True
+    )
+    exhausted = await runner._wait_after_transient_github_error(
+        exc,
+        workspace_id=workspace_id,
+        pr_number=42,
+        context="resolve_thread",
+        state=state,
+        monitor_log=None,
+    )
+    assert exhausted is False
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        persisted = ws.monitor_threads_addressed or {}
+        assert persisted.get(_RESOLVE_THREAD_COUNT_KEY) == "3"
+        assert "PRRT_open" not in persisted

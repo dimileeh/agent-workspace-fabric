@@ -198,7 +198,14 @@ async def _run_bounded_transient_forge_retry(
                 )
             ],
         )
-        await self._persist_state(workspace_id, state)
+        # Persist only the bounded retry counter, never the whole in-memory state:
+        # a fix-cycle caller may still hold an unconfirmed addressed verdict that it
+        # rolls back only after this returns, and flushing it here would let a
+        # crash/restart reload it as addressed and merge over still-open feedback
+        # (#305). See _persist_forge_transient_retry_count.
+        await self._persist_forge_transient_retry_count(
+            workspace_id, context=context, retry_number=retry_number
+        )
         return False
     wait_seconds = _exponential_backoff_wait_seconds(
         retry_number=retry_number,
@@ -237,7 +244,14 @@ async def _run_bounded_transient_forge_retry(
             )
         ],
     )
-    await self._persist_state(workspace_id, state)
+    # Persist only the bounded retry counter, never the whole in-memory state: a
+    # fix-cycle caller may still hold an unconfirmed addressed verdict that it rolls
+    # back only after this returns, and flushing it here would let a crash/restart
+    # during the backoff reload it as addressed and merge over still-open feedback
+    # (#305). See _persist_forge_transient_retry_count.
+    await self._persist_forge_transient_retry_count(
+        workspace_id, context=context, retry_number=retry_number
+    )
     await self._deps.sleep(wait_seconds)
     return True
 
