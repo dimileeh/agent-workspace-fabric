@@ -1293,8 +1293,24 @@ async def handle_merge_action(
                 ):
                     return False
                 raise
+            # The notification posted: clear any stale ``post_human_notification``
+            # retry count so a recovered blip never accumulates toward the budget.
+            await self._clear_forge_transient_retry_state_on_success(
+                workspace_id=workspace_id,
+                state=state,
+                context="post_human_notification",
+            )
             await self._deps.sleep(self._config.poll_interval_seconds)
             return False
+
+        # Past the preflight guard with no captured error: the merge-method preflight
+        # succeeded this attempt, so clear any stale ``merge_method_preflight`` retry
+        # count to keep a recovered blip from accumulating across merge attempts.
+        await self._clear_forge_transient_retry_state_on_success(
+            workspace_id=workspace_id,
+            state=state,
+            context="merge_method_preflight",
+        )
 
         if merge_method_notification_reason is not None:
             _log.warning(
@@ -1351,6 +1367,15 @@ async def handle_merge_action(
                     return False
                 blocker_detail = _redact_and_truncate_forge_error(merge_blocker.stderr)
                 blocker_reason = _merge_rejection_reason(merge_blocker.stderr)
+            # The merge call completed with a deterministic (non-transient) blocker:
+            # this incident is over, so clear any stale ``merge_pr`` retry count to
+            # give the next merge attempt a fresh bounded budget rather than resuming
+            # from blips that already recovered.
+            await self._clear_forge_transient_retry_state_on_success(
+                workspace_id=workspace_id,
+                state=state,
+                context="merge_pr",
+            )
             # Branch protection / restrictions often block merges; fall back to
             # the release-PR notify flow rather than failing the workspace.
             _log.warning(

@@ -344,6 +344,13 @@ async def _run_fix_cycle(
             ):
                 break
             raise
+        # The settle re-poll succeeded: clear any stale retry count for this context
+        # so a recovered blip never accumulates toward the budget across fix cycles.
+        await self._clear_forge_transient_retry_state_on_success(
+            workspace_id=workspace_id,
+            state=state,
+            context="fix_cycle_settle_fetch_pr_status",
+        )
         new_threads = [
             t for t in status.unresolved_inline_threads if _review_thread_needs_attention(state, t)
         ]
@@ -639,6 +646,13 @@ async def _run_fix_cycle(
                 },
             )
         else:
+            # The resolve landed: clear any stale ``resolve_thread`` retry count so a
+            # recovered transient blip never accumulates toward the bounded budget.
+            await self._clear_forge_transient_retry_state_on_success(
+                workspace_id=workspace_id,
+                state=state,
+                context="resolve_thread",
+            )
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -840,6 +854,13 @@ async def _capture_deferred_review_thread(
             evidence={"thread_ids": [thread.thread_id], "error_message": redacted_error},
         )
         return False
+    # The tracking issue was filed: clear any stale ``capture_deferred_thread``
+    # retry count so a recovered blip never accumulates toward the bounded budget.
+    await self._clear_forge_transient_retry_state_on_success(
+        workspace_id=workspace_id,
+        state=state,
+        context="capture_deferred_thread",
+    )
     # Filing the tracking issue is the durable capture. Record it immediately so
     # a later retry (e.g. after a failed push) never files a duplicate, even if
     # the explanatory comment below fails. The comment is best-effort courtesy.

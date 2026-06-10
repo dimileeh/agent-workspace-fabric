@@ -421,6 +421,11 @@ class PullRequestMonitorRunner(RunnerDelegatesMixin):
                         reason_code=exc.reason_code,
                     )
                     return
+                # ``_execute`` returned without raising, so the execute-path forge
+                # calls recovered: clear any stale ``execute_action`` retry count so a
+                # recovered blip never accumulates toward the budget across polls. The
+                # unconditional persist below flushes the clear (no extra write).
+                _clear_transient_forge_retry_state(state, context="execute_action")
                 await self._persist_state(workspace_id, state)
                 if terminal:
                     return

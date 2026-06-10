@@ -1398,6 +1398,13 @@ async def _execute(
                 error_message=str(exc),
             )
             raise
+        # The notification posted: clear any stale ``post_human_notification`` retry
+        # count so a recovered blip never accumulates toward the bounded budget.
+        await self._clear_forge_transient_retry_state_on_success(
+            workspace_id=workspace_id,
+            state=state,
+            context="post_human_notification",
+        )
         await self._deps.sleep(self._config.poll_interval_seconds)
         await self._finish_monitor_operation(
             operation,

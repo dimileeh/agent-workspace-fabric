@@ -152,5 +152,8 @@ class RunnerDelegatesMixin:
     _wait_after_transient_github_error = _transient_ops._wait_after_transient_github_error
     _wait_after_transient_bitbucket_error = _transient_ops._wait_after_transient_bitbucket_error
     _wait_after_transient_forge_error = _transient_ops._wait_after_transient_forge_error
+    _clear_forge_transient_retry_state_on_success = (
+        _transient_ops._clear_forge_transient_retry_state_on_success
+    )
     _wait_after_transient_base_fetch_error = _transient_ops._wait_after_transient_base_fetch_error
     _write_defer_signal = _transient_ops._write_defer_signal

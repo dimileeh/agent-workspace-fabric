@@ -386,6 +386,13 @@ async def _resolve_addressed_outdated_threads(
         # Resolve landed — clear any transient requeue flag from a prior poll so
         # ``decide`` no longer holds this thread at ``NotifyHuman``.
         state.threads_addressed_ids.pop(_outdated_resolve_requeued_key(tid), None)
+        # Also clear any stale bounded-retry count for this context so a recovered
+        # blip never accumulates toward the budget across polls.
+        await self._clear_forge_transient_retry_state_on_success(
+            workspace_id=workspace_id,
+            state=state,
+            context="resolve_outdated_thread",
+        )
         await self._record_pr_monitor_audit_event(
             workspace_id=workspace_id,
             event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,

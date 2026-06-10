@@ -315,3 +315,104 @@ async def test_monitor_run_terminates_after_github_401_retry_budget_exhausted(
         assert ws.events[-1].reason_code == GITHUB_API_ERROR
         assert len(_events(ws, "monitor.github_transient_error_retrying")) == 1
         assert len(_events(ws, "monitor.github_transient_error_retry_exhausted")) == 1
+
+
+_RESOLVE_THREAD_COUNT_KEY = "__awf_forge_transient_retry_count:resolve_thread"
+
+
+@pytest.mark.unit
+async def test_clear_on_success_resets_per_context_budget_and_persists(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A recovered blip must not leak its count: once the context's operation
+    succeeds the counter is cleared (and the clear is persisted), so later
+    independent blips in the same context start from a fresh bounded budget
+    instead of resuming from a stale count and exhausting it prematurely."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 2)
+    exc = GitHubClientError(
+        operation="gh api graphql",
+        returncode=1,
+        stderr="gh: Requires authentication (HTTP 401)",
+    )
+    state = MonitorState()
+
+    # First incident: two recovered blips bring ``resolve_thread`` to the budget
+    # edge. The wait helper persists the running count on every blip.
+    for expected_count in (1, 2):
+        assert (
+            await runner._wait_after_transient_github_error(
+                exc,
+                workspace_id=workspace_id,
+                pr_number=42,
+                context="resolve_thread",
+                state=state,
+                monitor_log=None,
+            )
+            is True
+        )
+        assert state.threads_addressed_ids[_RESOLVE_THREAD_COUNT_KEY] == str(expected_count)
+
+    # The operation then succeeds: the counter is cleared in memory AND the clear
+    # is persisted over the previously-persisted "2".
+    await runner._clear_forge_transient_retry_state_on_success(
+        workspace_id=workspace_id,
+        state=state,
+        context="resolve_thread",
+    )
+    assert _RESOLVE_THREAD_COUNT_KEY not in state.threads_addressed_ids
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert _RESOLVE_THREAD_COUNT_KEY not in (ws.monitor_threads_addressed or {})
+
+    # A later, independent blip starts a fresh budget rather than tipping straight
+    # into exhaustion off the stale count.
+    assert (
+        await runner._wait_after_transient_github_error(
+            exc,
+            workspace_id=workspace_id,
+            pr_number=42,
+            context="resolve_thread",
+            state=state,
+            monitor_log=None,
+        )
+        is True
+    )
+    assert state.threads_addressed_ids[_RESOLVE_THREAD_COUNT_KEY] == "1"
+
+
+@pytest.mark.unit
+async def test_clear_on_success_is_noop_without_a_counter(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Clearing a context that never blipped is a harmless no-op that adds no
+    state mutation (and so no extra DB write on the common happy path)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState(threads_addressed_ids={"PRRT_x": "false_positive"})
+
+    await runner._clear_forge_transient_retry_state_on_success(
+        workspace_id=workspace_id,
+        state=state,
+        context="merge_pr",
+    )
+
+    # Unrelated state is untouched and no forge-retry key was introduced.
+    assert state.threads_addressed_ids == {"PRRT_x": "false_positive"}

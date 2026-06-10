@@ -36,6 +36,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _base_fetch_retry_wait_seconds,
+    _clear_transient_forge_retry_state,
     _collect_defer_items,
     _exponential_backoff_wait_seconds,
     _increment_base_fetch_retry_count,
@@ -348,6 +349,32 @@ async def _wait_after_transient_forge_error(
     raise RuntimeError(  # pragma: no cover - only GitHub/Bitbucket subclasses exist
         f"unknown ForgeClientError subclass: {type(exc).__name__}"
     )
+
+
+async def _clear_forge_transient_retry_state_on_success(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    context: str,
+) -> None:
+    """Reset a context's bounded forge-transient retry counter after success.
+
+    The per-context counter (:func:`_increment_forge_transient_retry_count`) is
+    persisted on every transient forge blip so a *consecutive* run of failures
+    stays bounded across polls. Once that context's forge operation finally
+    succeeds the incident is over, so the counter must be cleared — otherwise a
+    recovered one-off blip leaves a stale count behind, and later unrelated blips
+    in the same context resume from it and exhaust the bounded budget
+    prematurely, downgrading or terminating an otherwise-healthy monitor.
+
+    Mirrors the inline clear the ``fetch_pr_status`` / ``pre_merge_recheck`` paths
+    already perform, factored into one helper so every increment context resets
+    symmetrically. Persists only when a counter was actually present, so the
+    common no-blip success path adds no extra DB write.
+    """
+    if _clear_transient_forge_retry_state(state, context=context):
+        await self._persist_state(workspace_id, state)
 
 
 async def _wait_after_transient_base_fetch_error(
