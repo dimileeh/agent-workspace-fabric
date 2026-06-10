@@ -412,12 +412,23 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             reap_claude_bases=settings.claude_base_gc_enabled,
             compose_manager=compose,
         )
+        # Share one cleanup-batch budget across both passes. ``plan_terminal_workspace_gc``
+        # caps each call to ``workspace_cleanup_batch_limit`` candidates (the
+        # "maximum cleanup candidates per batch" invariant), but giving the
+        # discarded-status pass the full limit again would let a single sweep reclaim
+        # up to ~2x the configured guard. Subtract the first pass's selected candidates
+        # so the combined sweep never exceeds one batch budget; a fully-spent budget
+        # makes the second pass a no-op (``limit=0`` selects nothing).
+        discarded_limit = max(
+            settings.workspace_cleanup_batch_limit - len(default_result.plan.candidates),
+            0,
+        )
         discarded_result = await run_service_workspace_gc(
             session_factory,
             work_dir=work_dir,
             execute=True,
             min_age_hours=settings.completed_workspace_retention_hours,
-            limit=settings.workspace_cleanup_batch_limit,
+            limit=discarded_limit,
             cleanup_enabled=settings.workspace_cleanup_enabled,
             include_statuses=(
                 WorkspaceStatus.cancelled.value,

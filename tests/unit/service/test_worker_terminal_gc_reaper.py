@@ -357,6 +357,116 @@ async def test_worker_terminal_gc_reaper_reaps_cancelled_and_destroyed(
     assert {cancelled_id, destroyed_id} <= candidate_ids
 
 
+class _FakeGCPlan:
+    """Stand-in for ``WorkspaceGCResult.plan`` exposing only ``candidates``."""
+
+    def __init__(self, candidate_count: int) -> None:
+        self.candidates = [object()] * candidate_count
+
+
+class _FakeGCResult:
+    """Minimal ``run_service_workspace_gc`` return capturing the selected count."""
+
+    def __init__(self, candidate_count: int) -> None:
+        self.plan = _FakeGCPlan(candidate_count)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+            "deleted_paths": [],
+            "candidates": [],
+            "delete_errors": [],
+            "preserved_count": 0,
+        }
+
+
+async def _limits_for_two_pass_gc(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    batch_limit: int,
+    first_pass_selected: int,
+) -> list[int | None]:
+    """Build the reaper, run it, and return the ``limit`` passed to each GC pass."""
+    created: dict[str, Any] = {}
+
+    class _ControlWorker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["terminal_gc_reaper"] = kwargs["terminal_gc_reaper"]
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    _patch_runtime_constructors(monkeypatch)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+
+    limits: list[int | None] = []
+
+    async def _fake_gc(_session_factory: object, **kwargs: Any) -> _FakeGCResult:
+        limits.append(kwargs.get("limit"))
+        # Only the first (default-policy) pass reports selected candidates; the
+        # second pass's budget is what we are asserting on.
+        return _FakeGCResult(first_pass_selected if len(limits) == 1 else 0)
+
+    monkeypatch.setattr(worker_mod, "run_service_workspace_gc", _fake_gc)
+
+    settings = dataclasses.replace(
+        _settings(tmp_path),
+        workspace_cleanup_batch_limit=batch_limit,
+    )
+    worker_mod.build_worker_runtime(settings)
+    reaper = created["terminal_gc_reaper"]
+    await reaper()
+    return limits
+
+
+@pytest.mark.unit
+async def test_worker_terminal_gc_shares_batch_budget_across_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The discarded-status pass gets the batch budget minus the first pass's selections.
+
+    Both passes share one ``workspace_cleanup_batch_limit`` budget, so the combined
+    sweep cannot reclaim more than the configured guard — otherwise a limit of N
+    could delete up to ~2N candidates in one cycle, breaking the per-batch GC
+    invariant.
+    """
+    limits = await _limits_for_two_pass_gc(
+        monkeypatch,
+        tmp_path,
+        session_factory,
+        batch_limit=5,
+        first_pass_selected=3,
+    )
+
+    assert limits == [5, 2]
+
+
+@pytest.mark.unit
+async def test_worker_terminal_gc_exhausted_budget_makes_second_pass_noop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A first pass that fills the batch budget leaves the discarded pass a no-op (``limit=0``).
+
+    Without clamping, ``batch_limit - first_pass_selected`` would go negative; the
+    second pass must receive ``0`` so it selects nothing rather than a negative limit.
+    """
+    limits = await _limits_for_two_pass_gc(
+        monkeypatch,
+        tmp_path,
+        session_factory,
+        batch_limit=4,
+        first_pass_selected=6,
+    )
+
+    assert limits == [4, 0]
+
+
 @pytest.mark.unit
 def test_combine_terminal_gc_reports_concatenates_and_sums() -> None:
     """A clean default pass + clean discarded pass fold into one ``succeeded`` summary."""
