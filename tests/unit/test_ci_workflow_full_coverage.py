@@ -462,6 +462,40 @@ def test_ci_workflow_actions_pinned_to_sha_with_version_comment(action: str, ref
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "job_name",
+    [
+        "lint-and-type",
+        "python-coverage-shards",
+        "python-full-coverage",
+        "console",
+        "release-artifacts",
+    ],
+)
+def test_ci_workflow_checkouts_disable_persisted_credentials(job_name: str) -> None:
+    """Every checkout in ci.yml sets ``persist-credentials: false``.
+
+    Mirrors ``test_publish_workflow_checkouts_disable_persisted_credentials``
+    so the two workflows are symmetrically enforced: a future edit that drops
+    the flag from any ci.yml checkout fails the suite instead of silently
+    re-persisting the GITHUB_TOKEN in ``.git/config``.
+    """
+    job = _job(_workflow(), job_name)
+    checkouts = [
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).split("@", 1)[0] == "actions/checkout"
+    ]
+    assert checkouts, f"{job_name} job has no checkout step"
+    for checkout in checkouts:
+        with_config = checkout.get("with", {})
+        assert isinstance(with_config, dict)
+        assert with_config.get("persist-credentials") is False, (
+            f"checkout in {job_name} must set persist-credentials: false"
+        )
+
+
+@pytest.mark.unit
 def test_contributor_docs_require_ci_rollup_status_check() -> None:
     docs = CONTRIBUTING_PATH.read_text(encoding="utf-8")
 
