@@ -95,6 +95,7 @@ class ControlWorker(WorkerDelegatesMixin):
         orphan_dir_reconciler: Callable[[], Awaitable[OrphanDirReconcileResult]] | None = None,
         classified_orphan_reaper: Callable[[], Awaitable[OrphanReapResult]] | None = None,
         claude_base_reaper: Callable[[], Awaitable[dict[str, object]]] | None = None,
+        terminal_gc_reaper: Callable[[], Awaitable[dict[str, object]]] | None = None,
         auth_overlay_work_dir: Path | None = None,
         config: WorkerConfig,
     ) -> None:
@@ -111,6 +112,12 @@ class ControlWorker(WorkerDelegatesMixin):
         # the API ``/v1/service/gc`` path self-protects and reaps nothing; this
         # closure (built in ``service/worker.py``) drives the real reclaim.
         self._claude_base_reaper = claude_base_reaper
+        # CAP_SYS_ADMIN-context reaper for per-workspace terminal-workspace auth dirs
+        # (#513). Only the worker can unmount a reaped workspace's live Claude overlay
+        # to satisfy the GC's unmount-before-remove contract, so the API
+        # ``/v1/service/gc`` path skips every auth dir; this closure (built in
+        # ``service/worker.py``) drives the real per-workspace reclaim.
+        self._terminal_gc_reaper = terminal_gc_reaper
         # The host work dir that backs ``auth/<id>/claude/...`` overlays. When set,
         # the terminal-runtime-release sweep unmounts a reaped workspace's overlay
         # in the worker's (CAP_SYS_ADMIN) mount namespace before GC removes the dir.
@@ -137,6 +144,7 @@ class ControlWorker(WorkerDelegatesMixin):
         self._next_orphan_reconcile_scan_at = 0.0
         self._next_classified_orphan_reap_scan_at = 0.0
         self._next_claude_base_reap_scan_at = 0.0
+        self._next_terminal_gc_reap_scan_at = 0.0
         self._requested_capacity_resume_after: SchedulerOrderCursor | None = None
         self._requested_capacity_resume_signature: _AllocatedReservationSignature | None = None
         self._requested_capacity_resume_queue_signature: _RequestedCapacityQueueSignature | None = (
@@ -196,6 +204,7 @@ class ControlWorker(WorkerDelegatesMixin):
         await self._maybe_reconcile_orphan_dirs()
         await self._maybe_reap_classified_orphans()
         await self._maybe_reap_superseded_claude_bases()
+        await self._maybe_reap_terminal_workspace_gc()
 
         if self._executor is not None:
             # Preserved-active-validation redispatches enqueued during recovery

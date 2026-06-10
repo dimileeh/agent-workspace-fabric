@@ -31,6 +31,16 @@ class WorkerConfig:
     # verification is trustworthy and it can actually reap superseded bases (#509).
     claude_base_gc_enabled: bool = True
     claude_base_reap_scan_interval_seconds: float = 3600.0
+    # Kill-switch for the worker-side terminal-workspace auth-dir GC sweep (#513),
+    # sourced from ``settings.terminal_workspace_gc_enabled``. The per-workspace
+    # ``auth/<id>/`` dirs (~1.7 GB each) for completed/cancelled/destroyed
+    # workspaces can only be reclaimed in a CAP_SYS_ADMIN context: removing one
+    # first unmounts a possible live Claude overlay, which the capability-less API
+    # ``/v1/service/gc`` path cannot verify (it self-protects and skips). The worker
+    # holds CAP_SYS_ADMIN + the agent's mount namespace, so it drives the real
+    # reclaim. Failed workspaces are preserved (inherited GC policy).
+    terminal_workspace_gc_enabled: bool = True
+    terminal_workspace_gc_scan_interval_seconds: float = 3600.0
     # NOTE: the interval fields above are read by the worker cleanup loops. The
     # two fields below are informational mirrors of the same settings: the
     # *effective* values are captured by the ``_reconcile_orphan_dirs`` closure

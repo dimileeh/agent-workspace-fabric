@@ -15,7 +15,7 @@ import uuid as uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,6 +50,7 @@ from awf.control.worker.constants import (
     _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
     _TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+    _TERMINAL_WORKSPACE_GC_REAP_FAILED_REASON_CODE,
 )
 from awf.control.worker.helpers import (
     _worker_exception_is_transient_db_connection,
@@ -320,6 +321,89 @@ def _log_claude_base_reap_summary(report: dict[str, object]) -> None:
             reason_code=report.get("reason_code"),
             errors=report.get("errors") or [],
             unverifiable=report.get("unverifiable") or [],
+        )
+
+
+async def _maybe_reap_terminal_workspace_gc(self: Any) -> None:
+    """Periodically reap per-workspace terminal-workspace auth dirs from the worker (#513).
+
+    The terminal-workspace GC (``service.gc.run_service_workspace_gc``) reclaims the
+    per-workspace ``auth/<id>/`` dirs (~1.7 GB each) of completed/cancelled/destroyed
+    workspaces. Removing one first unmounts a possible live Claude overlay at
+    ``auth/<id>/claude/merged``, and ``teardown_workspace_auth_overlay`` raises
+    ``OverlayUnmountUnverifiableError`` whenever the caller cannot prove it holds
+    CAP_SYS_ADMIN — so the capability-less API ``/v1/service/gc`` path records every
+    auth path ``skipped`` and deletes nothing. Only the worker holds CAP_SYS_ADMIN and
+    shares the agent's mount namespace, so this loop drives the same already-tested GC
+    from the worker, where the unmount-before-remove actually succeeds. Reuses the GC's
+    classification, path planning, ``WorkspaceGCPathOutcome`` bookkeeping, and the
+    ``preserves_failed_workspaces=True`` policy (failed workspaces are never reaped).
+
+    No-op when no reaper callback is wired or the kill-switch
+    (``terminal_workspace_gc_enabled``) is off, in which case the cursor is left
+    eligible so enabling the flag does not wait out a stale interval (mirrors
+    ``_maybe_reap_superseded_claude_bases``). The reaper closure ``await``s the async
+    GC (which offloads its blocking multi-GB ``rmtree``/DB work via
+    ``asyncio.to_thread`` internally) and returns a report dict rather than raising for
+    expected partial/skipped cases, so failures are summarised and the cursor is always
+    rescheduled. Any unexpected exception is logged loudly via ``_log.exception`` and
+    swallowed so one failed sweep cannot block provisioning or dispatch.
+    ``asyncio.CancelledError`` propagates for cooperative shutdown.
+    """
+    if self._terminal_gc_reaper is None:
+        return
+    if not self._config.terminal_workspace_gc_enabled:
+        return
+
+    now = monotonic()
+    if now < self._next_terminal_gc_reap_scan_at:
+        return
+
+    try:
+        report = await self._terminal_gc_reaper()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.exception(
+            "worker.terminal_workspace_gc_reap_failed",
+            reason_code=_TERMINAL_WORKSPACE_GC_REAP_FAILED_REASON_CODE,
+        )
+    else:
+        _log_terminal_gc_reap_summary(report)
+
+    interval = max(0.0, self._config.terminal_workspace_gc_scan_interval_seconds)
+    self._next_terminal_gc_reap_scan_at = monotonic() + interval
+
+
+def _log_terminal_gc_reap_summary(report: dict[str, object]) -> None:
+    """Emit a structured summary for a completed terminal-workspace GC sweep.
+
+    Logs ``info`` when auth/worktree/compose paths were reclaimed and ``warning`` when
+    the GC self-reported a ``partial`` (e.g. a delete error or an unverifiable overlay
+    unmount). A clean run that reclaimed nothing (no eligible candidates, or a dry-run
+    preview) is intentionally silent to avoid log noise each interval. Only counts and
+    the reason code the GC report already surfaces are logged — never auth-dir contents
+    or secrets.
+    """
+    deleted_path_count = report.get("deleted_path_count") or 0
+    # Independent conditions, not mutually exclusive: a ``partial`` pass can still have
+    # reclaimed some paths while another path errored, so surface both the reclaim
+    # (info) and the partial (warning) rather than masking one behind the other.
+    if deleted_path_count:
+        _log.info(
+            "worker.terminal_workspace_gc_reaped",
+            reason_code=report.get("reason_code"),
+            deleted_path_count=deleted_path_count,
+            candidate_count=report.get("candidate_count"),
+            preserved_count=report.get("preserved_count"),
+        )
+    if report.get("status") == "partial":
+        _log.warning(
+            "worker.terminal_workspace_gc_partial",
+            reason_code=report.get("reason_code"),
+            # Count only — never the per-path ``error``/``path`` entries — so an
+            # auth-dir path can't leak into the worker log.
+            delete_error_count=len(cast("list[object]", report.get("delete_errors") or [])),
         )
 
 
