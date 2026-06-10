@@ -13,6 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PUBLISH_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "publish.yml"
 
 
+def _action_name(uses_ref: str) -> str:
+    """Extract the action name from a ``uses:`` reference, stripping the ``@ref`` suffix."""
+    return uses_ref.split("@", 1)[0]
+
+
 def _publish_workflow() -> dict[str, Any]:
     """Load the publish workflow YAML as a mapping."""
     loaded = yaml.safe_load(PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8"))
@@ -53,7 +58,7 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
     """Collect artifact upload paths declared by a workflow job."""
     paths: set[str] = set()
     for step in _steps(job):
-        if str(step.get("uses", "")).split("@", 1)[0] != "actions/upload-artifact":
+        if _action_name(str(step.get("uses", ""))) != "actions/upload-artifact":
             continue
         with_config = step.get("with", {})
         assert isinstance(with_config, dict)
@@ -127,7 +132,7 @@ def test_publish_workflow_checkouts_disable_persisted_credentials(job_name: str)
     checkouts = [
         step
         for step in _steps(job)
-        if str(step.get("uses", "")).split("@", 1)[0] == "actions/checkout"
+        if _action_name(str(step.get("uses", ""))) == "actions/checkout"
     ]
     assert checkouts, f"{job_name} job has no checkout step"
     for checkout in checkouts:
@@ -153,7 +158,7 @@ def test_publish_workflow_setup_uv_disables_cache(job_name: str) -> None:
     setup_uv_steps = [
         step
         for step in _steps(job)
-        if str(step.get("uses", "")).split("@", 1)[0] == "astral-sh/setup-uv"
+        if _action_name(str(step.get("uses", ""))) == "astral-sh/setup-uv"
     ]
     assert setup_uv_steps, f"{job_name} job has no setup-uv step"
     for setup_uv in setup_uv_steps:
@@ -220,7 +225,7 @@ def test_publish_workflow_has_installer_smoke_job_consuming_release_artifacts() 
     downloaded = {
         step.get("with", {}).get("name")
         for step in _steps(smoke_job)
-        if str(step.get("uses", "")).split("@", 1)[0] == "actions/download-artifact"
+        if _action_name(str(step.get("uses", ""))) == "actions/download-artifact"
     }
     assert "python-distributions" in downloaded
     assert "python-distribution-checksums" in downloaded
@@ -284,7 +289,7 @@ def test_publish_workflow_publish_job_keeps_manual_trusted_publishing_gate() -> 
 
     publish_steps = _steps(publish_job)
     assert any(
-        str(step.get("uses", "")).split("@", 1)[0] == "pypa/gh-action-pypi-publish"
+        _action_name(str(step.get("uses", ""))) == "pypa/gh-action-pypi-publish"
         for step in publish_steps
     )
 
