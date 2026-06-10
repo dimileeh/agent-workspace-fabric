@@ -303,13 +303,16 @@ def _diagnostics_for_template(template: TemplateFile) -> list[Diagnostic]:
 
 def _discover_tracked_templates(repo_root: Path) -> list[TemplateFile]:
     """Return tracked docker/compose Jinja2 templates from git."""
-    result = subprocess.run(
-        ["git", "ls-files", "docker/compose/*.j2"],
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "docker/compose/*.j2"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise TemplateReadError(f"unable to execute git: {exc}") from exc
     if result.returncode != 0:
         stderr = result.stderr.strip() or "git ls-files failed"
         raise TemplateReadError(f"unable to discover tracked compose templates: {stderr}")
