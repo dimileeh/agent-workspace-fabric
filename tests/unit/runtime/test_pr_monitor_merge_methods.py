@@ -1135,6 +1135,94 @@ async def test_unclassified_first_merge_failure_notifies_without_method_mismatch
 
 
 @pytest.mark.unit
+async def test_merge_blocker_fallback_notification_transient_error_retries_then_clears(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A transient post_comment blip while notifying about a *deterministic* merge
+    blocker must run the bounded forge-retry path (wait + persist the
+    ``post_human_notification`` counter) instead of escaping the merge loop, and a
+    later successful post must clear that budget — mirroring the merge-method
+    preflight notification arm rather than calling ``_post_human_notification_once``
+    naked."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+
+    def deterministic_merge_error() -> GitHubClientError:
+        return GitHubClientError(
+            operation="gh pr merge",
+            returncode=1,
+            stderr="GraphQL: Pull request could not be merged with this method.",
+        )
+
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=[deterministic_merge_error()],
+        post_comment_error=GitHubClientError(
+            operation="gh pr comment",
+            returncode=1,
+            stderr="HTTP 502 Bad Gateway",
+        ),
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+
+    async def _run_merge() -> bool | None:
+        return await runner._execute(
+            action=Merge(),
+            workspace_id=workspace_id,
+            repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+            repo=_TEST_REPO,
+            pr_number=_TEST_PR_NUMBER,
+            status=_mergeable_status(),
+            state=state,
+            base_branch=_TEST_DEFAULT_BASE_BRANCH,
+            remote_branch=f"awf/{workspace_id}",
+            remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    counter_key = "__awf_forge_transient_retry_count:post_human_notification"
+
+    # Phase 1: deterministic merge blocker + transient 502 on the notification post.
+    # The wrapped retry path waits and re-polls instead of letting the 502 escape,
+    # and persists the bounded ``post_human_notification`` counter.
+    terminal = await _run_merge()
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert gh.comments == []
+    assert sleep_fn.calls == [5]
+    assert state.threads_addressed_ids.get(counter_key) == "1"
+
+    # Phase 2: a later poll whose notification post succeeds clears the budget so a
+    # recovered one-off blip never accumulates toward the bounded retry count.
+    gh.post_comment_error = None
+    gh.merge_results = [deterministic_merge_error()]
+    terminal = await _run_merge()
+    assert terminal is False
+    assert gh.merge_calls == ["squash", "squash"]
+    assert len(gh.comments) == 1
+    assert "GitHub rejected the merge attempt" in gh.comments[0]
+    assert counter_key not in state.threads_addressed_ids
+    assert sleep_fn.calls == [5, 60]
+
+
+@pytest.mark.unit
 async def test_mismatched_first_merge_rejection_notifies_without_method_rotation(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

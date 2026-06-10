@@ -1410,12 +1410,37 @@ async def handle_merge_action(
                 workspace_id=workspace_id,
                 stderr=blocker_detail,
             )
-            await self._post_human_notification_once(
-                repo=repo,
-                pr_number=pr_number,
-                status=merge_status,
+            try:
+                await self._post_human_notification_once(
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=merge_status,
+                    state=state,
+                    blocker_reason=blocker_reason,
+                )
+            except ForgeClientError as exc:
+                # The human notification posts through ``self._deps.gh``; a transient
+                # blip waits then keeps polling while a permanent fault re-raises.
+                # Mirrors the merge-method-preflight notification arm so this
+                # merge-blocker fallback shares the same bounded backoff/counter for
+                # ``post_human_notification`` instead of letting a 502/429 escape
+                # uncaught and bypass the budget.
+                if await self._wait_after_transient_forge_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="post_human_notification",
+                    state=state,
+                    monitor_log=monitor_log,
+                ):
+                    return False
+                raise
+            # The notification posted: clear any stale ``post_human_notification``
+            # retry count so a recovered blip never accumulates toward the budget.
+            await self._clear_forge_transient_retry_state_on_success(
+                workspace_id=workspace_id,
                 state=state,
-                blocker_reason=blocker_reason,
+                context="post_human_notification",
             )
             await self._deps.sleep(self._config.poll_interval_seconds)
             return False
