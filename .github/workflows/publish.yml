@@ -31,7 +31,7 @@ jobs:
           fetch-tags: true
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.5.31"
           github-token: ""
@@ -106,14 +106,14 @@ jobs:
           fi
 
       - name: Upload distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-distributions
           path: dist/*
           if-no-files-found: error
 
       - name: Upload release audit artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-distribution-checksums
           path: |
@@ -146,7 +146,7 @@ jobs:
           path: artifacts/release
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.5.31"
           github-token: ""

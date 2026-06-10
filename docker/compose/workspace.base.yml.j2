@@ -8,8 +8,8 @@
 #}
 services:
   {% for s in services %}
-  {{ s.name }}:
-    container_name: "awf-{{ workspace_id }}-{{ s.name }}"
+  {{ s.name | tojson }}:
+    container_name: {{ ("awf-" ~ workspace_id ~ "-" ~ s.name) | tojson }}
     {% if s.image %}image: {{ s.image | tojson }}
     {% if s.local_image %}pull_policy: never
     {% endif %}{% elif s.build_context %}build:
@@ -22,7 +22,7 @@ services:
       {% for k, v in s.environment %}{{ k | tojson }}: {{ v | tojson }}
       {% endfor %}
     {% endif %}{% if s.depends_on %}depends_on:
-      {% for dep in s.depends_on %}{{ dep }}:
+      {% for dep in s.depends_on %}{{ dep | tojson }}:
         condition: service_healthy
       {% endfor %}
     {% endif %}{% if s.healthcheck_cmd %}healthcheck:
@@ -35,7 +35,7 @@ services:
       start_period: 5s
     {% endif %}{% if s.command %}command: {{ s.command | tojson }}
     {% endif %}{% if s.ports %}ports:
-      {% for cp, hp in s.ports %}- "{{ hp }}:{{ cp }}"
+      {% for cp, hp in s.ports %}- {{ (hp ~ ":" ~ cp) | tojson }}
       {% endfor %}
     {% endif %}{% if s.volumes %}volumes:
       {% for src, tgt in s.volumes %}- {{ (src ~ ":" ~ tgt) | tojson }}
@@ -46,26 +46,26 @@ services:
 
   {% endfor %}
   agent:
-    image: "{{ agent_runtime_image }}"
-    container_name: "awf-{{ workspace_id }}-agent"
+    image: {{ agent_runtime_image | tojson }}
+    container_name: {{ ("awf-" ~ workspace_id ~ "-agent") | tojson }}
     working_dir: /workspace
     environment:
-      WORKSPACE_ID: "{{ workspace_id }}"
+      WORKSPACE_ID: {{ workspace_id | tojson }}
       {% for k, v in agent_environment %}{{ k | tojson }}: {{ v | tojson }}
-      {% endfor %}{% if git_name %}GIT_AUTHOR_NAME: "{{ git_name }}"
-      GIT_COMMITTER_NAME: "{{ git_name }}"{% endif %}
-      {% if git_email %}GIT_AUTHOR_EMAIL: "{{ git_email }}"
-      GIT_COMMITTER_EMAIL: "{{ git_email }}"{% endif %}
+      {% endfor %}{% if git_name %}GIT_AUTHOR_NAME: {{ git_name | tojson }}
+      GIT_COMMITTER_NAME: {{ git_name | tojson }}{% endif %}
+      {% if git_email %}GIT_AUTHOR_EMAIL: {{ git_email | tojson }}
+      GIT_COMMITTER_EMAIL: {{ git_email | tojson }}{% endif %}
     volumes:
-      - "{{ worktree_host_path }}:/workspace"
+      - {{ (worktree_host_path ~ ":/workspace") | tojson }}
       {% if auth_mounts %}{% for m in auth_mounts %}
-      - "{{ m.source }}:{{ m.target }}:{{ m.mode | default('ro') }}"
+      - {{ (m.source ~ ":" ~ m.target ~ ":" ~ (m.mode | default('ro'))) | tojson }}
       {% endfor %}{% endif %}
     {% if host_gateway_enabled -%}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     {% endif %}{% if agent_depends_on %}depends_on:
-      {% for dep in agent_depends_on %}{{ dep }}:
+      {% for dep in agent_depends_on %}{{ dep | tojson }}:
         condition: service_healthy
       {% endfor %}
     {% endif %}networks:
@@ -76,8 +76,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "{{ resources.cpu_limit }}"
-          memory: "{{ resources.memory_limit }}"
+          cpus: {{ resources.cpu_limit | tojson }}
+          memory: {{ resources.memory_limit | tojson }}
     {% endif %}
 
 {% if named_volumes %}volumes:
@@ -89,6 +89,6 @@ services:
 
 networks:
   awf_net:
-    name: "awf-{{ workspace_id }}-net"
+    name: {{ ("awf-" ~ workspace_id ~ "-net") | tojson }}
     {% if network_internal %}internal: true
     {% endif %}

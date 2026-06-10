@@ -19,6 +19,8 @@ here we resolve only the ones the monitor already recorded with a fix verdict.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 from awf.common.bitbucket_client import BitbucketClientError
@@ -29,6 +31,8 @@ from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
+    ReviewThread,
+    _mark_review_thread_addressed,
     _review_thread_needs_attention,
 )
 from awf.runtime.pr_monitor_runner.constants import (
@@ -37,6 +41,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _GITHUB_TRANSIENT_RETRY_REASON,
 )
 from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 
 # Verdicts whose now-OUTDATED threads this hygiene step may resolve. This is the
@@ -48,6 +53,167 @@ from awf.runtime.pr_monitor_runner.logging import _log
 # (``fix_committed`` / ``false_positive``) both mean "handled, thread should
 # close, no human follow-up".
 _OUTDATED_RESOLVABLE_THREAD_VERDICTS = _RESOLVABLE_THREAD_VERDICTS - frozenset({"defer"})
+
+
+def _parse_commit_iso(raw: str) -> datetime | None:
+    """Parse a ``git log --format=%aI`` author date into a UTC-aware datetime.
+
+    ``%aI`` is strict ISO 8601 with a numeric offset (never ``Z``, never naive),
+    so a direct ``fromisoformat`` suffices; the result is normalized to UTC to
+    compare cleanly against the UTC-aware review-comment timestamps. Returns
+    ``None`` if git emitted something unparseable — the caller then falls back to
+    the seed-anyway baseline rather than guessing post-fix ordering.
+    """
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:  # pragma: no cover - %aI always carries an offset
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _latest_reviewer_comment_at(thread: ReviewThread) -> datetime | None:
+    """Newest non-viewer (reviewer/human/bot) comment timestamp on the thread.
+
+    The forge clients already drop AWF's own (``viewer_did_author``) comments
+    from the thread feed, but filter again here so the ordering check considers
+    only reviewer activity even if a caller passes an unfiltered thread. Both
+    ``created_at`` (a fresh reply) and ``updated_at`` (an edited comment — which
+    also changes the resolution body hash) count as activity. Returns ``None``
+    when no reviewer comment carries a usable timestamp.
+    """
+    latest: datetime | None = None
+    for comment in thread.comments:
+        if comment.viewer_did_author:
+            continue
+        for stamp in (comment.created_at, comment.updated_at):
+            if stamp is not None and (latest is None or stamp > latest):
+                latest = stamp
+    return latest
+
+
+async def _seed_outdated_thread_verdicts_from_branch_evidence(
+    self: Any,
+    *,
+    workspace_id: str,
+    status: PRStatus,
+    state: MonitorState,
+) -> None:
+    """Seed missing verdicts for outdated threads the PR branch already addressed (#484).
+
+    After a re-adoption / instance handoff, an outdated thread a PRIOR instance
+    addressed (via an in-place ``fix: address …`` commit) carries no verdict in
+    THIS instance's ``state.threads_addressed_ids``. The #473 resolution below
+    gates on a recorded verdict, and outdated threads are dropped from the
+    actionable feed, so without one the thread can never be resolved and GitHub
+    keeps the PR BLOCKED on an invisible (collapsed) conversation while the monitor
+    reports ``unresolved_threads=0`` and loops on ``NotifyHuman``.
+
+    Reconcile the verdict from durable branch evidence: a commit on the worktree
+    HEAD whose message references BOTH the unique thread id (``PRRT_…``) AND the
+    ``fix: address`` prefix — the two shapes AWF emits for review-thread fixes
+    (``comments.py``: ``fix: address PR review thread <id>``; ``monitor_prompts.py``:
+    ``fix: address <id> — …``). A match is strong proof THIS branch already fixed
+    the feedback, so record ``fix_committed``. Use ``_mark_review_thread_addressed``
+    (not bare ``state.mark_addressed``) so the current body-hash snapshot is stored
+    too — otherwise the resolve loop's ``_review_thread_needs_attention`` guard
+    would skip the freshly-seeded thread.
+
+    Post-fix reviewer activity guard: the body-hash snapshot is taken HERE, at
+    re-adoption time, not at the prior instance's fix time. So if a reviewer replied
+    to the outdated thread AFTER that fix but BEFORE this re-adoption, the reply is
+    already baked into the seeded hash and ``_review_thread_needs_attention`` could
+    never fire for it — seeding ``fix_committed`` blindly would resolve (and possibly
+    merge) over that untriaged feedback. To prevent it, the seed compares the fix
+    commit's author time against the newest non-viewer comment timestamp: when a
+    reviewer comment provably postdates the matching fix commit, seed ``needs_human``
+    instead of ``fix_committed``. ``needs_human`` is NOT in
+    ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS`` (so the resolve loop leaves the thread
+    open) and ``decide``'s outdated gate treats it as a merge blocker (``NotifyHuman``),
+    so the fresh feedback surfaces to a human instead of being silently merged over —
+    while the common case (no post-fix reply, or a comment that predates the fix) still
+    seeds ``fix_committed`` and unblocks the PR. When the fix commit time or the comment
+    timestamps are unavailable we cannot prove post-fix ordering, so we keep the
+    seed-``fix_committed`` baseline (the alternative — never seeding — leaves the PR
+    permanently BLOCKED on an invisible collapsed conversation). The guard still
+    protects against replies that arrive AFTER seeding, on subsequent polls.
+
+    Best-effort and self-contained: runs only for outdated threads lacking a
+    verdict (no git call in steady state), uses a bounded ``git log -n 1`` grep,
+    and leaves a thread untouched on a non-``ok`` git result or no match. Never
+    raises.
+    """
+    unseeded = [
+        thread
+        for thread in status.outdated_unresolved_inline_threads
+        if state.threads_addressed_ids.get(thread.thread_id) is None
+    ]
+    if not unseeded:
+        return
+    worktree_path = self._worktrees_root / workspace_id
+
+    async def _matching_fix_commit_time(thread: ReviewThread) -> tuple[bool, datetime | None]:
+        # ``-F --all-match`` requires BOTH literal substrings (the unique thread id
+        # AND ``fix: address``) present in one commit message — matching both AWF
+        # commit shapes while staying specific enough not to seed a thread the
+        # branch never addressed. ``%aI`` returns the newest matching commit's
+        # AUTHOR time so the caller can detect reviewer replies that postdate the
+        # fix. Author (not committer, ``%cI``) time is deliberate: AWF's rebase
+        # recovery (``control/executor/git_methods.py``) runs ``git rebase`` on a
+        # stale PR branch, which rewrites every replayed commit's COMMITTER date
+        # while preserving its author date. In the sequence fix commit → reviewer
+        # follow-up → rebase recovery → re-adoption, the rewritten committer date
+        # is newer than the follow-up, so a ``%cI`` ordering would seed
+        # ``fix_committed`` over the untriaged reply; the author date stays anchored
+        # to the original fix time and keeps the post-fix guard correct. Returns
+        # ``(matched, commit_time)``: an empty / failed read means no durable
+        # evidence (no seed); a non-empty read is a match whose time may still be
+        # ``None`` if git emitted something unparseable.
+        result = await self._deps.runner.run(
+            git_worktree_command(
+                worktree_path,
+                "log",
+                "-n",
+                "1",
+                "--format=%aI",
+                "-F",
+                "--all-match",
+                "--grep",
+                thread.thread_id,
+                "--grep",
+                "fix: address",
+                "HEAD",
+            )
+        )
+        raw = result.stdout.strip()
+        if not (result.ok and raw):
+            return False, None
+        return True, _parse_commit_iso(raw)
+
+    # The per-thread evidence greps are independent, read-only ``git log`` reads,
+    # so run them concurrently (one re-adoption can carry several unseeded outdated
+    # threads) and apply verdicts afterwards in deterministic thread order.
+    evidence = await asyncio.gather(*(_matching_fix_commit_time(thread) for thread in unseeded))
+    for thread, (matched, commit_time) in zip(unseeded, evidence, strict=True):
+        if not matched:
+            continue
+        latest_comment_at = _latest_reviewer_comment_at(thread)
+        if (
+            commit_time is not None
+            and latest_comment_at is not None
+            and latest_comment_at > commit_time
+        ):
+            # A reviewer replied (or edited a comment) AFTER the matching fix commit
+            # but before this re-adoption: that feedback is untriaged. Seed
+            # ``needs_human`` (not ``fix_committed``) so the resolve loop leaves the
+            # thread open and ``decide`` blocks merge on it (``NotifyHuman``) instead
+            # of resolving/merging over the fresh feedback. Plain ``mark_addressed``
+            # (no body-hash snapshot) suffices — the ``needs_human`` block is keyed on
+            # the verdict alone, not the hash.
+            state.mark_addressed(thread.thread_id, "needs_human")
+            continue
+        _mark_review_thread_addressed(state, thread, "fix_committed")
 
 
 async def _resolve_addressed_outdated_threads(
@@ -84,6 +250,16 @@ async def _resolve_addressed_outdated_threads(
     is in-memory only, matching the rest of the transient path.
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
+    # #484: seed verdicts for outdated threads a prior instance already addressed
+    # (re-adoption / handoff) from durable branch evidence, so the resolve loop
+    # below — which gates on a recorded verdict — can resolve them this iteration
+    # instead of leaving the PR permanently BLOCKED on an invisible conversation.
+    await _seed_outdated_thread_verdicts_from_branch_evidence(
+        self,
+        workspace_id=workspace_id,
+        status=status,
+        state=state,
+    )
     for thread in status.outdated_unresolved_inline_threads:
         tid = thread.thread_id
         if state.threads_addressed_ids.get(tid) not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:

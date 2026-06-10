@@ -52,7 +52,7 @@ def _uploaded_paths(job: dict[str, Any]) -> set[str]:
     """Collect artifact upload paths declared by a workflow job."""
     paths: set[str] = set()
     for step in _steps(job):
-        if step.get("uses") != "actions/upload-artifact@v4":
+        if step.get("uses") != "actions/upload-artifact@v7":
             continue
         with_config = step.get("with", {})
         assert isinstance(with_config, dict)
