@@ -62,6 +62,12 @@ def test_validate_ruff_covers_whole_package_not_only_cli() -> None:
     assert any(_targets_path(tokens, "src/awf") for tokens in ruff_commands), (
         "ruff must lint the whole src/awf package, not only src/awf/cli"
     )
+    # The `tests` target must also survive: dropping it from
+    # `ruff check src/awf tests` would silently narrow linting coverage of the
+    # test tree without tripping the src/awf guard above.
+    assert any(_targets_path(tokens, "tests") for tokens in ruff_commands), (
+        "ruff must also lint the tests tree, not only src/awf"
+    )
 
 
 @pytest.mark.unit
