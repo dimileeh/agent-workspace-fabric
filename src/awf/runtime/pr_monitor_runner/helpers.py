@@ -547,6 +547,25 @@ def _bitbucket_merge_rejection_reason(exc: BitbucketClientError) -> str:
     return f"Bitbucket rejected the merge attempt: {detail}"
 
 
+def _attach_transient_retry_counters(
+    payload: dict[str, object],
+    *,
+    retry_number: int | None,
+    max_retries: int | None,
+) -> dict[str, object]:
+    """Attach the optional retry-budget fields shared by forge retry payloads.
+
+    Both the GitHub and Bitbucket transient-retry payloads carry ``retry_number``
+    and ``max_retries`` only when the bounded-retry budget supplies them; centralise
+    that conditional attachment so the two builders stay in lockstep.
+    """
+    if retry_number is not None:
+        payload["retry_number"] = retry_number
+    if max_retries is not None:
+        payload["max_retries"] = max_retries
+    return payload
+
+
 def _transient_github_retry_payload(
     exc: GitHubClientError,
     *,
@@ -565,11 +584,9 @@ def _transient_github_retry_payload(
         "message": _redact_and_truncate_forge_error(str(exc)),
         "stderr": _redact_and_truncate_forge_error(exc.stderr),
     }
-    if retry_number is not None:
-        payload["retry_number"] = retry_number
-    if max_retries is not None:
-        payload["max_retries"] = max_retries
-    return payload
+    return _attach_transient_retry_counters(
+        payload, retry_number=retry_number, max_retries=max_retries
+    )
 
 
 def _transient_bitbucket_retry_payload(
@@ -592,11 +609,9 @@ def _transient_bitbucket_retry_payload(
         "wait_seconds": wait_seconds,
         "message": str(exc)[:400],
     }
-    if retry_number is not None:
-        payload["retry_number"] = retry_number
-    if max_retries is not None:
-        payload["max_retries"] = max_retries
-    return payload
+    return _attach_transient_retry_counters(
+        payload, retry_number=retry_number, max_retries=max_retries
+    )
 
 
 def _transient_base_fetch_retry_payload(
