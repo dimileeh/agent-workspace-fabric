@@ -69,12 +69,20 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
     "temporary failure in name resolution",
     "name or service not known",
     "could not resolve proxy",
-    # Ambiguous auth blips: a bare ``HTTP 401`` / ``Requires authentication`` with
-    # no strong permanent marker is treated as a recoverable transient (#515). The
-    # strong markers above are checked first and win, so a genuine bad-credentials
-    # 401 still fails fast. Git's own auth wording (``fatal: Authentication
-    # failed`` / ``returned error: 401``) contains neither substring, so base-fetch
-    # classification is unaffected and git auth failures still terminate.
+)
+
+# Ambiguous auth blips: a bare ``HTTP 401`` / ``Requires authentication`` with no
+# strong permanent marker is a recoverable transient on the GitHub *API* client
+# path (a GraphQL blip on a valid token, #515). The strong markers above are
+# checked first and win, so a genuine bad-credentials 401 still fails fast.
+#
+# These markers apply ONLY to ``_is_transient_github_client_error``, never to raw
+# git base-fetch stderr: git's smart-HTTP transport surfaces genuine credential
+# failures as ``error: RPC failed; HTTP 401`` (a contiguous ``HTTP 401``
+# substring), which must fail fast rather than be bounded-retried. They are
+# therefore deliberately kept out of ``_TRANSIENT_GITHUB_ERROR_MARKERS`` so
+# ``_is_transient_base_fetch_error`` never matches them.
+_AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
     "http 401",
     "requires authentication",
 )

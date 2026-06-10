@@ -705,6 +705,14 @@ def test_transient_base_fetch_classifier_and_corrupt_retry_count_recovery() -> N
             "The requested URL returned error: 401"
         )
     )
+    # #516 (PRRT_kwDOSJAM6s6InGJP) regression: git smart-HTTP surfaces genuine
+    # credential failures as ``error: RPC failed; HTTP 401`` — a contiguous
+    # ``HTTP 401`` substring. The ambiguous-auth markers are scoped to the GitHub
+    # API client path only, so this base-fetch auth failure must still fail fast
+    # rather than be bounded-retried as a transient blip.
+    assert not _is_transient_base_fetch_error(
+        BaseFetchError("error: RPC failed; HTTP 401 curl 22 The requested URL returned error: 401")
+    )
     retry_key = "__awf_base_fetch_retry_count:sync_base"
     state = MonitorState(threads_addressed_ids={retry_key: "not-an-integer"})
 
