@@ -25,9 +25,13 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 def _assert_sha_pinned(uses: object, expected_action: str) -> None:
     """Assert a ``uses:`` ref pins ``expected_action`` to a full 40-char commit SHA."""
-    assert isinstance(uses, str)
+    assert isinstance(uses, str), (
+        f"expected 'uses' to be a string, but got {type(uses).__name__} (action: {expected_action})"
+    )
     action, sep, ref = uses.partition("@")
-    assert sep == "@" and action == expected_action, uses
+    assert sep == "@" and action == expected_action, (
+        f"expected action '{expected_action}', but got '{uses}'"
+    )
     assert _SHA_RE.fullmatch(ref), f"{expected_action} must be pinned to a 40-char SHA: {uses}"
 
 
