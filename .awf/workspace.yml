@@ -58,7 +58,11 @@ awf:
     validate:
       - command: uv run --python 3.12 --extra dev ruff check src/awf tests
         timeout_seconds: 300
+      - command: uv run --python 3.12 --extra dev ruff format --check src/awf tests
+        timeout_seconds: 300
       - command: uv run --python 3.12 --extra dev mypy src/awf
         timeout_seconds: 600
+      - command: uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check
+        timeout_seconds: 300
       - command: uv run --python 3.12 --extra dev pytest tests/unit -n 3 -q
         timeout_seconds: 1800
