@@ -46,6 +46,7 @@ from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_relea
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings
+from awf.service.gc import run_service_workspace_gc
 from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
     OrphanDirReconcileResult,
@@ -331,6 +332,47 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             execute=True,
         )
 
+    async def _reap_terminal_workspace_gc() -> dict[str, object]:
+        """Reap per-workspace terminal-workspace auth dirs from the worker (#513).
+
+        The per-workspace ``auth/<id>/`` dirs (~1.7 GB each) of completed/cancelled/
+        destroyed workspaces leak because reclaiming one first unmounts a possible
+        live Claude overlay at ``auth/<id>/claude/merged``, and
+        ``teardown_workspace_auth_overlay`` raises ``OverlayUnmountUnverifiableError``
+        whenever the caller cannot prove it holds CAP_SYS_ADMIN — so the
+        capability-less API ``/v1/service/gc`` path records every auth path ``skipped``
+        and deletes nothing. The worker holds CAP_SYS_ADMIN and shares the agent's
+        mount namespace, so driving the same already-tested GC here makes the
+        unmount-before-remove succeed and the dir is actually removed (same root cause
+        as #509's shared-base reaper, but for the per-workspace dirs it did not cover).
+
+        Reuse the exact assembly wrapper the API route calls
+        (``run_service_workspace_gc``) so the volume-removing compose teardown,
+        companion-image prune, and same-pass claude-base reap are threaded identically
+        and worker/API behaviour stays in lockstep. It is ``async`` and offloads its
+        blocking multi-GB ``rmtree``/DB work via ``asyncio.to_thread`` internally, so
+        just ``await`` it (no extra ``to_thread`` wrap, unlike the sync claude-base
+        reaper above). Reuse the worker's ``compose`` ComposeManager so the GC does not
+        re-resolve the workspace template into a second manager. Return the report dict
+        for the worker's summary logger. The GC inherits its ``preserves_failed_
+        workspaces=True`` policy and ``min_age_hours`` retention — failed and too-young
+        workspaces are preserved.
+        """
+        result = await run_service_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            execute=True,
+            min_age_hours=settings.completed_workspace_retention_hours,
+            limit=settings.workspace_cleanup_batch_limit,
+            cleanup_enabled=settings.workspace_cleanup_enabled,
+            companion_image_cache_enabled=settings.companion_image_cache_enabled,
+            companion_image_retention_hours=settings.companion_image_retention_hours,
+            host_home=host_home,
+            reap_claude_bases=settings.claude_base_gc_enabled,
+            compose_manager=compose,
+        )
+        return result.to_dict()
+
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=provisioner,
@@ -340,6 +382,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         orphan_dir_reconciler=_reconcile_orphan_dirs,
         classified_orphan_reaper=_reap_classified_orphans,
         claude_base_reaper=_reap_superseded_claude_bases,
+        terminal_gc_reaper=_reap_terminal_workspace_gc,
         # The work dir backs ``auth/<id>/claude`` overlays; the worker (alone
         # holding CAP_SYS_ADMIN + the agent's mount namespace) unmounts a reaped
         # workspace's overlay on terminal-runtime-release before GC removes the dir.
@@ -357,6 +400,10 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             claude_base_gc_enabled=settings.claude_base_gc_enabled,
             claude_base_reap_scan_interval_seconds=(
                 settings.claude_base_reap_scan_interval_seconds
+            ),
+            terminal_workspace_gc_enabled=settings.terminal_workspace_gc_enabled,
+            terminal_workspace_gc_scan_interval_seconds=(
+                settings.terminal_workspace_gc_scan_interval_seconds
             ),
             orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
             orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,

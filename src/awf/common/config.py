@@ -447,6 +447,24 @@ class Settings(BaseSettings):
             "reaper sweeps (GC-B). Gated by ``claude_base_gc_enabled``."
         ),
     )
+    terminal_workspace_gc_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether the worker drives per-workspace terminal-workspace auth-dir GC "
+            "(the ~1.7 GB auth/<id>/ dirs of completed/cancelled/destroyed "
+            "workspaces). The worker holds CAP_SYS_ADMIN so its overlay "
+            "unmount-before-remove succeeds; the capability-less API GC path skips. "
+            "Failed workspaces are preserved. On by default (#513)."
+        ),
+    )
+    terminal_workspace_gc_scan_interval_seconds: float = Field(
+        default=DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS,
+        gt=0,
+        description=(
+            "Interval between worker terminal-workspace auth-dir GC sweeps (#513). "
+            "Gated by ``terminal_workspace_gc_enabled``."
+        ),
+    )
     orphan_reconcile_max_per_scan: int = Field(
         default=DEFAULT_ORPHAN_RECONCILE_LIMIT,
         gt=0,
