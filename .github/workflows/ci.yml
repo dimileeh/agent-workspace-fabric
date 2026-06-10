@@ -111,7 +111,7 @@ jobs:
 
       - name: Upload coverage shard
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-coverage-shard-${{ matrix.shard }}
           path: coverage-artifacts/.coverage.shard-${{ matrix.shard }}
@@ -169,7 +169,7 @@ jobs:
 
       - name: Upload full coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: full-coverage-report
           path: coverage.xml
