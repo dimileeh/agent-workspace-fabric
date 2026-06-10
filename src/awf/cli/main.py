@@ -19,10 +19,8 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-import click
 import httpx
 import typer
-from click.core import ParameterSource
 
 from awf import __version__
 from awf.cli.common import (
@@ -210,6 +208,7 @@ def _emit_init_migration_error(
     help=f"Run local onboarding checks for a project path.\n{_DX_FIRST_PATH_HELP}",
 )
 def init(
+    ctx: typer.Context,
     path: Path | None = typer.Argument(
         None,
         help=(
@@ -287,11 +286,11 @@ def init(
     ),
 ) -> None:
     """Run project-onboarding checks for a repository path."""
-    ctx = click.get_current_context()
 
     def _explicit(name: str) -> bool:
         """Return whether an option was explicitly supplied."""
-        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+        source = ctx.get_parameter_source(name)
+        return source is not None and source.name == "COMMANDLINE"
 
     if path is None:
         path_required_flags: list[str] = []

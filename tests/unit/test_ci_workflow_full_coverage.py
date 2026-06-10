@@ -67,7 +67,7 @@ def _step_run(job: dict[str, Any], name: str) -> str:
 
 def _setup_uv_step(workflow: dict[str, Any], job_name: str) -> dict[str, Any]:
     step = _named_step(_job(workflow, job_name), "Install uv")
-    assert step.get("uses") == "astral-sh/setup-uv@v4"
+    assert step.get("uses") == "astral-sh/setup-uv@v7"
     return step
 
 
@@ -195,7 +195,7 @@ def test_ci_has_parallel_python_coverage_shards() -> None:
 
     upload_step = _named_step(job, "Upload coverage shard")
     assert upload_step.get("if") == "${{ always() }}"
-    assert upload_step.get("uses") == "actions/upload-artifact@v4"
+    assert upload_step.get("uses") == "actions/upload-artifact@v7"
     assert upload_step.get("with") == {
         "name": "python-coverage-shard-${{ matrix.shard }}",
         "path": "coverage-artifacts/.coverage.shard-${{ matrix.shard }}",
