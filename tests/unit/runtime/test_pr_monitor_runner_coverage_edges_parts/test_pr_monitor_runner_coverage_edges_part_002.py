@@ -1327,3 +1327,174 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
     assert payload["evidence"]["needs_human_thread_count"] == 1
     # Task body_excerpt should not leak into event payloads.
     assert "please add a regression test" not in repr(resolution_events[0].payload)
+
+
+@pytest.mark.unit
+async def test_resolve_thread_exhausted_transient_blocks_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """When a still-open comment thread's resolve keeps hitting a transient forge
+    fault until the bounded retry budget is exhausted, the fix cycle must escalate
+    to ``needs_human`` rather than clear the addressed marker.
+
+    Clearing the marker (the deterministic-fault path) would re-route the still-open
+    thread through AddressComments next poll, immediately re-exhaust the deliberately
+    persisted counter on the next resolve, and re-run the agent every poll — the
+    exact storm the bounded budget exists to prevent. ``needs_human`` keeps the
+    thread UNRESOLVED so the merge gate keeps blocking and decide() routes to
+    NotifyHuman, and the exhausted reason code stays diagnosable in the audit event.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="newsha\n")
+    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    # A budget of 0 retries exhausts on the first transient resolve fault — no
+    # backoff sleep, straight to the exhausted path within this single fix cycle.
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
+    thread = ReviewThread(
+        thread_id="T_resolve",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # Escalated to needs_human (kept addressed → no re-address storm), NOT cleared.
+    assert state.threads_addressed_ids.get("T_resolve") == "needs_human"
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # Not terminated: the workspace keeps polling.
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        # Exhaustion is recorded as such; no further backoff sleep happened.
+        exhausted_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.github_transient_error_retry_exhausted"
+        ]
+        assert _retry_events(ws) == []
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    assert len(exhausted_events) == 1
+    assert exhausted_events[0].reason_code == "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
+    assert len(resolution_events) == 1
+    payload = resolution_events[0].payload
+    assert payload is not None
+    assert payload["action"] == "resolve_thread"
+    assert payload["outcome"] == "needs_human"
+    assert resolution_events[0].reason_code == "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
+    assert payload["evidence"]["needs_human_thread_count"] == 1
+    assert payload["evidence"]["thread_ids"] == ["T_resolve"]
+    assert "please adjust this" not in repr(resolution_events[0].payload)
+
+
+@pytest.mark.unit
+async def test_resolve_thread_exhausted_transient_bitbucket_blocks_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Bitbucket symmetry: an exhausted transient resolve budget on a still-open
+    comment thread escalates to ``needs_human`` with the Bitbucket exhausted reason
+    code, rather than clearing the marker and re-running the agent forever."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="newsha\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitbucketResolveThreadClient(
+            cmd,
+            BitbucketClientError(
+                operation="bitbucket resolve_thread",
+                status=429,
+                body="rate limited",
+                reason_code=BITBUCKET_RATE_LIMITED,
+            ),
+        ),
+    )
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
+    thread = ReviewThread(
+        thread_id="T_resolve",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert state.threads_addressed_ids.get("T_resolve") == "needs_human"
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        exhausted_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.bitbucket_transient_error_retry_exhausted"
+        ]
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    assert len(exhausted_events) == 1
+    assert exhausted_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY_EXHAUSTED"
+    assert len(resolution_events) == 1
+    payload = resolution_events[0].payload
+    assert payload is not None
+    assert payload["action"] == "resolve_thread"
+    assert payload["outcome"] == "needs_human"
+    assert resolution_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY_EXHAUSTED"
+    assert payload["evidence"]["needs_human_thread_count"] == 1
+    assert "please adjust this" not in repr(resolution_events[0].payload)
