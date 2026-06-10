@@ -30,6 +30,7 @@ def _settings(
     completed_workspace_retention_hours: float = 168.0,
     auto_cleanup_orphans: bool = False,
     classified_orphan_reap_scan_interval_seconds: float = 3600.0,
+    claude_base_reap_scan_interval_seconds: float = 3600.0,
     orphan_reconcile_max_per_scan: int = 50,
     orphan_reconcile_min_age_hours: float = 168.0,
 ) -> ServiceSettings:
@@ -53,6 +54,7 @@ def _settings(
         completed_workspace_retention_hours=completed_workspace_retention_hours,
         auto_cleanup_orphans=auto_cleanup_orphans,
         classified_orphan_reap_scan_interval_seconds=(classified_orphan_reap_scan_interval_seconds),
+        claude_base_reap_scan_interval_seconds=claude_base_reap_scan_interval_seconds,
         orphan_reconcile_max_per_scan=orphan_reconcile_max_per_scan,
         orphan_reconcile_min_age_hours=orphan_reconcile_min_age_hours,
         node_id="node-1",
@@ -212,6 +214,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            claude_base_reaper: object = None,
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
@@ -864,6 +867,7 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            claude_base_reaper: object = None,
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
@@ -953,6 +957,7 @@ def test_build_worker_runtime_defaults_unset_service_node_id_to_local(
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            claude_base_reaper: object = None,
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:
@@ -1338,6 +1343,7 @@ def _stub_worker_runtime_dependencies(
             open_pr_resolver: object,
             orphan_dir_reconciler: object = None,
             classified_orphan_reaper: object = None,
+            claude_base_reaper: object = None,
             auth_overlay_work_dir: object = None,
             config: object,
         ) -> None:

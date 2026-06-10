@@ -46,6 +46,7 @@ from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_relea
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings
+from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
     OrphanDirReconcileResult,
     build_default_compose_teardown,
@@ -313,6 +314,23 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             min_retention_hours=settings.completed_workspace_retention_hours,
         )
 
+    async def _reap_superseded_claude_bases() -> dict[str, object]:
+        """Reap superseded shared ``~/.claude`` overlay bases from the worker (#509).
+
+        The worker holds CAP_SYS_ADMIN and shares the agent's mount namespace, so
+        unlike the API ``/v1/service/gc`` path its ``/proc/mounts`` live-mount
+        verification is trustworthy and it can actually reap. The reaper is a
+        blocking filesystem operation (multi-GB ``rmtree``, no DB), so run it in a
+        worker thread to keep the event loop responsive (mirrors the auth-overlay
+        teardown's ``asyncio.to_thread``).
+        """
+        return await asyncio.to_thread(
+            reap_superseded_claude_bases,
+            work_dir=work_dir,
+            host_home=host_home,
+            execute=True,
+        )
+
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=provisioner,
@@ -321,6 +339,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         open_pr_resolver=open_pr_resolver,
         orphan_dir_reconciler=_reconcile_orphan_dirs,
         classified_orphan_reaper=_reap_classified_orphans,
+        claude_base_reaper=_reap_superseded_claude_bases,
         # The work dir backs ``auth/<id>/claude`` overlays; the worker (alone
         # holding CAP_SYS_ADMIN + the agent's mount namespace) unmounts a reaped
         # workspace's overlay on terminal-runtime-release before GC removes the dir.
@@ -334,6 +353,10 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             ),
             classified_orphan_reap_scan_interval_seconds=(
                 settings.classified_orphan_reap_scan_interval_seconds
+            ),
+            claude_base_gc_enabled=settings.claude_base_gc_enabled,
+            claude_base_reap_scan_interval_seconds=(
+                settings.claude_base_reap_scan_interval_seconds
             ),
             orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
             orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,

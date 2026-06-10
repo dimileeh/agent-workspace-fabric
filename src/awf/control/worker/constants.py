@@ -255,6 +255,15 @@ _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE = "ORPHAN_DIR_RECONCILE_FAILED"
 _CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE = "CLASSIFIED_ORPHAN_REAP_FAILED"
 """Reason code logged when a classified-orphan reaper sweep fails non-transiently."""
 
+_CLAUDE_BASE_REAP_SWEEP_FAILED_REASON_CODE = "CLAUDE_BASE_REAP_SWEEP_FAILED"
+"""Reason code logged when the worker superseded-Claude-base reaper sweep fails (#509).
+
+Worker-internal structured-log reason code only, not a doctor/catalog entry
+(mirrors ``_CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE``). The reaper itself never
+raises for expected partial/permission cases — it returns a report dict — so this
+fires only for an unexpected failure of the injected closure (e.g. the blocking
+``rmtree`` raising an unhandled error)."""
+
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
