@@ -116,6 +116,7 @@ class ServiceSettings:
     classified_orphan_reap_scan_interval_seconds: float = (
         DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS
     )
+    claude_base_reap_scan_interval_seconds: float = DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS
     orphan_reconcile_max_per_scan: int = DEFAULT_ORPHAN_RECONCILE_LIMIT
     orphan_reconcile_min_age_hours: float = DEFAULT_ORPHAN_RECONCILE_MIN_AGE_HOURS
     network_posture_open_legacy_cutoff: datetime | None = None
@@ -259,6 +260,7 @@ def resolve_service_settings(
         classified_orphan_reap_scan_interval_seconds=(
             settings.classified_orphan_reap_scan_interval_seconds
         ),
+        claude_base_reap_scan_interval_seconds=settings.claude_base_reap_scan_interval_seconds,
         orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
         orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,
         network_posture_open_legacy_cutoff=settings.network_posture_open_legacy_cutoff,

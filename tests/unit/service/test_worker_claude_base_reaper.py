@@ -79,7 +79,7 @@ def test_build_worker_runtime_wires_claude_base_reaper(
     monkeypatch.setattr(worker_mod, "build_default_compose_teardown", lambda _manager: object())
     monkeypatch.setattr(worker_mod, "build_orphan_compose_teardown", lambda _manager: object())
 
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, claude_base_reap_scan_interval_seconds=1800.0)
     work_dir = Path(settings.work_dir).resolve()
     host_home = Path(settings.host_home).resolve()
 
@@ -104,6 +104,10 @@ def test_build_worker_runtime_wires_claude_base_reaper(
     worker_mod.build_worker_runtime(settings)
 
     assert created["worker_config"].claude_base_gc_enabled is settings.claude_base_gc_enabled
+    assert (
+        created["worker_config"].claude_base_reap_scan_interval_seconds
+        == settings.claude_base_reap_scan_interval_seconds
+    )
     reaper = created["claude_base_reaper"]
     assert reaper is not None
     assert callable(reaper)

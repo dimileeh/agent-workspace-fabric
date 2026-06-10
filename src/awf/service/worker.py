@@ -355,6 +355,9 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
                 settings.classified_orphan_reap_scan_interval_seconds
             ),
             claude_base_gc_enabled=settings.claude_base_gc_enabled,
+            claude_base_reap_scan_interval_seconds=(
+                settings.claude_base_reap_scan_interval_seconds
+            ),
             orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
             orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,
             auto_cleanup_orphans=settings.auto_cleanup_orphans,

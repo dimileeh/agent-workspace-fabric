@@ -30,6 +30,7 @@ def _settings(
     completed_workspace_retention_hours: float = 168.0,
     auto_cleanup_orphans: bool = False,
     classified_orphan_reap_scan_interval_seconds: float = 3600.0,
+    claude_base_reap_scan_interval_seconds: float = 3600.0,
     orphan_reconcile_max_per_scan: int = 50,
     orphan_reconcile_min_age_hours: float = 168.0,
 ) -> ServiceSettings:
@@ -53,6 +54,7 @@ def _settings(
         completed_workspace_retention_hours=completed_workspace_retention_hours,
         auto_cleanup_orphans=auto_cleanup_orphans,
         classified_orphan_reap_scan_interval_seconds=(classified_orphan_reap_scan_interval_seconds),
+        claude_base_reap_scan_interval_seconds=claude_base_reap_scan_interval_seconds,
         orphan_reconcile_max_per_scan=orphan_reconcile_max_per_scan,
         orphan_reconcile_min_age_hours=orphan_reconcile_min_age_hours,
         node_id="node-1",
