@@ -93,6 +93,27 @@ def test_publish_workflow_actions_pinned_to_sha_with_version_comment(action: str
 
 
 @pytest.mark.unit
+def test_publish_workflow_all_external_actions_are_sha_pinned() -> None:
+    """Every non-local ``uses:`` is SHA-pinned with a ``# <ref>`` comment, exhaustively.
+
+    The parametrized guard above only checks the actions it names, so a newly
+    added external ``uses:`` entry could regress to a floating tag and still pass.
+    This pass walks *every* non-local ``uses:`` line in publish.yml and enforces
+    ``@<40-char SHA>  # <ref>`` so the hardening cannot silently regress.
+    """
+    text = PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    # Collect every uses: line that is not a local (``./``) action reference.
+    uses_lines = re.findall(r"^\s*(?:-\s*)?uses:\s*(?!\./)\S+.*", text, re.MULTILINE)
+    assert uses_lines, "No external uses: entries found in publish.yml"
+    for line in uses_lines:
+        assert re.search(r"uses:\s*[^@\s]+@[0-9a-f]{40}\s+#\s+\S+\b", line), (
+            f"External action in line '{line.strip()}' is not pinned to a "
+            "40-char SHA with a '# <ref>' comment"
+        )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("job_name", ["build", "installer-smoke"])
 def test_publish_workflow_checkouts_disable_persisted_credentials(job_name: str) -> None:
     """Every checkout in publish.yml sets ``persist-credentials: false``.
