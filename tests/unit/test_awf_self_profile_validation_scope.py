@@ -36,13 +36,30 @@ def _commands_for_tool(tool: str) -> list[list[str]]:
     return [tokens for tokens in _validate_commands() if tool in tokens]
 
 
+def _targets_path(tokens: list[str], target: str) -> bool:
+    """Return True if any token names ``target`` or a parent of it.
+
+    Uses ``pathlib.Path`` comparison so equivalent spellings — ``src/awf`` vs
+    ``src/awf/`` — match identically and a trailing slash can never cause a
+    false failure. ``Path(str)`` never raises, so no defensive guard is needed.
+    """
+    target_path = Path(target)
+    return any(Path(token) == target_path or Path(token) in target_path.parents for token in tokens)
+
+
+def _targets_subpath(tokens: list[str], target: str) -> bool:
+    """Return True if any token names ``target`` or a path nested under it."""
+    target_path = Path(target)
+    return any(Path(token) == target_path or target_path in Path(token).parents for token in tokens)
+
+
 @pytest.mark.unit
 def test_validate_ruff_covers_whole_package_not_only_cli() -> None:
     ruff_commands = _commands_for_tool("ruff")
     assert ruff_commands, "validate phase must run ruff"
-    # An exact `src/awf` token covers the whole package; `src/awf/cli` is a
-    # distinct token, so this does not match the narrow CLI-only scope.
-    assert any("src/awf" in tokens for tokens in ruff_commands), (
+    # A `src/awf` token (or a parent of it) covers the whole package; a
+    # `src/awf/cli` subpath does not, so this does not match the CLI-only scope.
+    assert any(_targets_path(tokens, "src/awf") for tokens in ruff_commands), (
         "ruff must lint the whole src/awf package, not only src/awf/cli"
     )
 
@@ -51,7 +68,7 @@ def test_validate_ruff_covers_whole_package_not_only_cli() -> None:
 def test_validate_mypy_covers_whole_package_not_only_cli() -> None:
     mypy_commands = _commands_for_tool("mypy")
     assert mypy_commands, "validate phase must run mypy"
-    assert any("src/awf" in tokens for tokens in mypy_commands), (
+    assert any(_targets_path(tokens, "src/awf") for tokens in mypy_commands), (
         "mypy must type-check the whole src/awf package, not only src/awf/cli"
     )
 
@@ -60,7 +77,7 @@ def test_validate_mypy_covers_whole_package_not_only_cli() -> None:
 def test_validate_pytest_covers_full_unit_suite_not_only_cli() -> None:
     pytest_commands = _commands_for_tool("pytest")
     assert pytest_commands, "validate phase must run pytest"
-    assert any("tests/unit" in tokens for tokens in pytest_commands), (
+    assert any(_targets_path(tokens, "tests/unit") for tokens in pytest_commands), (
         "pytest must run the full tests/unit suite, not only tests/unit/cli"
     )
 
@@ -71,15 +88,17 @@ def test_no_validate_command_is_scoped_solely_to_the_cli_slice() -> None:
 
     A command that targets the CLI slice (`src/awf/cli` or `tests/unit/cli`)
     without also covering the broad `src/awf` / `tests/unit` target is exactly
-    the regression from #512.
+    the regression from #512. Path-based matching means a trailing slash or a
+    deeper CLI subpath cannot bypass this guard.
     """
-    cli_only_tokens = {"src/awf/cli", "tests/unit/cli"}
-    broad_tokens = {"src/awf", "tests/unit"}
     for tokens in _validate_commands():
-        narrow = cli_only_tokens.intersection(tokens)
-        if narrow:
-            assert broad_tokens.intersection(tokens), (
-                f"validate command {tokens!r} is scoped solely to the CLI slice "
-                f"({narrow}); it must also cover the broad src/awf / tests/unit "
-                "target so conformance exercises non-CLI changes"
+        targets_cli = _targets_subpath(tokens, "src/awf/cli") or _targets_subpath(
+            tokens, "tests/unit/cli"
+        )
+        if targets_cli:
+            targets_broad = _targets_path(tokens, "src/awf") or _targets_path(tokens, "tests/unit")
+            assert targets_broad, (
+                f"validate command {tokens!r} is scoped solely to the CLI slice; "
+                "it must also cover the broad src/awf / tests/unit target so "
+                "conformance exercises non-CLI changes"
             )
