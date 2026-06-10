@@ -266,3 +266,160 @@ async def test_worker_terminal_gc_reaper_removes_auth_dir_and_preserves_failed(
     assert report["status"] == "succeeded"
     assert str(completed_auth) in report["deleted_paths"]
     assert completed_id in {c["workspace_id"] for c in report["candidates"]}
+
+
+@pytest.mark.unit
+async def test_worker_terminal_gc_reaper_reaps_cancelled_and_destroyed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The wired closure reaps cancelled/destroyed auth dirs the default policy skips (#513).
+
+    ``plan_terminal_workspace_gc``'s conservative default policy only classifies
+    completed/failed/superseded rows (guarded by
+    ``test_default_gc_policy_ignores_non_pr_terminal_and_unknown_statuses``), so a
+    single default-policy sweep never even looks at ``cancelled``/``destroyed``
+    workspaces and their ~1.7 GB auth dirs leak — the exact case #513 set out to
+    fix. The worker therefore runs a second, explicit ``include_statuses`` pass for
+    those discarded statuses (they carry no merged-PR work to preserve, so an
+    age-based sweep is correct) while leaving the first pass's completed-merged /
+    failed-preservation nuance untouched. This proves both discarded dirs are
+    removed and the failed one still survives.
+    """
+    created: dict[str, Any] = {}
+
+    class _ControlWorker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["terminal_gc_reaper"] = kwargs["terminal_gc_reaper"]
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    _patch_runtime_constructors(monkeypatch)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    from unittest.mock import AsyncMock
+
+    from awf.service.gc import WorkspaceGCWorktreeRemoveResult
+
+    monkeypatch.setattr(
+        "awf.service.gc._default_worktree_remover",
+        AsyncMock(
+            return_value=WorkspaceGCWorktreeRemoveResult(
+                status="succeeded", reason_code="WORKTREE_REMOVE_SUCCEEDED"
+            )
+        ),
+    )
+    monkeypatch.setattr("awf.node.auth_mounts_claude._has_cap_sys_admin", lambda: True)
+
+    settings = dataclasses.replace(
+        _settings(tmp_path, completed_workspace_retention_hours=24.0),
+        claude_base_gc_enabled=False,
+        companion_image_cache_enabled=False,
+    )
+    work_dir = Path(settings.work_dir).resolve()
+    old = datetime.now(UTC) - timedelta(hours=200)
+    cancelled_id, cancelled_auth = await _terminal_workspace_with_auth_overlay(
+        session_factory,
+        work_dir=work_dir,
+        status=WorkspaceStatus.cancelled,
+        updated_at=old,
+    )
+    destroyed_id, destroyed_auth = await _terminal_workspace_with_auth_overlay(
+        session_factory,
+        work_dir=work_dir,
+        status=WorkspaceStatus.destroyed,
+        updated_at=old,
+    )
+    _failed_id, failed_auth = await _terminal_workspace_with_auth_overlay(
+        session_factory,
+        work_dir=work_dir,
+        status=WorkspaceStatus.failed,
+        updated_at=old,
+    )
+    assert cancelled_auth.is_dir()
+    assert destroyed_auth.is_dir()
+    assert failed_auth.is_dir()
+
+    worker_mod.build_worker_runtime(settings)
+    reaper = created["terminal_gc_reaper"]
+
+    report = await reaper()
+
+    # Both discarded-status auth dirs are reclaimed; the failed one is preserved.
+    assert not cancelled_auth.exists()
+    assert not destroyed_auth.exists()
+    assert failed_auth.is_dir()
+    assert report["status"] == "succeeded"
+    deleted = set(report["deleted_paths"])
+    assert str(cancelled_auth) in deleted
+    assert str(destroyed_auth) in deleted
+    candidate_ids = {c["workspace_id"] for c in report["candidates"]}
+    assert {cancelled_id, destroyed_id} <= candidate_ids
+
+
+@pytest.mark.unit
+def test_combine_terminal_gc_reports_concatenates_and_sums() -> None:
+    """A clean default pass + clean discarded pass fold into one ``succeeded`` summary."""
+    default_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": ["/a"],
+        "candidates": [{"workspace_id": "ws_completed"}],
+        "delete_errors": [],
+        "preserved_count": 1,
+        "deleted_path_count": 1,
+        "candidate_count": 1,
+    }
+    discarded_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": ["/b", "/c"],
+        "candidates": [{"workspace_id": "ws_cancelled"}, {"workspace_id": "ws_destroyed"}],
+        "delete_errors": [],
+        "preserved_count": 2,
+        "deleted_path_count": 2,
+        "candidate_count": 2,
+    }
+
+    combined = worker_mod._combine_terminal_gc_reports(default_report, discarded_report)
+
+    assert combined["status"] == "succeeded"
+    assert combined["reason_code"] == "CLEANUP_EXECUTION_SUCCEEDED"
+    assert combined["deleted_paths"] == ["/a", "/b", "/c"]
+    assert combined["deleted_path_count"] == 3
+    assert combined["candidate_count"] == 3
+    assert combined["preserved_count"] == 3
+
+
+@pytest.mark.unit
+def test_combine_terminal_gc_reports_partial_in_either_pass_wins() -> None:
+    """A ``partial`` from the discarded pass is never masked behind the default pass.
+
+    The discarded-status pass leaked disk it could not reclaim, so the merged
+    summary must report ``partial`` (and the partial reason code) even though the
+    default pass reported a clean success.
+    """
+    from awf.service.gc import CLEANUP_EXECUTION_PARTIAL
+
+    default_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [],
+        "preserved_count": 0,
+    }
+    discarded_report: dict[str, Any] = {
+        "status": "partial",
+        "reason_code": CLEANUP_EXECUTION_PARTIAL,
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [{"kind": "auth", "error": "boom"}],
+        "preserved_count": 0,
+    }
+
+    combined = worker_mod._combine_terminal_gc_reports(default_report, discarded_report)
+
+    assert combined["status"] == "partial"
+    assert combined["reason_code"] == CLEANUP_EXECUTION_PARTIAL
+    assert combined["delete_errors"] == [{"kind": "auth", "error": "boom"}]
