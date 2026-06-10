@@ -80,7 +80,7 @@ def test_publish_workflow_actions_pinned_to_sha_with_version_comment(action: str
     """Every ``uses:`` ref is pinned to a 40-char SHA with the Dependabot ``# <ref>`` comment."""
     text = PUBLISH_WORKFLOW_PATH.read_text(encoding="utf-8")
 
-    # No floating-ref refs remain for this action.
+    # No floating-tag refs remain for this action.
     assert not re.search(rf"{re.escape(action)}@{re.escape(ref)}(?=\s|$)", text), action
     # Every ``uses:`` occurrence is pinned to a 40-char SHA with the version comment, so a
     # single mis-pinned duplicate cannot hide behind a correctly pinned sibling.
