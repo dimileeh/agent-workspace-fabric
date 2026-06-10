@@ -52,7 +52,7 @@ dev = [
     "openapi-spec-validator>=0.7.0",
     "types-PyYAML>=6.0.0",
     "ruff>=0.15.16",
-    "mypy>=1.11.0",
+    "mypy>=2.1.0",
     "types-jinja2>=2.11.0",
     "pre-commit>=4.0.0",
 ]
