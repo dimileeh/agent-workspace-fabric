@@ -1252,6 +1252,22 @@ async def handle_merge_action(
                 monitor_log=monitor_log,
             ):
                 return False
+            # Reaching here, the wait helper returned False for one of two reasons:
+            # a *deterministic* preflight fault (a definitive merge-method policy
+            # rejection) or a still-*transient* blip (e.g. HTTP 502) whose bounded
+            # retry budget was just exhausted (an under-budget transient would have
+            # re-polled above). Only the deterministic case is a genuine policy
+            # rejection. Recording the sticky ``_merge_method_blocked_key`` blocker
+            # makes ``pr_monitor.decide`` return ``NotifyHuman`` for this head_sha on
+            # every later poll, so labelling an exhausted-transient outage that way
+            # would wedge the merge under a false "merge-method rejection" until the
+            # commit changes. Instead, keep polling without a blocker so a recovered
+            # forge re-runs the preflight next cycle — symmetric with the under-budget
+            # retry path (#518 review). The exhausted counter stays persisted (kept by
+            # the wait helper) so each later poll fails closed immediately.
+            if _is_transient_github_client_error(merge_method_preflight_error):
+                await self._deps.sleep(self._config.poll_interval_seconds)
+                return False
             _log.warning(
                 "monitor.merge_method_preflight_falling_back_to_notify",
                 workspace_id=workspace_id,
