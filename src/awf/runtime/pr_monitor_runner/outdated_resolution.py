@@ -19,6 +19,7 @@ here we resolve only the ones the monitor already recorded with a fix verdict.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from awf.common.bitbucket_client import BitbucketClientError
@@ -29,6 +30,7 @@ from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     MonitorState,
     PRStatus,
+    ReviewThread,
     _mark_review_thread_addressed,
     _review_thread_needs_attention,
 )
@@ -101,7 +103,8 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     if not unseeded:
         return
     worktree_path = self._worktrees_root / workspace_id
-    for thread in unseeded:
+
+    async def _branch_has_fix_commit(thread: ReviewThread) -> bool:
         # ``-F --all-match`` requires BOTH literal substrings (the unique thread id
         # AND ``fix: address``) present in one commit message — matching both AWF
         # commit shapes while staying specific enough not to seed a thread the
@@ -122,7 +125,14 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
                 "HEAD",
             )
         )
-        if result.ok and result.stdout.strip():
+        return bool(result.ok and result.stdout.strip())
+
+    # The per-thread evidence greps are independent, read-only ``git log`` reads,
+    # so run them concurrently (one re-adoption can carry several unseeded outdated
+    # threads) and apply verdicts afterwards in deterministic thread order.
+    matches = await asyncio.gather(*(_branch_has_fix_commit(thread) for thread in unseeded))
+    for thread, matched in zip(unseeded, matches, strict=True):
+        if matched:
             _mark_review_thread_addressed(state, thread, "fix_committed")
 
 
