@@ -29,6 +29,10 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-tags: true
+          # This is the most release-sensitive checkout in the repo (it builds
+          # and checksums the PyPI distributions); do not leave the GITHUB_TOKEN
+          # persisted in .git/config where a later build step could reuse it.
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
@@ -137,6 +141,10 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # Match the build job and ci.yml: do not persist GITHUB_TOKEN in
+          # .git/config for the artifact-verification smoke checkout.
+          persist-credentials: false
 
       - name: Download distributions
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4

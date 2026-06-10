@@ -93,6 +93,31 @@ def test_publish_workflow_actions_pinned_to_sha_with_version_comment(action: str
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("job_name", ["build", "installer-smoke"])
+def test_publish_workflow_checkouts_disable_persisted_credentials(job_name: str) -> None:
+    """Every checkout in publish.yml sets ``persist-credentials: false``.
+
+    The build job builds and checksums the PyPI distributions, so leaving the
+    GITHUB_TOKEN persisted in ``.git/config`` is the highest-stakes omission in
+    the repo. This mirrors the same zizmor-driven hardening already enforced on
+    every ci.yml checkout.
+    """
+    job = _job(_publish_workflow(), job_name)
+    checkouts = [
+        step
+        for step in _steps(job)
+        if str(step.get("uses", "")).split("@", 1)[0] == "actions/checkout"
+    ]
+    assert checkouts, f"{job_name} job has no checkout step"
+    for checkout in checkouts:
+        with_config = checkout.get("with", {})
+        assert isinstance(with_config, dict)
+        assert with_config.get("persist-credentials") is False, (
+            f"checkout in {job_name} must set persist-credentials: false"
+        )
+
+
+@pytest.mark.unit
 def test_publish_workflow_generates_manifest_without_removing_checksum_artifact() -> None:
     """The publish workflow creates and uploads both checksum and manifest files."""
     build_job = _job(_publish_workflow(), "build")
