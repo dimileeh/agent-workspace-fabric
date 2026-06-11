@@ -413,6 +413,11 @@ def test_check_gh_warns_when_missing_and_ok_when_present() -> None:
     # user sees the .env auth path, not just the gh-install path (#528).
     assert "bitbucket.org" in missing.fix
     assert "BITBUCKET_API_TOKEN" in missing.fix
+    # Basic auth also needs the email and auth-mode vars in the fix, not just the
+    # detail — otherwise a Bitbucket user following the fix sets only the token and
+    # still has broken PR/git auth (#528).
+    assert "BITBUCKET_EMAIL" in missing.fix
+    assert "BITBUCKET_AUTH_MODE" in missing.fix
 
 
 # --- Python runtime -------------------------------------------------------
