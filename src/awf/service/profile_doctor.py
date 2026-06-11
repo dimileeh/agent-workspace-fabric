@@ -79,6 +79,13 @@ PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR = "PROFILE_DOCTOR_SECRET_LEASES_PROBE_E
 PROFILE_DOCTOR_SERVICE_PATHS_OK = "PROFILE_DOCTOR_SERVICE_PATHS_OK"
 PROFILE_DOCTOR_SERVICE_PATHS_NONE = "PROFILE_DOCTOR_SERVICE_PATHS_NONE"
 PROFILE_DOCTOR_SERVICE_PATH_INVALID = "PROFILE_DOCTOR_SERVICE_PATH_INVALID"
+# Resolution (normalize + containment) only proves a path is *shaped* legally; it
+# never stats it. A build-only service with an in-repo but absent ``build_context``
+# (or a missing ``Dockerfile`` / ``env_file``) passes resolution, is skipped by the
+# image phase (no image to pull), yet ``docker compose up`` later fails on the
+# missing ``build.context`` / ``env_file``. So the resolved build/env paths are also
+# stat-checked before reporting ok.
+PROFILE_DOCTOR_SERVICE_PATH_MISSING = "PROFILE_DOCTOR_SERVICE_PATH_MISSING"
 
 # Service dependency-graph phase reason codes. Provisioning runs
 # ``validate_companion_service_graph(profile_services=..., companions=(),
@@ -515,16 +522,77 @@ def _service_paths_phase(
             ),
         }
 
+    # Resolution only normalizes + containment-checks; it never stats. A build-only
+    # service whose in-repo ``build_context`` (or its ``Dockerfile`` / ``env_file``)
+    # is absent passes resolution and is skipped by the image phase (no image to
+    # pull), but the compose template renders the value as ``build.context`` /
+    # ``env_file`` and ``docker compose up`` fails later. Stat the resolved
+    # build/env paths so preflight fails here instead of at the real launch.
+    missing = _missing_service_build_paths(profile, services)
+    if missing:
+        return None, {
+            "name": "service_paths",
+            "status": "fail",
+            "reason_code": PROFILE_DOCTOR_SERVICE_PATH_MISSING,
+            "message": (
+                "A profile service build/env path is missing and provisioning would "
+                f"fail to build/start it: {'; '.join(missing)}."
+            ),
+            "evidence": {"missing": missing},
+            "action": (
+                "Create the missing build_context directory, Dockerfile, or env_file, "
+                "or fix the profile service path to point at an existing repo file."
+            ),
+        }
+
     return services, {
         "name": "service_paths",
         "status": "ok",
         "reason_code": PROFILE_DOCTOR_SERVICE_PATHS_OK,
         "message": (
-            f"All {len(profile.services)} profile service path(s) resolve within the repo root."
+            f"All {len(profile.services)} profile service path(s) resolve within the "
+            "repo root and the build/env paths exist."
         ),
         "evidence": {"services": [service.name for service in profile.services]},
         "action": _NO_ACTION,
     }
+
+
+def _missing_service_build_paths(
+    profile: WorkspaceProfile, services: tuple[ComposeService, ...]
+) -> list[str]:
+    """Return human-readable descriptors for resolved build/env paths that do not exist.
+
+    ``services`` are the resolved compose services (absolute, repo-contained paths);
+    ``profile.services`` carries the declared (repo-relative) values, which read
+    better in the failure message. ``profile_services`` preserves order, so the two
+    zip 1:1. Only the build/env paths provisioning depends on are stat-checked:
+
+    * ``build_context`` -- rendered as ``build.context``; must be a directory.
+    * the ``Dockerfile`` inside that context (``build.dockerfile``); must be a file.
+    * ``env_file`` -- rendered as ``env_file``; must be a file.
+
+    Volume sources are intentionally excluded: Compose creates a missing bind-mount
+    source as an empty directory rather than failing the way a missing build context
+    or env_file does.
+    """
+    missing: list[str] = []
+    for declared, resolved in zip(profile.services, services, strict=True):
+        if resolved.build_context is not None:
+            context = Path(resolved.build_context)
+            if not context.is_dir():
+                missing.append(
+                    f"{declared.name}: build_context '{declared.build_context}' "
+                    "does not exist or is not a directory"
+                )
+            elif not (context / resolved.dockerfile).is_file():
+                missing.append(
+                    f"{declared.name}: dockerfile '{declared.dockerfile}' "
+                    f"not found in build_context '{declared.build_context}'"
+                )
+        if resolved.env_file is not None and not Path(resolved.env_file).is_file():
+            missing.append(f"{declared.name}: env_file '{declared.env_file}' does not exist")
+    return missing
 
 
 def _service_graph_phase(

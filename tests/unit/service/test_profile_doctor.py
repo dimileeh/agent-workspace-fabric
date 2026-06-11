@@ -37,6 +37,7 @@ from awf.service.profile_doctor import (
     PROFILE_DOCTOR_SERVICE_GRAPH_OK,
     PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED,
     PROFILE_DOCTOR_SERVICE_PATH_INVALID,
+    PROFILE_DOCTOR_SERVICE_PATH_MISSING,
     PROFILE_DOCTOR_SERVICE_PATHS_NONE,
     PROFILE_DOCTOR_SERVICE_PATHS_OK,
     PROFILE_RESOLUTION_FAILED,
@@ -598,7 +599,7 @@ def test_service_paths_no_services_skipped(tmp_path: Path) -> None:
 
 
 def test_service_paths_valid_relative_ok(tmp_path: Path) -> None:
-    """A build-only service with a workspace-relative build_context resolves ok."""
+    """A build-only service with a workspace-relative, existing build_context resolves ok."""
     _write_profile(
         tmp_path,
         "awf:\n"
@@ -610,6 +611,7 @@ def test_service_paths_valid_relative_ok(tmp_path: Path) -> None:
         "      build_context: .\n"
         "      dockerfile: Dockerfile\n",
     )
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
 
     report = collect_profile_doctor_report(
         tmp_path, repo_url=None, host_env={}, image_probe=lambda _image: IMAGE_PRESENT
@@ -619,6 +621,97 @@ def test_service_paths_valid_relative_ok(tmp_path: Path) -> None:
     assert service_phase["status"] == "ok"
     assert service_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_PATHS_OK
     assert service_phase["evidence"]["services"] == ["app"]
+
+
+def test_service_paths_missing_build_context_fails(tmp_path: Path) -> None:
+    """A build-only service whose in-repo build_context is absent fails preflight.
+
+    Resolution only normalizes + containment-checks the path, and the image phase
+    skips build-only services (no image to pull), so without the existence check the
+    doctor would report green for a profile whose ``docker compose up`` later fails
+    on the missing ``build.context``.
+    """
+    _write_profile(
+        tmp_path,
+        "awf:\n"
+        "  name: generic\n"
+        "  docker:\n"
+        "    mode: none\n"
+        "  services:\n"
+        "    - name: app\n"
+        "      build_context: ./service\n"
+        "      dockerfile: Dockerfile\n",
+    )
+
+    report = collect_profile_doctor_report(
+        tmp_path, repo_url=None, host_env={}, image_probe=lambda _image: IMAGE_PRESENT
+    )
+
+    service_phase = _phase(report, "service_paths")
+    assert service_phase["status"] == "fail"
+    assert service_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_PATH_MISSING
+    assert "build_context './service'" in service_phase["message"]
+    assert service_phase["evidence"]["missing"] == [
+        "app: build_context './service' does not exist or is not a directory"
+    ]
+    # The image phase still skips the build-only service (nothing to pull), so the
+    # green build path would otherwise mask the missing context.
+    assert _phase(report, "docker_images")["status"] == "skipped"
+    # The graph phase defers to the service_paths failure rather than re-resolving.
+    graph_phase = _phase(report, "service_graph")
+    assert graph_phase["status"] == "skipped"
+    assert graph_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED
+    assert report["status"] == "fail"
+
+
+def test_service_paths_missing_dockerfile_fails(tmp_path: Path) -> None:
+    """An existing build_context with no matching Dockerfile fails preflight."""
+    _write_profile(
+        tmp_path,
+        "awf:\n"
+        "  name: generic\n"
+        "  docker:\n"
+        "    mode: none\n"
+        "  services:\n"
+        "    - name: app\n"
+        "      build_context: .\n"
+        "      dockerfile: Dockerfile.app\n",
+    )
+
+    report = collect_profile_doctor_report(
+        tmp_path, repo_url=None, host_env={}, image_probe=lambda _image: IMAGE_PRESENT
+    )
+
+    service_phase = _phase(report, "service_paths")
+    assert service_phase["status"] == "fail"
+    assert service_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_PATH_MISSING
+    assert service_phase["evidence"]["missing"] == [
+        "app: dockerfile 'Dockerfile.app' not found in build_context '.'"
+    ]
+
+
+def test_service_paths_missing_env_file_fails(tmp_path: Path) -> None:
+    """An image service whose declared env_file is absent fails preflight."""
+    _write_profile(
+        tmp_path,
+        "awf:\n"
+        "  name: generic\n"
+        "  docker:\n"
+        "    mode: none\n"
+        "  services:\n"
+        "    - name: app\n"
+        "      image: postgres:16\n"
+        "      env_file: ./service.env\n",
+    )
+
+    report = collect_profile_doctor_report(
+        tmp_path, repo_url=None, host_env={}, image_probe=lambda _image: IMAGE_PRESENT
+    )
+
+    service_phase = _phase(report, "service_paths")
+    assert service_phase["status"] == "fail"
+    assert service_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_PATH_MISSING
+    assert service_phase["evidence"]["missing"] == ["app: env_file './service.env' does not exist"]
 
 
 def test_service_paths_escaping_build_context_fails(tmp_path: Path) -> None:
