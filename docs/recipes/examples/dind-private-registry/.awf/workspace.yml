@@ -1,0 +1,36 @@
+# .awf/workspace.yml — DinD workspace authenticating to a private registry.
+#
+# This is the copy-pasteable companion to
+# docs/recipes/dind-private-registry-auth.md. It mounts the host Docker
+# ``config.json`` read-only via a ``local-file`` secret lease and points
+# ``DOCKER_CONFIG`` at the directory that contains it, so ``docker``/Gradle
+# inside the agent (talking to the managed DinD daemon at
+# ``tcp://docker:2375``) authenticate to the private registry.
+#
+# NOTE: ``ref`` must be a literal absolute path to an existing file. ``~``,
+# ``$HOME``, ``${AWF_HOST_HOME}``, ``/home/<user>``, and ``/Users/<user>``
+# roots are rejected as too broad. Replace ``/home/youruser`` with your own
+# absolute home path before using this profile.
+name: dind-private-registry
+version: 1
+description: DinD workspace with private-registry Docker auth via a mounted config.json.
+
+runtime:
+  environment:
+    # Docker (and Gradle's Docker integration) read $DOCKER_CONFIG/config.json
+    # for registry credentials. Point it at the DIRECTORY, not the file.
+    DOCKER_CONFIG: /run/awf/secrets/docker
+    # DOCKER_HOST is auto-injected for docker.mode: dind; shown here for clarity.
+    DOCKER_HOST: tcp://docker:2375
+
+docker:
+  mode: dind
+
+secrets:
+  - name: docker-registry-auth
+    kind: mount
+    mode: ro
+    provider: local-file        # 'host-file' is an accepted alias.
+    # Absolute path to the host Docker config.json holding the registry creds.
+    ref: /home/youruser/.docker/config.json
+    target: /run/awf/secrets/docker/config.json
