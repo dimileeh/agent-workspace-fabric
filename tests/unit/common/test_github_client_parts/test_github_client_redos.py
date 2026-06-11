@@ -79,17 +79,26 @@ def test_bare_slug_git_suffix_strip_edges(value: str, expected_name: str) -> Non
 
 @pytest.mark.unit
 def test_bare_slug_pathological_tail_is_linear() -> None:
-    """A long dot/``.git``-heavy tail must parse in linear time.
+    """A long ``.git``-overlap tail with a non-matching terminator parses linearly.
 
     Regression for CodeQL ``py/redos`` on ``github_client.py:165``. The original
     lazy-group + ``(?:\\.git)?`` overlap is the backtracking anti-pattern CodeQL
     flagged; the hardened possessive form has a single unambiguous match path
-    and completes in microseconds. The 5.0s budget is far above any realistic
-    parse time (so a loaded/memory-constrained CI runner won't fail spuriously)
-    yet far below the seconds-to-minutes a re-introduced backtracking regression
-    would take. This guards against the ambiguity being re-introduced.
+    and completes in microseconds.
+
+    The input must actually exercise that overlap to pin the fix: it repeats real
+    ``.git`` fragments (so the lazy group and the optional ``(?:\\.git)?`` fight
+    over every fragment boundary) and ends in a non-matching ``/x`` terminator,
+    forcing the *failure* path where a re-introduced lazy pattern backtracks. A
+    bare ``b.g``-style tail never contains the ``.git`` suffix and parses as a
+    trivial success under either pattern, so it would not catch a regression.
+
+    The 5.0s budget is far above any realistic parse time (so a loaded/
+    memory-constrained CI runner won't fail spuriously) yet far below the
+    seconds-to-minutes a re-introduced backtracking regression would take.
     """
-    pathological = "a" * 5000 + "/" + "b.g" * 2000
+    pathological = "a" * 5000 + "/" + "b.git" * 2000 + "/x"
     start = time.perf_counter()
-    RepoRef.from_url(pathological)
+    with pytest.raises(ValueError):
+        RepoRef.from_url(pathological)
     assert time.perf_counter() - start < 5.0
