@@ -39,7 +39,7 @@ from awf.profiles.models import (
     WorkspaceProfile,
 )
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
-from awf.service.smoke import _collect_next_actions, _compute_overall_status
+from awf.service.report_shape import collect_next_actions, compute_overall_status
 
 # Synthetic, path-safe workspace id handed to the secret-lease resolver. It never
 # touches real workspace state — the resolver only uses it to name a throwaway
@@ -137,8 +137,8 @@ def collect_profile_doctor_report(
         phases.append(_egress_phase(profile))
         phases.append(_docker_images_phase(profile, image_probe=probe))
 
-    status = _compute_overall_status([phase["status"] for phase in phases])
-    next_actions = _collect_next_actions(phases)
+    status = compute_overall_status([phase["status"] for phase in phases])
+    next_actions = collect_next_actions(phases)
     return {
         "status": status,
         "repo": str(repo),

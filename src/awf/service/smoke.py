@@ -8,6 +8,7 @@ from typing import Any
 
 from awf.common.profile_paths import PROFILE_MARKER_PATHS
 from awf.service.config import ServiceSettings
+from awf.service.report_shape import collect_next_actions, compute_overall_status
 from awf.service.worker_heartbeat import (
     WORKER_HEARTBEAT_FRESH_REASON,
     WORKER_HEARTBEAT_UNAVAILABLE_REASON,
@@ -116,8 +117,8 @@ async def collect_smoke_report(
         )
         phases.append(console_phase)
         overall.append(console_phase["status"])
-        status = _compute_overall_status(overall)
-        next_actions = _collect_next_actions(phases)
+        status = compute_overall_status(overall)
+        next_actions = collect_next_actions(phases)
         return _finalize_smoke_report(
             status=status,
             project=str(project),
@@ -152,8 +153,8 @@ async def collect_smoke_report(
     phases.append(console_phase)
     overall.append(console_phase["status"])
 
-    status = _compute_overall_status(overall)
-    next_actions = _collect_next_actions(phases)
+    status = compute_overall_status(overall)
+    next_actions = collect_next_actions(phases)
 
     return _finalize_smoke_report(
         status=status,
@@ -634,27 +635,6 @@ async def _phase_console_links(
             "AWF_CONSOLE_URL to a reachable console URL."
         ),
     }, links
-
-
-def _compute_overall_status(phase_statuses: list[str]) -> str:
-    """Collapse per-phase status values into the overall smoke status."""
-    has_fail = any(s == "fail" for s in phase_statuses)
-    has_warn = any(s == "warn" for s in phase_statuses)
-    if has_fail:
-        return "fail"
-    if has_warn:
-        return "warn"
-    return "ok"
-
-
-def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
-    """Collect non-no-op actionable hints from smoke phases."""
-    actions: list[str] = []
-    for phase in phases:
-        action = phase.get("action", "")
-        if action and action != "No action required.":
-            actions.append(action)
-    return actions
 
 
 async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any]:
