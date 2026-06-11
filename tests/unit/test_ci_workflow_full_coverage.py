@@ -532,12 +532,14 @@ _EXPECTED_CI_JOBS = frozenset(
     }
 )
 _VALID_PERMISSION_VALUES = frozenset({"read", "write", "none"})
-# Jobs that may be granted ``write`` on *any* permission scope (currently none —
-# the entire workflow is least-privilege read-only). A future job that genuinely
-# needs a broader scope must be added here deliberately, which is the point of the
-# gate. Generalized beyond ``contents`` so that ``packages``, ``id-token``,
-# ``pull-requests`` and every other scope are held to the same least-privilege bar.
-_WRITE_PERMISSION_WHITELIST: frozenset[str] = frozenset()
+# ``(job, scope)`` pairs that may be granted ``write`` (currently none — the entire
+# workflow is least-privilege read-only). A future job that genuinely needs a broader
+# scope must add the *specific* ``(job, scope)`` pair here deliberately, which is the
+# point of the gate. Keyed by ``(job, scope)`` rather than job name alone so a
+# whitelisted job is approved only for the exact scope it needs and cannot silently
+# acquire write on additional scopes (``packages``, ``id-token``, ``pull-requests``,
+# etc.) without a separate, deliberate entry.
+_WRITE_PERMISSION_WHITELIST: frozenset[tuple[str, str]] = frozenset()
 
 
 @pytest.mark.unit
@@ -592,7 +594,7 @@ def test_ci_workflow_jobs_have_least_privilege_permissions() -> None:
                     f"job {name!r} grants invalid permission {scope}={level!r}"
                 )
                 if level == "write":
-                    assert name in _WRITE_PERMISSION_WHITELIST, (
+                    assert (name, scope) in _WRITE_PERMISSION_WHITELIST, (
                         f"job {name!r} over-grants {scope}: write"
                     )
 
