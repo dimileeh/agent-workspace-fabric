@@ -532,10 +532,12 @@ _EXPECTED_CI_JOBS = frozenset(
     }
 )
 _VALID_PERMISSION_VALUES = frozenset({"read", "write", "none"})
-# Job-level scopes that may be granted ``write`` (currently none — the entire
-# workflow is least-privilege read-only). A future job that genuinely needs a
-# broader scope must be added here deliberately, which is the point of the gate.
-_CONTENTS_WRITE_WHITELIST: frozenset[str] = frozenset()
+# Jobs that may be granted ``write`` on *any* permission scope (currently none —
+# the entire workflow is least-privilege read-only). A future job that genuinely
+# needs a broader scope must be added here deliberately, which is the point of the
+# gate. Generalized beyond ``contents`` so that ``packages``, ``id-token``,
+# ``pull-requests`` and every other scope are held to the same least-privilege bar.
+_WRITE_PERMISSION_WHITELIST: frozenset[str] = frozenset()
 
 
 @pytest.mark.unit
@@ -573,16 +575,16 @@ def test_ci_workflow_jobs_have_least_privilege_permissions() -> None:
         )
 
         # 3. No job over-grants. Any job-level block must be a scope->level mapping
-        #    and may not grant contents: write unless explicitly whitelisted.
+        #    and may not grant write on any scope unless explicitly whitelisted.
         if job_permissions is not None:
             assert isinstance(job_permissions, dict), name
             for scope, level in job_permissions.items():
                 assert level in _VALID_PERMISSION_VALUES, (
                     f"job {name!r} grants invalid permission {scope}={level!r}"
                 )
-                if scope == "contents" and level == "write":
-                    assert name in _CONTENTS_WRITE_WHITELIST, (
-                        f"job {name!r} over-grants contents: write"
+                if level == "write":
+                    assert name in _WRITE_PERMISSION_WHITELIST, (
+                        f"job {name!r} over-grants {scope}: write"
                     )
 
 
