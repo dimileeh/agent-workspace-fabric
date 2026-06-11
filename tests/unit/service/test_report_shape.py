@@ -7,6 +7,7 @@ import pytest
 from awf.service.report_shape import collect_next_actions, compute_overall_status
 
 
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("statuses", "expected"),
     [
@@ -22,6 +23,7 @@ def test_compute_overall_status_precedence(statuses: list[str], expected: str) -
     assert compute_overall_status(statuses) == expected
 
 
+@pytest.mark.unit
 def test_collect_next_actions_skips_empty_and_noop() -> None:
     """Only non-empty, non-no-op actions survive, in phase order."""
     phases = [
