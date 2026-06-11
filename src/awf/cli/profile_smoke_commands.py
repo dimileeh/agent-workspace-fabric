@@ -52,7 +52,14 @@ def profile_preview(
 
 @profile_app.command("doctor")
 def profile_doctor(
-    repo: Path = typer.Argument(..., help="Path to a checked-out repository."),
+    repo: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Path to a checked-out repository.",
+    ),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Run a real profile-readiness preflight (resolve, lint, secrets, egress, images).

@@ -98,6 +98,25 @@ def test_doctor_pretty_renders_human_lines(monkeypatch: pytest.MonkeyPatch, tmp_
     assert "Next actions:" in result.stdout
 
 
+def test_doctor_rejects_missing_repo_path(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist"
+
+    result = _runner.invoke(app, ["profile", "doctor", str(missing)])
+
+    assert result.exit_code != 0
+    assert "does not exist" in result.output
+
+
+def test_doctor_rejects_file_repo_path(tmp_path: Path) -> None:
+    a_file = tmp_path / "checkout.txt"
+    a_file.write_text("not a directory")
+
+    result = _runner.invoke(app, ["profile", "doctor", str(a_file)])
+
+    assert result.exit_code != 0
+    assert "is a file" in result.output
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0
