@@ -105,11 +105,15 @@ earlier as `SECRET_LEASE_SOURCE_TOO_BROAD` per that same table.)
 
 Before using this recipe on that stack, make the host config visible to the control
 plane at the **same absolute path** (AWF mounts host auth paths host-equal). Add a
-read-only bind mount of the host `config.json` to **both** the `api` and `worker`
-services, mirroring the existing auth volumes:
+read-only bind mount of the host `config.json` to the **`worker`** service only —
+the worker is the container that resolves the lease (`source.exists()` runs in
+`LocalSecretLeaseMountResolver`, started from `src/awf/service/worker.py`). The `api`
+container never reads the host `config.json` (its `SecretLeaseService` only reports
+lease status from DB records), so do **not** mount the secret there — that would
+widen the secret's exposure surface for no benefit:
 
 ```yaml
-# Add to the `api` AND `worker` `volumes:` lists in docker/compose/local-service.yml
+# Add to the `worker` `volumes:` list in docker/compose/local-service.yml
 # (or a Compose override merged on top), then point `ref:` at the same host path.
 - ${AWF_HOST_HOME:-${HOME}}/.docker/config.json:${AWF_HOST_HOME:-${HOME}}/.docker/config.json:ro
 ```
