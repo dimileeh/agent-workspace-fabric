@@ -33,6 +33,9 @@ from awf.service.profile_doctor import (
     PROFILE_DOCTOR_SECRET_LEASES_OK,
     PROFILE_DOCTOR_SECRET_LEASES_OPTIONAL_MISSING,
     PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR,
+    PROFILE_DOCTOR_SERVICE_PATH_INVALID,
+    PROFILE_DOCTOR_SERVICE_PATHS_NONE,
+    PROFILE_DOCTOR_SERVICE_PATHS_OK,
     PROFILE_RESOLUTION_FAILED,
     _default_image_probe,
     _lint_phase,
@@ -291,7 +294,7 @@ def test_profile_resolution_failure_skips_downstream(tmp_path: Path) -> None:
     resolution_phase = _phase(report, "profile_resolution")
     assert resolution_phase["status"] == "fail"
     assert resolution_phase["reason_code"] == "SECRET_TARGET_TOO_BROAD"
-    for name in ("profile_lint", "secret_leases", "egress", "docker_images"):
+    for name in ("profile_lint", "secret_leases", "egress", "service_paths", "docker_images"):
         skipped = _phase(report, name)
         assert skipped["status"] == "skipped"
         assert skipped["reason_code"] == PROFILE_DOCTOR_PROFILE_UNRESOLVED
@@ -500,6 +503,77 @@ def test_docker_images_skipped_without_images_or_dind(tmp_path: Path) -> None:
     assert docker_phase["status"] == "skipped"
     assert docker_phase["reason_code"] == DOCKER_MODE_NOT_DIND
     assert probed == []
+
+
+def test_service_paths_no_services_skipped(tmp_path: Path) -> None:
+    """A profile that declares no services has no repo-relative paths to validate."""
+    _write_profile(
+        tmp_path,
+        "awf:\n  name: generic\n  security:\n    egress:\n      mode: open\n",
+    )
+
+    report = collect_profile_doctor_report(tmp_path, repo_url=None, host_env={})
+
+    service_phase = _phase(report, "service_paths")
+    assert service_phase["status"] == "skipped"
+    assert service_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_PATHS_NONE
+
+
+def test_service_paths_valid_relative_ok(tmp_path: Path) -> None:
+    """A build-only service with a workspace-relative build_context resolves ok."""
+    _write_profile(
+        tmp_path,
+        "awf:\n"
+        "  name: generic\n"
+        "  docker:\n"
+        "    mode: none\n"
+        "  services:\n"
+        "    - name: app\n"
+        "      build_context: .\n"
+        "      dockerfile: Dockerfile\n",
+    )
+
+    report = collect_profile_doctor_report(
+        tmp_path, repo_url=None, host_env={}, image_probe=lambda _image: IMAGE_PRESENT
+    )
+
+    service_phase = _phase(report, "service_paths")
+    assert service_phase["status"] == "ok"
+    assert service_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_PATHS_OK
+    assert service_phase["evidence"]["services"] == ["app"]
+
+
+def test_service_paths_escaping_build_context_fails(tmp_path: Path) -> None:
+    """A build-only service whose build_context escapes the worktree fails preflight.
+
+    The image phase skips build-only services (no image to pull), so this is the
+    only phase that catches a path provisioning would later reject via
+    ``profile_services(profile, base_path=worktree_path)``.
+    """
+    _write_profile(
+        tmp_path,
+        "awf:\n"
+        "  name: generic\n"
+        "  docker:\n"
+        "    mode: none\n"
+        "  services:\n"
+        "    - name: app\n"
+        "      build_context: ../escape\n"
+        "      dockerfile: Dockerfile\n",
+    )
+
+    report = collect_profile_doctor_report(
+        tmp_path, repo_url=None, host_env={}, image_probe=lambda _image: IMAGE_PRESENT
+    )
+
+    service_phase = _phase(report, "service_paths")
+    assert service_phase["status"] == "fail"
+    assert service_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_PATH_INVALID
+    assert "escapes workspace root" in service_phase["message"]
+    # The docker_images phase still skips the build-only service (nothing to pull),
+    # so the green build path would otherwise mask the rejection.
+    assert _phase(report, "docker_images")["status"] == "skipped"
+    assert report["status"] == "fail"
 
 
 def test_overall_status_skipped_stays_ok(tmp_path: Path) -> None:

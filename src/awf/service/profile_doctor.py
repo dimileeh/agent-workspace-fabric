@@ -30,6 +30,7 @@ from awf.node.secret_mounts import (
     LocalSecretLeaseMountResolver,
     SecretLeaseResolutionError,
 )
+from awf.profiles.compose import profile_services
 from awf.profiles.models import (
     DockerMode,
     EgressMode,
@@ -64,6 +65,17 @@ PROFILE_DOCTOR_SECRET_LEASES_OPTIONAL_MISSING = "PROFILE_DOCTOR_SECRET_LEASES_OP
 # An *unexpected* (non-``SecretLeaseResolutionError``) failure while probing — e.g.
 # an ``OSError`` from the bitbucket askpass materialization (mkdir/write/chmod).
 PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR = "PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR"
+
+# Service-path phase reason codes. Build-only services (and any service env_file /
+# volume source) carry repo-relative paths that provisioning resolves against the
+# worktree root via ``profile_services(profile, base_path=...)`` and REJECTS when
+# absolute or escaping. The image phase skips build-only services (no image to
+# pull), so without this phase the doctor could report green for a path that
+# provisioning later rejects. Structured failures reuse the resolver's own
+# ``reason_code`` when present (e.g. a ``ProfileServiceValidationError``).
+PROFILE_DOCTOR_SERVICE_PATHS_OK = "PROFILE_DOCTOR_SERVICE_PATHS_OK"
+PROFILE_DOCTOR_SERVICE_PATHS_NONE = "PROFILE_DOCTOR_SERVICE_PATHS_NONE"
+PROFILE_DOCTOR_SERVICE_PATH_INVALID = "PROFILE_DOCTOR_SERVICE_PATH_INVALID"
 
 # Docker-image phase reason codes.
 DOCKER_MODE_NOT_DIND = "DOCKER_MODE_NOT_DIND"
@@ -131,13 +143,14 @@ def collect_profile_doctor_report(
         # The profile did not resolve: every downstream probe needs the profile,
         # so emit them as ``skipped`` rather than crashing or fabricating
         # readiness.
-        for name in ("profile_lint", "secret_leases", "egress", "docker_images"):
+        for name in ("profile_lint", "secret_leases", "egress", "service_paths", "docker_images"):
             phases.append(_skipped_phase(name))
     else:
         profile = resolution.profile
         phases.append(_lint_phase(resolution.lint_findings))
         phases.append(_secret_leases_phase(profile, host_home=resolved_home, host_env=host_env))
         phases.append(_egress_phase(profile))
+        phases.append(_service_paths_phase(profile, repo=repo))
         phases.append(_docker_images_phase(profile, image_probe=probe))
 
     status = compute_overall_status([phase["status"] for phase in phases])
@@ -391,6 +404,64 @@ def _egress_phase(profile: WorkspaceProfile) -> dict[str, Any]:
             "Widen egress to 'open' if bootstrap needs network access, or confirm the "
             "restricted/offline posture is intended."
         ),
+    }
+
+
+def _service_paths_phase(profile: WorkspaceProfile, *, repo: Path) -> dict[str, Any]:
+    """Resolve profile-service repo-relative paths the way provisioning does.
+
+    Provisioning runs ``profile_services(profile, base_path=worktree_path)``, whose
+    ``_resolve_workspace_path`` REJECTS absolute or escaping service paths (e.g.
+    ``build_context: ../app``, an absolute ``env_file``, or a volume source that
+    leaves the worktree root). The image phase skips build-only services -- they
+    have no image to pull -- so without this probe the doctor could declare a green
+    ``docker_images`` result for a profile that provisioning later rejects. Running
+    the same resolver here fails preflight before the real workspace launch does.
+
+    Paths are profile-declared (never secret material), so the resolver's message
+    -- which names the offending path -- is safe to surface in evidence.
+    """
+    if not profile.services:
+        return {
+            "name": "service_paths",
+            "status": "skipped",
+            "reason_code": PROFILE_DOCTOR_SERVICE_PATHS_NONE,
+            "message": "No profile services are declared, so there are no paths to validate.",
+            "evidence": {},
+            "action": _NO_ACTION,
+        }
+
+    try:
+        profile_services(profile, base_path=repo)
+    except ValueError as exc:
+        # ``profile_services`` raises a plain ``ValueError`` for absolute/escaping
+        # paths and a ``ProfileServiceValidationError`` (a ``ValueError`` subclass
+        # carrying a ``reason_code``) for blocking service-volume lint. Both are the
+        # exact failures provisioning would hit.
+        reason_code = getattr(exc, "reason_code", None) or PROFILE_DOCTOR_SERVICE_PATH_INVALID
+        return {
+            "name": "service_paths",
+            "status": "fail",
+            "reason_code": reason_code,
+            "message": (
+                f"A profile service path is invalid and provisioning would reject it: {exc}"
+            ),
+            "evidence": {"error": str(exc)},
+            "action": (
+                "Make profile service paths (build_context / env_file / volume sources) "
+                "workspace-relative and contained within the repo root."
+            ),
+        }
+
+    return {
+        "name": "service_paths",
+        "status": "ok",
+        "reason_code": PROFILE_DOCTOR_SERVICE_PATHS_OK,
+        "message": (
+            f"All {len(profile.services)} profile service path(s) resolve within the repo root."
+        ),
+        "evidence": {"services": [service.name for service in profile.services]},
+        "action": _NO_ACTION,
     }
 
 
