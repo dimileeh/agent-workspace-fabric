@@ -494,6 +494,61 @@ def test_doctor_scrubs_docker_context_when_forcing_daemon(
     assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
 
 
+def test_doctor_scrubs_cleared_docker_client_keys_from_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Docker CLI client key the service env clears must not survive into the probe.
+
+    The worker's ``bootstrap._docker_cli_environ`` scrubs Docker CLI client keys
+    (e.g. ``DOCKER_TLS_VERIFY``/``DOCKER_CONFIG``) that the resolved service
+    environment explicitly blanks while the caller shell still exports them, via
+    ``cleared_docker_cli_client_keys``. The doctor must mirror that scrub or a stale
+    caller client key would redirect the image probe to a different daemon/config
+    than the worker's compose pulls, so a green preflight would not match
+    provisioning.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The caller shell exports a stale DOCKER_TLS_VERIFY the service env blanks.
+    monkeypatch.setenv("DOCKER_TLS_VERIFY", "1")
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"DOCKER_TLS_VERIFY": "", "DOCKER_CONFIG": "/svc/.docker"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="tcp://remote:2375",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    docker_environ = captured["docker_environ"]
+    assert isinstance(docker_environ, dict)
+    assert docker_environ["DOCKER_HOST"] == "tcp://remote:2375"
+    # The cleared client key is scrubbed so it cannot redirect the probe daemon.
+    assert "DOCKER_TLS_VERIFY" not in docker_environ
+    # Unrelated client config still threads through to the probe.
+    assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0

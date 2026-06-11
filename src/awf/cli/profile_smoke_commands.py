@@ -71,6 +71,7 @@ def profile_doctor(
     """
     from awf.common.git_remote import detect_repo_url_from_checkout
     from awf.service.config import local_service_environ, resolve_service_settings
+    from awf.service.environment import cleared_docker_cli_client_keys
     from awf.service.profile_doctor import collect_profile_doctor_report
 
     resolved = repo.expanduser().resolve()
@@ -108,9 +109,16 @@ def profile_doctor(
     # caller DOCKER_HOST/DOCKER_CONTEXT cannot redirect the probe. Docker's CLI
     # treats DOCKER_CONTEXT as overriding DOCKER_HOST, so drop it (matching the
     # service Docker helpers' scrub) or a stale context would still redirect the
-    # probe to the wrong daemon despite the pinned DOCKER_HOST.
+    # probe to the wrong daemon despite the pinned DOCKER_HOST. Also scrub any
+    # Docker CLI client keys (DOCKER_CONFIG/DOCKER_CERT_PATH/DOCKER_TLS*/...) the
+    # service environment explicitly clears, exactly as the worker's
+    # bootstrap._docker_cli_environ does via cleared_docker_cli_client_keys; without
+    # it a stale caller client key (e.g. a TLS config the service env blanks) would
+    # survive into the probe and let it talk to a different daemon/config than the
+    # worker's compose pulls, so preflight would not match provisioning.
+    scrubbed_keys = {"DOCKER_CONTEXT", *cleared_docker_cli_client_keys(host_env)}
     docker_environ = {
-        key: value for key, value in host_env.items() if key.upper() != "DOCKER_CONTEXT"
+        key: value for key, value in host_env.items() if key.upper() not in scrubbed_keys
     }
     docker_environ["DOCKER_HOST"] = settings.docker_host
     report = collect_profile_doctor_report(
