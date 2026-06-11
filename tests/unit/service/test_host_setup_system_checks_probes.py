@@ -397,7 +397,7 @@ def test_check_gh_warns_when_missing_and_ok_when_present() -> None:
     missing = check_gh(which=lambda _cmd: None)
     assert present.level is SetupCheckLevel.OK
     assert missing.level is SetupCheckLevel.WARNING
-    # The missing-gh warning must point BitBucket users at the .env auth path so
+    # The missing-gh warning must point Bitbucket users at the .env auth path so
     # they are not told to install gh for a forge that does not need it (#525).
     assert "BITBUCKET_API_TOKEN" in missing.detail
     assert "bitbucket.org" in missing.detail
