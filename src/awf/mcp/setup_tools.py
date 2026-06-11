@@ -121,7 +121,13 @@ _SOURCE_CHECKOUT_REMEDIATION_REASON_CODES = frozenset(
 _SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN = re.compile(
     r"(?P<setup>\bawf setup --dry-run(?P<setup_suffix>[.,;):]|$|\s+to\b))"
     r"|(?P<start_source>\bawf start\s+--source-checkout(?:=|\s+)"
-    r"(?:'[^']*'|\"[^\"]*\"|\S)+?"
+    # Value tokens form a unique partition so no position matches two branches,
+    # removing the quoted-vs-``\S`` overlap that caused exponential backtracking
+    # (CodeQL py/redos): an atomic complete quoted string (which may hold spaces),
+    # a single non-quote char, or a lone quote reachable only when it does *not*
+    # open a complete quoted string — reproducing the original ``\S``-matches-an-
+    # unbalanced-quote behavior on the realistic single-argument inputs seen here.
+    r"(?:(?>'[^']*+'|\"[^\"]*+\")|[^\s'\"]|(?!'[^']*+')(?!\"[^\"]*+\")['\"])+?"
     r"(?P<start_source_suffix>[.,;):](?=\s|$)|$|\s+to\b))"
     r"|(?P<start>\bawf start(?P<start_suffix>[.,;):]|$|\s+to\b))"
 )

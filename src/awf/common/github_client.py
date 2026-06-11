@@ -138,6 +138,19 @@ _FORGE_HOSTS: dict[ForgeKind, str] = {
 _HOST_FORGES: dict[str, ForgeKind] = {host: forge for forge, host in _FORGE_HOSTS.items()}
 
 
+def _strip_bare_slug_git_suffix(name: str) -> str:
+    """Strip a trailing ``.git`` from a bare-slug repo name.
+
+    Replicates the original lazy ``([^/\\s]+?)(?:\\.git)?`` behavior exactly: the
+    suffix is removed only when something precedes it (``len > 4``), so
+    ``owner/.git`` keeps the literal ``.git`` name while ``owner/repo.git``
+    becomes ``repo`` and ``owner/repo.git.git`` becomes ``repo.git``.
+    """
+    if name.endswith(".git") and len(name) > 4:
+        return name[:-4]
+    return name
+
+
 @dataclass(frozen=True)
 class RepoRef:
     """Owner + repo name parsed out of URLs like
@@ -162,23 +175,49 @@ class RepoRef:
         """
         value = repo_url.strip()
         # Bare ``owner/repo`` slug (no host, no scheme) defaults to GitHub.
-        slug_match = re.fullmatch(r"([^/\s]+)/([^/\s]+?)(?:\.git)?/?", value)
+        # Possessive groups (``++``) make the owner/name split unambiguous — ``/``
+        # is excluded from the class, so a token never needs to give a character
+        # back — eliminating the ReDoS backtracking the lazy ``([^/\s]+?)`` +
+        # ``(?:\.git)?`` overlap allowed (CodeQL py/redos). The trailing ``.git``
+        # strip moves into code to preserve the original lazy behavior exactly.
+        slug_match = re.fullmatch(r"([^/\s]++)/([^/\s]++)/?", value)
         if (
             slug_match
             and "github.com" not in value
             and "bitbucket.org" not in value
             and ":" not in value
         ):
-            return cls(owner=slug_match.group(1), name=slug_match.group(2), forge="github")
+            return cls(
+                owner=slug_match.group(1),
+                name=_strip_bare_slug_git_suffix(slug_match.group(2)),
+                forge="github",
+            )
 
         # SSH scp-like form: ``git@<host>:owner/repo(.git)?``.
+        # Possessive groups (``++``) make the owner/name split unambiguous — ``/``
+        # is excluded from the class, so a token never needs to give a character
+        # back — eliminating the same lazy ``([^/]+?)`` + ``(?:\.git)?`` overlap
+        # (CodeQL py/redos) that was hardened on the bare-slug path above. The
+        # trailing ``.git`` strip moves into ``_strip_bare_slug_git_suffix`` so the
+        # original lazy behavior (only a non-empty suffix is stripped) is preserved.
         for host, forge in _HOST_FORGES.items():
-            ssh_match = re.fullmatch(rf"git@{re.escape(host)}:([^/]+)/([^/]+?)(?:\.git)?/?", value)
+            ssh_match = re.fullmatch(rf"git@{re.escape(host)}:([^/]++)/([^/]++)/?", value)
             if ssh_match:
-                return cls(owner=ssh_match.group(1), name=ssh_match.group(2), forge=forge)
+                return cls(
+                    owner=ssh_match.group(1),
+                    name=_strip_bare_slug_git_suffix(ssh_match.group(2)),
+                    forge=forge,
+                )
 
-        parsed = urlsplit(value)
-        parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        # ``urlsplit``/``.hostname`` raise a bespoke ``ValueError`` (e.g. "Invalid
+        # IPv6 URL") on malformed authorities like ``https://[bad``. Normalize that
+        # to this method's standard parse-failure message so callers see one
+        # consistent error and no urllib internals leak through.
+        try:
+            parsed = urlsplit(value)
+            parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        except ValueError as exc:
+            raise ValueError(f"Cannot parse repo from URL: {repo_url!r}") from exc
         url_forge = _HOST_FORGES.get(parsed_host) if parsed_host is not None else None
         is_http_url = parsed.scheme in {"http", "https"}
         is_ssh_url = parsed.scheme == "ssh" and (
@@ -217,8 +256,16 @@ class RepoRef:
         """Return a clone URL matching the requested transport style."""
         host = self._forge_host()
         stripped = repo_url.strip()
-        parsed = urlsplit(stripped)
-        parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        # ``urlsplit``/``.hostname`` raise ``ValueError`` (e.g. "Invalid IPv6 URL")
+        # on malformed authorities like ``https://[bad``. Unlike ``from_url``, this
+        # method returns a URL rather than parsing one, so an unhandled crash here
+        # would be unexpected: treat an unparseable URL as a non-match and fall back
+        # to the canonical HTTPS clone URL (same as other unrecognized inputs).
+        try:
+            parsed = urlsplit(stripped)
+            parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        except ValueError:
+            return self.https_url()
         # Match SSH by scheme (not a no-port prefix) so explicit-port forms such
         # as ssh://git@github.com:22/owner/repo.git are preserved as SSH instead
         # of silently falling through to HTTPS (thread PRRT_kwDOSJAM6s6IQkBd).
@@ -230,11 +277,7 @@ class RepoRef:
         if stripped.startswith(f"git@{host}:") or is_ssh_url:
             return self.ssh_url()
 
-        if (
-            parsed.scheme in {"http", "https"}
-            and parsed.hostname is not None
-            and parsed.hostname.lower() == host
-        ):
+        if parsed.scheme in {"http", "https"} and parsed_host == host:
             userinfo, sep, _host = parsed.netloc.rpartition("@")
             if sep and userinfo:
                 return f"https://{userinfo}@{host}/{self.owner}/{self.name}.git"

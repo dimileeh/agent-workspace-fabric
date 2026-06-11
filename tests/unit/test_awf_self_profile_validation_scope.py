@@ -80,12 +80,41 @@ def test_validate_mypy_covers_whole_package_not_only_cli() -> None:
 
 
 @pytest.mark.unit
-def test_validate_pytest_covers_full_unit_suite_not_only_cli() -> None:
-    pytest_commands = _commands_for_tool("pytest")
-    assert pytest_commands, "validate phase must run pytest"
-    assert any(_targets_path(tokens, "tests/unit") for tokens in pytest_commands), (
-        "pytest must run the full tests/unit suite, not only tests/unit/cli"
+def test_validate_phase_delegates_pytest_to_github_ci() -> None:
+    """In-workspace pytest is intentionally delegated to GitHub CI.
+
+    GitHub CI runs the full sharded pytest+coverage on every PR commit (the
+    authoritative gate), so the validate phase runs no in-workspace test suite —
+    duplicating it only slows the run and saturates the host. Should a pytest
+    command ever be added back, the #512 anti-narrowing guard in
+    ``test_no_validate_command_is_scoped_solely_to_the_cli_slice`` still rejects
+    a ``tests/unit/cli``-only scope, and this assertion forces the removal to be
+    revisited as a deliberate choice rather than a silent reintroduction.
+    """
+    assert _commands_for_tool("pytest") == [], (
+        "validate phase must not run an in-workspace pytest; GitHub CI owns the "
+        "full sharded pytest+coverage gate"
     )
+
+
+@pytest.mark.unit
+def test_validate_pytest_if_present_covers_full_unit_suite_not_only_cli() -> None:
+    """Guard intent is anti-re-narrowing, not pytest-presence.
+
+    The validate phase intentionally no longer runs the in-workspace test suite
+    (GitHub CI runs the authoritative sharded pytest+coverage on every PR
+    commit). So an absent pytest command is the expected, deliberate state — the
+    #512 regression this file guards against was a *narrowed* validate phase
+    (pytest scoped to ``tests/unit/cli``), not the absence of pytest. If a
+    pytest command is ever re-added, it must still cover the full ``tests/unit``
+    suite rather than the CLI-only slice.
+    """
+    pytest_commands = _commands_for_tool("pytest")
+    for tokens in pytest_commands:
+        assert _targets_path(tokens, "tests/unit"), (
+            "a validate-phase pytest command must run the full tests/unit suite, "
+            "not only tests/unit/cli"
+        )
 
 
 @pytest.mark.unit

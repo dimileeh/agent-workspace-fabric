@@ -521,6 +521,84 @@ def test_ci_workflow_checkouts_disable_persisted_credentials(job_name: str) -> N
         )
 
 
+_EXPECTED_CI_JOBS = frozenset(
+    {
+        "lint-and-type",
+        "python-coverage-shards",
+        "python-full-coverage",
+        "console",
+        "release-artifacts",
+        "ci-required",
+    }
+)
+_VALID_PERMISSION_VALUES = frozenset({"read", "write", "none"})
+# ``(job, scope)`` pairs that may be granted ``write`` (currently none — the entire
+# workflow is least-privilege read-only). A future job that genuinely needs a broader
+# scope must add the *specific* ``(job, scope)`` pair here deliberately, which is the
+# point of the gate. Keyed by ``(job, scope)`` rather than job name alone so a
+# whitelisted job is approved only for the exact scope it needs and cannot silently
+# acquire write on additional scopes (``packages``, ``id-token``, ``pull-requests``,
+# etc.) without a separate, deliberate entry.
+_WRITE_PERMISSION_WHITELIST: frozenset[tuple[str, str]] = frozenset()
+
+
+@pytest.mark.unit
+def test_ci_workflow_jobs_have_least_privilege_permissions() -> None:
+    """Every ci.yml job is covered by an explicit least-privilege ``permissions:`` block.
+
+    Resolves CodeQL ``actions/missing-workflow-permissions`` (alerts #1–#6): with
+    no ``permissions:`` block the default GITHUB_TOKEN scope is broad. The fix is a
+    single workflow-level ``contents: read`` default; this guard asserts that
+    default exists and that no job silently broadens it. Assertion #1 is the gate
+    that covers every job — including any future job — because the workflow-level
+    default applies to all jobs that lack their own block. Assertion #2 then encodes
+    the coverage invariant explicitly (job-level block *or* workflow default) so the
+    check still holds if coverage is ever moved from the default to per-job blocks.
+    """
+    workflow = _workflow()
+
+    # 1. Workflow-level default is read-only (PyYAML loads ``read`` as a string).
+    assert workflow.get("permissions") == {"contents": "read"}
+
+    jobs = workflow.get("jobs", {})
+    assert isinstance(jobs, dict)
+
+    # The known six jobs must all still be present so the covered set can't shrink
+    # unnoticed, and drive coverage off the *live* job keys so a newly added job is
+    # also checked.
+    assert _EXPECTED_CI_JOBS.issubset(jobs.keys())
+
+    for name, job in jobs.items():
+        assert isinstance(job, dict), name
+        job_permissions = job.get("permissions")
+
+        # 2. Every job is covered by an explicit permissions block: either its own
+        #    job-level mapping or the workflow-level default. Given assertion #1 pins
+        #    that default, the RHS holds today and #1 is the real gate; this encodes
+        #    the coverage invariant so it still bites if coverage ever moves to
+        #    per-job blocks (default dropped + a job missing its own block).
+        assert job_permissions is not None or "permissions" in workflow, (
+            f"job {name!r} has no permissions coverage (no job-level block and no "
+            "workflow-level default)"
+        )
+
+        # 3. No job over-grants. Any job-level block must be a scope->level mapping
+        #    and may not grant write on any scope unless explicitly whitelisted.
+        if job_permissions is not None:
+            assert isinstance(job_permissions, dict), (
+                f"job {name!r} permissions must be a dictionary, got "
+                f"{type(job_permissions).__name__}"
+            )
+            for scope, level in job_permissions.items():
+                assert level in _VALID_PERMISSION_VALUES, (
+                    f"job {name!r} grants invalid permission {scope}={level!r}"
+                )
+                if level == "write":
+                    assert (name, scope) in _WRITE_PERMISSION_WHITELIST, (
+                        f"job {name!r} over-grants {scope}: write"
+                    )
+
+
 @pytest.mark.unit
 def test_contributor_docs_require_ci_rollup_status_check() -> None:
     docs = CONTRIBUTING_PATH.read_text(encoding="utf-8")

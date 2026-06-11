@@ -210,7 +210,7 @@ _SCRIPT_SUFFIXES: Final[tuple[str, ...]] = (
 _VALIDATION_TEST_COMMAND_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_./-])"
     r"(?:npm|pnpm|yarn|bun|go|cargo|make|mvn|gradle|gradlew|tox|nox|uv|poetry|pipenv)"
-    r"(?:\s+(?:run|exec|--?[A-Za-z0-9_.=:/-]+))*"
+    r"(?:\s+(?:run|exec|--?[A-Za-z0-9_.=:/-]++))*+"
     r"\s+test(?:\s|$)"
 )
 _VALIDATION_UNITTEST_COMMAND_RE: Final = re.compile(
@@ -219,7 +219,7 @@ _VALIDATION_UNITTEST_COMMAND_RE: Final = re.compile(
 _VALIDATION_TEST_PATH_RE: Final = re.compile(
     r"(?<![A-Za-z0-9_./-])"
     r"(?:(?:uv|poetry|pipenv)\s+run\s+)?python(?:3(?:\.\d+)?)?"
-    r"(?:\s+--?[A-Za-z0-9_.=:/-]+)*"
+    r"(?:\s+--?[A-Za-z0-9_.=:/-]++)*+"
     r"\s+tests/[^\s;&|]*"
 )
 _PINNED_WORKFLOW_USES_SHA_RE: Final = re.compile(r"^[0-9a-fA-F]{40}$")
