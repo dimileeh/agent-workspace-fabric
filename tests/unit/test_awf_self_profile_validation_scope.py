@@ -80,6 +80,24 @@ def test_validate_mypy_covers_whole_package_not_only_cli() -> None:
 
 
 @pytest.mark.unit
+def test_validate_phase_delegates_pytest_to_github_ci() -> None:
+    """In-workspace pytest is intentionally delegated to GitHub CI.
+
+    GitHub CI runs the full sharded pytest+coverage on every PR commit (the
+    authoritative gate), so the validate phase runs no in-workspace test suite —
+    duplicating it only slows the run and saturates the host. Should a pytest
+    command ever be added back, the #512 anti-narrowing guard in
+    ``test_no_validate_command_is_scoped_solely_to_the_cli_slice`` still rejects
+    a ``tests/unit/cli``-only scope, and this assertion forces the removal to be
+    revisited as a deliberate choice rather than a silent reintroduction.
+    """
+    assert _commands_for_tool("pytest") == [], (
+        "validate phase must not run an in-workspace pytest; GitHub CI owns the "
+        "full sharded pytest+coverage gate"
+    )
+
+
+@pytest.mark.unit
 def test_validate_pytest_if_present_covers_full_unit_suite_not_only_cli() -> None:
     """Guard intent is anti-re-narrowing, not pytest-presence.
 
