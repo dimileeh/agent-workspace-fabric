@@ -139,6 +139,19 @@ test("returns false when execCommand throws", async () => {
   }
 });
 
+test("returns false when document.body is not yet available (early load / SSR)", async () => {
+  const restoreNav = setGlobal("navigator", {});
+  const { doc } = makeFakeDocument({ execResult: true });
+  doc.body = null;
+  const restoreDoc = setGlobal("document", doc);
+  try {
+    assert.equal(await copyTextToClipboard("ws_no_body"), false);
+  } finally {
+    restoreDoc();
+    restoreNav();
+  }
+});
+
 test("returns false when neither the clipboard API nor document is available", async () => {
   const restoreNav = setGlobal("navigator", {});
   const restoreDoc = setGlobal("document", undefined);
