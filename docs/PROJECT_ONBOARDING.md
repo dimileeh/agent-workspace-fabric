@@ -43,9 +43,9 @@ needs — do not unconditionally install or authenticate the GitHub CLI `gh`.
 Detect the forge from the repo's `origin` remote (`git remote -v`):
 
 - **`github.com` → GitHub:** install and authenticate `gh` (`gh auth status`).
-- **`bitbucket.org` → BitBucket:** set `BITBUCKET_API_TOKEN`, `BITBUCKET_EMAIL`,
+- **`bitbucket.org` → Bitbucket:** set `BITBUCKET_API_TOKEN`, `BITBUCKET_EMAIL`,
   and `BITBUCKET_AUTH_MODE` (e.g. `basic`) in `.env`. **No `gh` install or auth
-  is required** for BitBucket repos.
+  is required** for Bitbucket repos.
 
 The per-provider prompts below all follow this rule: detect the forge first,
 then require only the matching auth.
