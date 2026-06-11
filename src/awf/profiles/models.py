@@ -980,8 +980,16 @@ def runtime_toolchain_findings(
     # Profile toolchain keys are normalized to lowercase (see ProfileRuntime._validate_toolchains),
     # but ``available`` keys come from external image discovery with no case guarantee. Fold the
     # availability keys to lowercase so a mixed-case ``"Java"`` does not produce a false-positive
-    # RUNTIME_TOOLCHAIN_UNAVAILABLE warning against a declared ``"java"`` toolchain.
-    available_lower = {key.lower(): value for key, value in available.items()}
+    # RUNTIME_TOOLCHAIN_UNAVAILABLE warning against a declared ``"java"`` toolchain. Merge (rather
+    # than overwrite) sets so two casings of the same language — e.g. ``"JAVA"`` and ``"Java"`` —
+    # union their versions instead of silently dropping all but the last.
+    available_lower: dict[str, set[str]] = {}
+    for key, value in available.items():
+        k = key.lower()
+        if k in available_lower:
+            available_lower[k] = available_lower[k] | value
+        else:
+            available_lower[k] = value
     findings: list[ProfileLintFinding] = []
     for language, versions in profile.runtime.toolchains.items():
         available_versions = available_lower.get(language, set())

@@ -928,6 +928,15 @@ def test_runtime_toolchain_findings_mixed_case_availability_keys_still_detect_mi
 
 
 @pytest.mark.unit
+def test_runtime_toolchain_findings_duplicate_casing_availability_keys_merge_versions() -> None:
+    """Two casings of the same availability key union their versions instead of letting the
+    later entry overwrite the earlier one — otherwise a dropped version warns falsely."""
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    assert runtime_toolchain_findings(profile, {"JAVA": {"17", "21"}, "Java": {"17"}}) == ()
+
+
+@pytest.mark.unit
 def test_runtime_toolchain_findings_no_declaration_never_warns() -> None:
     profile = WorkspaceProfile.model_validate({"name": "plain"})
 
