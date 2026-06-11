@@ -409,6 +409,10 @@ def test_check_gh_warns_when_missing_and_ok_when_present() -> None:
     # guidance in the detail — a Bitbucket user should not be told to install gh.
     assert missing.fix is not None
     assert missing.fix.startswith("For GitHub repos:")
+    # The fix must also offer the forge-aware Bitbucket alternative so a Bitbucket
+    # user sees the .env auth path, not just the gh-install path (#528).
+    assert "bitbucket.org" in missing.fix
+    assert "BITBUCKET_API_TOKEN" in missing.fix
 
 
 # --- Python runtime -------------------------------------------------------
