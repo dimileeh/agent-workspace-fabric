@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from awf.service.smoke import (
+    MOCKED_SMOKE_PREFLIGHT_HINT,
     _default_config_resolver,
     _default_console_checker,
     _default_disk_profile_preview,
@@ -997,6 +998,53 @@ class TestCollectSmokeReportExceptionPaths:
 
         ws_phase = next(p for p in report["phases"] if p["name"] == "workspace_request")
         assert ws_phase["reason_code"] == "SMOKE_WORKSPACE_REQUEST_FAILED"
+
+    async def test_mocked_local_adds_real_preflight_advisory(self, tmp_path: Path) -> None:
+        """Item 7: a green mocked smoke explicitly says real preflight was NOT run."""
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=True,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        assert report["preflight_hint"] == MOCKED_SMOKE_PREFLIGHT_HINT
+        assert MOCKED_SMOKE_PREFLIGHT_HINT in report["next_actions"]
+        assert "awf profile doctor" in MOCKED_SMOKE_PREFLIGHT_HINT
+
+    async def test_live_mode_omits_real_preflight_advisory(self, tmp_path: Path) -> None:
+        """Live smoke does not add the mocked-vs-real advisory."""
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(github_token="ghp_test_token"),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        assert report["preflight_hint"] is None
+        assert MOCKED_SMOKE_PREFLIGHT_HINT not in report["next_actions"]
+
+    async def test_mocked_local_advisory_added_when_project_missing(self, tmp_path: Path) -> None:
+        """The advisory is present even on the missing-project early-return path."""
+        report = await collect_smoke_report(
+            project=tmp_path / "does-not-exist",
+            settings=_settings(),
+            mocked_local=True,
+            demo_path=tmp_path / "also-missing",
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        assert report["preflight_hint"] == MOCKED_SMOKE_PREFLIGHT_HINT
+        assert MOCKED_SMOKE_PREFLIGHT_HINT in report["next_actions"]
 
     async def test_extract_validation_commands_catches_exception_on_broken_phases(
         self, tmp_path: Path

@@ -13,6 +13,15 @@ from awf.service.worker_heartbeat import (
     WORKER_HEARTBEAT_UNAVAILABLE_REASON,
 )
 
+# Item 7 (issue #527): a green *mocked* smoke must not be mistaken for real
+# readiness. The mocked proof never resolves the real profile, secret leases,
+# egress posture, or service images — so it explicitly points operators at the
+# real preflight.
+MOCKED_SMOKE_PREFLIGHT_HINT = (
+    "mocked smoke passed; real profile preflight NOT run — run "
+    "`awf profile doctor <repo>` for real readiness"
+)
+
 ServiceCollector = Callable[[ServiceSettings], Awaitable[dict[str, Any]]]
 AuthCollector = Callable[..., dict[str, Any]]
 ProfilePreview = Callable[..., Any]
@@ -109,14 +118,15 @@ async def collect_smoke_report(
         overall.append(console_phase["status"])
         status = _compute_overall_status(overall)
         next_actions = _collect_next_actions(phases)
-        return {
-            "status": status,
-            "project": str(project),
-            "mode": mode,
-            "phases": phases,
-            "console_links": console_links,
-            "next_actions": next_actions,
-        }
+        return _finalize_smoke_report(
+            status=status,
+            project=str(project),
+            mode=mode,
+            phases=phases,
+            console_links=console_links,
+            next_actions=next_actions,
+            mocked_local=mocked_local,
+        )
 
     profile_preview_obj, profile_phase = _phase_profile_preview(
         effective_project, mocked_local, profile_preview
@@ -145,13 +155,45 @@ async def collect_smoke_report(
     status = _compute_overall_status(overall)
     next_actions = _collect_next_actions(phases)
 
+    return _finalize_smoke_report(
+        status=status,
+        project=str(effective_project),
+        mode=mode,
+        phases=phases,
+        console_links=console_links,
+        next_actions=next_actions,
+        mocked_local=mocked_local,
+    )
+
+
+def _finalize_smoke_report(
+    *,
+    status: str,
+    project: str,
+    mode: str,
+    phases: list[dict[str, Any]],
+    console_links: dict[str, str],
+    next_actions: list[str],
+    mocked_local: bool,
+) -> dict[str, Any]:
+    """Assemble the smoke report, adding the mocked-vs-real preflight advisory.
+
+    Item 7 (issue #527): a green *mocked* smoke is not real readiness, so when
+    ``mocked_local`` is set the report carries ``preflight_hint`` and appends it
+    to ``next_actions`` pointing at ``awf profile doctor``. The change is additive
+    (new field + appended action) so existing smoke phase assertions stay green.
+    """
+    preflight_hint = MOCKED_SMOKE_PREFLIGHT_HINT if mocked_local else None
+    if preflight_hint is not None:
+        next_actions = [*next_actions, preflight_hint]
     return {
         "status": status,
-        "project": str(effective_project),
+        "project": project,
         "mode": mode,
         "phases": phases,
         "console_links": console_links,
         "next_actions": next_actions,
+        "preflight_hint": preflight_hint,
     }
 
 

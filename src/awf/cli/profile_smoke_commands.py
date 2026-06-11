@@ -50,6 +50,68 @@ def profile_preview(
         _emit(payload, fmt)
 
 
+@profile_app.command("doctor")
+def profile_doctor(
+    repo: Path = typer.Argument(..., help="Path to a checked-out repository."),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Run a real profile-readiness preflight (resolve, lint, secrets, egress, images).
+
+    Unlike ``awf smoke`` (which can run mocked), this resolves the RESOLVED profile
+    and runs the *same* probes provisioning uses, from the same host context — no
+    agent run, no PR, no workspace creation. Use it before onboarding to catch
+    profile/runtime gaps (notably ``SECRET_LEASE_SOURCE_MISSING``).
+    """
+    from awf.common.git_remote import detect_repo_url_from_checkout
+    from awf.service.profile_doctor import collect_profile_doctor_report
+
+    resolved = repo.expanduser().resolve()
+    report = collect_profile_doctor_report(
+        resolved,
+        repo_url=detect_repo_url_from_checkout(resolved),
+    )
+    if fmt == OutputFormat.pretty:
+        _emit_profile_doctor_pretty(report)
+    else:
+        _emit(report, fmt)
+    if report["status"] == "fail":
+        raise typer.Exit(code=1)
+
+
+def _emit_profile_doctor_pretty(report: dict[str, object]) -> None:
+    """Render a human-readable profile-doctor report (status + per-phase lines)."""
+    status = report.get("status", "unknown")
+    repo = report.get("repo", "unknown")
+    typer.echo(f"AWF profile doctor: {status}")
+    typer.echo(f"Repo: {repo}")
+
+    phases = report.get("phases")
+    if isinstance(phases, list) and phases:
+        typer.echo("")
+        typer.echo("Phases:")
+        for phase in phases:
+            if not isinstance(phase, dict):
+                continue
+            phase_status = phase.get("status", "unknown")
+            name = phase.get("name", "unknown")
+            message = phase.get("message", "")
+            header = f"  [{phase_status}] {name}"
+            typer.echo(f"{header}: {message}" if message else header)
+            reason = phase.get("reason_code", "")
+            if reason:
+                typer.echo(f"        reason: {reason}")
+            action = phase.get("action", "")
+            if action and action not in {"No action required.", "none"}:
+                typer.echo(f"        action: {action}")
+
+    next_actions = report.get("next_actions")
+    if isinstance(next_actions, list) and next_actions:
+        typer.echo("")
+        typer.echo("Next actions:")
+        for action in next_actions:
+            typer.echo(f"  - {action}")
+
+
 @profile_app.command("init")
 def profile_init(
     path: Path = typer.Argument(..., help="Path to the repository to inspect."),
