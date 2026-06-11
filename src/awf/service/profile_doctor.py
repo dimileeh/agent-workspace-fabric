@@ -94,8 +94,12 @@ PROFILE_DOCTOR_SERVICE_GRAPH_INVALID = "PROFILE_DOCTOR_SERVICE_GRAPH_INVALID"
 # avoid double-reporting the same root cause.
 PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED = "PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED"
 
-# Docker-image phase reason codes.
-DOCKER_MODE_NOT_DIND = "DOCKER_MODE_NOT_DIND"
+# Docker-image phase reason codes. ``PROFILE_DOCTOR_IMAGES_NONE`` covers the skip
+# path where there is nothing to probe — no agent runtime image, no DinD daemon
+# image (docker.mode != dind), and no service images — so it is named after the
+# absence of images rather than only the docker mode (which is one of several
+# contributing conditions).
+PROFILE_DOCTOR_IMAGES_NONE = "PROFILE_DOCTOR_IMAGES_NONE"
 PROFILE_DOCTOR_IMAGES_PRESENT = "PROFILE_DOCTOR_IMAGES_PRESENT"
 PROFILE_DOCTOR_IMAGES_PULLABLE = "PROFILE_DOCTOR_IMAGES_PULLABLE"
 PROFILE_DOCTOR_IMAGE_UNREACHABLE = "PROFILE_DOCTOR_IMAGE_UNREACHABLE"
@@ -584,8 +588,8 @@ def _service_graph_phase(
         "status": "ok",
         "reason_code": PROFILE_DOCTOR_SERVICE_GRAPH_OK,
         "message": (
-            f"All {len(services)} profile service dependency edge(s) resolve and "
-            "the graph is acyclic."
+            f"All {len(services)} profile service(s) form a valid dependency graph "
+            "(declared targets, acyclic, no name/host-port collisions)."
         ),
         "evidence": {"services": [service.name for service in services]},
         "action": _NO_ACTION,
@@ -630,7 +634,7 @@ def _docker_images_phase(
         return {
             "name": "docker_images",
             "status": "skipped",
-            "reason_code": DOCKER_MODE_NOT_DIND,
+            "reason_code": PROFILE_DOCTOR_IMAGES_NONE,
             "message": (
                 "docker.mode is not 'dind' and no service images are declared, so "
                 "there are no images to pull."

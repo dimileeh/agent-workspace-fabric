@@ -16,13 +16,13 @@ from awf.profiles.models import (
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service import profile_doctor
 from awf.service.profile_doctor import (
-    DOCKER_MODE_NOT_DIND,
     DOCKER_UNAVAILABLE,
     IMAGE_PRESENT,
     IMAGE_PULLABLE,
     IMAGE_UNAVAILABLE,
     IMAGE_UNREACHABLE,
     PROFILE_DOCTOR_IMAGE_UNREACHABLE,
+    PROFILE_DOCTOR_IMAGES_NONE,
     PROFILE_DOCTOR_IMAGES_PRESENT,
     PROFILE_DOCTOR_IMAGES_PULLABLE,
     PROFILE_DOCTOR_LINT_CLEAN,
@@ -85,7 +85,7 @@ def test_happy_path_all_ok(tmp_path: Path) -> None:
     assert _phase(report, "egress")["status"] == "ok"
     docker_phase = _phase(report, "docker_images")
     assert docker_phase["status"] == "skipped"
-    assert docker_phase["reason_code"] == DOCKER_MODE_NOT_DIND
+    assert docker_phase["reason_code"] == PROFILE_DOCTOR_IMAGES_NONE
 
 
 def test_secret_lease_source_missing_fails(tmp_path: Path) -> None:
@@ -511,7 +511,7 @@ def test_docker_images_skipped_without_images_or_dind(tmp_path: Path) -> None:
 
     docker_phase = _phase(report, "docker_images")
     assert docker_phase["status"] == "skipped"
-    assert docker_phase["reason_code"] == DOCKER_MODE_NOT_DIND
+    assert docker_phase["reason_code"] == PROFILE_DOCTOR_IMAGES_NONE
     assert probed == []
 
 
