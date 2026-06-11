@@ -193,6 +193,14 @@ def register_control_tools(
             max_length=16384,
             description="Optional adopted workspace prompt.",
         ),
+        task_tag: str | None = Field(
+            default=None,
+            max_length=64,
+            description=(
+                "Optional Jira issue key (e.g. PROJ-123) prepended to every "
+                "AWF-authored monitor commit message so fixes link to the issue."
+            ),
+        ),
         reason: str | None = Field(
             default=None,
             max_length=512,
@@ -217,6 +225,7 @@ def register_control_tools(
                     initial_review_grace_period_seconds=(initial_review_grace_period_seconds),
                     task_title=task_title,
                     task_prompt=task_prompt,
+                    task_tag=task_tag,
                     reason=reason,
                 )
             )

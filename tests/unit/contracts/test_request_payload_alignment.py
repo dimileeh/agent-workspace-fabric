@@ -384,6 +384,7 @@ async def test_mcp_create_hydrates_canonical_request_model() -> None:
             "model": "gemini",
             "effort": "xhigh",
             "external_id": "ext_42",
+            "task_tag": "PROJ-123",
             "task_class": "docs_task",
             "priority": 10,
             "human_boost": 2,
@@ -450,6 +451,7 @@ async def test_mcp_create_hydrates_canonical_request_model() -> None:
             "model": "gemini",
             "effort": "xhigh",
             "task_external_id": "ext_42",
+            "task_tag": "PROJ-123",
             "task_class": "docs_task",
             "priority": 10,
             "human_boost": 2,
@@ -551,6 +553,7 @@ async def test_mcp_create_omits_unspecified_optional_task_fields() -> None:
     assert "model" not in mcp_request.task.model_fields_set
     assert "effort" not in mcp_request.task.model_fields_set
     assert "external_id" not in mcp_request.task.model_fields_set
+    assert "task_tag" not in mcp_request.task.model_fields_set
     assert "task_class" not in mcp_request.task.model_fields_set
     assert "priority" not in mcp_request.task.model_fields_set
     assert "human_boost" not in mcp_request.task.model_fields_set
@@ -572,6 +575,7 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
         "initial_review_grace_period_seconds": None,
         "task_title": None,
         "task_prompt": None,
+        "task_tag": "PROJ-123",
         "reason": None,
     }
     rest_request = PullRequestMonitorAdoptionRequest.model_validate(rest_payload)
@@ -593,6 +597,7 @@ async def test_mcp_adoption_hydrates_canonical_request_model() -> None:
             "initial_review_grace_period_seconds": None,
             "task_title": None,
             "task_prompt": None,
+            "task_tag": "PROJ-123",
             "reason": None,
         },
     )
