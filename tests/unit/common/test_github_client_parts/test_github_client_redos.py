@@ -23,10 +23,23 @@ from awf.common.github_client import RepoRef
 # shipping the vulnerable pattern in production code.
 _ORIGINAL_BARE_SLUG_RE = re.compile(r"([^/\s]+)/([^/\s]+?)(?:\.git)?/?")
 
+# Embedded copy of the ORIGINAL (pre-hardening) SSH scp-like regex, kept local for
+# the same reason: it carried the identical lazy ``([^/]+?)`` + ``(?:\.git)?``
+# overlap (CodeQL py/redos) that the bare-slug pattern had.
+_ORIGINAL_SSH_RE = re.compile(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?")
+
 
 def _original_parse(value: str) -> tuple[str, str] | None:
     """Replicate the original bare-slug owner/name extraction."""
     match = _ORIGINAL_BARE_SLUG_RE.fullmatch(value)
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
+
+
+def _original_ssh_parse(value: str) -> tuple[str, str] | None:
+    """Replicate the original SSH scp-like owner/name extraction."""
+    match = _ORIGINAL_SSH_RE.fullmatch(value)
     if match is None:
         return None
     return match.group(1), match.group(2)
@@ -98,6 +111,52 @@ def test_bare_slug_pathological_tail_is_linear() -> None:
     seconds-to-minutes a re-introduced backtracking regression would take.
     """
     pathological = "a" * 5000 + "/" + "b.git" * 2000 + "/x"
+    start = time.perf_counter()
+    with pytest.raises(ValueError):
+        RepoRef.from_url(pathological)
+    assert time.perf_counter() - start < 5.0
+
+
+_SSH_CASES = [
+    "git@github.com:owner/repo",
+    "git@github.com:owner/repo.git",
+    "git@github.com:owner/repo/",
+    "git@github.com:owner/repo.git/",
+    "git@github.com:owner/repo.git.git",
+    "git@github.com:owner/.git",
+    "git@github.com:owner/repo.github",
+    "git@github.com:o/r",
+    "git@github.com:o/r.git",
+    "git@github.com:dimileeh/aira-web",
+    "git@github.com:dimileeh/aira-web.git",
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", _SSH_CASES)
+def test_ssh_owner_name_matches_original(value: str) -> None:
+    """Hardened SSH parsing yields the same owner/name the original regex produced."""
+    expected = _original_ssh_parse(value)
+    assert expected is not None, "test corpus entry must be a valid SSH ref"
+    ref = RepoRef.from_url(value)
+    assert (ref.owner, ref.name) == expected
+    assert ref.forge == "github"
+
+
+@pytest.mark.unit
+def test_ssh_pathological_tail_is_linear() -> None:
+    """A pathological SSH ``.git``-overlap tail parses linearly.
+
+    Regression for the SSH scp-like form on ``github_client.py:198``, which shared
+    the same lazy ``([^/]+?)`` + ``(?:\\.git)?`` overlap CodeQL flagged on the
+    bare-slug path. The tail repeats real ``.git`` fragments (so the lazy group and
+    the optional ``(?:\\.git)?`` fight over every fragment boundary) and ends in a
+    trailing ``/x`` the name group cannot consume, forcing the *failure* path where
+    a re-introduced lazy pattern backtracks. The hardened possessive form has a
+    single match path and completes in microseconds. The 5.0s budget mirrors the
+    bare-slug guard: well above any real parse time, well below a regression's.
+    """
+    pathological = "git@github.com:owner/" + "b.git" * 4000 + "/x"
     start = time.perf_counter()
     with pytest.raises(ValueError):
         RepoRef.from_url(pathological)

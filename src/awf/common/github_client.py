@@ -194,10 +194,20 @@ class RepoRef:
             )
 
         # SSH scp-like form: ``git@<host>:owner/repo(.git)?``.
+        # Possessive groups (``++``) make the owner/name split unambiguous — ``/``
+        # is excluded from the class, so a token never needs to give a character
+        # back — eliminating the same lazy ``([^/]+?)`` + ``(?:\.git)?`` overlap
+        # (CodeQL py/redos) that was hardened on the bare-slug path above. The
+        # trailing ``.git`` strip moves into ``_strip_bare_slug_git_suffix`` so the
+        # original lazy behavior (only a non-empty suffix is stripped) is preserved.
         for host, forge in _HOST_FORGES.items():
-            ssh_match = re.fullmatch(rf"git@{re.escape(host)}:([^/]+)/([^/]+?)(?:\.git)?/?", value)
+            ssh_match = re.fullmatch(rf"git@{re.escape(host)}:([^/]++)/([^/]++)/?", value)
             if ssh_match:
-                return cls(owner=ssh_match.group(1), name=ssh_match.group(2), forge=forge)
+                return cls(
+                    owner=ssh_match.group(1),
+                    name=_strip_bare_slug_git_suffix(ssh_match.group(2)),
+                    forge=forge,
+                )
 
         parsed = urlsplit(value)
         parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
