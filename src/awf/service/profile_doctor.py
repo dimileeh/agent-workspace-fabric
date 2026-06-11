@@ -386,7 +386,10 @@ def _docker_images_phase(
     images: list[str] = []
     # The managed DinD daemon image is only pulled when docker.mode is dind.
     dind_image = profile.docker.dind_image if profile.docker.mode == DockerMode.dind else None
-    # Services with a build_context have image=None (built locally) -- nothing to pull.
+    # ProfileService enforces mutual exclusivity of image and build_context, so a
+    # build-only service always has image=None; filtering on `s.image` therefore
+    # correctly excludes locally built services (nothing to pull) without an explicit
+    # build_context guard.
     for candidate in (dind_image, *(s.image for s in profile.services if s.image)):
         if candidate and candidate not in images:
             images.append(candidate)
