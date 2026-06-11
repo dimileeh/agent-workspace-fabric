@@ -96,9 +96,12 @@ the bundled `docker/compose/local-service.yml` stack the `api`/`worker` containe
 only bind-mount a **fixed allowlist** of host auth paths — `~/.config/gh`,
 `~/.config/gcloud`, `~/.gitconfig`, `~/.ssh`, `~/.codex`, `~/.claude`, `~/.gemini`,
 `~/.config/opencode`, `~/.grok`, `~/.ollama` — and **`~/.docker` is not one of them.**
-So a `ref:` pointing at `~/.docker/config.json` resolves to a path the worker cannot
-see, and a `required: true` lease (the default) fails at provision time with
-`SECRET_LEASE_SOURCE_MISSING` even though the file exists on the host.
+So a `ref:` written as the literal absolute path the [`ref` restrictions](#ref-restrictions-read-before-copying)
+require — e.g. `/home/youruser/.docker/config.json` — resolves to a path the worker
+cannot see, and a `required: true` lease (the default) fails at provision time with
+`SECRET_LEASE_SOURCE_MISSING` even though the file exists on the host. (The
+`~/.docker/config.json` shorthand never reaches this existence check: it is rejected
+earlier as `SECRET_LEASE_SOURCE_TOO_BROAD` per that same table.)
 
 Before using this recipe on that stack, make the host config visible to the control
 plane at the **same absolute path** (AWF mounts host auth paths host-equal). Add a
