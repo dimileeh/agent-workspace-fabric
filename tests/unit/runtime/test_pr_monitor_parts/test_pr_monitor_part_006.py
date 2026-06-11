@@ -876,6 +876,81 @@ class TestImageRefMatchesDaemonUrl:
         )
         assert _log_shows_docker_registry_timeout(log) is True
 
+    @pytest.mark.unit
+    def test_org_image_token_auth_host_in_url_path_does_not_match(self) -> None:
+        """An ``auth.docker.io`` token denial whose host is a *different* registry
+        must NOT match an unqualified Docker Hub org image, even when
+        ``auth.docker.io`` appears only inside the URL path.
+
+        ``docker pull org/app:latest`` is an implicit Docker Hub pull.  A bare
+        substring check ``"auth.docker.io" in line`` is satisfied by
+        ``https://evil.example/auth.docker.io/token?...`` where ``auth.docker.io``
+        is a path segment, not the token-service host — a CodeQL
+        ``py/incomplete-url-substring-sanitization`` bypass.  The URL-host
+        boundary check (``"//auth.docker.io/"``) rejects it.
+
+        Regression for CodeQL alert #7."""
+        bypass_line = (
+            'get "https://evil.example/auth.docker.io/token'
+            '?scope=repository%3aorg%2fapp%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("org/app:latest", bypass_line) is False
+
+        # Sanity: the real Docker Hub token service still matches.
+        real_line = 'get "https://auth.docker.io/token?scope=repository%3aorg%2fapp%3apull": denied'
+        assert _image_ref_matches_daemon_url("org/app:latest", real_line) is True
+
+    @pytest.mark.unit
+    def test_docker_hub_alias_token_auth_host_in_url_path_does_not_match(self) -> None:
+        """A Docker Hub alias ref must NOT match an ``auth.docker.io`` token denial
+        whose host is a different registry and that only embeds ``auth.docker.io``
+        in the URL path.
+
+        ``docker pull docker.io/library/postgres:16`` resolves through the
+        Docker Hub token service (``auth.docker.io``).  A path-only occurrence of
+        ``auth.docker.io`` (e.g. ``https://evil.example/auth.docker.io/token``)
+        must not satisfy the Docker Hub host guard — only the URL-host boundary
+        form ``//auth.docker.io/`` (or ``//docker.io/``) counts.
+
+        Regression for CodeQL alert #8."""
+        bypass_line = (
+            'get "https://evil.example/auth.docker.io/token'
+            '?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("docker.io/library/postgres:16", bypass_line) is False
+
+        # Sanity: the real Docker Hub token service still matches.
+        real_line = (
+            'get "https://auth.docker.io/token'
+            '?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("docker.io/library/postgres:16", real_line) is True
+
+    @pytest.mark.unit
+    def test_library_image_token_auth_host_in_url_path_does_not_match(self) -> None:
+        """An unqualified Docker Hub library image must NOT match an
+        ``auth.docker.io`` token denial whose host is a different registry and
+        that only embeds ``auth.docker.io`` in the URL path.
+
+        ``docker pull postgres:16`` is an implicit Docker Hub library pull.  A
+        path-only ``auth.docker.io`` (``https://evil.example/auth.docker.io/token``)
+        must not satisfy the Docker Hub host guard via a bare substring — only
+        the boundary form ``//auth.docker.io/`` counts.
+
+        Regression for CodeQL alert #9."""
+        bypass_line = (
+            'get "https://evil.example/auth.docker.io/token'
+            '?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("postgres:16", bypass_line) is False
+
+        # Sanity: the real Docker Hub token service still matches.
+        real_line = (
+            'get "https://auth.docker.io/token'
+            '?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("postgres:16", real_line) is True
+
 
 class TestStripImageTag:
     """Unit tests for ``_strip_image_tag``."""
