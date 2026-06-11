@@ -36,6 +36,20 @@ The root `.env` is the single local runtime env file for source checkouts and
 package installs. Existing legacy `docker/compose/.env` files are migration
 sources only.
 
+### Forge authentication (detect before installing anything)
+
+AWF is forge-agnostic, so configure **only** the auth the target repo actually
+needs — do not unconditionally install or authenticate the GitHub CLI `gh`.
+Detect the forge from the repo's `origin` remote (`git remote -v`):
+
+- **`github.com` → GitHub:** install and authenticate `gh` (`gh auth status`).
+- **`bitbucket.org` → Bitbucket:** set `BITBUCKET_API_TOKEN`, `BITBUCKET_EMAIL`,
+  and `BITBUCKET_AUTH_MODE` (e.g. `basic`) in `.env`. **No `gh` install or auth
+  is required** for Bitbucket repos.
+
+The per-provider prompts below all follow this rule: detect the forge first,
+then require only the matching auth.
+
 ## One-message prompt
 
 Use this with Codex, Claude Code, Cursor, Gemini, OpenCode, Grok, or a human
@@ -43,7 +57,10 @@ operator:
 
 ```text
 Inspect this repository for AWF onboarding. Do not launch a workspace, push,
-open a PR, or start project services. Start with:
+open a PR, or start project services. First detect the forge from the repo's
+origin remote (git remote -v) and configure only the matching auth: GitHub
+(github.com) needs gh; Bitbucket (bitbucket.org) needs BITBUCKET_API_TOKEN +
+BITBUCKET_EMAIL + BITBUCKET_AUTH_MODE in .env and no gh. Then start with:
 
 `awf init . --write-profile --yes`
 `awf profile preview .`
@@ -63,10 +80,11 @@ generic for any repository and do not contain project-specific assumptions.
 ```text
 Inspect this repository for AWF onboarding. Do not launch a workspace yet.
 
-1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
-2. Run `awf profile preview .` to preview the resolved profile.
-3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
-4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+1. Detect the forge from `git remote -v` and configure only the matching auth (see "Forge authentication" above): GitHub (github.com) needs `gh`; Bitbucket (bitbucket.org) needs `BITBUCKET_API_TOKEN` + `BITBUCKET_EMAIL` + `BITBUCKET_AUTH_MODE` in `.env` and no `gh`.
+2. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
 
 Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
@@ -76,10 +94,11 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 I will inspect this repository for AWF onboarding. I will not launch a workspace yet.
 
-1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
-2. Run `awf profile preview .` to preview the resolved profile.
-3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
-4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+1. Detect the forge from `git remote -v` and configure only the matching auth (see "Forge authentication" above): GitHub (github.com) needs `gh`; Bitbucket (bitbucket.org) needs `BITBUCKET_API_TOKEN` + `BITBUCKET_EMAIL` + `BITBUCKET_AUTH_MODE` in `.env` and no `gh`.
+2. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
 
 Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
@@ -89,10 +108,11 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 Analyze this repository for AWF onboarding. Do not launch a workspace yet.
 
-1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
-2. Run `awf profile preview .` to preview the resolved profile.
-3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
-4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+1. Detect the forge from `git remote -v` and configure only the matching auth (see "Forge authentication" above): GitHub (github.com) needs `gh`; Bitbucket (bitbucket.org) needs `BITBUCKET_API_TOKEN` + `BITBUCKET_EMAIL` + `BITBUCKET_AUTH_MODE` in `.env` and no `gh`.
+2. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
 
 Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
@@ -102,10 +122,11 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 Use `opencode run` to inspect this repository for AWF onboarding. Do not launch a workspace yet.
 
-1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
-2. Run `awf profile preview .` to preview the resolved profile.
-3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
-4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+1. Detect the forge from `git remote -v` and configure only the matching auth (see "Forge authentication" above): GitHub (github.com) needs `gh`; Bitbucket (bitbucket.org) needs `BITBUCKET_API_TOKEN` + `BITBUCKET_EMAIL` + `BITBUCKET_AUTH_MODE` in `.env` and no `gh`.
+2. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
 
 Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
@@ -115,10 +136,11 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 Inspect this repository for AWF onboarding. Do not launch a workspace yet.
 
-1. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
-2. Run `awf profile preview .` to preview the resolved profile.
-3. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
-4. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+1. Detect the forge from `git remote -v` and configure only the matching auth (see "Forge authentication" above): GitHub (github.com) needs `gh`; Bitbucket (bitbucket.org) needs `BITBUCKET_API_TOKEN` + `BITBUCKET_EMAIL` + `BITBUCKET_AUTH_MODE` in `.env` and no `gh`.
+2. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
 
 Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
