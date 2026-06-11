@@ -49,6 +49,10 @@ _REPRESENTATIVE_NEXT_STEPS = [
     "awf start --source-checkout=/p/r:",
     "awf start --source-checkout=/p/r",
     "awf start --source-checkout=it's/repo",  # unbalanced quote -> lone-quote branch
+    # shlex.join() escapes an apostrophe path as adjacent quoted segments
+    # ('it' + "'" + 's/repo'); the partitioned value must tokenize the run as a
+    # series of atomic quoted strings rather than a single one.
+    "awf start --source-checkout='it'\"'\"'s/repo'",
     "awf start --source-checkout /opt/aira.",
     "Then run awf setup --dry-run to provision.",
     "awf start to begin.",
@@ -87,6 +91,13 @@ def test_next_step_pattern_matches_original(text: str) -> None:
             "awf start --source-checkout=/old/r",
             "awf start --source-checkout=/new/repo",
             "awf start --source-checkout=/new/repo",
+        ),
+        (
+            # shlex.join()-escaped apostrophe path (adjacent quoted segments) as
+            # the step's source-checkout token must rewrite as a single unit.
+            "awf start --source-checkout='/old'\"'\"'s/r'.",
+            "awf start --source-checkout=/new/repo",
+            "awf start --source-checkout=/new/repo.",
         ),
     ],
 )
