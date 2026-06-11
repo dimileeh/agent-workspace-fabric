@@ -2,12 +2,18 @@
 
 CodeQL flagged ``_VALIDATION_TEST_COMMAND_RE`` and ``_VALIDATION_TEST_PATH_RE``
 (``py/redos`` / ``py/polynomial-redos``) in all five ``quality_gates*`` modules.
-Both carry a repeated separator group whose greedy inner token class overlaps an
-adjacent ``\\s+`` boundary, so a long run of flag-like tokens has exponentially
+Both carried a repeated separator group whose greedy inner token class overlapped
+an adjacent ``\\s+`` boundary, so a long run of flag-like tokens had exponentially
 many ways to split → catastrophic backtracking.
 
 The five modules carry byte-identical copies of these constants, so the same
 accept-set + timing assertions run against every module's compiled pattern.
+
+The expected ``search`` spans below were captured once from the pre-hardening
+patterns. We bake the expected results as literals rather than re-compiling the
+original (vulnerable) regexes here: re-shipping those literals would itself be a
+``py/redos`` finding, and the differential guard is just as strong asserting the
+hardened pattern against the captured spans.
 """
 
 from __future__ import annotations
@@ -32,57 +38,45 @@ _MODULES: tuple[ModuleType, ...] = (
     _qg_commands,
 )
 
-# Embedded copies of the ORIGINAL (pre-hardening) patterns. Kept local to the
-# test so the differential guard proves equivalence without re-shipping the
-# vulnerable regexes from production.
-_ORIGINAL_TEST_COMMAND_RE = re.compile(
-    r"(?<![A-Za-z0-9_./-])"
-    r"(?:npm|pnpm|yarn|bun|go|cargo|make|mvn|gradle|gradlew|tox|nox|uv|poetry|pipenv)"
-    r"(?:\s+(?:run|exec|--?[A-Za-z0-9_.=:/-]+))*"
-    r"\s+test(?:\s|$)"
-)
-_ORIGINAL_TEST_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_./-])"
-    r"(?:(?:uv|poetry|pipenv)\s+run\s+)?python(?:3(?:\.\d+)?)?"
-    r"(?:\s+--?[A-Za-z0-9_.=:/-]+)*"
-    r"\s+tests/[^\s;&|]*"
-)
-
-_TEST_COMMAND_INPUTS = [
+# (input, expected search span) captured from the ORIGINAL pre-hardening
+# ``_VALIDATION_TEST_COMMAND_RE``. ``None`` == no match.
+_TEST_COMMAND_CASES: list[tuple[str, tuple[int, int] | None]] = [
     # positives
-    "npm test",
-    "pnpm run test",
-    "yarn exec test",
-    "uv run --frozen test",
-    "cargo  test",
-    "make test",
-    "npm --foo test",
-    "go run --x --y test",
-    "poetry run --no-root test ",
+    ("npm test", (0, 8)),
+    ("pnpm run test", (0, 13)),
+    ("yarn exec test", (0, 14)),
+    ("uv run --frozen test", (0, 20)),
+    ("cargo  test", (0, 11)),
+    ("make test", (0, 9)),
+    ("npm --foo test", (0, 14)),
+    ("go run --x --y test", (0, 19)),
+    ("poetry run --no-root test ", (0, 26)),
     # negatives
-    "npm testing",
-    "npm run build",
-    "gotest",
-    "pytest",
-    "mytest",
-    "xnpm test",
-    "npm--test",
-    "npm run --frozen build",
+    ("npm testing", None),
+    ("npm run build", None),
+    ("gotest", None),
+    ("pytest", None),
+    ("mytest", None),
+    ("xnpm test", None),
+    ("npm--test", None),
+    ("npm run --frozen build", None),
 ]
 
-_TEST_PATH_INPUTS = [
+# (input, expected search span) captured from the ORIGINAL pre-hardening
+# ``_VALIDATION_TEST_PATH_RE``. ``None`` == no match.
+_TEST_PATH_CASES: list[tuple[str, tuple[int, int] | None]] = [
     # positives
-    "python tests/x.py",
-    "uv run python3.12 tests/unit",
-    "python -q tests/a",
-    "python3 --foo tests/unit/x",
-    "poetry run python tests/",
+    ("python tests/x.py", (0, 17)),
+    ("uv run python3.12 tests/unit", (0, 28)),
+    ("python -q tests/a", (0, 17)),
+    ("python3 --foo tests/unit/x", (0, 26)),
+    ("poetry run python tests/", (0, 24)),
     # negatives
-    "python tests",
-    "pythontests/x",
-    "python testsuite",
-    "python -q tests",
-    "xpython tests/a",
+    ("python tests", None),
+    ("pythontests/x", None),
+    ("python testsuite", None),
+    ("python -q tests", None),
+    ("xpython tests/a", None),
 ]
 
 
@@ -94,26 +88,28 @@ def _attr(module: ModuleType, name: str) -> re.Pattern[str]:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("module", _MODULES, ids=lambda m: m.__name__.rsplit(".", 1)[-1])
-@pytest.mark.parametrize("text", _TEST_COMMAND_INPUTS)
-def test_test_command_re_matches_original(module: ModuleType, text: str) -> None:
+@pytest.mark.parametrize("text, expected_span", _TEST_COMMAND_CASES)
+def test_test_command_re_matches_original(
+    module: ModuleType, text: str, expected_span: tuple[int, int] | None
+) -> None:
     """Hardened ``_VALIDATION_TEST_COMMAND_RE`` keeps the original match/span."""
-    expected = _ORIGINAL_TEST_COMMAND_RE.search(text)
     actual = _attr(module, "_VALIDATION_TEST_COMMAND_RE").search(text)
-    assert (actual is None) == (expected is None)
-    if expected is not None and actual is not None:
-        assert actual.span() == expected.span()
+    assert (actual is None) == (expected_span is None)
+    if actual is not None and expected_span is not None:
+        assert actual.span() == expected_span
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("module", _MODULES, ids=lambda m: m.__name__.rsplit(".", 1)[-1])
-@pytest.mark.parametrize("text", _TEST_PATH_INPUTS)
-def test_test_path_re_matches_original(module: ModuleType, text: str) -> None:
+@pytest.mark.parametrize("text, expected_span", _TEST_PATH_CASES)
+def test_test_path_re_matches_original(
+    module: ModuleType, text: str, expected_span: tuple[int, int] | None
+) -> None:
     """Hardened ``_VALIDATION_TEST_PATH_RE`` keeps the original match/span."""
-    expected = _ORIGINAL_TEST_PATH_RE.search(text)
     actual = _attr(module, "_VALIDATION_TEST_PATH_RE").search(text)
-    assert (actual is None) == (expected is None)
-    if expected is not None and actual is not None:
-        assert actual.span() == expected.span()
+    assert (actual is None) == (expected_span is None)
+    if actual is not None and expected_span is not None:
+        assert actual.span() == expected_span
 
 
 @pytest.mark.unit
@@ -121,7 +117,7 @@ def test_test_path_re_matches_original(module: ModuleType, text: str) -> None:
 def test_test_command_re_no_catastrophic_backtracking(module: ModuleType) -> None:
     """A long flag run with no trailing ``test`` must reject in linear time.
 
-    Regression for CodeQL ``py/redos`` — the original pattern blows up
+    Regression for CodeQL ``py/redos`` — the original pattern blew up
     exponentially on this input; the possessive form rejects in ~microseconds.
     """
     pathological = "npm " + "--x " * 5000 + "z"
