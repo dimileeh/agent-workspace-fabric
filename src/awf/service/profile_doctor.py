@@ -25,6 +25,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from awf.node.companion_services import validate_companion_service_graph
+from awf.node.compose_manager import ComposeService
 from awf.node.egress_policy import LocalEgressPolicyError, local_egress_plan
 from awf.node.secret_mounts import (
     LocalSecretLeaseMountResolver,
@@ -76,6 +78,21 @@ PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR = "PROFILE_DOCTOR_SECRET_LEASES_PROBE_E
 PROFILE_DOCTOR_SERVICE_PATHS_OK = "PROFILE_DOCTOR_SERVICE_PATHS_OK"
 PROFILE_DOCTOR_SERVICE_PATHS_NONE = "PROFILE_DOCTOR_SERVICE_PATHS_NONE"
 PROFILE_DOCTOR_SERVICE_PATH_INVALID = "PROFILE_DOCTOR_SERVICE_PATH_INVALID"
+
+# Service dependency-graph phase reason codes. Provisioning runs
+# ``validate_companion_service_graph(profile_services=..., companions=(),
+# docker_mode=...)`` in ``ComposeStackLauncher.launch``, so missing/cyclic/
+# duplicate-name/duplicate-host-port/unhealthy profile-service dependency edges are
+# rejected at launch. Without this phase the doctor could report ``service_paths``
+# ok for a profile provisioning later rejects. Structured failures reuse the
+# validator's own ``reason_code`` (e.g. ``COMPANION_SERVICE_DEPENDENCY_UNKNOWN``).
+PROFILE_DOCTOR_SERVICE_GRAPH_OK = "PROFILE_DOCTOR_SERVICE_GRAPH_OK"
+PROFILE_DOCTOR_SERVICE_GRAPH_NONE = "PROFILE_DOCTOR_SERVICE_GRAPH_NONE"
+PROFILE_DOCTOR_SERVICE_GRAPH_INVALID = "PROFILE_DOCTOR_SERVICE_GRAPH_INVALID"
+# The graph could not be validated because path resolution failed first; the
+# ``service_paths`` phase already reports that failure, so this phase is skipped to
+# avoid double-reporting the same root cause.
+PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED = "PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED"
 
 # Docker-image phase reason codes.
 DOCKER_MODE_NOT_DIND = "DOCKER_MODE_NOT_DIND"
@@ -154,14 +171,23 @@ def collect_profile_doctor_report(
         # The profile did not resolve: every downstream probe needs the profile,
         # so emit them as ``skipped`` rather than crashing or fabricating
         # readiness.
-        for name in ("profile_lint", "secret_leases", "egress", "service_paths", "docker_images"):
+        for name in (
+            "profile_lint",
+            "secret_leases",
+            "egress",
+            "service_paths",
+            "service_graph",
+            "docker_images",
+        ):
             phases.append(_skipped_phase(name))
     else:
         profile = resolution.profile
         phases.append(_lint_phase(resolution.lint_findings))
         phases.append(_secret_leases_phase(profile, host_home=resolved_home, host_env=host_env))
         phases.append(_egress_phase(profile))
-        phases.append(_service_paths_phase(profile, repo=repo))
+        services, service_paths_phase = _service_paths_phase(profile, repo=repo)
+        phases.append(service_paths_phase)
+        phases.append(_service_graph_phase(profile, services=services))
         phases.append(
             _docker_images_phase(
                 profile, image_probe=probe, agent_runtime_image=agent_runtime_image
@@ -422,7 +448,9 @@ def _egress_phase(profile: WorkspaceProfile) -> dict[str, Any]:
     }
 
 
-def _service_paths_phase(profile: WorkspaceProfile, *, repo: Path) -> dict[str, Any]:
+def _service_paths_phase(
+    profile: WorkspaceProfile, *, repo: Path
+) -> tuple[tuple[ComposeService, ...] | None, dict[str, Any]]:
     """Resolve profile-service repo-relative paths the way provisioning does.
 
     Provisioning runs ``profile_services(profile, base_path=worktree_path)``, whose
@@ -433,11 +461,15 @@ def _service_paths_phase(profile: WorkspaceProfile, *, repo: Path) -> dict[str, 
     ``docker_images`` result for a profile that provisioning later rejects. Running
     the same resolver here fails preflight before the real workspace launch does.
 
+    Returns the resolved ``ComposeService`` tuple (so ``_service_graph_phase`` can
+    validate the dependency graph without re-resolving) alongside the phase dict.
+    The tuple is ``None`` when there are no services or path resolution failed.
+
     Paths are profile-declared (never secret material), so the resolver's message
     -- which names the offending path -- is safe to surface in evidence.
     """
     if not profile.services:
-        return {
+        return None, {
             "name": "service_paths",
             "status": "skipped",
             "reason_code": PROFILE_DOCTOR_SERVICE_PATHS_NONE,
@@ -447,14 +479,14 @@ def _service_paths_phase(profile: WorkspaceProfile, *, repo: Path) -> dict[str, 
         }
 
     try:
-        profile_services(profile, base_path=repo)
+        services = profile_services(profile, base_path=repo)
     except ValueError as exc:
         # ``profile_services`` raises a plain ``ValueError`` for absolute/escaping
         # paths and a ``ProfileServiceValidationError`` (a ``ValueError`` subclass
         # carrying a ``reason_code``) for blocking service-volume lint. Both are the
         # exact failures provisioning would hit.
         reason_code = getattr(exc, "reason_code", None) or PROFILE_DOCTOR_SERVICE_PATH_INVALID
-        return {
+        return None, {
             "name": "service_paths",
             "status": "fail",
             "reason_code": reason_code,
@@ -468,7 +500,7 @@ def _service_paths_phase(profile: WorkspaceProfile, *, repo: Path) -> dict[str, 
             ),
         }
 
-    return {
+    return services, {
         "name": "service_paths",
         "status": "ok",
         "reason_code": PROFILE_DOCTOR_SERVICE_PATHS_OK,
@@ -476,6 +508,86 @@ def _service_paths_phase(profile: WorkspaceProfile, *, repo: Path) -> dict[str, 
             f"All {len(profile.services)} profile service path(s) resolve within the repo root."
         ),
         "evidence": {"services": [service.name for service in profile.services]},
+        "action": _NO_ACTION,
+    }
+
+
+def _service_graph_phase(
+    profile: WorkspaceProfile, *, services: tuple[ComposeService, ...] | None
+) -> dict[str, Any]:
+    """Validate the profile service dependency graph the way provisioning does.
+
+    Provisioning runs ``validate_companion_service_graph(profile_services=services,
+    companions=(), docker_mode=profile.docker.mode)`` in ``ComposeStackLauncher.
+    launch``, which rejects missing/cyclic/self/duplicate-name profile-service
+    dependency edges, ``depends_on`` targets without a healthcheck, and duplicate
+    host ports (``COMPANION_SERVICE_DEPENDENCY_*`` / ``COMPANION_SERVICE_HOST_PORT_
+    COLLISION`` / ``COMPANION_SERVICE_NAME_COLLISION``). Without this phase the
+    doctor could report ``service_paths`` ok while provisioning later rejects the
+    same graph. The doctor has no companions, so ``companions=()`` mirrors the
+    launcher's profile-only call.
+
+    The graph is validated against the resolved ``services`` passed in from
+    ``_service_paths_phase``. When that is ``None`` either there are no services to
+    validate or path resolution already failed (and is reported there), so this
+    phase is skipped rather than re-running the resolver or fabricating a result.
+
+    Service names and dependency targets are profile-declared (never secret
+    material), so the validator's message is safe to surface in evidence.
+    """
+    if not profile.services:
+        return {
+            "name": "service_graph",
+            "status": "skipped",
+            "reason_code": PROFILE_DOCTOR_SERVICE_GRAPH_NONE,
+            "message": "No profile services are declared, so there is no dependency graph.",
+            "evidence": {},
+            "action": _NO_ACTION,
+        }
+    if services is None:
+        return {
+            "name": "service_graph",
+            "status": "skipped",
+            "reason_code": PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED,
+            "message": (
+                "Service paths did not resolve, so the dependency graph could not be "
+                "validated; fix the service_paths failure first."
+            ),
+            "evidence": {},
+            "action": _NO_ACTION,
+        }
+
+    try:
+        validate_companion_service_graph(
+            profile_services=services,
+            companions=(),
+            docker_mode=profile.docker.mode,
+        )
+    except ProfileResolutionError as exc:
+        return {
+            "name": "service_graph",
+            "status": "fail",
+            "reason_code": exc.reason_code or PROFILE_DOCTOR_SERVICE_GRAPH_INVALID,
+            "message": (
+                "The profile service dependency graph is invalid and provisioning "
+                f"would reject it: {exc}"
+            ),
+            "evidence": {"error": str(exc)},
+            "action": (
+                "Fix profile service depends_on targets (declared, acyclic, with a "
+                "healthcheck) and ensure service names and host ports are unique."
+            ),
+        }
+
+    return {
+        "name": "service_graph",
+        "status": "ok",
+        "reason_code": PROFILE_DOCTOR_SERVICE_GRAPH_OK,
+        "message": (
+            f"All {len(services)} profile service dependency edge(s) resolve and "
+            "the graph is acyclic."
+        ),
+        "evidence": {"services": [service.name for service in services]},
         "action": _NO_ACTION,
     }
 

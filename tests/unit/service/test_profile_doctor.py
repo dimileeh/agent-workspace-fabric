@@ -33,6 +33,9 @@ from awf.service.profile_doctor import (
     PROFILE_DOCTOR_SECRET_LEASES_OK,
     PROFILE_DOCTOR_SECRET_LEASES_OPTIONAL_MISSING,
     PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR,
+    PROFILE_DOCTOR_SERVICE_GRAPH_NONE,
+    PROFILE_DOCTOR_SERVICE_GRAPH_OK,
+    PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED,
     PROFILE_DOCTOR_SERVICE_PATH_INVALID,
     PROFILE_DOCTOR_SERVICE_PATHS_NONE,
     PROFILE_DOCTOR_SERVICE_PATHS_OK,
@@ -294,7 +297,14 @@ def test_profile_resolution_failure_skips_downstream(tmp_path: Path) -> None:
     resolution_phase = _phase(report, "profile_resolution")
     assert resolution_phase["status"] == "fail"
     assert resolution_phase["reason_code"] == "SECRET_TARGET_TOO_BROAD"
-    for name in ("profile_lint", "secret_leases", "egress", "service_paths", "docker_images"):
+    for name in (
+        "profile_lint",
+        "secret_leases",
+        "egress",
+        "service_paths",
+        "service_graph",
+        "docker_images",
+    ):
         skipped = _phase(report, name)
         assert skipped["status"] == "skipped"
         assert skipped["reason_code"] == PROFILE_DOCTOR_PROFILE_UNRESOLVED
@@ -641,6 +651,86 @@ def test_service_paths_escaping_build_context_fails(tmp_path: Path) -> None:
     # The docker_images phase still skips the build-only service (nothing to pull),
     # so the green build path would otherwise mask the rejection.
     assert _phase(report, "docker_images")["status"] == "skipped"
+    # The graph phase cannot validate edges it could not resolve, so it defers to
+    # the service_paths failure rather than double-reporting the same root cause.
+    graph_phase = _phase(report, "service_graph")
+    assert graph_phase["status"] == "skipped"
+    assert graph_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_GRAPH_UNRESOLVED
+    assert report["status"] == "fail"
+
+
+def test_service_graph_no_services_skipped(tmp_path: Path) -> None:
+    """A profile that declares no services has no dependency graph to validate."""
+    _write_profile(
+        tmp_path,
+        "awf:\n  name: generic\n  security:\n    egress:\n      mode: open\n",
+    )
+
+    report = collect_profile_doctor_report(tmp_path, repo_url=None, host_env={})
+
+    graph_phase = _phase(report, "service_graph")
+    assert graph_phase["status"] == "skipped"
+    assert graph_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_GRAPH_NONE
+
+
+def test_service_graph_valid_dependency_ok(tmp_path: Path) -> None:
+    """A service depending on a healthchecked sibling resolves to a green graph."""
+    _write_profile(
+        tmp_path,
+        "awf:\n"
+        "  name: generic\n"
+        "  docker:\n"
+        "    mode: none\n"
+        "  services:\n"
+        "    - name: redis\n"
+        "      image: redis:7-alpine\n"
+        "      healthcheck_cmd: redis-cli ping\n"
+        "    - name: app\n"
+        "      image: app:latest\n"
+        "      depends_on:\n"
+        "        - redis\n",
+    )
+
+    report = collect_profile_doctor_report(
+        tmp_path, repo_url=None, host_env={}, image_probe=lambda _image: IMAGE_PRESENT
+    )
+
+    graph_phase = _phase(report, "service_graph")
+    assert graph_phase["status"] == "ok"
+    assert graph_phase["reason_code"] == PROFILE_DOCTOR_SERVICE_GRAPH_OK
+    assert graph_phase["evidence"]["services"] == ["redis", "app"]
+
+
+def test_service_graph_unknown_dependency_fails(tmp_path: Path) -> None:
+    """A depends_on target that is not a declared service fails the graph phase.
+
+    Provisioning runs the same ``validate_companion_service_graph`` in
+    ``ComposeStackLauncher.launch``, so without this phase the doctor would report
+    ``service_paths`` ok for a graph provisioning later rejects.
+    """
+    _write_profile(
+        tmp_path,
+        "awf:\n"
+        "  name: generic\n"
+        "  docker:\n"
+        "    mode: none\n"
+        "  services:\n"
+        "    - name: app\n"
+        "      image: app:latest\n"
+        "      depends_on:\n"
+        "        - missing\n",
+    )
+
+    report = collect_profile_doctor_report(
+        tmp_path, repo_url=None, host_env={}, image_probe=lambda _image: IMAGE_PRESENT
+    )
+
+    # The path probe is green -- only the graph probe catches the dangling edge.
+    assert _phase(report, "service_paths")["status"] == "ok"
+    graph_phase = _phase(report, "service_graph")
+    assert graph_phase["status"] == "fail"
+    assert graph_phase["reason_code"] == "COMPANION_SERVICE_DEPENDENCY_UNKNOWN"
+    assert "app->missing" in graph_phase["evidence"]["error"]
     assert report["status"] == "fail"
 
 
