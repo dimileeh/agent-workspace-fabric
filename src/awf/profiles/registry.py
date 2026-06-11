@@ -135,6 +135,11 @@ def java_profile(*, build_tool: str = "maven", source: str = "builtin:java") -> 
         source=source,
         confidence="medium",
         description=description,
+        # Declare the JDKs the build needs side by side: a Gradle repo may require
+        # JDK 17 for test execution even when the runtime ships a newer JDK 21
+        # (issue #527, item 6). Preflight surfaces RUNTIME_TOOLCHAIN_UNAVAILABLE if
+        # the runtime/toolchain image can't provide a declared version.
+        runtime=ProfileRuntime(toolchains={"java": ["17", "21"]}),
         phases={
             "setup": [setup],
             "validate": [validate],
