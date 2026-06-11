@@ -95,6 +95,8 @@ def profile_doctor(
 
 def _emit_profile_doctor_pretty(report: dict[str, object]) -> None:
     """Render a human-readable profile-doctor report (status + per-phase lines)."""
+    from awf.service.profile_doctor import _NO_ACTION
+
     status = report.get("status", "unknown")
     repo = report.get("repo", "unknown")
     typer.echo(f"AWF profile doctor: {status}")
@@ -116,7 +118,7 @@ def _emit_profile_doctor_pretty(report: dict[str, object]) -> None:
             if reason:
                 typer.echo(f"        reason: {reason}")
             action = phase.get("action", "")
-            if action and action not in {"No action required.", "none"}:
+            if action and action not in {_NO_ACTION, "none"}:
                 typer.echo(f"        action: {action}")
 
     next_actions = report.get("next_actions")
