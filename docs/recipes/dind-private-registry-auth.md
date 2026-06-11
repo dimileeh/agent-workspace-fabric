@@ -12,6 +12,29 @@ pulls fail with `unauthorized` / `denied`.
 lease**, then point `DOCKER_CONFIG` at the directory that contains it. Docker and
 Gradle then read `$DOCKER_CONFIG/config.json` and authenticate to the registry.
 
+> **Prerequisite — the config must hold _inline_ credentials.** This recipe mounts
+> only `config.json`, so it works when that file carries the registry creds inline
+> under an `"auths"` entry (a base64 `auth` token, as `docker login` writes by
+> default). It does **not** work when the host config delegates to a credential
+> helper via `"credsStore"` (e.g. `desktop`, `osxkeychain`, `secretservice` — common
+> on Docker Desktop and some Linux setups) or `"credHelpers"`: those configs store no
+> token in the file itself and instead shell out to a `docker-credential-*` binary
+> that must be on the Docker client's `$PATH` (per Docker's `docker login`
+> credential-store docs). The mounted file alone would leave the agent container
+> without that helper, so private pulls still fail with `unauthorized` / `denied`.
+> Before using this recipe, either:
+>
+> - **Materialize inline auths**: on the host, produce a helper-free config — e.g.
+>   `DOCKER_CONFIG=$(mktemp -d) docker login registry.example.com` writes a plain
+>   `auths` entry into a throwaway `config.json` you can point `ref:` at — or hand-write
+>   a config with an `auths.<registry>.auth` base64 `user:token`; then mount that.
+> - **Or provide the helper too**: ensure the matching `docker-credential-*` binary
+>   (and any backing store it needs) is available on the agent container's `$PATH`,
+>   which is outside the scope of this file-mount-only recipe.
+>
+> Check before relying on it: `grep -E 'credsStore|credHelpers' ~/.docker/config.json`
+> returning nothing means your config is inline-auth and ready to mount as-is.
+
 Everything below uses existing AWF mechanisms — no core code change is required.
 
 ## Copy-pasteable `.awf/workspace.yml`
