@@ -621,6 +621,7 @@ class TestMiscMonitorHelpers:
             is True
         )
 
+    @pytest.mark.unit
     async def test_commit_dirty_worktree_prepends_task_tag(
         self,
         factory: async_sessionmaker[AsyncSession],
