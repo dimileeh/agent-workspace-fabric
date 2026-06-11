@@ -416,6 +416,56 @@ def test_docker_images_unavailable_warns(tmp_path: Path) -> None:
     assert docker_phase["reason_code"] == DOCKER_UNAVAILABLE
 
 
+def test_docker_images_probed_without_dind(tmp_path: Path) -> None:
+    """Service images are probed even when docker.mode is none.
+
+    ``docker compose up`` pulls profile service images regardless of
+    ``docker.mode``, so an unreachable/private service image must fail the
+    preflight instead of being skipped. The managed DinD daemon image is not
+    probed because no DinD daemon is started in ``none`` mode.
+    """
+    _write_profile(
+        tmp_path,
+        "awf:\n  name: generic\n  services:\n    - name: db\n      image: private/db:latest\n",
+    )
+
+    probed: list[str] = []
+
+    def _probe(image: str) -> str:
+        probed.append(image)
+        return IMAGE_UNREACHABLE
+
+    report = collect_profile_doctor_report(tmp_path, repo_url=None, host_env={}, image_probe=_probe)
+
+    docker_phase = _phase(report, "docker_images")
+    assert docker_phase["status"] == "fail"
+    assert docker_phase["reason_code"] == PROFILE_DOCTOR_IMAGE_UNREACHABLE
+    # The service image is probed; the DinD daemon image is not (mode is none).
+    assert probed == ["private/db:latest"]
+    assert report["status"] == "fail"
+
+
+def test_docker_images_skipped_without_images_or_dind(tmp_path: Path) -> None:
+    """With no service images and docker.mode none, there is nothing to probe."""
+    _write_profile(
+        tmp_path,
+        "awf:\n  name: generic\n",
+    )
+
+    probed: list[str] = []
+
+    def _probe(image: str) -> str:
+        probed.append(image)
+        return IMAGE_PRESENT
+
+    report = collect_profile_doctor_report(tmp_path, repo_url=None, host_env={}, image_probe=_probe)
+
+    docker_phase = _phase(report, "docker_images")
+    assert docker_phase["status"] == "skipped"
+    assert docker_phase["reason_code"] == DOCKER_MODE_NOT_DIND
+    assert probed == []
+
+
 def test_overall_status_skipped_stays_ok(tmp_path: Path) -> None:
     """A report of only ok + skipped phases rolls up to ok."""
     _write_profile(

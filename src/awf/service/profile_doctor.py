@@ -374,25 +374,35 @@ def _docker_images_phase(
     *,
     image_probe: ImageProbe,
 ) -> dict[str, Any]:
-    """Probe DinD + service-image pullability (skipping locally built services)."""
-    if profile.docker.mode != DockerMode.dind:
+    """Probe service-image + DinD-daemon pullability (skipping locally built services).
+
+    Profile service images (postgres, redis, private app images, ...) are pulled
+    by ``docker compose up`` regardless of ``docker.mode`` -- only the managed
+    DinD daemon image is conditional on ``docker.mode == dind`` (see
+    ``ComposeManager._services_for``). Both are probed here so the phase cannot
+    report a green/skipped result while a missing or private service image would
+    later break ``docker compose up``.
+    """
+    images: list[str] = []
+    # The managed DinD daemon image is only pulled when docker.mode is dind.
+    dind_image = profile.docker.dind_image if profile.docker.mode == DockerMode.dind else None
+    # Services with a build_context have image=None (built locally) -- nothing to pull.
+    for candidate in (dind_image, *(s.image for s in profile.services if s.image)):
+        if candidate and candidate not in images:
+            images.append(candidate)
+
+    if not images:
         return {
             "name": "docker_images",
             "status": "skipped",
             "reason_code": DOCKER_MODE_NOT_DIND,
             "message": (
-                "docker.mode is not 'dind'; service images are not pre-pulled, so "
-                "image pullability is not checked."
+                "docker.mode is not 'dind' and no service images are declared, so "
+                "there are no images to pull."
             ),
             "evidence": {"docker_mode": profile.docker.mode.value},
             "action": _NO_ACTION,
         }
-
-    images: list[str] = []
-    for candidate in (profile.docker.dind_image, *(s.image for s in profile.services if s.image)):
-        # Services with a build_context are built locally — nothing to pull.
-        if candidate and candidate not in images:
-            images.append(candidate)
 
     results = [{"image": image, "status": image_probe(image)} for image in images]
     statuses = {result["status"] for result in results}
