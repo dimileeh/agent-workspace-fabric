@@ -158,6 +158,12 @@ def test_doctor_probes_worker_host_home_not_process_home(
         "awf.common.git_remote.detect_repo_url_from_checkout",
         lambda _path: None,
     )
+    # Pin the merged Compose env view so the assertion does not depend on a real
+    # docker/compose/.env (which may inject provider creds in some environments).
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {},
+    )
     host_home = tmp_path / "worker-host-home"
     host_home.mkdir()
     monkeypatch.setattr(
@@ -203,6 +209,12 @@ def test_doctor_forwards_service_github_token_to_host_env(
     )
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    # Pin the merged Compose env view so the explicit token forward is asserted
+    # against a known-empty base, not whatever a real docker/compose/.env holds.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {},
+    )
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
         lambda: types.SimpleNamespace(
@@ -301,6 +313,13 @@ def test_doctor_host_env_omits_token_when_settings_unset(
     )
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    # Pin the merged Compose env view so the absence assertion does not depend on
+    # a real docker/compose/.env that may carry GH_TOKEN/GITHUB_TOKEN; otherwise
+    # this guard would pass without the file and fail with it.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {},
+    )
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
         lambda: types.SimpleNamespace(
@@ -342,6 +361,12 @@ def test_doctor_forwards_configured_agent_runtime_image(
     monkeypatch.setattr(
         "awf.common.git_remote.detect_repo_url_from_checkout",
         lambda _path: None,
+    )
+    # Pin the merged Compose env view so this test does not touch a real
+    # docker/compose/.env while exercising the image-forwarding path.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {},
     )
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
