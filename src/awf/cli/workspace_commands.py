@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 from typing import Any
 
@@ -676,6 +677,39 @@ def workspace_rebase(
     _handle_response(response, fmt)
 
 
+def _repo_targets_github_host(repo: str) -> bool:
+    """Return True only when *repo* carries ``github.com`` as an actual host.
+
+    The ``--repo`` option accepts either a full repo URL (SSH
+    ``git@github.com:owner/repo.git``, HTTPS ``https://github.com/owner/repo``,
+    or the scheme-less ``github.com/owner/repo``) or a bare ``owner/repo`` slug.
+    A bare substring check (``"github.com" in repo``) is bypassable by a hostile
+    host such as ``github.com.evil.example`` (CodeQL
+    ``py/incomplete-url-substring-sanitization``), so parse the host and compare
+    it on a host boundary: equality with ``github.com`` or a proper
+    ``.github.com`` suffix.
+    """
+    value = repo.strip()
+    # scp-style "[user@]host:owner/repo(.git)" — urlsplit cannot extract the host.
+    scp = re.match(r"^[^@/]+@([^:/]+):", value)
+    if scp is not None:
+        host: str | None = scp.group(1).lower()
+    else:
+        # Prefix a "//" for scheme-less "github.com/owner/repo" so urlsplit reads
+        # the leading token as netloc; real "https://..."/"ssh://..." URLs
+        # already carry "//". Malformed input (e.g. an unbalanced IPv6 bracket)
+        # makes urlsplit raise ValueError; treat such values as non-github rather
+        # than crashing the command.
+        try:
+            parsed = urllib.parse.urlsplit(value if "//" in value else f"//{value}")
+        except ValueError:
+            return False
+        host = parsed.hostname.lower() if parsed.hostname else None
+    if host is None:
+        return False
+    return host == "github.com" or host.endswith(".github.com")
+
+
 @workspace_app.command("adopt-pr", cls=MinRichHelpWidthCommand)
 def workspace_adopt_pr(
     repo: str | None = typer.Option(
@@ -734,6 +768,9 @@ def workspace_adopt_pr(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Adopt an already-open GitHub PR into AWF PR monitoring."""
+    repo = repo.strip() if repo is not None else None
+    if repo == "":
+        repo = None
     if pr_url is None and (repo is None or pr_number is None):
         raise typer.BadParameter(
             "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
@@ -742,9 +779,10 @@ def workspace_adopt_pr(
         raise typer.BadParameter(
             "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
         )
+    _repo_is_url = repo is not None and _repo_targets_github_host(repo)
     body: dict[str, Any] = {
-        "repo_url": repo if repo and "github.com" in repo else None,
-        "repo_slug": repo if repo and "github.com" not in repo else None,
+        "repo_url": repo if _repo_is_url else None,
+        "repo_slug": repo if repo and not _repo_is_url else None,
         "pr_number": pr_number,
         "pr_url": pr_url,
         "agent": agent,

@@ -519,6 +519,10 @@ def test_workspace_create_rejects_non_object_companion_json(
         {"repo": None, "pr_number": None, "pr_url": None},
         {"repo": "owner/repo", "pr_number": None, "pr_url": "https://github.com/owner/repo/pull/1"},
         {"repo": None, "pr_number": 1, "pr_url": "https://github.com/owner/repo/pull/1"},
+        # Empty/whitespace --repo normalizes to None, so --pr alone is an incomplete
+        # selector and must fail fast in the CLI rather than deferring to the API.
+        {"repo": "", "pr_number": 1, "pr_url": None},
+        {"repo": "   ", "pr_number": 1, "pr_url": None},
     ],
 )
 def test_workspace_adopt_pr_requires_exactly_one_selector(
@@ -585,3 +589,108 @@ def test_workspace_adopt_pr_accepts_cursor_agent(
     assert captured["method"] == "POST"
     assert captured["path"] == "/v1/workspaces/adopt-pr"
     assert captured["json"]["agent"] == "cursor"  # type: ignore[index]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "git@github.com:org/app.git",
+        "https://github.com/org/app",
+        "github.com/org/app",
+        "ssh://git@github.com/org/app.git",
+    ],
+)
+def test_repo_targets_github_host_accepts_real_github_urls(repo: str) -> None:
+    """Real github.com repo URLs (scp, https, scheme-less, ssh) are host-matched."""
+    assert workspace_commands._repo_targets_github_host(repo) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "owner/repo",
+        "dimileeh/aira-web",
+        # Bypass attempts that the old "github.com" in repo substring check
+        # would have wrongly accepted as github.com URLs.
+        "github.com.evil.example/org/app",
+        "https://github.com.evil.example/org/app",
+        "git@github.com.evil.example:org/app.git",
+        "https://evil.example/github.com/org/app",
+    ],
+)
+def test_repo_targets_github_host_rejects_slugs_and_bypasses(repo: str) -> None:
+    """Bare slugs and host-boundary bypasses are not treated as github.com hosts."""
+    assert workspace_commands._repo_targets_github_host(repo) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo",
+    [
+        # Unbalanced IPv6 bracket: urlsplit raises ValueError("Invalid IPv6 URL").
+        "[bad",
+        "git@[::1",
+        "https://[::1/org/app",
+    ],
+)
+def test_repo_targets_github_host_returns_false_on_unparseable_url(repo: str) -> None:
+    """Malformed URLs that make urlsplit raise ValueError are treated as non-github (no crash)."""
+    assert workspace_commands._repo_targets_github_host(repo) is False
+
+
+def _adopt_pr_body(monkeypatch: pytest.MonkeyPatch, repo: str) -> dict[str, object]:
+    """Invoke workspace_adopt_pr and capture the posted JSON body."""
+    captured: dict[str, object] = {}
+
+    def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        captured.update(kwargs)
+        return httpx.Response(202, json={"id": "ws"})
+
+    monkeypatch.setattr(workspace_commands, "_call", _call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+
+    workspace_commands.workspace_adopt_pr(
+        repo=repo,
+        pr_number=7,
+        pr_url=None,
+        agent="codex",
+        model=None,
+        effort=None,
+        owned_paths=None,
+        profile_ref="auto",
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        task_title=None,
+        task_prompt=None,
+        reason=None,
+        api_token=None,
+        base_url=None,
+        fmt=OutputFormat.json,
+    )
+    return captured["json"]  # type: ignore[return-value]
+
+
+@pytest.mark.unit
+def test_adopt_pr_routes_github_url_to_repo_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An scp-style github.com URL is sent as repo_url, not repo_slug."""
+    body = _adopt_pr_body(monkeypatch, "git@github.com:org/app.git")
+    assert body["repo_url"] == "git@github.com:org/app.git"
+    assert body["repo_slug"] is None
+
+
+@pytest.mark.unit
+def test_adopt_pr_routes_slug_to_repo_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare owner/repo slug is sent as repo_slug, not repo_url."""
+    body = _adopt_pr_body(monkeypatch, "dimileeh/aira-web")
+    assert body["repo_slug"] == "dimileeh/aira-web"
+    assert body["repo_url"] is None
+
+
+@pytest.mark.unit
+def test_adopt_pr_routes_lookalike_host_to_repo_slug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A github.com look-alike host is NOT routed to repo_url (CodeQL alert #16)."""
+    body = _adopt_pr_body(monkeypatch, "github.com.evil.example/org/app")
+    assert body["repo_url"] is None
+    assert body["repo_slug"] == "github.com.evil.example/org/app"
