@@ -505,6 +505,74 @@ def test_docker_images_skipped_without_images_or_dind(tmp_path: Path) -> None:
     assert probed == []
 
 
+def test_docker_images_probes_configured_agent_runtime_image(tmp_path: Path) -> None:
+    """The configured agent runtime image is probed even without DinD or services.
+
+    Every workspace stack renders an ``agent`` service from
+    ``settings.agent_runtime_image``; ``docker compose up`` pulls it like any other
+    image. A missing/private custom agent image must therefore fail the preflight
+    rather than letting the phase report green and breaking at provision time.
+    """
+    _write_profile(
+        tmp_path,
+        "awf:\n  name: generic\n",
+    )
+
+    probed: list[str] = []
+
+    def _probe(image: str) -> str:
+        probed.append(image)
+        return IMAGE_UNREACHABLE if image == "private/agent:latest" else IMAGE_PRESENT
+
+    report = collect_profile_doctor_report(
+        tmp_path,
+        repo_url=None,
+        host_env={},
+        image_probe=_probe,
+        agent_runtime_image="private/agent:latest",
+    )
+
+    docker_phase = _phase(report, "docker_images")
+    assert docker_phase["status"] == "fail"
+    assert docker_phase["reason_code"] == PROFILE_DOCTOR_IMAGE_UNREACHABLE
+    assert "private/agent:latest" in docker_phase["message"]
+    assert probed == ["private/agent:latest"]
+    assert report["status"] == "fail"
+
+
+def test_docker_images_agent_runtime_image_deduped_against_services(tmp_path: Path) -> None:
+    """An agent image equal to a service image is probed once (dedup branch)."""
+    _write_profile(
+        tmp_path,
+        "awf:\n"
+        "  name: generic\n"
+        "  docker:\n"
+        "    mode: dind\n"
+        "  services:\n"
+        "    - name: app\n"
+        "      image: awf-agent-runtime:latest\n",
+    )
+
+    probed: list[str] = []
+
+    def _probe(image: str) -> str:
+        probed.append(image)
+        return IMAGE_PRESENT
+
+    report = collect_profile_doctor_report(
+        tmp_path,
+        repo_url=None,
+        host_env={},
+        image_probe=_probe,
+        agent_runtime_image="awf-agent-runtime:latest",
+    )
+
+    docker_phase = _phase(report, "docker_images")
+    assert docker_phase["status"] == "ok"
+    # agent image first, then dind; the duplicate service entry is collapsed.
+    assert probed == ["awf-agent-runtime:latest", "docker:27-dind"]
+
+
 def test_service_paths_no_services_skipped(tmp_path: Path) -> None:
     """A profile that declares no services has no repo-relative paths to validate."""
     _write_profile(

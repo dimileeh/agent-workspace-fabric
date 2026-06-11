@@ -98,6 +98,11 @@ def profile_doctor(
         repo_url=detect_repo_url_from_checkout(resolved),
         host_home=Path(settings.host_home).expanduser().resolve(),
         host_env=host_env,
+        # Probe the SAME agent runtime image the worker renders into every stack
+        # (build_worker_runtime -> ComposeStackLauncher(agent_runtime_image=...)),
+        # so a missing/private custom AWF_AGENT_RUNTIME_IMAGE fails preflight here
+        # rather than at provision time.
+        agent_runtime_image=settings.agent_runtime_image,
     )
     if fmt == OutputFormat.pretty:
         _emit_profile_doctor_pretty(report)

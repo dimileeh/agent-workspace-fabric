@@ -111,6 +111,7 @@ def collect_profile_doctor_report(
     host_env: Mapping[str, str] | None = None,
     image_probe: ImageProbe | None = None,
     resolve: ProfileResolveFn | None = None,
+    agent_runtime_image: str | None = None,
 ) -> dict[str, Any]:
     """Run the real profile-readiness preflight and return a phase-by-phase report.
 
@@ -127,6 +128,13 @@ def collect_profile_doctor_report(
             always inject a fake so no test touches the daemon.
         resolve: Injectable profile resolver (defaults to
             ``resolve_workspace_profile``).
+        agent_runtime_image: The configured agent runtime image
+            (``settings.agent_runtime_image``) every workspace stack renders its
+            ``agent`` service from. When provided it is probed alongside the DinD
+            and profile service images so a missing/private custom agent image
+            fails preflight instead of breaking ``docker compose up`` at provision
+            time. ``None`` (e.g. callers without service settings) leaves it
+            unprobed.
 
     Returns:
         Report dict with top-level ``status``/``repo``/``phases``/``next_actions``
@@ -154,7 +162,11 @@ def collect_profile_doctor_report(
         phases.append(_secret_leases_phase(profile, host_home=resolved_home, host_env=host_env))
         phases.append(_egress_phase(profile))
         phases.append(_service_paths_phase(profile, repo=repo))
-        phases.append(_docker_images_phase(profile, image_probe=probe))
+        phases.append(
+            _docker_images_phase(
+                profile, image_probe=probe, agent_runtime_image=agent_runtime_image
+            )
+        )
 
     status = compute_overall_status([phase["status"] for phase in phases])
     next_actions = collect_next_actions(phases)
@@ -472,15 +484,19 @@ def _docker_images_phase(
     profile: WorkspaceProfile,
     *,
     image_probe: ImageProbe,
+    agent_runtime_image: str | None = None,
 ) -> dict[str, Any]:
-    """Probe service-image + DinD-daemon pullability (skipping locally built services).
+    """Probe agent-runtime + service-image + DinD-daemon pullability.
 
-    Profile service images (postgres, redis, private app images, ...) are pulled
-    by ``docker compose up`` regardless of ``docker.mode`` -- only the managed
-    DinD daemon image is conditional on ``docker.mode == dind`` (see
-    ``ComposeManager._services_for``). Both are probed here so the phase cannot
-    report a green/skipped result while a missing or private service image would
-    later break ``docker compose up``.
+    Every workspace stack renders an ``agent`` service from the configured
+    ``agent_runtime_image`` (``settings.agent_runtime_image``); profile service
+    images (postgres, redis, private app images, ...) are pulled by ``docker
+    compose up`` regardless of ``docker.mode``; only the managed DinD daemon image
+    is conditional on ``docker.mode == dind`` (see ``ComposeManager._services_for``).
+    All three are probed here so the phase cannot report a green/skipped result
+    while a missing or private image (including a custom/private agent runtime
+    image) would later break ``docker compose up``. Locally built services are
+    skipped because they have no image to pull.
     """
     images: list[str] = []
     # The managed DinD daemon image is only pulled when docker.mode is dind.
@@ -488,8 +504,13 @@ def _docker_images_phase(
     # ProfileService enforces mutual exclusivity of image and build_context, so a
     # build-only service always has image=None; filtering on `s.image` therefore
     # correctly excludes locally built services (nothing to pull) without an explicit
-    # build_context guard.
-    for candidate in (dind_image, *(s.image for s in profile.services if s.image)):
+    # build_context guard. The agent runtime image (when configured) leads the list
+    # because the agent service is the constant of every stack.
+    for candidate in (
+        agent_runtime_image,
+        dind_image,
+        *(s.image for s in profile.services if s.image),
+    ):
         if candidate and candidate not in images:
             images.append(candidate)
 

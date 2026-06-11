@@ -146,7 +146,11 @@ def test_doctor_probes_worker_host_home_not_process_home(
     host_home.mkdir()
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
-        lambda: types.SimpleNamespace(host_home=str(host_home), github_token=None),
+        lambda: types.SimpleNamespace(
+            host_home=str(host_home),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+        ),
     )
 
     result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
@@ -185,7 +189,11 @@ def test_doctor_forwards_service_github_token_to_host_env(
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
-        lambda: types.SimpleNamespace(host_home=str(tmp_path), github_token="ghp_doctor"),
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token="ghp_doctor",
+            agent_runtime_image="awf-agent-runtime:latest",
+        ),
     )
 
     result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
@@ -223,7 +231,11 @@ def test_doctor_host_env_omits_token_when_settings_unset(
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
-        lambda: types.SimpleNamespace(host_home=str(tmp_path), github_token=None),
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+        ),
     )
 
     result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
@@ -233,6 +245,45 @@ def test_doctor_host_env_omits_token_when_settings_unset(
     assert isinstance(host_env, dict)
     assert "GH_TOKEN" not in host_env
     assert "GITHUB_TOKEN" not in host_env
+
+
+def test_doctor_forwards_configured_agent_runtime_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The doctor must probe the worker's configured agent runtime image.
+
+    ``build_worker_runtime`` renders an ``agent`` service from
+    ``settings.agent_runtime_image`` into every workspace stack. The CLI must
+    forward that image so a missing/private custom ``AWF_AGENT_RUNTIME_IMAGE``
+    fails preflight instead of breaking ``docker compose up`` at provision time.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="registry.example.com/custom-agent:9",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert captured["agent_runtime_image"] == "registry.example.com/custom-agent:9"
 
 
 def test_doctor_appears_in_profile_help() -> None:
