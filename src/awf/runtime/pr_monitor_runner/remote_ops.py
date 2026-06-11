@@ -704,6 +704,7 @@ async def _run_sync_base(
             base_branch=base_branch,
             conflicting_files=conflicting_files,
             workspace_runtime_context=runner._workspace_runtime_context,
+            task_tag=await runner._resolve_task_tag(workspace_id),
         )
         agent_run_err = None
         command_evidence: list[str] = []

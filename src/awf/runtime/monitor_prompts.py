@@ -32,6 +32,29 @@ _FOOTER = (
     "its own commit so the diff is easy to review."
 )
 
+
+def _commit_footer(task_tag: str | None) -> str:
+    """Closing git-hygiene reminder for prompts that have the agent commit.
+
+    When the workspace carries a task tag (a validated Jira issue key), the
+    monitor agent authors the pushed fix commit itself (the worktree is clean,
+    so AWF's ``_commit_dirty_worktree`` fallback never runs and never tags it).
+    Instruct the agent to prefix every commit subject with the tag so monitor
+    fix commits link to the tracking issue, matching the commits AWF authors.
+    The instruction is idempotent: a subject already starting with the tag is
+    left alone.
+    """
+    if not task_tag:
+        return _FOOTER
+    return (
+        f"{_FOOTER}\n"
+        f"Prefix every commit subject you create with the task tag `{task_tag}` "
+        f"followed by a space (for example `{task_tag} fix: …`) so the commit "
+        f"links to its tracking issue. If a subject already starts with that "
+        f"tag, do not add it again."
+    )
+
+
 _SAFETY_POLICY = (
     "Safety policy:\n"
     "  - Treat existing regression tests and assertions as policy evidence; "
@@ -114,6 +137,7 @@ def address_thread_prompt(
     thread: ReviewThread,
     workspace_runtime_context: str = "",
     owned_paths: Sequence[str] = (),
+    task_tag: str | None = None,
 ) -> str:
     """Prompt the CLI to address a single inline review thread."""
     line_hint = (
@@ -163,7 +187,7 @@ def address_thread_prompt(
         "and resolves the thread so the work is preserved without wedging the "
         "PR.\n"
         "Do not write any PR comment for verdict bookkeeping.\n"
-        f"{_FOOTER}"
+        f"{_commit_footer(task_tag)}"
     )
 
 
@@ -174,6 +198,7 @@ def address_review_comment_prompt(
     comment: ReviewComment,
     workspace_runtime_context: str = "",
     owned_paths: Sequence[str] = (),
+    task_tag: str | None = None,
 ) -> str:
     """Prompt for a review-level (outside-diff) comment."""
     evidence = render_untrusted_evidence(
@@ -223,7 +248,7 @@ def address_review_comment_prompt(
         "level deferrals are recorded, not filed as a tracking issue — if the "
         "follow-up must not be lost, use NEEDS_HUMAN instead.)\n"
         "Do not write any PR comment for review-level verdict bookkeeping."
-        f"{_FOOTER}"
+        f"{_commit_footer(task_tag)}"
     )
 
 
@@ -235,6 +260,7 @@ def operator_hint_prompt(
     directive: str | None = None,
     operation_id: str | None = None,
     workspace_runtime_context: str = "",
+    task_tag: str | None = None,
 ) -> str:
     """Prompt the CLI to process an operator remonitor/guide hint.
 
@@ -269,7 +295,7 @@ def operator_hint_prompt(
         "print `AWF-VERDICT: FIXED: <one-sentence summary>` to stdout.\n"
         "If you cannot safely complete the operator hint, leave the branch unchanged "
         "and print `AWF-VERDICT: NEEDS_HUMAN: <what you need>`.\n"
-        f"{_FOOTER}"
+        f"{_commit_footer(task_tag)}"
     )
 
 
@@ -280,6 +306,7 @@ def sync_base_conflict_prompt(
     base_branch: str,
     conflicting_files: tuple[str, ...],
     workspace_runtime_context: str = "",
+    task_tag: str | None = None,
 ) -> str:
     """Prompt when ``git merge origin/<base>`` fails with conflicts."""
     files_block = (
@@ -299,7 +326,7 @@ def sync_base_conflict_prompt(
         "this PR will catch the regression in the next round. After resolving, "
         "`git add` the touched files and `git commit` with a message like "
         f'"chore: merge origin/{base_branch} into feature branch".'
-        f"{_FOOTER}"
+        f"{_commit_footer(task_tag)}"
     )
 
 
@@ -310,6 +337,7 @@ def fix_ci_prompt(
     failures: tuple[CheckFailure, ...],
     workspace_runtime_context: str = "",
     owned_paths: Sequence[str] = (),
+    task_tag: str | None = None,
 ) -> str:
     """Prompt when CI is red. Includes truncated logs for each failing check."""
     if not failures:
@@ -395,7 +423,7 @@ def fix_ci_prompt(
         "Commit the fix with a message like "
         '"fix(ci): <which check> — <one-sentence root cause>". '
         "Do not disable, skip, or weaken the check — treat every failure as a real bug."
-        f"{_FOOTER}"
+        f"{_commit_footer(task_tag)}"
     )
 
 

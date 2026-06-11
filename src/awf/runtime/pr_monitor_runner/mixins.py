@@ -109,6 +109,7 @@ class RunnerDelegatesMixin:
     )
     _repair_operation_start_head_result = _remote_repair._repair_operation_start_head_result
     _open_merge_candidate_head_sha = _remote_repair._open_merge_candidate_head_sha
+    _resolve_task_tag = _remote_repair._resolve_task_tag
     _commit_dirty_worktree = _remote_repair._commit_dirty_worktree
     _repair_protected_scope_commits_before_push = (
         _remote_repair._repair_protected_scope_commits_before_push

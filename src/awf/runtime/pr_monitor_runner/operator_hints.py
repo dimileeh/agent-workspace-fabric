@@ -67,6 +67,7 @@ async def _run_operator_hint_cycle(
         directive=hint.directive,
         operation_id=hint.operation_id,
         workspace_runtime_context=self._workspace_runtime_context,
+        task_tag=await self._resolve_task_tag(workspace_id),
     )
     try:
         verdict = await self._invoke_cli_for_verdict_result(
