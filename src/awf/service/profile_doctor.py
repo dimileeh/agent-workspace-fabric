@@ -19,6 +19,7 @@ it stays visually consistent with ``awf smoke`` which operators already read.
 
 from __future__ import annotations
 
+import functools
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
@@ -133,6 +134,7 @@ def collect_profile_doctor_report(
     image_probe: ImageProbe | None = None,
     resolve: ProfileResolveFn | None = None,
     agent_runtime_image: str | None = None,
+    docker_environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the real profile-readiness preflight and return a phase-by-phase report.
 
@@ -149,6 +151,15 @@ def collect_profile_doctor_report(
             always inject a fake so no test touches the daemon.
         resolve: Injectable profile resolver (defaults to
             ``resolve_workspace_profile``).
+        docker_environ: Subprocess environment the default image probe runs the
+            ``docker`` CLI under. The worker selects its Docker daemon/config from
+            the resolved service environment (``AWF_DOCKER_HOST``/``DOCKER_HOST``,
+            ``DOCKER_CONFIG``); when the caller shell does not export the same
+            client settings, an inheriting probe would inspect the wrong daemon and
+            the report would diverge from the worker's compose pulls. The CLI
+            threads the service Docker environment here so the probes match. ``None``
+            (and any injected ``image_probe``) leaves the probe inheriting the
+            caller environment.
         agent_runtime_image: The configured agent runtime image
             (``settings.agent_runtime_image``) every workspace stack renders its
             ``agent`` service from. When provided it is probed alongside the DinD
@@ -165,7 +176,7 @@ def collect_profile_doctor_report(
     """
     resolve_fn = resolve or resolve_workspace_profile
     resolved_home = host_home if host_home is not None else Path.home()
-    probe = image_probe or _default_image_probe
+    probe = image_probe or functools.partial(_default_image_probe, env=docker_environ)
 
     phases: list[dict[str, Any]] = []
     resolution, resolution_phase = _resolution_phase(repo, resolve=resolve_fn, repo_url=repo_url)
@@ -707,7 +718,7 @@ def _skipped_phase(name: str) -> dict[str, Any]:
     }
 
 
-def _default_image_probe(image: str) -> str:
+def _default_image_probe(image: str, *, env: Mapping[str, str] | None = None) -> str:
     """Probe a docker image locally, then test registry pullability.
 
     ``docker image inspect`` confirms a locally present image. When absent,
@@ -715,19 +726,23 @@ def _default_image_probe(image: str) -> str:
     docker CLI/daemon degrades to ``unavailable`` (never an exception): the doctor
     host may have no docker, which must be reported honestly rather than hard-
     failing the whole preflight.
+
+    ``env`` is the subprocess environment the ``docker`` CLI runs under so the
+    probe targets the same daemon/config the worker's compose pulls use; ``None``
+    inherits the caller environment.
     """
-    inspect = _run_docker(["docker", "image", "inspect", image, "--format", "{{.Id}}"])
+    inspect = _run_docker(["docker", "image", "inspect", image, "--format", "{{.Id}}"], env=env)
     if inspect is None:
         return IMAGE_UNAVAILABLE
     if inspect == 0:
         return IMAGE_PRESENT
-    manifest = _run_docker(["docker", "manifest", "inspect", image])
+    manifest = _run_docker(["docker", "manifest", "inspect", image], env=env)
     if manifest is None:
         return IMAGE_UNAVAILABLE
     return IMAGE_PULLABLE if manifest == 0 else IMAGE_UNREACHABLE
 
 
-def _run_docker(args: list[str]) -> int | None:
+def _run_docker(args: list[str], *, env: Mapping[str, str] | None = None) -> int | None:
     """Run a docker command and return its exit code, or ``None`` if unavailable.
 
     ``None`` means the docker CLI/daemon could not be reached at all (binary
@@ -736,6 +751,9 @@ def _run_docker(args: list[str]) -> int | None:
     down, ``docker`` still exits non-zero with a connection error on stderr; we
     detect that here so the preflight reports ``DOCKER_UNAVAILABLE`` rather than a
     hard ``IMAGE_UNREACHABLE`` failure.
+
+    ``env`` selects the Docker daemon/config the CLI talks to; ``None`` inherits
+    the caller environment (``subprocess`` default).
     """
     try:
         result = subprocess.run(
@@ -744,6 +762,7 @@ def _run_docker(args: list[str]) -> int | None:
             capture_output=True,
             text=True,
             timeout=_PROBE_TIMEOUT_SECONDS,
+            env=None if env is None else dict(env),
         )
     except (OSError, subprocess.SubprocessError):
         return None

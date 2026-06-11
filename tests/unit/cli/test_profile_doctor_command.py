@@ -53,6 +53,7 @@ def _stub(monkeypatch: pytest.MonkeyPatch, report: dict) -> None:
             host_home="~",
             github_token=None,
             agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
         ),
     )
     monkeypatch.setattr(
@@ -172,6 +173,7 @@ def test_doctor_probes_worker_host_home_not_process_home(
             host_home=str(host_home),
             github_token=None,
             agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
         ),
     )
 
@@ -221,6 +223,7 @@ def test_doctor_forwards_service_github_token_to_host_env(
             host_home=str(tmp_path),
             github_token="ghp_doctor",
             agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
         ),
     )
 
@@ -277,6 +280,7 @@ def test_doctor_host_env_includes_service_compose_env_file_creds(
             host_home=str(tmp_path),
             github_token=None,
             agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
         ),
     )
 
@@ -326,6 +330,7 @@ def test_doctor_host_env_omits_token_when_settings_unset(
             host_home=str(tmp_path),
             github_token=None,
             agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
         ),
     )
 
@@ -374,6 +379,7 @@ def test_doctor_forwards_configured_agent_runtime_image(
             host_home=str(tmp_path),
             github_token=None,
             agent_runtime_image="registry.example.com/custom-agent:9",
+            docker_host="unix:///var/run/docker.sock",
         ),
     )
 
@@ -381,6 +387,58 @@ def test_doctor_forwards_configured_agent_runtime_image(
 
     assert result.exit_code == 0
     assert captured["agent_runtime_image"] == "registry.example.com/custom-agent:9"
+
+
+def test_doctor_threads_service_docker_environ_to_image_probes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The doctor must probe images against the worker's Docker daemon/config.
+
+    The worker selects its daemon from the resolved service environment
+    (``AWF_DOCKER_HOST`` -> ``settings.docker_host``) and reads client config
+    (``DOCKER_CONFIG``) from ``docker/compose/.env``. The CLI must forward a
+    ``docker_environ`` that merges that service env and forces ``DOCKER_HOST`` to
+    the resolved daemon so the probes inspect the same daemon the worker's compose
+    pulls use -- not whatever the caller shell points at.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # Service env carries a DOCKER_CONFIG the caller shell does not export.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"DOCKER_CONFIG": "/svc/.docker"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="tcp://remote:2375",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    docker_environ = captured["docker_environ"]
+    assert isinstance(docker_environ, dict)
+    # DOCKER_HOST forced to the resolved daemon; DOCKER_CONFIG carried from the
+    # merged service env so the probe reads the worker's client config.
+    assert docker_environ["DOCKER_HOST"] == "tcp://remote:2375"
+    assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
 
 
 def test_doctor_appears_in_profile_help() -> None:

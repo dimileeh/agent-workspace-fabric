@@ -798,6 +798,84 @@ def test_default_image_probe_unavailable_when_manifest_errors(
     assert _default_image_probe("postgres:16") == IMAGE_UNAVAILABLE
 
 
+def test_default_image_probe_threads_env_into_docker_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe runs ``docker`` under the supplied service Docker environment.
+
+    The worker selects its daemon/config from the resolved service environment
+    (``DOCKER_HOST``/``DOCKER_CONFIG``). When that env is threaded in, every
+    ``docker`` invocation the probe makes must run under it so the probe inspects
+    the same daemon the worker's compose pulls use, not the caller shell's.
+    """
+    seen_envs: list[object] = []
+
+    def _run(args, **kwargs):
+        seen_envs.append(kwargs.get("env"))
+        if args[1] == "image":
+            return SimpleNamespace(returncode=1, stdout="", stderr="No such image")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(profile_doctor.subprocess, "run", _run)
+    docker_env = {"DOCKER_HOST": "tcp://remote:2375", "DOCKER_CONFIG": "/svc/.docker"}
+
+    assert _default_image_probe("postgres:16", env=docker_env) == IMAGE_PULLABLE
+
+    # Both the local inspect and the manifest probe must carry the service env.
+    assert seen_envs == [docker_env, docker_env]
+
+
+def test_default_image_probe_inherits_caller_env_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a threaded env the probe passes ``env=None`` (inherits the caller).
+
+    Direct/test callers that do not supply a service Docker environment keep the
+    prior behavior of inheriting the process environment.
+    """
+    seen_envs: list[object] = []
+
+    def _run(args, **kwargs):
+        seen_envs.append(kwargs.get("env", "missing"))
+        return SimpleNamespace(returncode=0, stdout="sha256:abc", stderr="")
+
+    monkeypatch.setattr(profile_doctor.subprocess, "run", _run)
+
+    assert _default_image_probe("postgres:16") == IMAGE_PRESENT
+    assert seen_envs == [None]
+
+
+def test_collect_report_threads_docker_environ_into_default_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``collect_profile_doctor_report`` binds ``docker_environ`` to the default probe.
+
+    When no ``image_probe`` is injected, the report must run its image probes
+    against the supplied service Docker environment so the preflight matches the
+    worker's compose pulls instead of the caller shell's daemon.
+    """
+    _write_profile(
+        tmp_path,
+        "awf:\n  name: generic\n  services:\n    - name: db\n      image: postgres:16\n",
+    )
+    seen_envs: list[object] = []
+
+    def _run(args, **kwargs):
+        seen_envs.append(kwargs.get("env"))
+        return SimpleNamespace(returncode=0, stdout="sha256:abc", stderr="")
+
+    monkeypatch.setattr(profile_doctor.subprocess, "run", _run)
+    docker_env = {"DOCKER_HOST": "tcp://remote:2375"}
+
+    report = collect_profile_doctor_report(
+        tmp_path, repo_url=None, host_env={}, docker_environ=docker_env
+    )
+
+    assert _phase(report, "docker_images")["reason_code"] == PROFILE_DOCTOR_IMAGES_PRESENT
+    # The single profile service image was probed under the threaded env.
+    assert seen_envs and all(env == docker_env for env in seen_envs)
+
+
 def test_default_image_probe_unavailable_when_daemon_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

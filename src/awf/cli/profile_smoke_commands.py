@@ -98,6 +98,15 @@ def profile_doctor(
     if settings.github_token:
         host_env["GH_TOKEN"] = settings.github_token
         host_env["GITHUB_TOKEN"] = settings.github_token
+    # Run the image probes against the SAME Docker daemon/config the worker's
+    # compose pulls target. The worker selects its daemon from the resolved service
+    # environment (AWF_DOCKER_HOST, materialised as DOCKER_HOST -- settings.docker_host
+    # -- with DOCKER_CONFIG and other client controls from docker/compose/.env). A
+    # bare image probe would inherit the caller shell instead and inspect the wrong
+    # daemon, so a green doctor would not match the worker's actual pulls. Thread the
+    # merged service env with DOCKER_HOST forced to the resolved daemon so a stray
+    # caller DOCKER_HOST/DOCKER_CONTEXT cannot redirect the probe.
+    docker_environ = {**host_env, "DOCKER_HOST": settings.docker_host}
     report = collect_profile_doctor_report(
         resolved,
         repo_url=detect_repo_url_from_checkout(resolved),
@@ -108,6 +117,7 @@ def profile_doctor(
         # so a missing/private custom AWF_AGENT_RUNTIME_IMAGE fails preflight here
         # rather than at provision time.
         agent_runtime_image=settings.agent_runtime_image,
+        docker_environ=docker_environ,
     )
     if fmt == OutputFormat.pretty:
         _emit_profile_doctor_pretty(report)
