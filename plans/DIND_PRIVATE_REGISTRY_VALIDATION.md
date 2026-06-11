@@ -25,7 +25,7 @@ Plan reference: [`DIND_PRIVATE_REGISTRY_PLAN.md`](DIND_PRIVATE_REGISTRY_PLAN.md)
 
 ## Evidence — focused tests run
 
-```
+```bash
 uv run --python 3.12 --extra dev pytest tests/unit/node/test_dind_private_registry_recipe.py -q
 ```
 
