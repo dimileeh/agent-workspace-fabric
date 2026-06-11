@@ -482,8 +482,11 @@ def _run_docker(args: list[str]) -> int | None:
     """Run a docker command and return its exit code, or ``None`` if unavailable.
 
     ``None`` means the docker CLI/daemon could not be reached at all (binary
-    missing or the call errored), which the caller maps to ``unavailable`` rather
-    than treating as an image failure.
+    missing, daemon not running, or the call errored), which the caller maps to
+    ``unavailable`` rather than treating as an image failure. When the daemon is
+    down, ``docker`` still exits non-zero with a connection error on stderr; we
+    detect that here so the preflight reports ``DOCKER_UNAVAILABLE`` rather than a
+    hard ``IMAGE_UNREACHABLE`` failure.
     """
     try:
         result = subprocess.run(
@@ -495,4 +498,14 @@ def _run_docker(args: list[str]) -> int | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
+
+    if result.returncode != 0 and result.stderr:
+        stderr_lower = result.stderr.lower()
+        if (
+            "cannot connect to the docker daemon" in stderr_lower
+            or "is the docker daemon running" in stderr_lower
+            or "error during connect" in stderr_lower
+        ):
+            return None
+
     return result.returncode

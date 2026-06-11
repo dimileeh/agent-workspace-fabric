@@ -478,3 +478,28 @@ def test_default_image_probe_unavailable_when_manifest_errors(
 
     monkeypatch.setattr(profile_doctor.subprocess, "run", _run)
     assert _default_image_probe("postgres:16") == IMAGE_UNAVAILABLE
+
+
+def test_default_image_probe_unavailable_when_daemon_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-zero exit with a daemon-connection error degrades to ``unavailable``.
+
+    When the docker daemon is not running, ``docker image inspect`` still exits
+    non-zero with a connection error on stderr. That must read as
+    ``DOCKER_UNAVAILABLE`` (a warning), not flow through to ``manifest inspect``
+    and report a hard ``IMAGE_UNREACHABLE`` failure.
+    """
+
+    def _run(args, **_kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+                "Is the docker daemon running?"
+            ),
+        )
+
+    monkeypatch.setattr(profile_doctor.subprocess, "run", _run)
+    assert _default_image_probe("postgres:16") == IMAGE_UNAVAILABLE
