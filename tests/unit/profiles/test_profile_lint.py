@@ -905,6 +905,29 @@ def test_runtime_toolchain_findings_language_entirely_absent_warns_each_version(
 
 
 @pytest.mark.unit
+def test_runtime_toolchain_findings_mixed_case_availability_keys_match_lowercased() -> None:
+    """Availability keys discovered from the image may be mixed-case; folding them to
+    lowercase prevents false-positive warnings against lowercase profile toolchain keys."""
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    assert runtime_toolchain_findings(profile, {"Java": {"17", "21"}}) == ()
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_mixed_case_availability_keys_still_detect_missing() -> None:
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    findings = runtime_toolchain_findings(profile, {"Java": {"21"}})
+
+    assert len(findings) == 1
+    assert findings[0].details == {
+        "language": "java",
+        "version": "17",
+        "available_versions": ["21"],
+    }
+
+
+@pytest.mark.unit
 def test_runtime_toolchain_findings_no_declaration_never_warns() -> None:
     profile = WorkspaceProfile.model_validate({"name": "plain"})
 

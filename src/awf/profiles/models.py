@@ -977,9 +977,14 @@ def runtime_toolchain_findings(
     """
     if available is None:
         return ()
+    # Profile toolchain keys are normalized to lowercase (see ProfileRuntime._validate_toolchains),
+    # but ``available`` keys come from external image discovery with no case guarantee. Fold the
+    # availability keys to lowercase so a mixed-case ``"Java"`` does not produce a false-positive
+    # RUNTIME_TOOLCHAIN_UNAVAILABLE warning against a declared ``"java"`` toolchain.
+    available_lower = {key.lower(): value for key, value in available.items()}
     findings: list[ProfileLintFinding] = []
     for language, versions in profile.runtime.toolchains.items():
-        available_versions = available.get(language, set())
+        available_versions = available_lower.get(language, set())
         for version in versions:
             if version in available_versions:
                 continue
