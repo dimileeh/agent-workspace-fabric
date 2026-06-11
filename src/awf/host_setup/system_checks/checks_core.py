@@ -169,8 +169,12 @@ def check_gh(*, which: WhichFn = shutil.which) -> SetupCheckResult:
             level=SetupCheckLevel.WARNING,
             summary="GitHub CLI (gh) is not installed.",
             detail="`gh` is not required for host readiness, but AWF PR workflows use it "
-            "for GitHub auth and PR operations.",
-            fix="Install the GitHub CLI before configuring GitHub provider access.",
+            "for GitHub auth and PR operations. For bitbucket.org repos, set "
+            "BITBUCKET_API_TOKEN, BITBUCKET_EMAIL, and BITBUCKET_AUTH_MODE (e.g. "
+            "basic) in .env instead of installing gh.",
+            fix="For GitHub repos: install the GitHub CLI before configuring GitHub "
+            "provider access. For bitbucket.org repos: set BITBUCKET_API_TOKEN, "
+            "BITBUCKET_EMAIL, and BITBUCKET_AUTH_MODE in .env instead.",
             docs_link=_GH_DOCS,
             data={"binary": "gh", "available": False},
         )
