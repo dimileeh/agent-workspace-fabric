@@ -395,8 +395,17 @@ def _line_url_host_is(line: str, host: str) -> bool:
     (the ``//<host>/`` boundary can itself sit anywhere in another host's URL).
     """
     for match in re.finditer(r"https?://[^\s\"']+", line):
-        if urlsplit(match.group(0)).hostname == host:
-            return True
+        # ``urlsplit``/``.hostname`` raise ``ValueError`` (e.g. "Invalid IPv6 URL")
+        # on malformed authorities like ``https://[bad/token``.  A malformed URL in
+        # CI output must not crash PR-log classification — treat an unparseable
+        # candidate as a non-match and keep scanning the remaining tokens
+        # (PRRT_kwDOSJAM6s6I3BzX), mirroring how ``clone_url_like`` and
+        # ``RepoRef.from_url`` guard their own ``urlsplit`` calls.
+        try:
+            if urlsplit(match.group(0)).hostname == host:
+                return True
+        except ValueError:
+            continue
     return False
 
 

@@ -12,6 +12,7 @@ from awf.runtime._docker_pull_detection import (
     _evidence_line_is_permanent_pull_failure,
     _forward_detail_ref_matches_pull,
     _image_ref_matches_daemon_url,
+    _line_url_host_is,
     _strip_image_tag,
 )
 from awf.runtime.pr_monitor import (
@@ -1028,6 +1029,46 @@ class TestImageRefMatchesDaemonUrl:
             '?scope=repository%3alibrary%2fpostgres%3apull": denied'
         )
         assert _image_ref_matches_daemon_url("postgres:16", real_line) is True
+
+
+class TestLineUrlHostIs:
+    """Unit tests for ``_line_url_host_is``."""
+
+    @pytest.mark.unit
+    def test_real_host_matches(self) -> None:
+        assert _line_url_host_is('get "https://auth.docker.io/token": denied', "auth.docker.io")
+
+    @pytest.mark.unit
+    def test_host_in_path_does_not_match(self) -> None:
+        # ``auth.docker.io`` only in the path of another host's URL must not match.
+        assert (
+            _line_url_host_is(
+                'get "https://evil.example//auth.docker.io/token": denied', "auth.docker.io"
+            )
+            is False
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "malformed_line",
+        [
+            'get "https://[bad/token": denied',
+            'head "https://[::1bad/auth.docker.io/token": denied',
+        ],
+    )
+    def test_malformed_url_does_not_crash(self, malformed_line: str) -> None:
+        # ``urlsplit``/``.hostname`` raise ``ValueError`` ("Invalid IPv6 URL") on
+        # malformed authorities; ``_line_url_host_is`` must not propagate it during
+        # PR-log classification — it skips the bad token and returns False
+        # (PRRT_kwDOSJAM6s6I3BzX).
+        assert _line_url_host_is(malformed_line, "auth.docker.io") is False
+
+    @pytest.mark.unit
+    def test_malformed_url_does_not_mask_later_real_host(self) -> None:
+        # A malformed token earlier in the line must not stop the scan from
+        # matching a real host token that follows.
+        line = 'first "https://[bad/x" then "https://auth.docker.io/token": denied'
+        assert _line_url_host_is(line, "auth.docker.io") is True
 
 
 class TestStripImageTag:
