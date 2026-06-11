@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -115,6 +116,43 @@ def test_doctor_rejects_file_repo_path(tmp_path: Path) -> None:
 
     assert result.exit_code != 0
     assert "is a file" in result.output
+
+
+def test_doctor_probes_worker_host_home_not_process_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The doctor must probe secret leases against the worker's ``settings.host_home``.
+
+    ``build_worker_runtime`` resolves leases with ``Path(settings.host_home)``;
+    when ``AWF_HOST_HOME`` diverges from the shell's ``HOME`` the CLI must forward
+    that same home so the preflight checks the directory provisioning actually
+    uses, not ``Path.home()``.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    host_home = tmp_path / "worker-host-home"
+    host_home.mkdir()
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(host_home=str(host_home)),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert captured["host_home"] == host_home.expanduser().resolve()
 
 
 def test_doctor_appears_in_profile_help() -> None:

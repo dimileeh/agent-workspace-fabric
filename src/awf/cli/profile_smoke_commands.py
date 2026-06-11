@@ -70,12 +70,20 @@ def profile_doctor(
     profile/runtime gaps (notably ``SECRET_LEASE_SOURCE_MISSING``).
     """
     from awf.common.git_remote import detect_repo_url_from_checkout
+    from awf.service.config import resolve_service_settings
     from awf.service.profile_doctor import collect_profile_doctor_report
 
     resolved = repo.expanduser().resolve()
+    # Probe secret leases against the SAME host_home the worker uses
+    # (build_worker_runtime: Path(settings.host_home)), not Path.home(). When
+    # AWF_HOST_HOME points the service at a different credential home than the
+    # shell's HOME, falling back to Path.home() would check the wrong directory
+    # and produce false passes/failures despite advertising the worker's context.
+    settings = resolve_service_settings()
     report = collect_profile_doctor_report(
         resolved,
         repo_url=detect_repo_url_from_checkout(resolved),
+        host_home=Path(settings.host_home).expanduser().resolve(),
     )
     if fmt == OutputFormat.pretty:
         _emit_profile_doctor_pretty(report)
