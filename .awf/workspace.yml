@@ -64,5 +64,9 @@ awf:
         timeout_seconds: 600
       - command: uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check
         timeout_seconds: 300
-      - command: uv run --python 3.12 --extra dev pytest tests/unit -n 3 -q
-        timeout_seconds: 1800
+      # `-n auto` (all cores) keeps the full unit suite well under the timeout
+      # (~9 min vs ~30-60 min at -n 3, which could not finish in 1800s). Do NOT
+      # run many awf-self workspaces in parallel: each validation saturates the
+      # host, so several at once crawl and starve each other.
+      - command: uv run --python 3.12 --extra dev pytest tests/unit -n auto -q
+        timeout_seconds: 2400
