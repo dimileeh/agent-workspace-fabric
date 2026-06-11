@@ -621,6 +621,21 @@ def test_repo_targets_github_host_rejects_slugs_and_bypasses(repo: str) -> None:
     assert workspace_commands._repo_targets_github_host(repo) is False
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo",
+    [
+        # Unbalanced IPv6 bracket: urlsplit raises ValueError("Invalid IPv6 URL").
+        "[bad",
+        "git@[::1",
+        "https://[::1/org/app",
+    ],
+)
+def test_repo_targets_github_host_returns_false_on_unparseable_url(repo: str) -> None:
+    """Malformed URLs that make urlsplit raise ValueError are treated as non-github (no crash)."""
+    assert workspace_commands._repo_targets_github_host(repo) is False
+
+
 def _adopt_pr_body(monkeypatch: pytest.MonkeyPatch, repo: str) -> dict[str, object]:
     """Invoke workspace_adopt_pr and capture the posted JSON body."""
     captured: dict[str, object] = {}

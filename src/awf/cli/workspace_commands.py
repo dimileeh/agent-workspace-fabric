@@ -697,8 +697,13 @@ def _repo_targets_github_host(repo: str) -> bool:
     else:
         # Prefix a "//" for scheme-less "github.com/owner/repo" so urlsplit reads
         # the leading token as netloc; real "https://..."/"ssh://..." URLs
-        # already carry "//".
-        parsed = urllib.parse.urlsplit(value if "//" in value else f"//{value}")
+        # already carry "//". Malformed input (e.g. an unbalanced IPv6 bracket)
+        # makes urlsplit raise ValueError; treat such values as non-github rather
+        # than crashing the command.
+        try:
+            parsed = urllib.parse.urlsplit(value if "//" in value else f"//{value}")
+        except ValueError:
+            return False
         host = parsed.hostname.lower() if parsed.hostname else None
     if host is None:
         return False
