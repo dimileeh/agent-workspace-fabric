@@ -951,6 +951,33 @@ class TestImageRefMatchesDaemonUrl:
         assert _image_ref_matches_daemon_url("docker.io/library/postgres:16", real_line) is True
 
     @pytest.mark.unit
+    def test_docker_hub_alias_token_auth_host_arbitrary_position_does_not_match(self) -> None:
+        """A Docker Hub alias ref must NOT match an ``auth.docker.io`` token denial
+        when ``//auth.docker.io/`` appears at an *arbitrary position* in a
+        different registry's URL rather than as the real host.
+
+        The earlier ``"//auth.docker.io/" in line`` boundary check still treats
+        the host as a substring, so a double-slash placement such as
+        ``https://evil.example//auth.docker.io/token`` (real host
+        ``evil.example``) satisfies it — the
+        ``py/incomplete-url-substring-sanitization`` gap CodeQL re-flagged.
+        Parsing the URL host with ``urlsplit`` rejects it.
+
+        Regression for PRRT_kwDOSJAM6s6I2gvt."""
+        bypass_line = (
+            'get "https://evil.example//auth.docker.io/token'
+            '?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("docker.io/library/postgres:16", bypass_line) is False
+
+        # Sanity: the real Docker Hub token service still matches.
+        real_line = (
+            'get "https://auth.docker.io/token'
+            '?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("docker.io/library/postgres:16", real_line) is True
+
+    @pytest.mark.unit
     def test_library_image_token_auth_host_in_url_path_does_not_match(self) -> None:
         """An unqualified Docker Hub library image must NOT match an
         ``auth.docker.io`` token denial whose host is a different registry and
@@ -964,6 +991,33 @@ class TestImageRefMatchesDaemonUrl:
         Regression for CodeQL alert #9."""
         bypass_line = (
             'get "https://evil.example/auth.docker.io/token'
+            '?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("postgres:16", bypass_line) is False
+
+        # Sanity: the real Docker Hub token service still matches.
+        real_line = (
+            'get "https://auth.docker.io/token'
+            '?scope=repository%3alibrary%2fpostgres%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("postgres:16", real_line) is True
+
+    @pytest.mark.unit
+    def test_library_image_token_auth_host_arbitrary_position_does_not_match(self) -> None:
+        """An unqualified Docker Hub library image must NOT match an
+        ``auth.docker.io`` token denial when ``//auth.docker.io/`` appears at an
+        *arbitrary position* in a different registry's URL rather than as the
+        real host.
+
+        A double-slash placement such as
+        ``https://evil.example//auth.docker.io/token`` (real host
+        ``evil.example``) satisfies the bare ``"//auth.docker.io/" in line``
+        boundary check — the ``py/incomplete-url-substring-sanitization`` gap
+        CodeQL re-flagged.  Parsing the URL host with ``urlsplit`` rejects it.
+
+        Regression for PRRT_kwDOSJAM6s6I2gvt."""
+        bypass_line = (
+            'get "https://evil.example//auth.docker.io/token'
             '?scope=repository%3alibrary%2fpostgres%3apull": denied'
         )
         assert _image_ref_matches_daemon_url("postgres:16", bypass_line) is False

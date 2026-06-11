@@ -584,11 +584,14 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
                 f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
             )
         # Docker Hub registry hosts use auth.docker.io as their token service,
-        # not the registry host itself — accept either.  Match on the
-        # "//<host>/" URL boundary (PRRT_kwDOSJAM6s6HtfLR) so a path-only
-        # "auth.docker.io" does not falsely match.
+        # not the registry host itself — accept either.  Parse the URL host for
+        # auth.docker.io (PRRT_kwDOSJAM6s6I2gvt) rather than substring-matching
+        # "//auth.docker.io/": the boundary form still matches an arbitrary-
+        # position occurrence such as "https://evil//auth.docker.io/token"
+        # (real host "evil"), so only an exact urlsplit host comparison rejects
+        # it.
         if _host in _DOCKER_HUB_REGISTRY_HOSTS:
-            return "//auth.docker.io/" in line or f"//{_host}/" in line
+            return _line_url_host_is(line, "auth.docker.io") or f"//{_host}/" in line
         # Use "//<host>/" as the URL-boundary delimiter so a hostname that is a
         # suffix of another host (e.g. "registry.example.com" inside
         # "prod.registry.example.com") does not falsely match.  Token-service
@@ -606,9 +609,12 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
         lib_token_scope = f"scope=repository%3alibrary%2f{repo_path}%3apull"
         unencoded_lib_token_scope = f"scope=repository:library/{repo_path}:pull"
         if lib_token_scope in line or unencoded_lib_token_scope in line:
-            # Boundary-anchored host match ("//auth.docker.io/") so a path-only
-            # "auth.docker.io" does not falsely match (PRRT_kwDOSJAM6s6HtfLR).
-            return "//auth.docker.io/" in line or any(
+            # Parse the URL host for auth.docker.io (PRRT_kwDOSJAM6s6I2gvt)
+            # rather than substring-matching "//auth.docker.io/": the boundary
+            # form still matches an arbitrary-position occurrence such as
+            # "https://evil//auth.docker.io/token" (real host "evil"), so only
+            # an exact urlsplit host comparison rejects it.
+            return _line_url_host_is(line, "auth.docker.io") or any(
                 f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
             )
     return False
