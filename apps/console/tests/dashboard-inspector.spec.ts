@@ -206,6 +206,7 @@ test.describe("Dashboard Workspace Inspector", () => {
       .toBe("ws_mock123");
     await expect(page.getByText("copied", { exact: true })).toBeVisible();
     await expect(page).not.toHaveURL(/workspaceId=ws_mock123/);
+    await expect(page.locator("h2", { hasText: "Mock Workspace" }).first()).not.toBeVisible();
   });
 
   test("Inspector fullscreen logs always use the currently inspected workspace", async ({ page }) => {
