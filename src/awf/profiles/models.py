@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Mapping
 from enum import StrEnum
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
@@ -52,6 +53,16 @@ class EndpointVisibility(StrEnum):
     internal = "internal"
 
 
+# Toolchain declaration bounds (see ``ProfileRuntime.toolchains``). Language keys
+# stay conservative safe identifiers; versions are dotted numeric strings such as
+# ``17``, ``21``, ``1.8`` or ``11.0.2``. Counts are capped so a declaration stays
+# bounded and cannot be used to inflate the schema.
+_TOOLCHAIN_LANGUAGE_PATTERN = re.compile(r"^[a-z][a-z0-9+_.-]*$")
+_TOOLCHAIN_VERSION_PATTERN = re.compile(r"^[0-9]+(\.[0-9]+){0,3}$")
+_MAX_TOOLCHAIN_LANGUAGES = 16
+_MAX_TOOLCHAIN_VERSIONS = 16
+
+
 class ProfileRuntime(BaseModel):
     """Runtime-level settings for the agent container."""
 
@@ -60,6 +71,74 @@ class ProfileRuntime(BaseModel):
     agent_image: str | None = Field(default=None, max_length=512)
     toolchain_image: str | None = Field(default=None, max_length=512)
     environment: dict[str, str] = Field(default_factory=dict)
+    toolchains: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Language toolchains the workspace needs, mapping a language identifier "
+            "to the versions that must be available in the runtime/toolchain image, "
+            'e.g. ``{"java": ["17", "21"]}``. Absent (the default empty mapping) '
+            "means no toolchain requirement is declared. The runtime/toolchain image "
+            "is expected to provide each declared version side by side (selected "
+            "per-command via ``JAVA_HOME``/``update-alternatives``); AWF surfaces a "
+            "``RUNTIME_TOOLCHAIN_UNAVAILABLE`` preflight warning when a declared "
+            "version is missing."
+        ),
+    )
+
+    @field_validator("toolchains", mode="before")
+    @classmethod
+    def _validate_toolchains(cls, value: object) -> object:
+        """Normalize and bound the toolchain declaration.
+
+        Lowercases language keys, validates each against a conservative identifier
+        pattern, requires a non-empty list of dotted-numeric versions per language,
+        de-duplicates versions while preserving declaration order, and caps the
+        number of languages/versions. An absent or empty declaration is a no-op.
+        """
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("runtime.toolchains must be a mapping of language to versions")
+        if len(value) > _MAX_TOOLCHAIN_LANGUAGES:
+            raise ValueError(
+                f"runtime.toolchains declares too many languages (max {_MAX_TOOLCHAIN_LANGUAGES})"
+            )
+        normalized: dict[str, list[str]] = {}
+        for raw_language, raw_versions in value.items():
+            if not isinstance(raw_language, str):
+                raise ValueError("runtime.toolchains language keys must be strings")
+            language = raw_language.strip().lower()
+            if not _TOOLCHAIN_LANGUAGE_PATTERN.fullmatch(language):
+                raise ValueError(f"invalid toolchain language identifier: {raw_language!r}")
+            if language in normalized:
+                raise ValueError(f"duplicate toolchain language: {language}")
+            if isinstance(raw_versions, str) or not isinstance(raw_versions, (list, tuple)):
+                raise ValueError(
+                    f"runtime.toolchains[{language!r}] must be a non-empty list of version strings"
+                )
+            if not raw_versions:
+                raise ValueError(
+                    f"runtime.toolchains[{language!r}] must declare at least one version"
+                )
+            if len(raw_versions) > _MAX_TOOLCHAIN_VERSIONS:
+                raise ValueError(
+                    f"runtime.toolchains[{language!r}] declares too many versions "
+                    f"(max {_MAX_TOOLCHAIN_VERSIONS})"
+                )
+            versions: list[str] = []
+            seen: set[str] = set()
+            for raw_version in raw_versions:
+                if not isinstance(raw_version, str):
+                    raise ValueError(f"runtime.toolchains[{language!r}] versions must be strings")
+                version = raw_version.strip()
+                if not _TOOLCHAIN_VERSION_PATTERN.fullmatch(version):
+                    raise ValueError(f"invalid toolchain version for {language!r}: {raw_version!r}")
+                if version in seen:
+                    continue
+                versions.append(version)
+                seen.add(version)
+            normalized[language] = versions
+        return normalized
 
 
 class ProfileDocker(BaseModel):
@@ -874,6 +953,52 @@ def normalize_inline_profile_snapshot(
 
 def _normalized_endpoint_env_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").upper()
+
+
+# Reason code emitted when a profile declares a language toolchain version that the
+# runtime/toolchain image does not provide. Profile-lint reason codes are free-form
+# strings consumed by preflight/console, not part of the generated doctor catalog.
+RUNTIME_TOOLCHAIN_UNAVAILABLE = "RUNTIME_TOOLCHAIN_UNAVAILABLE"
+
+
+def runtime_toolchain_findings(
+    profile: WorkspaceProfile,
+    available: Mapping[str, set[str]] | None,
+) -> tuple[ProfileLintFinding, ...]:
+    """Warn about declared language toolchains missing from the runtime image.
+
+    Pure, I/O-free seam for a (sibling-owned) preflight: ``available`` maps each
+    language to the set of versions actually discovered in the runtime/toolchain
+    image. ``available is None`` means the image contents are unknown, so this layer
+    stays silent (it never fails resolution on unknown availability). For every
+    declared ``(language, version)`` absent from ``available`` — including a language
+    not present at all — a ``warning``-severity :class:`ProfileLintFinding` carrying
+    the ``RUNTIME_TOOLCHAIN_UNAVAILABLE`` reason code is returned.
+    """
+    if available is None:
+        return ()
+    findings: list[ProfileLintFinding] = []
+    for language, versions in profile.runtime.toolchains.items():
+        available_versions = available.get(language, set())
+        for version in versions:
+            if version in available_versions:
+                continue
+            findings.append(
+                ProfileLintFinding(
+                    reason_code=RUNTIME_TOOLCHAIN_UNAVAILABLE,
+                    message=(
+                        f"runtime image does not provide {language} toolchain version {version}"
+                    ),
+                    path=f"runtime.toolchains.{language}",
+                    severity=ProfileLintSeverity.warning,
+                    details={
+                        "language": language,
+                        "version": version,
+                        "available_versions": sorted(available_versions),
+                    },
+                )
+            )
+    return tuple(findings)
 
 
 class ProfileResolution(BaseModel):

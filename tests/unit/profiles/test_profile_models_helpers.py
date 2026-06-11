@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from awf.profiles.models import (
     ProfileAppEndpoint,
     ProfileAppEndpointHealth,
     ProfileHealthCheck,
+    ProfileRuntime,
     normalize_inline_profile_snapshot,
 )
 
@@ -48,6 +50,108 @@ def test_app_endpoint_normalizes_scheme_to_lowercase() -> None:
     endpoint = ProfileAppEndpoint(name="web", service="app", port=8080, scheme="HTTPS")
 
     assert endpoint.scheme == "https"
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_absent_defaults_to_empty_no_behavior_change() -> None:
+    """An absent toolchains declaration is a no-op: the runtime keeps its prior shape."""
+    runtime = ProfileRuntime()
+
+    assert runtime.toolchains == {}
+    # Round-trips through dump/validate without gaining the field as anything but {}.
+    assert ProfileRuntime.model_validate(runtime.model_dump()).toolchains == {}
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_explicit_none_is_treated_as_empty() -> None:
+    """An explicit ``toolchains: null`` (e.g. an empty YAML key) means no requirement."""
+    runtime = ProfileRuntime.model_validate({"toolchains": None})
+
+    assert runtime.toolchains == {}
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_rejects_non_string_language_key() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": {17: ["17"]}})
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_normalizes_lowercases_and_dedupes_preserving_order() -> None:
+    runtime = ProfileRuntime.model_validate({"toolchains": {"Java": ["17", "21", "17"]}})
+
+    assert runtime.toolchains == {"java": ["17", "21"]}
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_accepts_dotted_numeric_versions() -> None:
+    runtime = ProfileRuntime.model_validate({"toolchains": {"java": ["1.8", "11.0.2"]}})
+
+    assert runtime.toolchains == {"java": ["1.8", "11.0.2"]}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_version", ["17a", "", "  ", "v17", "17.", ".17"])
+def test_runtime_toolchains_rejects_malformed_version(bad_version: str) -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": {"java": [bad_version]}})
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_rejects_empty_version_list() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": {"java": []}})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad_language", ["", "  ", "17java", "java lang", "Java!"])
+def test_runtime_toolchains_rejects_blank_or_invalid_language(bad_language: str) -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": {bad_language: ["17"]}})
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_rejects_non_mapping() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": ["java"]})
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_rejects_non_list_versions() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": {"java": "17"}})
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_rejects_non_string_version_entry() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": {"java": [17]}})
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_rejects_too_many_languages() -> None:
+    too_many = {f"lang{i}": ["1"] for i in range(17)}
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": too_many})
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_rejects_too_many_versions() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": {"java": [str(i) for i in range(17)]}})
+
+
+@pytest.mark.unit
+def test_runtime_toolchains_rejects_duplicate_language_after_lowercasing() -> None:
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"toolchains": {"Java": ["17"], "java": ["21"]}})
+
+
+@pytest.mark.unit
+def test_runtime_extra_keys_still_forbidden() -> None:
+    """Regression: adding ``toolchains`` must not loosen ``extra='forbid'``."""
+    with pytest.raises(ValidationError):
+        ProfileRuntime.model_validate({"unknown_runtime_key": "value"})
 
 
 @pytest.mark.unit
