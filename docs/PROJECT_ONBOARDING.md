@@ -122,7 +122,7 @@ Keep secrets as profile declarations or `${VAR}` placeholders; never write raw s
 ```text
 Use `opencode run` to inspect this repository for AWF onboarding. Do not launch a workspace yet.
 
-1. Detect the forge from `git remote -v` and configure only the matching auth (see "Forge authentication" above): GitHub (github.com) needs `gh`; BitBucket (bitbucket.org) needs `BITBUCKET_API_TOKEN` + `BITBUCKET_EMAIL` + `BITBUCKET_AUTH_MODE` in `.env` and no `gh`.
+1. Detect the forge from `git remote -v` and configure only the matching auth (see "Forge authentication" above): GitHub (github.com) needs `gh`; Bitbucket (bitbucket.org) needs `BITBUCKET_API_TOKEN` + `BITBUCKET_EMAIL` + `BITBUCKET_AUTH_MODE` in `.env` and no `gh`.
 2. Run `awf init . --write-profile --yes` to inspect the repo and write `.awf/workspace.yml`.
 3. Run `awf profile preview .` to preview the resolved profile.
 4. Run `awf init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
