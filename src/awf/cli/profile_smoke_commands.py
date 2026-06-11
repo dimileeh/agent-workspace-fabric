@@ -69,6 +69,8 @@ def profile_doctor(
     agent run, no PR, no workspace creation. Use it before onboarding to catch
     profile/runtime gaps (notably ``SECRET_LEASE_SOURCE_MISSING``).
     """
+    import os
+
     from awf.common.git_remote import detect_repo_url_from_checkout
     from awf.service.config import resolve_service_settings
     from awf.service.profile_doctor import collect_profile_doctor_report
@@ -80,10 +82,22 @@ def profile_doctor(
     # shell's HOME, falling back to Path.home() would check the wrong directory
     # and produce false passes/failures despite advertising the worker's context.
     settings = resolve_service_settings()
+    # Probe secret leases against the SAME effective env the worker uses. The
+    # worker exports settings.github_token into GH_TOKEN/GITHUB_TOKEN before
+    # constructing its LocalSecretLeaseMountResolver (build_worker_runtime ->
+    # _service_git_environment + _apply_service_git_environment). When the token
+    # lives in service settings / .env but is not exported in the current shell,
+    # forwarding raw os.environ would falsely report a provider: github lease as
+    # SECRET_LEASE_SOURCE_MISSING even though provisioning succeeds.
+    host_env = dict(os.environ)
+    if settings.github_token:
+        host_env["GH_TOKEN"] = settings.github_token
+        host_env["GITHUB_TOKEN"] = settings.github_token
     report = collect_profile_doctor_report(
         resolved,
         repo_url=detect_repo_url_from_checkout(resolved),
         host_home=Path(settings.host_home).expanduser().resolve(),
+        host_env=host_env,
     )
     if fmt == OutputFormat.pretty:
         _emit_profile_doctor_pretty(report)

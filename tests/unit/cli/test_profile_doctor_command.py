@@ -146,13 +146,93 @@ def test_doctor_probes_worker_host_home_not_process_home(
     host_home.mkdir()
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
-        lambda: types.SimpleNamespace(host_home=str(host_home)),
+        lambda: types.SimpleNamespace(host_home=str(host_home), github_token=None),
     )
 
     result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
 
     assert result.exit_code == 0
     assert captured["host_home"] == host_home.expanduser().resolve()
+
+
+def test_doctor_forwards_service_github_token_to_host_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The doctor must probe leases with the worker's effective token env.
+
+    ``build_worker_runtime`` exports ``settings.github_token`` into
+    ``GH_TOKEN``/``GITHUB_TOKEN`` before constructing its secret-lease resolver.
+    When the token lives in service settings / .env but is not exported in the
+    current shell, the CLI must forward it via ``host_env`` so a ``provider:
+    github`` lease provisioning would satisfy is not falsely reported as
+    ``SECRET_LEASE_SOURCE_MISSING``.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(host_home=str(tmp_path), github_token="ghp_doctor"),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    assert host_env["GH_TOKEN"] == "ghp_doctor"
+    assert host_env["GITHUB_TOKEN"] == "ghp_doctor"
+
+
+def test_doctor_host_env_omits_token_when_settings_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No service token => the doctor forwards the shell env unchanged.
+
+    A ``None`` ``settings.github_token`` must not inject empty GH_TOKEN/GITHUB_TOKEN
+    keys, which would otherwise mask a genuinely missing token source.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(host_home=str(tmp_path), github_token=None),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    assert "GH_TOKEN" not in host_env
+    assert "GITHUB_TOKEN" not in host_env
 
 
 def test_doctor_appears_in_profile_help() -> None:
