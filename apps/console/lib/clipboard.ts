@@ -82,29 +82,34 @@ function legacyCopyText(text: string): boolean {
   const previouslyFocused = document.activeElement;
 
   document.body.appendChild(textarea);
-  // `preventScroll` stops the browser from scrolling/jumping to the textarea on
-  // focus, which can happen even for a `position: fixed` element.
-  textarea.focus({ preventScroll: true });
-  textarea.select();
-
   let copied = false;
   try {
-    copied = document.execCommand("copy");
-  } catch {
-    copied = false;
-  }
+    // `preventScroll` stops the browser from scrolling/jumping to the textarea on
+    // focus, which can happen even for a `position: fixed` element.
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      copied = false;
+    }
+  } finally {
+    // `focus`/`select` can throw (e.g. a sandboxed iframe that blocks focus);
+    // the `finally` guarantees the transient textarea is removed and the user's
+    // selection/focus is restored even on that path, so we never strand an
+    // invisible 1×1 element in the DOM.
+    textarea.remove();
 
-  textarea.remove();
+    if (selection && previousRange) {
+      selection.removeAllRanges();
+      selection.addRange(previousRange);
+    }
 
-  if (selection && previousRange) {
-    selection.removeAllRanges();
-    selection.addRange(previousRange);
-  }
-
-  // Restore focus to the triggering element. `preventScroll` keeps this from
-  // jumping the viewport, mirroring the textarea focus above.
-  if (previouslyFocused && typeof (previouslyFocused as HTMLElement).focus === "function") {
-    (previouslyFocused as HTMLElement).focus({ preventScroll: true });
+    // Restore focus to the triggering element. `preventScroll` keeps this from
+    // jumping the viewport, mirroring the textarea focus above.
+    if (previouslyFocused && typeof (previouslyFocused as HTMLElement).focus === "function") {
+      (previouslyFocused as HTMLElement).focus({ preventScroll: true });
+    }
   }
 
   return copied;

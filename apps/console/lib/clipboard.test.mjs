@@ -18,7 +18,12 @@ function setGlobal(name, value) {
   };
 }
 
-function makeFakeDocument({ execResult = true, throwOnExec = false, withSelection = false } = {}) {
+function makeFakeDocument({
+  execResult = true,
+  throwOnExec = false,
+  throwOnFocus = false,
+  withSelection = false,
+} = {}) {
   const appended = [];
   const removed = [];
   const execCalls = [];
@@ -30,6 +35,7 @@ function makeFakeDocument({ execResult = true, throwOnExec = false, withSelectio
     setAttribute() {},
     focus(options) {
       focusOptions.push(options);
+      if (throwOnFocus) throw new Error("focus blocked");
     },
     select() {},
     remove() {
@@ -230,6 +236,27 @@ test("resolves to false (never rejects) when a legacy DOM op throws", async () =
   const restoreDoc = setGlobal("document", doc);
   try {
     assert.equal(await copyTextToClipboard("ws_dom_throw"), false);
+  } finally {
+    restoreDoc();
+    restoreNav();
+  }
+});
+
+test("cleans up the textarea and restores selection/focus when focus() throws", async () => {
+  const restoreNav = setGlobal("navigator", {});
+  const { doc, removed, restoredRanges, range, triggerFocusOptions } = makeFakeDocument({
+    throwOnFocus: true,
+    withSelection: true,
+  });
+  const restoreDoc = setGlobal("document", doc);
+  try {
+    // A sandboxed iframe that blocks focus makes textarea.focus() throw before
+    // execCommand runs; the finally block must still tear down the textarea and
+    // restore the user's selection/focus rather than stranding a 1x1 element.
+    assert.equal(await copyTextToClipboard("ws_focus_throw"), false);
+    assert.equal(removed.length, 1, "textarea is removed even when focus throws");
+    assert.deepEqual(restoredRanges, [range], "the displaced selection is restored");
+    assert.deepEqual(triggerFocusOptions, [{ preventScroll: true }], "focus is handed back");
   } finally {
     restoreDoc();
     restoreNav();
