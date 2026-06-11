@@ -11,6 +11,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default GITHUB_TOKEN scope for every job. No ci.yml job pushes
+# packages/images (image builds use ``push: false``), creates releases, comments
+# on PRs, or writes statuses; ``actions/upload-artifact`` uses the per-run Actions
+# artifact service (not the ``contents`` scope). So read-only contents — the
+# minimum for ``actions/checkout`` — is sufficient and strictly least-privilege.
+# Resolves CodeQL ``actions/missing-workflow-permissions``.
+permissions:
+  contents: read
+
 jobs:
   lint-and-type:
     runs-on: ubuntu-latest

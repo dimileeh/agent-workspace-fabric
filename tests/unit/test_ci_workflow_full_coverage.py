@@ -521,6 +521,71 @@ def test_ci_workflow_checkouts_disable_persisted_credentials(job_name: str) -> N
         )
 
 
+_EXPECTED_CI_JOBS = frozenset(
+    {
+        "lint-and-type",
+        "python-coverage-shards",
+        "python-full-coverage",
+        "console",
+        "release-artifacts",
+        "ci-required",
+    }
+)
+_VALID_PERMISSION_VALUES = frozenset({"read", "write", "none"})
+# Job-level scopes that may be granted ``write`` (currently none — the entire
+# workflow is least-privilege read-only). A future job that genuinely needs a
+# broader scope must be added here deliberately, which is the point of the gate.
+_CONTENTS_WRITE_WHITELIST: frozenset[str] = frozenset()
+
+
+@pytest.mark.unit
+def test_ci_workflow_jobs_have_least_privilege_permissions() -> None:
+    """Every ci.yml job is covered by an explicit least-privilege ``permissions:`` block.
+
+    Resolves CodeQL ``actions/missing-workflow-permissions`` (alerts #1–#6): with
+    no ``permissions:`` block the default GITHUB_TOKEN scope is broad. The fix is a
+    single workflow-level ``contents: read`` default; this guard asserts that
+    default exists, that no job silently broadens it, and that a future job added
+    without coverage (no workflow default + no job-level block) fails here.
+    """
+    workflow = _workflow()
+
+    # 1. Workflow-level default is read-only (PyYAML loads ``read`` as a string).
+    assert workflow.get("permissions") == {"contents": "read"}
+
+    jobs = workflow.get("jobs", {})
+    assert isinstance(jobs, dict)
+
+    # The known six jobs must all still be present so the covered set can't shrink
+    # unnoticed, and drive coverage off the *live* job keys so a newly added job is
+    # also checked.
+    assert _EXPECTED_CI_JOBS.issubset(jobs.keys())
+
+    for name, job in jobs.items():
+        assert isinstance(job, dict), name
+        job_permissions = job.get("permissions")
+
+        # 2. Every job is covered by an explicit permissions block: either its own
+        #    job-level mapping or the workflow-level default above.
+        assert job_permissions is not None or "permissions" in workflow, (
+            f"job {name!r} has no permissions coverage (no job-level block and no "
+            "workflow-level default)"
+        )
+
+        # 3. No job over-grants. Any job-level block must be a scope->level mapping
+        #    and may not grant contents: write unless explicitly whitelisted.
+        if job_permissions is not None:
+            assert isinstance(job_permissions, dict), name
+            for scope, level in job_permissions.items():
+                assert level in _VALID_PERMISSION_VALUES, (
+                    f"job {name!r} grants invalid permission {scope}={level!r}"
+                )
+                if scope == "contents" and level == "write":
+                    assert name in _CONTENTS_WRITE_WHITELIST, (
+                        f"job {name!r} over-grants contents: write"
+                    )
+
+
 @pytest.mark.unit
 def test_contributor_docs_require_ci_rollup_status_check() -> None:
     docs = CONTRIBUTING_PATH.read_text(encoding="utf-8")
