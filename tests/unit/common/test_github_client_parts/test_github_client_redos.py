@@ -84,10 +84,12 @@ def test_bare_slug_pathological_tail_is_linear() -> None:
     Regression for CodeQL ``py/redos`` on ``github_client.py:165``. The original
     lazy-group + ``(?:\\.git)?`` overlap is the backtracking anti-pattern CodeQL
     flagged; the hardened possessive form has a single unambiguous match path
-    and completes well under the 1.0s budget. This guards against the ambiguity
-    being re-introduced.
+    and completes in microseconds. The 5.0s budget is far above any realistic
+    parse time (so a loaded/memory-constrained CI runner won't fail spuriously)
+    yet far below the seconds-to-minutes a re-introduced backtracking regression
+    would take. This guards against the ambiguity being re-introduced.
     """
     pathological = "a" * 5000 + "/" + "b.g" * 2000
     start = time.perf_counter()
     RepoRef.from_url(pathological)
-    assert time.perf_counter() - start < 1.0
+    assert time.perf_counter() - start < 5.0

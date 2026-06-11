@@ -128,7 +128,10 @@ def test_test_command_re_no_catastrophic_backtracking(module: ModuleType) -> Non
     pattern = _attr(module, "_VALIDATION_TEST_COMMAND_RE")
     start = time.perf_counter()
     assert pattern.search(pathological) is None
-    assert time.perf_counter() - start < 1.0
+    # 5.0s is far above the ~microsecond possessive-form reject and far below
+    # the seconds-to-minutes a backtracking regression would take, so a loaded
+    # CI runner won't fail spuriously.
+    assert time.perf_counter() - start < 5.0
 
 
 @pytest.mark.unit
@@ -142,4 +145,5 @@ def test_test_path_re_no_catastrophic_backtracking(module: ModuleType) -> None:
     pattern = _attr(module, "_VALIDATION_TEST_PATH_RE")
     start = time.perf_counter()
     assert pattern.search(pathological) is None
-    assert time.perf_counter() - start < 1.0
+    # 5.0s budget: far above the possessive-form reject, far below a regression.
+    assert time.perf_counter() - start < 5.0

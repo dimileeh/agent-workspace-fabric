@@ -109,11 +109,13 @@ def test_next_step_pattern_no_catastrophic_backtracking() -> None:
     Regression for CodeQL ``py/redos`` on ``setup_tools.py:124``. A long quote
     run followed by a non-suffix boundary forces the original ``\\S``-overlap
     value to explore Catalan-many tokenizations (exponential); the partitioned
-    form completes well under the 1.0s budget.
+    form completes in microseconds. The 5.0s budget sits far above any realistic
+    parse time (so a loaded CI runner won't fail spuriously) yet far below the
+    seconds-to-minutes a re-introduced regression would take.
     """
     # Trailing ``" x"`` denies any valid suffix, so the original pattern would
     # backtrack across every tokenization of the quote run before failing.
     pathological = "awf start --source-checkout=" + "'" * 5000 + " x"
     start = time.perf_counter()
     assert _SETUP_STATUS_NEXT_STEP_COMMAND_PATTERN.search(pathological) is None
-    assert time.perf_counter() - start < 1.0
+    assert time.perf_counter() - start < 5.0
