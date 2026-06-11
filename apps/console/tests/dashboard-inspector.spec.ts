@@ -180,6 +180,35 @@ test.describe("Dashboard Workspace Inspector", () => {
     await expect(page.getByText("copied", { exact: true })).not.toBeVisible({ timeout: 2500 });
   });
 
+  test("Workspace id copies via execCommand fallback when the Clipboard API is unavailable (HTTP/Tailscale)", async ({ page }) => {
+    // Simulate a non-secure context (plain HTTP via a Tailscale address): no async
+    // Clipboard API, so the helper must fall back to document.execCommand("copy").
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+      document.execCommand = ((command: string) => {
+        if (command === "copy") {
+          const active = document.activeElement as HTMLTextAreaElement | null;
+          (window as typeof window & { __copiedViaExec?: string }).__copiedViaExec = active?.value;
+          return true;
+        }
+        return false;
+      }) as typeof document.execCommand;
+    });
+
+    await page.goto("/");
+
+    const copyId = page.getByLabel("Copy workspace id ws_mock123");
+    await expect(copyId).toBeVisible();
+    await copyId.click();
+
+    await expect
+      .poll(() => page.evaluate(() => (window as typeof window & { __copiedViaExec?: string }).__copiedViaExec))
+      .toBe("ws_mock123");
+    await expect(page.getByText("copied", { exact: true })).toBeVisible();
+    await expect(page).not.toHaveURL(/workspaceId=ws_mock123/);
+    await expect(page.locator("h2", { hasText: "Mock Workspace" }).first()).not.toBeVisible();
+  });
+
   test("Inspector fullscreen logs always use the currently inspected workspace", async ({ page }) => {
     await page.goto("/");
 

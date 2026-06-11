@@ -10,8 +10,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to the repo root: these are Python build/packaging output dirs. Without
+# the leading slash, the bare `lib/` also matched apps/console/lib (the Next.js
+# console's source modules), silently ignoring new files there — anchor to root.
+/lib/
+/lib64/
 parts/
 sdist/
 var/

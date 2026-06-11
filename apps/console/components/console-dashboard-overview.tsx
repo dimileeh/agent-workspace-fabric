@@ -35,6 +35,7 @@ useState
 } from "react";
 
 import { formatAgentLabel,formatAgentTitle } from "@/lib/agent-format";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { summarizeVisibleCoordinationWarnings } from "@/lib/coordination-format";
 import {
 compactId,
@@ -626,26 +627,33 @@ export function WorkspaceList({
   const copyWorkspaceId = async (event: SyntheticEvent<HTMLElement>, workspaceId: string) => {
     event.preventDefault();
     event.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(workspaceId);
-      setCopiedWorkspaceId(workspaceId);
-      setCopyToastVisible(true);
-      if (copyFadeTimeoutRef.current !== null) {
-        clearTimeout(copyFadeTimeoutRef.current);
-      }
-      if (copyClearTimeoutRef.current !== null) {
-        clearTimeout(copyClearTimeoutRef.current);
-      }
-      copyFadeTimeoutRef.current = setTimeout(() => {
-        setCopyToastVisible(false);
-      }, 1000);
-      copyClearTimeoutRef.current = setTimeout(() => {
-        setCopiedWorkspaceId((current) => (current === workspaceId ? null : current));
-      }, 1400);
-    } catch {
+    // Clear any pending timers upfront so every copy attempt starts from a clean
+    // state — otherwise stale timers from a prior successful copy could fire during
+    // the await or after a failed attempt and unexpectedly mutate the toast state.
+    if (copyFadeTimeoutRef.current !== null) {
+      clearTimeout(copyFadeTimeoutRef.current);
+      copyFadeTimeoutRef.current = null;
+    }
+    if (copyClearTimeoutRef.current !== null) {
+      clearTimeout(copyClearTimeoutRef.current);
+      copyClearTimeoutRef.current = null;
+    }
+    // Use the fallback-aware helper: navigator.clipboard is unavailable over plain
+    // HTTP (e.g. a Tailscale address), so it falls back to execCommand there.
+    const copied = await copyTextToClipboard(workspaceId);
+    if (!copied) {
       setCopiedWorkspaceId(null);
       setCopyToastVisible(false);
+      return;
     }
+    setCopiedWorkspaceId(workspaceId);
+    setCopyToastVisible(true);
+    copyFadeTimeoutRef.current = setTimeout(() => {
+      setCopyToastVisible(false);
+    }, 1000);
+    copyClearTimeoutRef.current = setTimeout(() => {
+      setCopiedWorkspaceId((current) => (current === workspaceId ? null : current));
+    }, 1400);
   };
 
   if (items.length === 0) {
