@@ -10,8 +10,11 @@ Install:
 - `uv`.
 - Docker Desktop or Docker Engine with Compose plugin.
 - Git.
-- GitHub CLI `gh`.
-- A GitHub account with access to the target repo.
+- Forge access for the target repo — choose the one that matches your repo's host:
+  - **GitHub:** the GitHub CLI `gh`, plus a GitHub account with access to the
+    target repo.
+  - **Bitbucket:** `BITBUCKET_API_TOKEN`, `BITBUCKET_EMAIL`, and
+    `BITBUCKET_AUTH_MODE` (e.g. `basic`) set in `.env` — no `gh` required.
 - SSH key or Git credentials that can clone and push the repo.
 - At least one coding-agent credential:
   - Codex CLI auth in `~/.codex`, or OpenAI auth environment as supported by
@@ -21,11 +24,16 @@ Install:
   - Gemini auth in `~/.gemini` or Google/Gemini env vars.
   - OpenCode via Ollama auth/state in `~/.config/opencode` and `~/.ollama`.
 
-Verify GitHub CLI:
+Verify forge access (run the check that matches your repo's host):
 
-```bash
-gh auth status
-```
+- **GitHub:**
+
+  ```bash
+  gh auth status
+  ```
+
+- **Bitbucket:** confirm `BITBUCKET_API_TOKEN`, `BITBUCKET_EMAIL`, and
+  `BITBUCKET_AUTH_MODE` are present in `.env` (no `gh` needed).
 
 Verify Docker:
 

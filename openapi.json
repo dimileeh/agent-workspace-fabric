@@ -3146,6 +3146,17 @@
               }
             ],
             "title": "Toolchain Image"
+          },
+          "toolchains": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": "Language toolchains the workspace needs, mapping a language identifier to the versions that must be available in the runtime/toolchain image, e.g. ``{\"java\": [\"17\", \"21\"]}``. Absent (the default empty mapping) means no toolchain requirement is declared. The runtime/toolchain image is expected to provide each declared version side by side (selected per-command via ``JAVA_HOME``/``update-alternatives``); AWF surfaces a ``RUNTIME_TOOLCHAIN_UNAVAILABLE`` preflight warning when a declared version is missing.",
+            "title": "Toolchains",
+            "type": "object"
           }
         },
         "title": "ProfileRuntime",
