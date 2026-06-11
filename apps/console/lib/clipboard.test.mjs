@@ -168,6 +168,25 @@ test("returns false when document.body is not yet available (early load / SSR)",
   }
 });
 
+test("resolves to false (never rejects) when a legacy DOM op throws", async () => {
+  const restoreNav = setGlobal("navigator", {});
+  const { doc } = makeFakeDocument({ execResult: true });
+  // appendChild raising is one of several legacy DOM ops outside execCommand's
+  // own try/catch; the helper must still resolve to a boolean, not reject.
+  doc.body = {
+    appendChild() {
+      throw new Error("appendChild failed");
+    },
+  };
+  const restoreDoc = setGlobal("document", doc);
+  try {
+    assert.equal(await copyTextToClipboard("ws_dom_throw"), false);
+  } finally {
+    restoreDoc();
+    restoreNav();
+  }
+});
+
 test("returns false when neither the clipboard API nor document is available", async () => {
   const restoreNav = setGlobal("navigator", {});
   const restoreDoc = setGlobal("document", undefined);

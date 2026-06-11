@@ -28,7 +28,16 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
       // legacy path rather than reporting failure outright.
     }
   }
-  return legacyCopyText(text);
+  // `legacyCopyText` guards its own `execCommand` call, but the surrounding DOM
+  // operations (createElement/appendChild/focus/selection restore) can still
+  // throw. Catch here so this async function always resolves to a boolean rather
+  // than rejecting and leaving the caller's success gate with an unhandled
+  // rejection.
+  try {
+    return legacyCopyText(text);
+  } catch {
+    return false;
+  }
 }
 
 /**
