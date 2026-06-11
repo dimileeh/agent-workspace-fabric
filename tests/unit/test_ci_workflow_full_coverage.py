@@ -547,8 +547,11 @@ def test_ci_workflow_jobs_have_least_privilege_permissions() -> None:
     Resolves CodeQL ``actions/missing-workflow-permissions`` (alerts #1–#6): with
     no ``permissions:`` block the default GITHUB_TOKEN scope is broad. The fix is a
     single workflow-level ``contents: read`` default; this guard asserts that
-    default exists, that no job silently broadens it, and that a future job added
-    without coverage (no workflow default + no job-level block) fails here.
+    default exists and that no job silently broadens it. Assertion #1 is the gate
+    that covers every job — including any future job — because the workflow-level
+    default applies to all jobs that lack their own block. Assertion #2 then encodes
+    the coverage invariant explicitly (job-level block *or* workflow default) so the
+    check still holds if coverage is ever moved from the default to per-job blocks.
     """
     workflow = _workflow()
 
@@ -568,7 +571,10 @@ def test_ci_workflow_jobs_have_least_privilege_permissions() -> None:
         job_permissions = job.get("permissions")
 
         # 2. Every job is covered by an explicit permissions block: either its own
-        #    job-level mapping or the workflow-level default above.
+        #    job-level mapping or the workflow-level default. Given assertion #1 pins
+        #    that default, the RHS holds today and #1 is the real gate; this encodes
+        #    the coverage invariant so it still bites if coverage ever moves to
+        #    per-job blocks (default dropped + a job missing its own block).
         assert job_permissions is not None or "permissions" in workflow, (
             f"job {name!r} has no permissions coverage (no job-level block and no "
             "workflow-level default)"
