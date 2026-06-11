@@ -153,6 +153,7 @@ class WorkspaceRepository:
         idempotency_key: str | None = None,
         task_kind: str = "feature_branch_pr",
         remote_push_branch: str | None = None,
+        task_tag: str | None = None,
         workspace_id: str | None = None,
     ) -> Workspace:
         """Create a new workspace in ``requested`` status and emit a creation event.
@@ -167,6 +168,7 @@ class WorkspaceRepository:
             repo_url=repo_url,
             branch_base=branch_base,
             remote_push_branch=remote_push_branch,
+            task_tag=task_tag,
             task_title=task_title,
             task_prompt=task_prompt,
             task_external_id=task_external_id,
@@ -222,6 +224,7 @@ class WorkspaceRepository:
             task_title=source.task_title,
             task_prompt=source.task_prompt if task_prompt is None else task_prompt,
             task_external_id=source.task_external_id,
+            task_tag=source.task_tag,
             task_class=source.task_class,
             owned_paths=list(source.owned_paths),
             task_policy=deepcopy(

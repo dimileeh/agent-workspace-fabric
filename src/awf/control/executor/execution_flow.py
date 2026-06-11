@@ -30,6 +30,7 @@ from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
 )
+from awf.common.task_tag import commit_message_with_task_tag, title_with_task_tag
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
@@ -728,7 +729,7 @@ async def execute(
                         message=quality_gate_violation_message(violations)[:2000],
                     )
                     return
-                commit_msg = f"awf: {ws.task_title}"[:72]
+                commit_msg = commit_message_with_task_tag(f"awf: {ws.task_title}", ws.task_tag)[:72]
                 commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
 
                 async def _run_commit() -> CommandResult:
@@ -1202,7 +1203,7 @@ async def execute(
     ):
         return
 
-    pr_title = ws.task_title
+    pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, defaults=defaults)
     push_branch_name = ws.branch_name or f"awf/{workspace_id}"
     existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None

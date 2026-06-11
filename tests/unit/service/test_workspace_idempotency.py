@@ -645,6 +645,53 @@ async def test_create_replay_conflicts_when_agent_effort_changes(
 
 
 @pytest.mark.unit
+async def test_create_persists_task_tag_and_replay_conflicts_when_it_changes(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A task tag is persisted on the workspace, and a replay with a different
+    tag conflicts instead of silently reusing the existing row."""
+    service = WorkspaceService(factory)
+    idempotency_key = "service-create-v2-task-tag"
+    request_payload = _v2_request().model_dump(mode="python")
+    request_payload["task"]["task_tag"] = "PROJ-123"
+    request = WorkspaceCreateRequest.model_validate(request_payload)
+
+    created = await service.create(request, idempotency_key=idempotency_key)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        assert workspace.task_tag == "PROJ-123"
+
+    replayed = await service.create(request, idempotency_key=idempotency_key)
+    assert replayed.id == created.id
+
+    request_payload["task"]["task_tag"] = "PROJ-999"
+    request_with_other_tag = WorkspaceCreateRequest.model_validate(request_payload)
+    with pytest.raises(WorkspaceCreateIdempotencyConflictError):
+        await service.create(request_with_other_tag, idempotency_key=idempotency_key)
+
+
+@pytest.mark.unit
+async def test_create_payload_match_treats_legacy_null_task_tag_as_absent(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pre-migration row (NULL task_tag) replay-matches an untagged request."""
+    request = _v2_request()
+    created = await WorkspaceService(factory).create(
+        request,
+        idempotency_key="service-create-v2-legacy-null-task-tag",
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        assert workspace.task_tag is None
+        workspace.status = "running"
+
+        assert workspaces.workspace_create_payload_matches(workspace, request)
+
+
+@pytest.mark.unit
 async def test_create_release_sync_replay_matches_despite_forced_auto_merge_off(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

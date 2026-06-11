@@ -132,6 +132,41 @@ class TestWorkspaceAdoptPr:
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
 
     @pytest.mark.unit
+    def test_task_tag_is_injected_and_validated(self) -> None:
+        """A valid --task-tag populates the adoption body; malformed values fail locally."""
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--pr-url",
+                    "https://github.com/dimileeh/aira-web/pull/277",
+                    "--task-tag",
+                    "PROJ-123",
+                ],
+            )
+        assert result.exit_code == 0
+        assert mock.call_args.kwargs["json"]["task_tag"] == "PROJ-123"
+
+        with patch("awf.cli.main.httpx.request") as mock_bad:
+            bad = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--pr-url",
+                    "https://github.com/dimileeh/aira-web/pull/277",
+                    "--task-tag",
+                    "bad-tag",
+                ],
+            )
+        assert bad.exit_code != 0
+        assert "task tag" in bad.output
+        mock_bad.assert_not_called()
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("base_url",),
         (

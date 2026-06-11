@@ -22,6 +22,7 @@ from awf.cli.common import (
 )
 from awf.cli.companion_env import merge_companion_env
 from awf.cli.env_file import parse_env_exclude_arg, parse_env_from_arg
+from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
     AgentRuntime,
     OperationStatus,
@@ -51,11 +52,28 @@ def _option_value(value: Any) -> str:
     return str(enum_value if enum_value is not None else value)
 
 
+def _task_tag_callback(value: str | None) -> str | None:
+    """Validate ``--task-tag`` locally; reject malformed Jira keys with a clear error."""
+    try:
+        return validate_task_tag(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+
 @workspace_app.command("create")
 def workspace_create(
     repo_url: str = typer.Option(..., "--repo", help="Git URL."),
     task_title: str = typer.Option(..., "--title"),
     task_prompt: str = typer.Option(..., "--prompt"),
+    task_tag: str | None = typer.Option(
+        None,
+        "--task-tag",
+        callback=_task_tag_callback,
+        help=(
+            "Optional Jira issue key (e.g. PROJ-123) prepended to the branch, PR "
+            "title, and every AWF-authored commit message so work links to the issue."
+        ),
+    ),
     branch_base: str | None = typer.Option(
         None,
         "--base",
@@ -196,6 +214,8 @@ def workspace_create(
         body["task"]["task_class"] = _option_value(task_class)
     if external_id is not None:
         body["task"]["external_id"] = external_id
+    if task_tag is not None:
+        body["task"]["task_tag"] = task_tag
     if priority is not None:
         body["task"]["priority"] = priority
     if human_boost is not None:
@@ -762,6 +782,15 @@ def workspace_adopt_pr(
     ),
     task_title: str | None = typer.Option(None, "--title"),
     task_prompt: str | None = typer.Option(None, "--prompt"),
+    task_tag: str | None = typer.Option(
+        None,
+        "--task-tag",
+        callback=_task_tag_callback,
+        help=(
+            "Optional Jira issue key (e.g. PROJ-123) prepended to every "
+            "AWF-authored monitor commit message so fixes link to the issue."
+        ),
+    ),
     reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
@@ -798,6 +827,8 @@ def workspace_adopt_pr(
         body["model"] = model
     if effort is not None:
         body["effort"] = effort
+    if task_tag is not None:
+        body["task_tag"] = task_tag
     if owned_paths is not None:
         body["owned_paths"] = owned_paths
     response = _call(

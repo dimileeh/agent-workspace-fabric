@@ -157,6 +157,7 @@ async def create_workspace_row(
         task_title=payload.task.title,
         task_prompt=payload.task.prompt,
         task_external_id=payload.task.external_id,
+        task_tag=payload.task.task_tag,
         task_class=(payload.task.task_class.value if payload.task.task_class is not None else None),
         owned_paths=payload.task.owned_paths,
         task_policy=task_policy,
@@ -296,6 +297,7 @@ def workspace_create_payload_matches(
     return (
         existing.repo_url == payload.repo.url
         and existing.branch_base == payload.repo.base_branch
+        and getattr(existing, "task_tag", None) == payload.task.task_tag
         and existing.task_title == payload.task.title
         and existing.task_prompt == payload.task.prompt
         and existing.task_external_id == payload.task.external_id

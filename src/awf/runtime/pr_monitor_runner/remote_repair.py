@@ -21,6 +21,7 @@ from awf.common.commands import CommandResult
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
+from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.protected_file_diffs import (
     git_show_text,
     protected_file_diffs_for_committed_paths,
@@ -213,6 +214,13 @@ async def _open_merge_candidate_head_sha(self: Any, workspace_id: str) -> str | 
         return candidate.head_sha if candidate is not None else None
 
 
+async def _resolve_task_tag(self: Any, workspace_id: str) -> str | None:
+    """Load the workspace's optional Jira issue key for commit-message tagging."""
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        return workspace.task_tag if workspace is not None else None
+
+
 async def _commit_dirty_worktree(
     self: Any,
     *,
@@ -299,6 +307,10 @@ async def _commit_dirty_worktree(
     )
     if cached.returncode == 0:
         return False
+
+    # Prepend the workspace's Jira issue key (if any) so monitor review-fix /
+    # CI-fix commits link to the issue. Idempotent: a re-run never double-prefixes.
+    message = commit_message_with_task_tag(message, await _resolve_task_tag(self, workspace_id))
 
     commit = await self._deps.runner.run(
         git_worktree_command(worktree_path, "commit", "-m", message)

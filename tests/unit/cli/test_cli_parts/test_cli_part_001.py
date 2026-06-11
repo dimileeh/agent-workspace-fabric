@@ -143,6 +143,77 @@ class TestWorkspaceCreate:
         assert body["repo"]["base_branch"] == "development"
 
     @pytest.mark.unit
+    def test_task_tag_is_injected_into_request_body(self) -> None:
+        """A valid --task-tag populates task.task_tag in the request body."""
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_tag"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Add docs",
+                    "--prompt",
+                    "Add docstrings.",
+                    "--task-tag",
+                    "PROJ-123",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["task"]["task_tag"] == "PROJ-123"
+
+    @pytest.mark.unit
+    def test_task_tag_omitted_when_not_provided(self) -> None:
+        """No --task-tag leaves task_tag out of the request body (no-op)."""
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_no_tag"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Add docs",
+                    "--prompt",
+                    "Add docstrings.",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "task_tag" not in mock.call_args.kwargs["json"]["task"]
+
+    @pytest.mark.unit
+    def test_malformed_task_tag_is_rejected_with_clear_error(self) -> None:
+        """A malformed --task-tag fails locally before any request is sent."""
+        with patch("awf.cli.main.httpx.request") as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Add docs",
+                    "--prompt",
+                    "Add docstrings.",
+                    "--task-tag",
+                    "proj-123",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "task tag" in result.output
+        mock.assert_not_called()
+
+    @pytest.mark.unit
     def test_workspace_create_accepts_grok_agent(self) -> None:
         """Allow workspace create to select the Grok agent runtime."""
         response = _mock_response(status_code=202, payload={"workspace_id": "ws_grok"})

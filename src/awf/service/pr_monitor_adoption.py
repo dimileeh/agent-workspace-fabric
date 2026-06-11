@@ -319,6 +319,7 @@ class PullRequestMonitorAdoptionService:
             task_external_id=_adoption_external_id(
                 repo_slug=repo.slug(), pr_number=metadata.number
             ),
+            task_tag=request.task_tag,
             agent=request.agent.value,
             test_commands=[],
             requires_database=False,
