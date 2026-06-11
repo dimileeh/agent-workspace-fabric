@@ -11,6 +11,7 @@ The public entry point is ``_log_shows_docker_registry_timeout``.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 # Docker pull / service-container registry timeouts. Unlike the unconditional
 # markers above, these Go context-timeout and net/http phrases also surface in
@@ -382,6 +383,23 @@ def _forward_detail_ref_matches_pull(
     return True
 
 
+def _line_url_host_is(line: str, host: str) -> bool:
+    """Whether any ``http(s)`` URL embedded in *line* has *host* as its real host.
+
+    Each candidate URL is parsed with ``urlsplit`` and its authority host is
+    compared to *host* exactly, so a target host appearing only in a URL *path*
+    or at an arbitrary position — e.g. ``https://evil.example//auth.docker.io/token``
+    (real host ``evil.example``) or ``https://evil.example/auth.docker.io/token``
+    — does not match.  This closes the ``py/incomplete-url-substring-sanitization``
+    gap that a bare ``"//<host>/" in line`` substring check still leaves open
+    (the ``//<host>/`` boundary can itself sit anywhere in another host's URL).
+    """
+    for match in re.finditer(r"https?://[^\s\"']+", line):
+        if urlsplit(match.group(0)).hostname == host:
+            return True
+    return False
+
+
 def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
     """Whether a daemon error line's quoted URL is attributable to *image_ref*.
 
@@ -556,10 +574,13 @@ def _image_ref_matches_daemon_url(image_ref: str, line: str) -> bool:
             # Unqualified Docker Hub ref: require a Docker Hub auth or registry
             # host in the token URL so an error from a different registry is
             # not attributed to a Docker Hub pull (mirrors PRRT_kwDOSJAM6s6HtNI4).
-            # Use the "//<host>/" URL-boundary delimiter (as elsewhere in this
-            # file, PRRT_kwDOSJAM6s6HtfLR) so a path-only "auth.docker.io" — e.g.
-            # "https://evil/auth.docker.io/token" — does not falsely match.
-            return "//auth.docker.io/" in line or any(
+            # Parse the URL host (PRRT_kwDOSJAM6s6I2gvY) rather than substring-
+            # matching "//auth.docker.io/": the boundary form still matches an
+            # arbitrary-position occurrence such as
+            # "https://evil/auth.docker.io/token" (path segment) or
+            # "https://evil//auth.docker.io/token" (real host "evil"), so only an
+            # exact urlsplit host comparison rejects both.
+            return _line_url_host_is(line, "auth.docker.io") or any(
                 f"//{h}/" in line for h in _DOCKER_HUB_REGISTRY_HOSTS
             )
         # Docker Hub registry hosts use auth.docker.io as their token service,

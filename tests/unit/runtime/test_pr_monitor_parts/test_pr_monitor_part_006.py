@@ -901,6 +901,30 @@ class TestImageRefMatchesDaemonUrl:
         assert _image_ref_matches_daemon_url("org/app:latest", real_line) is True
 
     @pytest.mark.unit
+    def test_org_image_token_auth_host_arbitrary_position_does_not_match(self) -> None:
+        """An ``auth.docker.io`` token denial must NOT match an unqualified Docker
+        Hub org image when ``//auth.docker.io/`` appears at an *arbitrary
+        position* in a different registry's URL rather than as the real host.
+
+        The earlier ``"//auth.docker.io/" in line`` boundary check still treats
+        the host as a substring, so a path/double-slash placement such as
+        ``https://evil.example//auth.docker.io/token`` (real host
+        ``evil.example``) satisfies it — the
+        ``py/incomplete-url-substring-sanitization`` gap CodeQL re-flagged.
+        Parsing the URL host with ``urlsplit`` rejects it.
+
+        Regression for CodeQL alert #29 (PRRT_kwDOSJAM6s6I2gvY)."""
+        bypass_line = (
+            'get "https://evil.example//auth.docker.io/token'
+            '?scope=repository%3aorg%2fapp%3apull": denied'
+        )
+        assert _image_ref_matches_daemon_url("org/app:latest", bypass_line) is False
+
+        # Sanity: the real Docker Hub token service still matches.
+        real_line = 'get "https://auth.docker.io/token?scope=repository%3aorg%2fapp%3apull": denied'
+        assert _image_ref_matches_daemon_url("org/app:latest", real_line) is True
+
+    @pytest.mark.unit
     def test_docker_hub_alias_token_auth_host_in_url_path_does_not_match(self) -> None:
         """A Docker Hub alias ref must NOT match an ``auth.docker.io`` token denial
         whose host is a different registry and that only embeds ``auth.docker.io``
