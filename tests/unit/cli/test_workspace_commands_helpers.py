@@ -519,6 +519,10 @@ def test_workspace_create_rejects_non_object_companion_json(
         {"repo": None, "pr_number": None, "pr_url": None},
         {"repo": "owner/repo", "pr_number": None, "pr_url": "https://github.com/owner/repo/pull/1"},
         {"repo": None, "pr_number": 1, "pr_url": "https://github.com/owner/repo/pull/1"},
+        # Empty/whitespace --repo normalizes to None, so --pr alone is an incomplete
+        # selector and must fail fast in the CLI rather than deferring to the API.
+        {"repo": "", "pr_number": 1, "pr_url": None},
+        {"repo": "   ", "pr_number": 1, "pr_url": None},
     ],
 )
 def test_workspace_adopt_pr_requires_exactly_one_selector(

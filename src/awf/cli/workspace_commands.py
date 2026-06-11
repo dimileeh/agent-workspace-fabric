@@ -768,6 +768,9 @@ def workspace_adopt_pr(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Adopt an already-open GitHub PR into AWF PR monitoring."""
+    repo = repo.strip() if repo is not None else None
+    if repo == "":
+        repo = None
     if pr_url is None and (repo is None or pr_number is None):
         raise typer.BadParameter(
             "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
@@ -776,7 +779,7 @@ def workspace_adopt_pr(
         raise typer.BadParameter(
             "select a PR with exactly one selector: either --pr-url or both --repo and --pr"
         )
-    _repo_is_url = repo is not None and repo != "" and _repo_targets_github_host(repo)
+    _repo_is_url = repo is not None and _repo_targets_github_host(repo)
     body: dict[str, Any] = {
         "repo_url": repo if _repo_is_url else None,
         "repo_slug": repo if repo and not _repo_is_url else None,
