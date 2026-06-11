@@ -205,6 +205,62 @@ def test_doctor_forwards_service_github_token_to_host_env(
     assert host_env["GITHUB_TOKEN"] == "ghp_doctor"
 
 
+def test_doctor_host_env_includes_service_compose_env_file_creds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The doctor must probe leases with the env Compose forwards to the worker.
+
+    ``build_worker_runtime`` constructs its ``LocalSecretLeaseMountResolver`` with
+    ``host_env=os.environ`` from inside the service container, where Compose
+    forwards ``BITBUCKET_API_TOKEN``/``BITBUCKET_EMAIL`` from
+    ``docker/compose/.env``. When those credentials live only in that env file and
+    are not exported in the caller shell, the CLI must source ``host_env`` from the
+    same merged Compose view (``local_service_environ``) so a ``provider:
+    bitbucket`` lease provisioning would satisfy is not falsely reported as
+    ``SECRET_LEASE_SOURCE_MISSING``.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+    monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+    # Simulate creds present only in docker/compose/.env (not the caller shell).
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {
+            "BITBUCKET_API_TOKEN": "bb_token",
+            "BITBUCKET_EMAIL": "dev@example.com",
+        },
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    assert host_env["BITBUCKET_API_TOKEN"] == "bb_token"
+    assert host_env["BITBUCKET_EMAIL"] == "dev@example.com"
+
+
 def test_doctor_host_env_omits_token_when_settings_unset(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -69,10 +69,8 @@ def profile_doctor(
     agent run, no PR, no workspace creation. Use it before onboarding to catch
     profile/runtime gaps (notably ``SECRET_LEASE_SOURCE_MISSING``).
     """
-    import os
-
     from awf.common.git_remote import detect_repo_url_from_checkout
-    from awf.service.config import resolve_service_settings
+    from awf.service.config import local_service_environ, resolve_service_settings
     from awf.service.profile_doctor import collect_profile_doctor_report
 
     resolved = repo.expanduser().resolve()
@@ -83,13 +81,20 @@ def profile_doctor(
     # and produce false passes/failures despite advertising the worker's context.
     settings = resolve_service_settings()
     # Probe secret leases against the SAME effective env the worker uses. The
-    # worker exports settings.github_token into GH_TOKEN/GITHUB_TOKEN before
-    # constructing its LocalSecretLeaseMountResolver (build_worker_runtime ->
-    # _service_git_environment + _apply_service_git_environment). When the token
-    # lives in service settings / .env but is not exported in the current shell,
-    # forwarding raw os.environ would falsely report a provider: github lease as
-    # SECRET_LEASE_SOURCE_MISSING even though provisioning succeeds.
-    host_env = dict(os.environ)
+    # worker constructs its LocalSecretLeaseMountResolver with host_env=os.environ
+    # from INSIDE the service container, where Compose forwards every provider
+    # credential (e.g. BITBUCKET_API_TOKEN/BITBUCKET_EMAIL) from
+    # docker/compose/.env. Source host_env from that same merged Compose view
+    # (local_service_environ) rather than the bare caller shell, so a provider:
+    # bitbucket (or any env-backed) lease provisioning would satisfy is not
+    # falsely reported as SECRET_LEASE_SOURCE_MISSING when the credential lives in
+    # the service env file but is not exported in the current shell.
+    host_env = dict(local_service_environ())
+    # The worker additionally exports settings.github_token into
+    # GH_TOKEN/GITHUB_TOKEN before constructing the resolver (build_worker_runtime
+    # -> _service_git_environment + _apply_service_git_environment). Mirror that
+    # explicit forward so a token that resolves only through service settings (not
+    # the env file) still satisfies a provider: github lease.
     if settings.github_token:
         host_env["GH_TOKEN"] = settings.github_token
         host_env["GITHUB_TOKEN"] = settings.github_token
