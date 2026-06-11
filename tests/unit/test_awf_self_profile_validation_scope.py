@@ -98,6 +98,26 @@ def test_validate_phase_delegates_pytest_to_github_ci() -> None:
 
 
 @pytest.mark.unit
+def test_validate_pytest_if_present_covers_full_unit_suite_not_only_cli() -> None:
+    """Guard intent is anti-re-narrowing, not pytest-presence.
+
+    The validate phase intentionally no longer runs the in-workspace test suite
+    (GitHub CI runs the authoritative sharded pytest+coverage on every PR
+    commit). So an absent pytest command is the expected, deliberate state — the
+    #512 regression this file guards against was a *narrowed* validate phase
+    (pytest scoped to ``tests/unit/cli``), not the absence of pytest. If a
+    pytest command is ever re-added, it must still cover the full ``tests/unit``
+    suite rather than the CLI-only slice.
+    """
+    pytest_commands = _commands_for_tool("pytest")
+    for tokens in pytest_commands:
+        assert _targets_path(tokens, "tests/unit"), (
+            "a validate-phase pytest command must run the full tests/unit suite, "
+            "not only tests/unit/cli"
+        )
+
+
+@pytest.mark.unit
 def test_no_validate_command_is_scoped_solely_to_the_cli_slice() -> None:
     """Anti-re-narrowing guard: document what 'too narrow' looks like.
 
