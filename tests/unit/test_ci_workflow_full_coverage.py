@@ -577,7 +577,10 @@ def test_ci_workflow_jobs_have_least_privilege_permissions() -> None:
         # 3. No job over-grants. Any job-level block must be a scope->level mapping
         #    and may not grant write on any scope unless explicitly whitelisted.
         if job_permissions is not None:
-            assert isinstance(job_permissions, dict), name
+            assert isinstance(job_permissions, dict), (
+                f"job {name!r} permissions must be a dictionary, got "
+                f"{type(job_permissions).__name__}"
+            )
             for scope, level in job_permissions.items():
                 assert level in _VALID_PERMISSION_VALUES, (
                     f"job {name!r} grants invalid permission {scope}={level!r}"
