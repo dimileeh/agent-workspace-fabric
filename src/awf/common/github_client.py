@@ -256,8 +256,16 @@ class RepoRef:
         """Return a clone URL matching the requested transport style."""
         host = self._forge_host()
         stripped = repo_url.strip()
-        parsed = urlsplit(stripped)
-        parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        # ``urlsplit``/``.hostname`` raise ``ValueError`` (e.g. "Invalid IPv6 URL")
+        # on malformed authorities like ``https://[bad``. Unlike ``from_url``, this
+        # method returns a URL rather than parsing one, so an unhandled crash here
+        # would be unexpected: treat an unparseable URL as a non-match and fall back
+        # to the canonical HTTPS clone URL (same as other unrecognized inputs).
+        try:
+            parsed = urlsplit(stripped)
+            parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        except ValueError:
+            return self.https_url()
         # Match SSH by scheme (not a no-port prefix) so explicit-port forms such
         # as ssh://git@github.com:22/owner/repo.git are preserved as SSH instead
         # of silently falling through to HTTPS (thread PRRT_kwDOSJAM6s6IQkBd).
@@ -269,11 +277,7 @@ class RepoRef:
         if stripped.startswith(f"git@{host}:") or is_ssh_url:
             return self.ssh_url()
 
-        if (
-            parsed.scheme in {"http", "https"}
-            and parsed.hostname is not None
-            and parsed.hostname.lower() == host
-        ):
+        if parsed.scheme in {"http", "https"} and parsed_host == host:
             userinfo, sep, _host = parsed.netloc.rpartition("@")
             if sep and userinfo:
                 return f"https://{userinfo}@{host}/{self.owner}/{self.name}.git"

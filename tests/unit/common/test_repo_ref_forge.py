@@ -194,3 +194,18 @@ class TestRepoRefHostAwareBuilders:
             ref.clone_url_like("ssh://git@github.com:22/dimileeh/source.git")
             == "git@github.com:contributor/aira-web.git"
         )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "malformed_url",
+        [
+            "https://[bad/dimileeh/source.git",
+            "ssh://git@[::1bad/dimileeh/source.git",
+        ],
+    )
+    def test_clone_url_like_malformed_url_falls_back_to_https(self, malformed_url: str) -> None:
+        # ``urlsplit``/``.hostname`` raise ``ValueError`` ("Invalid IPv6 URL") on
+        # malformed authorities; ``clone_url_like`` must not crash — it falls back
+        # to the canonical HTTPS clone URL (review comment 4477925645).
+        ref = RepoRef(owner="contributor", name="aira-web")
+        assert ref.clone_url_like(malformed_url) == "https://github.com/contributor/aira-web.git"
