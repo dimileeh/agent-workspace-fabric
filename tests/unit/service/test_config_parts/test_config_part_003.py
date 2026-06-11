@@ -397,3 +397,30 @@ def test_orphan_reconcile_settings_flow_from_environment() -> None:
     assert settings.claude_base_reap_scan_interval_seconds == 1234.0
     assert settings.orphan_reconcile_max_per_scan == 7
     assert settings.orphan_reconcile_min_age_hours == 12.0
+
+
+@pytest.mark.unit
+def test_terminal_workspace_gc_defaults_are_on_and_sane() -> None:
+    settings = resolve_service_settings(Settings(_env_file=None), environ={})
+
+    assert settings.terminal_workspace_gc_enabled is True
+    assert (
+        settings.terminal_workspace_gc_scan_interval_seconds
+        == DEFAULT_ORPHAN_RECONCILE_SCAN_INTERVAL_SECONDS
+    )
+
+
+@pytest.mark.unit
+def test_terminal_workspace_gc_settings_flow_from_environment() -> None:
+    base = Settings(
+        _env_file=None,
+        terminal_workspace_gc_enabled=False,
+        terminal_workspace_gc_scan_interval_seconds=555.0,
+    )
+
+    settings = resolve_service_settings(base, environ={})
+
+    # Settings -> ServiceSettings passthrough (the WorkerConfig forward is covered
+    # by tests/unit/service/test_worker_terminal_gc_reaper.py).
+    assert settings.terminal_workspace_gc_enabled is False
+    assert settings.terminal_workspace_gc_scan_interval_seconds == 555.0

@@ -59,6 +59,8 @@ class RunnerDelegatesMixin:
     _load_state = _lifecycle._load_state
     _refresh_operator_state_from_workspace = _lifecycle._refresh_operator_state_from_workspace
     _persist_state = _lifecycle._persist_state
+    _persist_forge_transient_retry_count = _lifecycle._persist_forge_transient_retry_count
+    _remove_forge_transient_retry_count = _lifecycle._remove_forge_transient_retry_count
     _terminate_completed = _lifecycle._terminate_completed
     _reconcile_target_branch_after_merge = _lifecycle._reconcile_target_branch_after_merge
     _teardown_compose_stack = _lifecycle._teardown_compose_stack
@@ -152,5 +154,8 @@ class RunnerDelegatesMixin:
     _wait_after_transient_github_error = _transient_ops._wait_after_transient_github_error
     _wait_after_transient_bitbucket_error = _transient_ops._wait_after_transient_bitbucket_error
     _wait_after_transient_forge_error = _transient_ops._wait_after_transient_forge_error
+    _clear_forge_transient_retry_state_on_success = (
+        _transient_ops._clear_forge_transient_retry_state_on_success
+    )
     _wait_after_transient_base_fetch_error = _transient_ops._wait_after_transient_base_fetch_error
     _write_defer_signal = _transient_ops._write_defer_signal

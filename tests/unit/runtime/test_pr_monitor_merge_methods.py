@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.audit import redact_audit_text
 from awf.common.bitbucket_client import (
     BITBUCKET_MERGE_IN_PROGRESS,
     BITBUCKET_MERGE_METHOD_UNSUPPORTED,
@@ -28,13 +27,6 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorState,
     PRStatus,
-)
-from awf.runtime.pr_monitor_runner.merge_loop import (
-    _effective_merge_methods,
-    _merge_error_supports_method_alternative,
-    _merge_method_rejection_method,
-    _MergeAttemptOutcome,
-    _MergeAttemptResult,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -71,192 +63,6 @@ def _mergeable_status() -> PRStatus:
         merge_state_status=MergeStateStatus.CLEAN,
         checks=(),
     )
-
-
-@pytest.mark.unit
-def test_effective_merge_methods_intersect_repo_and_branch_constraints() -> None:
-    """Effective merge methods prefer squash after intersecting repo and branch policy."""
-    assert _effective_merge_methods(
-        repo_methods=("merge", "squash", "rebase"),
-        branch_methods=("merge",),
-    ) == ("merge",)
-    assert _effective_merge_methods(
-        repo_methods=("merge", "squash"),
-        branch_methods=None,
-    ) == ("squash", "merge")
-    assert (
-        _effective_merge_methods(
-            repo_methods=("squash",),
-            branch_methods=("merge",),
-        )
-        == ()
-    )
-
-
-@pytest.mark.unit
-def test_effective_merge_methods_resolves_fast_forward_only_repo() -> None:
-    """A fast-forward-only Bitbucket repo must resolve to ``fast_forward`` (#448).
-
-    Before #448 ``fast_forward`` was absent from ``_MERGE_METHOD_PREFERENCE`` so the
-    intersection silently dropped it to an empty tuple, wedging every merge on a
-    fast-forward-only repo with a spurious MERGE_METHOD_MISMATCH.
-    """
-    assert _effective_merge_methods(
-        repo_methods=("fast_forward",),
-        branch_methods=None,
-    ) == ("fast_forward",)
-
-
-@pytest.mark.unit
-def test_effective_merge_methods_prefers_squash_over_fast_forward() -> None:
-    """A multi-strategy repo still prefers squash; fast_forward is the last resort."""
-    assert _effective_merge_methods(
-        repo_methods=("merge", "squash", "fast_forward"),
-        branch_methods=None,
-    ) == ("squash", "merge", "fast_forward")
-
-
-@pytest.mark.unit
-def test_effective_merge_methods_github_order_unchanged_by_fast_forward() -> None:
-    """Adding fast_forward as the tail entry must not reorder GitHub precedence."""
-    assert _effective_merge_methods(
-        repo_methods=("rebase", "squash", "merge"),
-        branch_methods=None,
-    ) == ("squash", "merge", "rebase")
-
-
-@pytest.mark.unit
-def test_merge_method_rejection_classifier_is_specific() -> None:
-    """Merge-method rejection classification only handles method-specific failures."""
-    assert (
-        _merge_method_rejection_method(
-            GitHubClientError(
-                operation="gh pr merge",
-                returncode=1,
-                stderr="GraphQL: Squash merges are not allowed on this repository.",
-            )
-        )
-        == "squash"
-    )
-    assert (
-        _merge_method_rejection_method(
-            GitHubClientError(
-                operation="gh pr merge",
-                returncode=1,
-                stderr="GraphQL: Merge commits are not allowed on this repository.",
-            )
-        )
-        == "merge"
-    )
-    assert (
-        _merge_method_rejection_method(
-            GitHubClientError(
-                operation="gh pr merge",
-                returncode=1,
-                stderr="GraphQL: Rebase merges are not allowed on this repository.",
-            )
-        )
-        == "rebase"
-    )
-    assert (
-        _merge_method_rejection_method(
-            GitHubClientError(
-                operation="gh pr merge",
-                returncode=1,
-                stderr="GraphQL: Merge method squash merging is not allowed.",
-            )
-        )
-        == "squash"
-    )
-    assert (
-        _merge_method_rejection_method(
-            GitHubClientError(
-                operation="gh pr merge",
-                returncode=1,
-                stderr="GraphQL: Merge method merge commit is not allowed.",
-            )
-        )
-        == "merge"
-    )
-    assert (
-        _merge_method_rejection_method(
-            GitHubClientError(
-                operation="gh pr merge",
-                returncode=1,
-                stderr="GraphQL: Merge method rebase is not allowed.",
-            )
-        )
-        == "rebase"
-    )
-    assert (
-        _merge_method_rejection_method(
-            GitHubClientError(
-                operation="gh pr merge",
-                returncode=1,
-                stderr="HTTP 502 Bad Gateway",
-            )
-        )
-        is None
-    )
-    assert (
-        _merge_error_supports_method_alternative(
-            GitHubClientError(
-                operation="gh pr merge",
-                returncode=1,
-                stderr="GraphQL: Pull request could not be merged with this method.",
-            )
-        )
-        is False
-    )
-    assert (
-        _merge_method_rejection_method(
-            GitHubClientError(
-                operation="gh pr merge squash merges are not allowed",
-                returncode=1,
-                stderr="GraphQL: Pull request could not be merged with this method.",
-            )
-        )
-        is None
-    )
-
-
-@pytest.mark.unit
-def test_redaction_preserves_merge_method_policy_phrases() -> None:
-    """Classifier policy phrases must survive GitHubClientError stderr redaction."""
-    phrases = (
-        "Squash merges are not allowed",
-        "Merge commits are not allowed",
-        "Rebase merges are not allowed",
-        "Merge method squash merging is not allowed",
-        "Merge method merge commit is not allowed",
-        "Merge method rebase is not allowed",
-    )
-
-    for phrase in phrases:
-        assert phrase.lower() in redact_audit_text(f"GraphQL: {phrase}.").lower()
-
-
-@pytest.mark.unit
-def test_method_blocker_attempt_result_requires_notification_reason() -> None:
-    """Method blockers must carry the state value that suppresses repeat merges."""
-    with pytest.raises(ValueError, match="requires a notification reason"):
-        _MergeAttemptResult(_MergeAttemptOutcome.METHOD_BLOCKER)
-
-    with pytest.raises(ValueError, match="requires a notification reason"):
-        _MergeAttemptResult(_MergeAttemptOutcome.METHOD_BLOCKER, notification_reason="")
-
-    blocker = _MergeAttemptResult(
-        _MergeAttemptOutcome.METHOD_BLOCKER,
-        notification_reason="MERGE_METHOD_MISMATCH: no allowed method succeeded",
-    )
-
-    assert (
-        blocker.method_blocker_notification_reason
-        == "MERGE_METHOD_MISMATCH: no allowed method succeeded"
-    )
-    assert _MergeAttemptResult(_MergeAttemptOutcome.SUCCESS).notification_reason is None
-    assert _MergeAttemptResult(_MergeAttemptOutcome.RETRY_NEXT_METHOD).notification_reason is None
-    assert _MergeAttemptResult(_MergeAttemptOutcome.BLOCKER).notification_reason is None
 
 
 class _MergeMethodClient:
@@ -480,7 +286,7 @@ async def test_transient_merge_method_preflight_error_retries_without_blocker(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.merge_calls == []
     assert gh.comments == []
     assert not any(
@@ -512,7 +318,7 @@ async def test_empty_branch_rules_slurp_preflight_error_retries_without_blocker(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.merge_calls == []
     assert gh.comments == []
     assert not any(
@@ -554,6 +360,83 @@ async def test_non_transient_merge_method_preflight_error_notifies_human(
 
 
 @pytest.mark.unit
+async def test_exhausted_transient_merge_method_preflight_keeps_polling_without_blocker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An exhausted *transient* preflight blip must not be mislabelled as a rejection.
+
+    When the bounded forge-retry helper returns ``False`` because the budget is
+    exhausted while the preflight error is still transient (e.g. HTTP 502), the
+    merge loop must keep polling without recording the sticky
+    ``_merge_method_blocked_key`` blocker or posting a "GitHub rejected merge-method
+    preflight" notification. Recording the blocker would make ``pr_monitor.decide``
+    return ``NotifyHuman`` for this head_sha forever, wedging the merge under a false
+    policy-rejection label, contradicting the under-budget retry-without-a-blocker
+    behaviour (regression for the PR #518 review).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        branch_error=GitHubClientError(
+            operation=(
+                f"gh api repos/{{owner}}/{{repo}}/rules/branches/{_TEST_DEFAULT_BASE_BRANCH}"
+            ),
+            returncode=1,
+            stderr="HTTP 502 Bad Gateway",
+        )
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    # Zero retries: the first transient blip exhausts the budget immediately and
+    # drives the preflight arm down the exhausted-transient fallback.
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    # No merge attempt, no human notification, and crucially no sticky merge-method
+    # blocker: the exhausted-transient outage keeps polling rather than wedging the
+    # merge under a false policy rejection.
+    assert gh.merge_calls == []
+    assert gh.comments == []
+    assert not any(
+        key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
+    )
+    assert sleep_fn.calls == [60]
+    # The exhausted-transient counter survives so the next poll fails closed
+    # immediately instead of re-spending a full bounded budget.
+    counter_key = "__awf_forge_transient_retry_count:merge_method_preflight"
+    assert state.threads_addressed_ids.get(counter_key) == "1"
+
+
+@pytest.mark.unit
 async def test_merge_method_preflight_notification_transient_error_retries(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -583,7 +466,7 @@ async def test_merge_method_preflight_notification_transient_error_retries(
     assert terminal is False
     assert gh.merge_calls == []
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
@@ -623,7 +506,7 @@ async def test_merge_method_preflight_notification_transient_bitbucket_error_ret
     assert terminal is False
     assert gh.merge_calls == []
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
@@ -939,11 +822,87 @@ async def test_transient_first_merge_failure_does_not_retry_allowed_alternative(
 
     assert terminal is False
     assert gh.merge_calls == ["squash"]
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert gh.comments == []
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_exhausted_transient_merge_failure_preserves_retry_counter(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An exhausted *transient* merge blip must not reset the ``merge_pr`` budget.
+
+    When the bounded forge-retry helper returns ``False`` because the budget is
+    exhausted (the merge error is still transient, not a deterministic rejection),
+    the merge arm falls back to notify-and-keep-polling. It must keep the persisted
+    ``merge_pr`` retry counter so later polls fail closed via the exhausted path,
+    rather than clearing it as if the blocker were deterministic and handing each
+    subsequent merge attempt a fresh full retry budget — symmetric with
+    ``fetch_pr_status`` / ``pre_merge_recheck`` (regression for the PR #516
+    merge-path counter-reset bug).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    gh = _MergeMethodClient(
+        repo_methods=("squash",),
+        branch_methods=("squash",),
+        merge_results=[
+            GitHubClientError(
+                operation="gh pr merge",
+                returncode=1,
+                stderr="HTTP 502 Bad Gateway",
+            )
+        ],
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    # Zero retries: the first transient blip exhausts the budget immediately and
+    # drives the merge arm down the notify-and-keep-polling fallback.
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        status=_mergeable_status(),
+        state=state,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    # The exhausted-transient counter survives in memory and in the DB instead of
+    # being wiped like a deterministic blocker; the next poll therefore exhausts
+    # immediately rather than re-spending a full bounded budget.
+    counter_key = "__awf_forge_transient_retry_count:merge_pr"
+    assert state.threads_addressed_ids.get(counter_key) == "1"
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert (ws.monitor_threads_addressed or {}).get(counter_key) == "1"
 
 
 @pytest.mark.unit
@@ -979,6 +938,94 @@ async def test_unclassified_first_merge_failure_notifies_without_method_mismatch
     assert not any(
         key.startswith("__awf_merge_method_blocked__:") for key in state.threads_addressed_ids
     )
+
+
+@pytest.mark.unit
+async def test_merge_blocker_fallback_notification_transient_error_retries_then_clears(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A transient post_comment blip while notifying about a *deterministic* merge
+    blocker must run the bounded forge-retry path (wait + persist the
+    ``post_human_notification`` counter) instead of escaping the merge loop, and a
+    later successful post must clear that budget — mirroring the merge-method
+    preflight notification arm rather than calling ``_post_human_notification_once``
+    naked."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+
+    def deterministic_merge_error() -> GitHubClientError:
+        return GitHubClientError(
+            operation="gh pr merge",
+            returncode=1,
+            stderr="GraphQL: Pull request could not be merged with this method.",
+        )
+
+    gh = _MergeMethodClient(
+        repo_methods=("merge", "squash"),
+        branch_methods=("merge", "squash"),
+        merge_results=[deterministic_merge_error()],
+        post_comment_error=GitHubClientError(
+            operation="gh pr comment",
+            returncode=1,
+            stderr="HTTP 502 Bad Gateway",
+        ),
+    )
+    gh.expect_context(
+        repo=_TEST_REPO,
+        pr_number=_TEST_PR_NUMBER,
+        base_branch=_TEST_DEFAULT_BASE_BRANCH,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+
+    async def _run_merge() -> bool | None:
+        return await runner._execute(
+            action=Merge(),
+            workspace_id=workspace_id,
+            repo_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+            repo=_TEST_REPO,
+            pr_number=_TEST_PR_NUMBER,
+            status=_mergeable_status(),
+            state=state,
+            base_branch=_TEST_DEFAULT_BASE_BRANCH,
+            remote_branch=f"awf/{workspace_id}",
+            remote_push_url=f"git@github.com:{_TEST_REPO.slug()}.git",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    counter_key = "__awf_forge_transient_retry_count:post_human_notification"
+
+    # Phase 1: deterministic merge blocker + transient 502 on the notification post.
+    # The wrapped retry path waits and re-polls instead of letting the 502 escape,
+    # and persists the bounded ``post_human_notification`` counter.
+    terminal = await _run_merge()
+    assert terminal is False
+    assert gh.merge_calls == ["squash"]
+    assert gh.comments == []
+    assert sleep_fn.calls == [5]
+    assert state.threads_addressed_ids.get(counter_key) == "1"
+
+    # Phase 2: a later poll whose notification post succeeds clears the budget so a
+    # recovered one-off blip never accumulates toward the bounded retry count.
+    gh.post_comment_error = None
+    gh.merge_results = [deterministic_merge_error()]
+    terminal = await _run_merge()
+    assert terminal is False
+    assert gh.merge_calls == ["squash", "squash"]
+    assert len(gh.comments) == 1
+    assert "GitHub rejected the merge attempt" in gh.comments[0]
+    assert counter_key not in state.threads_addressed_ids
+    assert sleep_fn.calls == [5, 60]
 
 
 @pytest.mark.unit
@@ -1251,7 +1298,7 @@ async def test_transient_bitbucket_merge_failure_waits_without_notify(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
 
 @pytest.mark.unit
@@ -1296,7 +1343,7 @@ async def test_in_progress_bitbucket_merge_does_not_record_failed_operation(
     assert terminal is False
     assert gh.merge_calls == ["squash"]
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
     async with factory() as session:
         operations = await OperationRepository(session).list_for_workspace(
@@ -1371,7 +1418,7 @@ async def test_merge_task_timeout_cancels_operation_and_keeps_polling(
     assert gh.merge_calls == ["squash"]
     # No "merge rejected" notification while the async merge may still be running.
     assert gh.comments == []
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
 
     async with factory() as session:
         operations = await OperationRepository(session).list_for_workspace(

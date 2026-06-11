@@ -839,8 +839,9 @@ class TestBitbucketApiError:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        # The transient 503 made the monitor wait one poll interval and re-poll.
-        assert sleep_fn.calls == [60]
+        # The transient 503 made the monitor wait the initial bounded-retry
+        # backoff (5.0s, retry #1) and re-poll — see #515.
+        assert sleep_fn.calls == [5.0]
         assert gh.calls == 2
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)

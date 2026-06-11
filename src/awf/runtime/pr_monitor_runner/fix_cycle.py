@@ -18,6 +18,7 @@ from awf.common.bitbucket_client import BitbucketClientError
 from awf.common.bitbucket_client_parsing import is_task_thread_id
 from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import (
+    GitHubClientError,
     RepoRef,
 )
 from awf.runtime.logs import WorkspaceLogSink
@@ -38,13 +39,17 @@ from awf.runtime.pr_monitor_runner.comments import (
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_COMMENT_RESOLUTION_EVENT,
     _AUDIT_GIT_PUSH_EVENT,
+    _BITBUCKET_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _BITBUCKET_TRANSIENT_RETRY_REASON,
+    _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _clear_addressed_state_by_id,
     _defer_reason_state_key,
+    _is_transient_bitbucket_client_error,
+    _is_transient_github_client_error,
     _mark_review_comment_addressed,
     _redact_and_truncate_forge_error,
     _review_comment_needs_attention,
@@ -339,10 +344,18 @@ async def _run_fix_cycle(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="fix_cycle_settle_fetch_pr_status",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 break
             raise
+        # The settle re-poll succeeded: clear any stale retry count for this context
+        # so a recovered blip never accumulates toward the budget across fix cycles.
+        await self._clear_forge_transient_retry_state_on_success(
+            workspace_id=workspace_id,
+            state=state,
+            context="fix_cycle_settle_fetch_pr_status",
+        )
         new_threads = [
             t for t in status.unresolved_inline_threads if _review_thread_needs_attention(state, t)
         ]
@@ -524,6 +537,7 @@ async def _run_fix_cycle(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 context="resolve_thread",
+                state=state,
                 monitor_log=monitor_log,
             ):
                 # Transient fault: clear the addressed marker so the next poll
@@ -600,6 +614,55 @@ async def _run_fix_cycle(
                     },
                 )
                 continue
+            # ``_wait_after_transient_forge_error`` returns False for BOTH a
+            # deterministic resolve fault and a still-*transient* blip whose bounded
+            # retry budget was just exhausted. These must NOT share the clear-marker
+            # path for a still-open (non-outdated) comment thread: a deterministic
+            # fault clears the marker so the next poll re-routes the open thread
+            # through AddressComments (the #305-safe default). On exhaustion the
+            # underlying fault is still transient (auth/transport/5xx) — something the
+            # agent cannot fix — and the per-context counter is deliberately kept at
+            # its ceiling, so clearing the marker would re-address the thread, hit the
+            # budget again on the very next resolve, re-clear, and re-run the agent
+            # every poll: the exact fix-cycle storm the bounded budget exists to stop.
+            # Escalate to ``needs_human`` instead (mirroring the task path above): the
+            # thread stays UNRESOLVED so the merge gate keeps blocking, decide() routes
+            # it to NotifyHuman (not AddressComments), and an operator repairs the
+            # forge fault. Outdated threads are excluded — they can never re-route
+            # through AddressComments, so the storm does not apply and their verdict
+            # is preserved for the outdated-resolution step below.
+            if isinstance(exc, BitbucketClientError):
+                forge_fault_is_transient = _is_transient_bitbucket_client_error(exc)
+                exhausted_reason = _BITBUCKET_TRANSIENT_RETRY_EXHAUSTED_REASON
+            else:
+                forge_fault_is_transient = _is_transient_github_client_error(
+                    cast(GitHubClientError, exc)
+                )
+                exhausted_reason = _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON
+            if forge_fault_is_transient and tid not in outdated_thread_ids:
+                state.mark_addressed(tid, "needs_human")
+                await self._record_pr_monitor_audit_event(
+                    workspace_id=workspace_id,
+                    event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                    action="resolve_thread",
+                    outcome="needs_human",
+                    reason_code=exhausted_reason,
+                    pr_number=pr_number,
+                    status=None,
+                    base_branch=base_branch or "",
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                    source_head_sha=pushed_head_sha,
+                    evidence={
+                        "thread_ids": [tid],
+                        "resolved_thread_count": 0,
+                        "needs_human_thread_count": 1,
+                        "error_message": str(exc),
+                    },
+                )
+                continue
             # Do NOT drop out of the monitor. Also do not keep the thread in
             # addressed-state: decide() filters addressed IDs before it returns
             # AddressComments, so retaining a failed resolve would make the next poll
@@ -637,6 +700,13 @@ async def _run_fix_cycle(
                 },
             )
         else:
+            # The resolve landed: clear any stale ``resolve_thread`` retry count so a
+            # recovered transient blip never accumulates toward the bounded budget.
+            await self._clear_forge_transient_retry_state_on_success(
+                workspace_id=workspace_id,
+                state=state,
+                context="resolve_thread",
+            )
             await self._record_pr_monitor_audit_event(
                 workspace_id=workspace_id,
                 event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
@@ -788,6 +858,7 @@ async def _capture_deferred_review_thread(
             workspace_id=workspace_id,
             pr_number=pr_number,
             context="capture_deferred_thread",
+            state=state,
             monitor_log=monitor_log,
         ):
             # Transient (502 / rate-limit / reset): a temporary issue-API outage
@@ -837,6 +908,13 @@ async def _capture_deferred_review_thread(
             evidence={"thread_ids": [thread.thread_id], "error_message": redacted_error},
         )
         return False
+    # The tracking issue was filed: clear any stale ``capture_deferred_thread``
+    # retry count so a recovered blip never accumulates toward the bounded budget.
+    await self._clear_forge_transient_retry_state_on_success(
+        workspace_id=workspace_id,
+        state=state,
+        context="capture_deferred_thread",
+    )
     # Filing the tracking issue is the durable capture. Record it immediately so
     # a later retry (e.g. after a failed push) never files a duplicate, even if
     # the explanatory comment below fails. The comment is best-effort courtesy.

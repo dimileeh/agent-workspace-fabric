@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.bitbucket_client import (
     BITBUCKET_API_ERROR,
-    BITBUCKET_AUTH_FAILED,
     BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
@@ -584,7 +583,7 @@ async def test_pre_merge_recheck_transient_github_error_retries_later(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [2, 60]
+    assert sleep_fn.calls == [2, 5]
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
     assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
     async with factory() as s:
@@ -601,7 +600,7 @@ async def test_pre_merge_recheck_transient_github_error_retries_later(
         assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
         assert events[0].payload["context"] == "pre_merge_recheck"
         assert events[0].payload["operation"] == "gh api graphql"
-        assert events[0].payload["wait_seconds"] == 60
+        assert events[0].payload["wait_seconds"] == 5
 
 
 @pytest.mark.unit
@@ -651,7 +650,7 @@ async def test_pre_merge_recheck_transient_bitbucket_error_retries_later(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [2, 60]
+    assert sleep_fn.calls == [2, 5]
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -661,7 +660,7 @@ async def test_pre_merge_recheck_transient_bitbucket_error_retries_later(
         assert len(retry_events) == 1
         assert retry_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY"
         assert retry_events[0].payload["context"] == "pre_merge_recheck"
-        assert retry_events[0].payload["wait_seconds"] == 60
+        assert retry_events[0].payload["wait_seconds"] == 5
 
 
 @pytest.mark.unit
@@ -671,7 +670,11 @@ async def test_pre_merge_recheck_bitbucket_error_fails_workspace(
     mocker: pytest_mock.MockerFixture,
 ) -> None:
     """A deterministic Bitbucket fault during the pre-merge recheck terminates the
-    workspace with the actionable reason code preserved end-to-end."""
+    workspace with the actionable reason code preserved end-to-end.
+
+    A non-auth 4xx (``BITBUCKET_API_ERROR`` 404) is genuinely deterministic —
+    401/403 are now bounded-retryable (#515), so they route through the transient
+    arm rather than terminating immediately."""
     sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
     runner = make_runner(
@@ -688,9 +691,9 @@ async def test_pre_merge_recheck_bitbucket_error_fails_workspace(
         mocker.AsyncMock(
             side_effect=BitbucketClientError(
                 operation="bitbucket fetch_pr_status",
-                status=403,
-                body="forbidden",
-                reason_code=BITBUCKET_AUTH_FAILED,
+                status=404,
+                body="not found",
+                reason_code=BITBUCKET_API_ERROR,
             )
         ),
     )
@@ -717,7 +720,7 @@ async def test_pre_merge_recheck_bitbucket_error_fails_workspace(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert "bitbucket error during pre-merge recheck" in (ws.failure_message or "")
-        assert ws.events[-1].reason_code == BITBUCKET_AUTH_FAILED
+        assert ws.events[-1].reason_code == BITBUCKET_API_ERROR
         assert _bitbucket_retry_events(ws) == []
 
 
@@ -778,7 +781,7 @@ async def test_pre_merge_recheck_unknown_status_after_retry_never_uses_old_green
 
     assert first_terminal is False
     assert second_terminal is False
-    assert sleep_fn.calls == [2, 60, 2, 60]
+    assert sleep_fn.calls == [2, 5, 2, 60]
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
     assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
     async with factory() as s:

@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.bitbucket_client import (
-    BITBUCKET_AUTH_FAILED,
+    BITBUCKET_API_ERROR,
     BITBUCKET_RATE_LIMITED,
     BITBUCKET_TASK_RESOLVE_FORBIDDEN,
     BitbucketClientError,
@@ -201,10 +201,11 @@ async def test_transient_github_merge_error_retries_without_human_escalation(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert len(cmd.calls) == 1
     assert cmd.calls[0].args[:3] == ["gh", "pr", "merge"]
-    assert state.threads_addressed_ids == {}
+    # Only the bounded-retry bookkeeping key is left behind — no thread markers.
+    assert state.threads_addressed_ids == {"__awf_forge_transient_retry_count:merge_pr": "1"}
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -215,7 +216,7 @@ async def test_transient_github_merge_error_retries_without_human_escalation(
         assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
         assert events[0].payload["context"] == "merge_pr"
         assert events[0].payload["operation"] == "gh pr merge"
-        assert events[0].payload["wait_seconds"] == 60
+        assert events[0].payload["wait_seconds"] == 5
 
 
 @pytest.mark.unit
@@ -363,10 +364,13 @@ async def test_transient_human_notification_comment_error_retries_without_crashi
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
+    assert sleep_fn.calls == [5]
     assert len(cmd.calls) == 1
     assert cmd.calls[0].args[:3] == ["gh", "pr", "comment"]
-    assert state.threads_addressed_ids == {}
+    # Only the bounded-retry bookkeeping key is left behind — no thread markers.
+    assert state.threads_addressed_ids == {
+        "__awf_forge_transient_retry_count:post_human_notification": "1"
+    }
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -377,7 +381,7 @@ async def test_transient_human_notification_comment_error_retries_without_crashi
         assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
         assert events[0].payload["context"] == "post_human_notification"
         assert events[0].payload["operation"] == "gh pr comment"
-        assert events[0].payload["wait_seconds"] == 60
+        assert events[0].payload["wait_seconds"] == 5
 
 
 @pytest.mark.unit
@@ -459,8 +463,11 @@ async def test_transient_bitbucket_human_notification_comment_error_retries(
     )
 
     assert terminal is False
-    assert sleep_fn.calls == [60]
-    assert state.threads_addressed_ids == {}
+    assert sleep_fn.calls == [5]
+    # Only the bounded-retry bookkeeping key is left behind — no thread markers.
+    assert state.threads_addressed_ids == {
+        "__awf_forge_transient_retry_count:post_human_notification": "1"
+    }
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
@@ -562,7 +569,7 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert sleep_fn.calls == [30, 60]
+    assert sleep_fn.calls == [30, 5]
     assert state.threads_addressed_ids["T_retry"] == "fix_committed"
     assert _review_thread_body_state_key("T_retry") in state.threads_addressed_ids
     worktree = tmp_path / "worktrees" / workspace_id
@@ -624,7 +631,7 @@ async def test_resolve_thread_transient_failure_requeues_thread_safely(
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert sleep_fn.calls == [30, 60]
+    assert sleep_fn.calls == [30, 5]
     assert "T_resolve" not in state.threads_addressed_ids
     assert state.last_push_sha == "newsha"
     worktree = tmp_path / "worktrees" / workspace_id
@@ -757,11 +764,13 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    # A permanent Bitbucket fault (403, token lacks the scope) during resolve_thread
-    # must forward the forge-native reason code (BITBUCKET_AUTH_FAILED here) and clear
-    # the addressed marker WITHOUT escaping the fix cycle — mirroring the GitHub arm's
-    # "do NOT drop out of the monitor" behaviour rather than terminating the workspace,
-    # and keeping the fault diagnosable instead of collapsing it to a generic placeholder.
+    # A permanent Bitbucket fault during resolve_thread must forward the
+    # forge-native reason code and clear the addressed marker WITHOUT escaping the
+    # fix cycle — mirroring the GitHub arm's "do NOT drop out of the monitor"
+    # behaviour rather than terminating the workspace, and keeping the fault
+    # diagnosable instead of collapsing it to a generic placeholder. A non-auth 4xx
+    # (``BITBUCKET_API_ERROR`` 404) is genuinely deterministic — 401/403 are now
+    # bounded-retryable (#515), so they would route through the transient arm.
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
@@ -780,9 +789,9 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
             cmd,
             BitbucketClientError(
                 operation="bitbucket resolve_thread",
-                status=403,
-                body="forbidden: missing scope",
-                reason_code=BITBUCKET_AUTH_FAILED,
+                status=404,
+                body="thread not found",
+                reason_code=BITBUCKET_API_ERROR,
             ),
         ),
     )
@@ -833,12 +842,12 @@ async def test_resolve_thread_permanent_bitbucket_failure_keeps_monitor_alive(
     assert resolution_events[0].payload is not None
     assert resolution_events[0].payload["action"] == "resolve_thread"
     assert resolution_events[0].payload["outcome"] == "failed"
-    assert resolution_events[0].payload["reason_code"] == BITBUCKET_AUTH_FAILED
+    assert resolution_events[0].payload["reason_code"] == BITBUCKET_API_ERROR
     assert resolution_events[0].payload["evidence"] == {
         "thread_ids": ["T_resolve"],
         "resolved_thread_count": 0,
         "failed_thread_count": 1,
-        "error_message": "bitbucket resolve_thread failed (status=403): forbidden: missing scope",
+        "error_message": "bitbucket resolve_thread failed (status=404): thread not found",
     }
     assert "please adjust this" not in repr(resolution_events[0].payload)
 
@@ -900,7 +909,7 @@ async def test_fix_cycle_treats_transient_bitbucket_settle_poll_as_retryable(
 
     # The transient blip breaks the settle loop and proceeds to push + resolve;
     # the addressed marker survives because the fix shipped.
-    assert sleep_fn.calls == [30, 60]
+    assert sleep_fn.calls == [30, 5]
     assert state.threads_addressed_ids["T_settle"] == "fix_committed"
     worktree = tmp_path / "worktrees" / workspace_id
     assert cmd.calls[0].args[:5] == _git_worktree_command(worktree)
@@ -1318,3 +1327,174 @@ async def test_task_resolve_forbidden_blocks_as_needs_human_without_retry_storm(
     assert payload["evidence"]["needs_human_thread_count"] == 1
     # Task body_excerpt should not leak into event payloads.
     assert "please add a regression test" not in repr(resolution_events[0].payload)
+
+
+@pytest.mark.unit
+async def test_resolve_thread_exhausted_transient_blocks_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """When a still-open comment thread's resolve keeps hitting a transient forge
+    fault until the bounded retry budget is exhausted, the fix cycle must escalate
+    to ``needs_human`` rather than clear the addressed marker.
+
+    Clearing the marker (the deterministic-fault path) would re-route the still-open
+    thread through AddressComments next poll, immediately re-exhaust the deliberately
+    persisted counter on the next resolve, and re-run the agent every poll — the
+    exact storm the bounded budget exists to prevent. ``needs_human`` keeps the
+    thread UNRESOLVED so the merge gate keeps blocking and decide() routes to
+    NotifyHuman, and the exhausted reason code stays diagnosable in the audit event.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="newsha\n")
+    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    # A budget of 0 retries exhausts on the first transient resolve fault — no
+    # backoff sleep, straight to the exhausted path within this single fix cycle.
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
+    thread = ReviewThread(
+        thread_id="T_resolve",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # Escalated to needs_human (kept addressed → no re-address storm), NOT cleared.
+    assert state.threads_addressed_ids.get("T_resolve") == "needs_human"
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # Not terminated: the workspace keeps polling.
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        # Exhaustion is recorded as such; no further backoff sleep happened.
+        exhausted_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.github_transient_error_retry_exhausted"
+        ]
+        assert _retry_events(ws) == []
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    assert len(exhausted_events) == 1
+    assert exhausted_events[0].reason_code == "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
+    assert len(resolution_events) == 1
+    payload = resolution_events[0].payload
+    assert payload is not None
+    assert payload["action"] == "resolve_thread"
+    assert payload["outcome"] == "needs_human"
+    assert resolution_events[0].reason_code == "GITHUB_TRANSIENT_RETRY_EXHAUSTED"
+    assert payload["evidence"]["needs_human_thread_count"] == 1
+    assert payload["evidence"]["thread_ids"] == ["T_resolve"]
+    assert "please adjust this" not in repr(resolution_events[0].payload)
+
+
+@pytest.mark.unit
+async def test_resolve_thread_exhausted_transient_bitbucket_blocks_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Bitbucket symmetry: an exhausted transient resolve budget on a still-open
+    comment thread escalates to ``needs_human`` with the Bitbucket exhausted reason
+    code, rather than clearing the marker and re-running the agent forever."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="newsha\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        gh=_BitbucketResolveThreadClient(
+            cmd,
+            BitbucketClientError(
+                operation="bitbucket resolve_thread",
+                status=429,
+                body="rate limited",
+                reason_code=BITBUCKET_RATE_LIMITED,
+            ),
+        ),
+    )
+    object.__setattr__(runner._runner_config, "transient_forge_max_retries", 0)
+    thread = ReviewThread(
+        thread_id="T_resolve",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert state.threads_addressed_ids.get("T_resolve") == "needs_human"
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        exhausted_events = [
+            event
+            for event in ws.events
+            if event.event_type == "monitor.bitbucket_transient_error_retry_exhausted"
+        ]
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    assert len(exhausted_events) == 1
+    assert exhausted_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY_EXHAUSTED"
+    assert len(resolution_events) == 1
+    payload = resolution_events[0].payload
+    assert payload is not None
+    assert payload["action"] == "resolve_thread"
+    assert payload["outcome"] == "needs_human"
+    assert resolution_events[0].reason_code == "BITBUCKET_TRANSIENT_RETRY_EXHAUSTED"
+    assert payload["evidence"]["needs_human_thread_count"] == 1
+    assert "please adjust this" not in repr(resolution_events[0].payload)

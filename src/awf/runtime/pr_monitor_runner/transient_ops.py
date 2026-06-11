@@ -11,6 +11,8 @@ import json as json
 import os as os
 import re as re
 import time as time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 from awf.common.bitbucket_client import BitbucketClientError
@@ -26,16 +28,21 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.constants import (
+    _BITBUCKET_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _BITBUCKET_TRANSIENT_RETRY_REASON,
     _GIT_BASE_FETCH_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GIT_BASE_FETCH_TRANSIENT_RETRY_REASON,
     _GIT_FETCH_BASE_FAILED_REASON,
+    _GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
     _GITHUB_TRANSIENT_RETRY_REASON,
 )
 from awf.runtime.pr_monitor_runner.helpers import (
     _base_fetch_retry_wait_seconds,
+    _clear_transient_forge_retry_state,
     _collect_defer_items,
+    _exponential_backoff_wait_seconds,
     _increment_base_fetch_retry_count,
+    _increment_forge_transient_retry_count,
     _is_transient_base_fetch_error,
     _is_transient_bitbucket_client_error,
     _is_transient_github_client_error,
@@ -91,35 +98,156 @@ async def _fetch_status_for_decision(
     return cast(PRStatus, status)
 
 
-async def _wait_after_transient_github_error(
+@dataclass(frozen=True)
+class _ForgeTransientRetrySpec:
+    """Forge-specific knobs for the shared bounded transient-retry routine.
+
+    The control flow for waiting on a recoverable GitHub vs Bitbucket blip is
+    byte-identical; only the classifier, payload builder, structured-event names,
+    and reason codes differ per forge. Capturing exactly those differences here
+    lets :func:`_run_bounded_transient_forge_retry` carry the single shared
+    implementation while each forge keeps emitting its own distinct event +
+    reason code (behaviour-preserving).
+    """
+
+    is_transient: Callable[[Any], bool]
+    build_payload: Callable[..., dict[str, object]]
+    retrying_event: str
+    exhausted_event: str
+    retrying_reason: str
+    exhausted_reason: str
+
+
+_GITHUB_TRANSIENT_RETRY_SPEC = _ForgeTransientRetrySpec(
+    is_transient=_is_transient_github_client_error,
+    build_payload=_transient_github_retry_payload,
+    retrying_event="monitor.github_transient_error_retrying",
+    exhausted_event="monitor.github_transient_error_retry_exhausted",
+    retrying_reason=_GITHUB_TRANSIENT_RETRY_REASON,
+    exhausted_reason=_GITHUB_TRANSIENT_RETRY_EXHAUSTED_REASON,
+)
+
+
+_BITBUCKET_TRANSIENT_RETRY_SPEC = _ForgeTransientRetrySpec(
+    is_transient=_is_transient_bitbucket_client_error,
+    build_payload=_transient_bitbucket_retry_payload,
+    retrying_event="monitor.bitbucket_transient_error_retrying",
+    exhausted_event="monitor.bitbucket_transient_error_retry_exhausted",
+    retrying_reason=_BITBUCKET_TRANSIENT_RETRY_REASON,
+    exhausted_reason=_BITBUCKET_TRANSIENT_RETRY_EXHAUSTED_REASON,
+)
+
+
+async def _run_bounded_transient_forge_retry(
     self: Any,
-    exc: GitHubClientError,
+    exc: ForgeClientError,
     *,
     workspace_id: str,
     pr_number: int,
     context: str,
+    state: MonitorState,
     monitor_log: WorkspaceLogSink | None,
+    spec: _ForgeTransientRetrySpec,
 ) -> bool:
-    if not _is_transient_github_client_error(exc):
+    """Shared bounded-backoff retry routine for one forge's transient blips.
+
+    A transient classification (per ``spec.is_transient``) increments a
+    per-context retry count and, while under the budget, sleeps an exponential
+    backoff and returns ``True`` (retry). Once the budget is exhausted it emits a
+    distinct exhausted event, persists state, and returns ``False`` so the caller
+    terminates via its existing path with the forge's preserved ``reason_code``. A
+    non-transient (deterministic) fault returns ``False`` immediately. Mirrors the
+    base-fetch bounded-retry machinery with its own config + per-context counter so
+    the two never entangle; ``spec`` supplies the only forge-specific differences
+    (classifier, payload builder, event names, reason codes).
+    """
+    if not spec.is_transient(exc):
+        # Deterministic (non-transient) fault: there is no retry to bound, so the
+        # bounded-retry incident this context may still be carrying is over. Clear
+        # any stale per-context counter left by a *prior* recovered transient blip
+        # before returning — otherwise the non-terminal callers (``resolve_thread``
+        # / ``capture_deferred_thread`` / ...) leave it in ``state`` and the runner
+        # persists it on the next save, so a later *unrelated* transient in the same
+        # context resumes from the old count and can exhaust the budget immediately.
+        # The exhausted path below deliberately keeps its counter (still transient →
+        # fail closed), mirroring ``merge_pr``'s ``if not blocker_is_transient``
+        # clear in ``merge_loop``. Clears (and persists) only when a counter is
+        # actually present, so the common deterministic-without-prior-blip path adds
+        # no extra DB write.
+        await self._clear_forge_transient_retry_state_on_success(
+            workspace_id=workspace_id,
+            state=state,
+            context=context,
+        )
         return False
-    wait_seconds = self._config.poll_interval_seconds
-    payload = _transient_github_retry_payload(
+    retry_number = _increment_forge_transient_retry_count(state, context)
+    max_retries = max(self._runner_config.transient_forge_max_retries, 0)
+    if retry_number > max_retries:
+        payload = spec.build_payload(
+            exc,
+            context=context,
+            pr_number=pr_number,
+            wait_seconds=0.0,
+            retry_number=retry_number,
+            max_retries=max_retries,
+        )
+        _log.warning(
+            spec.exhausted_event,
+            workspace_id=workspace_id,
+            **payload,
+        )
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": spec.exhausted_event,
+                "workspace_id": workspace_id,
+                "reason_code": spec.exhausted_reason,
+                **payload,
+            },
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type=spec.exhausted_event,
+                    reason_code=spec.exhausted_reason,
+                    payload=payload,
+                )
+            ],
+        )
+        # Persist only the bounded retry counter, never the whole in-memory state:
+        # a fix-cycle caller may still hold an unconfirmed addressed verdict that it
+        # rolls back only after this returns, and flushing it here would let a
+        # crash/restart reload it as addressed and merge over still-open feedback
+        # (#305). See _persist_forge_transient_retry_count.
+        await self._persist_forge_transient_retry_count(
+            workspace_id, context=context, retry_number=retry_number
+        )
+        return False
+    wait_seconds = _exponential_backoff_wait_seconds(
+        retry_number=retry_number,
+        initial_backoff_seconds=self._runner_config.transient_forge_initial_backoff_seconds,
+        max_backoff_seconds=self._runner_config.transient_forge_max_backoff_seconds,
+    )
+    payload = spec.build_payload(
         exc,
         context=context,
         pr_number=pr_number,
         wait_seconds=wait_seconds,
+        retry_number=retry_number,
+        max_retries=max_retries,
     )
     _log.warning(
-        "monitor.github_transient_error_retrying",
+        spec.retrying_event,
         workspace_id=workspace_id,
         **payload,
     )
     await self._write_monitor_log(
         monitor_log,
         {
-            "event": "monitor.github_transient_error_retrying",
+            "event": spec.retrying_event,
             "workspace_id": workspace_id,
-            "reason_code": _GITHUB_TRANSIENT_RETRY_REASON,
+            "reason_code": spec.retrying_reason,
             **payload,
         },
     )
@@ -127,14 +255,56 @@ async def _wait_after_transient_github_error(
         workspace_id=workspace_id,
         events=[
             WorkspaceEventCreate(
-                event_type="monitor.github_transient_error_retrying",
-                reason_code=_GITHUB_TRANSIENT_RETRY_REASON,
+                event_type=spec.retrying_event,
+                reason_code=spec.retrying_reason,
                 payload=payload,
             )
         ],
     )
+    # Persist only the bounded retry counter, never the whole in-memory state: a
+    # fix-cycle caller may still hold an unconfirmed addressed verdict that it rolls
+    # back only after this returns, and flushing it here would let a crash/restart
+    # during the backoff reload it as addressed and merge over still-open feedback
+    # (#305). See _persist_forge_transient_retry_count.
+    await self._persist_forge_transient_retry_count(
+        workspace_id, context=context, retry_number=retry_number
+    )
     await self._deps.sleep(wait_seconds)
     return True
+
+
+async def _wait_after_transient_github_error(
+    self: Any,
+    exc: GitHubClientError,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    context: str,
+    state: MonitorState,
+    monitor_log: WorkspaceLogSink | None,
+) -> bool:
+    """Wait and keep polling on a recoverable GitHub blip, with bounded backoff.
+
+    A transient classification (5xx, rate-limit, transport, or an ambiguous
+    ``HTTP 401`` / ``Requires authentication`` with no strong permanent marker —
+    #515) increments a per-context retry count and, while under the budget, sleeps
+    an exponential backoff and returns ``True`` (retry). Once the budget is
+    exhausted it emits a distinct exhausted event, persists state, and returns
+    ``False`` so the caller terminates via its existing path with the forge's
+    preserved ``reason_code``. A non-transient (strong permanent) fault returns
+    ``False`` immediately. Thin wrapper over
+    :func:`_run_bounded_transient_forge_retry` with the GitHub spec.
+    """
+    return await _run_bounded_transient_forge_retry(
+        self,
+        exc,
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        context=context,
+        state=state,
+        monitor_log=monitor_log,
+        spec=_GITHUB_TRANSIENT_RETRY_SPEC,
+    )
 
 
 async def _wait_after_transient_bitbucket_error(
@@ -144,50 +314,32 @@ async def _wait_after_transient_bitbucket_error(
     workspace_id: str,
     pr_number: int,
     context: str,
+    state: MonitorState,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool:
-    """Wait and keep polling on a recoverable Bitbucket blip.
+    """Wait and keep polling on a recoverable Bitbucket blip, with bounded backoff.
 
     Mirrors :func:`_wait_after_transient_github_error` so Bitbucket workspaces
-    survive transient rate-limit/transport/5xx faults instead of terminating
-    immediately. Returns ``True`` when the caller should retry (``continue``),
-    ``False`` when the error is deterministic and must fail the monitor.
+    survive transient rate-limit/transport/5xx faults — and, symmetric with
+    GitHub's ambiguous-401 handling (#515), any 401/403 auth blip — instead of
+    terminating immediately. A transient classification increments a per-context
+    retry count and, while under the budget, sleeps an exponential backoff and
+    returns ``True`` (retry); once exhausted it emits a distinct exhausted event,
+    persists state, and returns ``False`` so the caller terminates with the
+    preserved ``reason_code``. A deterministic fault returns ``False`` immediately.
+    Thin wrapper over :func:`_run_bounded_transient_forge_retry` with the Bitbucket
+    spec.
     """
-    if not _is_transient_bitbucket_client_error(exc):
-        return False
-    wait_seconds = self._config.poll_interval_seconds
-    payload = _transient_bitbucket_retry_payload(
+    return await _run_bounded_transient_forge_retry(
+        self,
         exc,
-        context=context,
+        workspace_id=workspace_id,
         pr_number=pr_number,
-        wait_seconds=wait_seconds,
+        context=context,
+        state=state,
+        monitor_log=monitor_log,
+        spec=_BITBUCKET_TRANSIENT_RETRY_SPEC,
     )
-    _log.warning(
-        "monitor.bitbucket_transient_error_retrying",
-        workspace_id=workspace_id,
-        **payload,
-    )
-    await self._write_monitor_log(
-        monitor_log,
-        {
-            "event": "monitor.bitbucket_transient_error_retrying",
-            "workspace_id": workspace_id,
-            "reason_code": _BITBUCKET_TRANSIENT_RETRY_REASON,
-            **payload,
-        },
-    )
-    await self._append_workspace_events(
-        workspace_id=workspace_id,
-        events=[
-            WorkspaceEventCreate(
-                event_type="monitor.bitbucket_transient_error_retrying",
-                reason_code=_BITBUCKET_TRANSIENT_RETRY_REASON,
-                payload=payload,
-            )
-        ],
-    )
-    await self._deps.sleep(wait_seconds)
-    return True
 
 
 async def _wait_after_transient_forge_error(
@@ -197,6 +349,7 @@ async def _wait_after_transient_forge_error(
     workspace_id: str,
     pr_number: int,
     context: str,
+    state: MonitorState,
     monitor_log: WorkspaceLogSink | None,
 ) -> bool:
     """Wait and keep polling on a recoverable forge (GitHub/Bitbucket) blip.
@@ -204,8 +357,10 @@ async def _wait_after_transient_forge_error(
     The forge-neutral entry point for the consolidated ``except ForgeClientError``
     catch arms: it dispatches to the per-forge wait helper so each keeps emitting
     its own transient-retry event and reason code (behaviour-preserving), while
-    callers no longer need to branch on the concrete forge type. Returns ``True``
-    when the caller should retry, ``False`` when the fault is deterministic.
+    callers no longer need to branch on the concrete forge type. ``state`` carries
+    the per-context bounded-retry counter through to the dispatched helper. Returns
+    ``True`` when the caller should retry, ``False`` when the fault is
+    deterministic or the bounded retry budget is exhausted.
     """
     if isinstance(exc, BitbucketClientError):
         return await _wait_after_transient_bitbucket_error(
@@ -214,6 +369,7 @@ async def _wait_after_transient_forge_error(
             workspace_id=workspace_id,
             pr_number=pr_number,
             context=context,
+            state=state,
             monitor_log=monitor_log,
         )
     if isinstance(exc, GitHubClientError):
@@ -223,6 +379,7 @@ async def _wait_after_transient_forge_error(
             workspace_id=workspace_id,
             pr_number=pr_number,
             context=context,
+            state=state,
             monitor_log=monitor_log,
         )
     # No per-forge wait helper exists for an unknown subclass, so we cannot emit
@@ -233,6 +390,40 @@ async def _wait_after_transient_forge_error(
     raise RuntimeError(  # pragma: no cover - only GitHub/Bitbucket subclasses exist
         f"unknown ForgeClientError subclass: {type(exc).__name__}"
     )
+
+
+async def _clear_forge_transient_retry_state_on_success(
+    self: Any,
+    *,
+    workspace_id: str,
+    state: MonitorState,
+    context: str,
+) -> None:
+    """Reset a context's bounded forge-transient retry counter after success.
+
+    The per-context counter (:func:`_increment_forge_transient_retry_count`) is
+    persisted on every transient forge blip so a *consecutive* run of failures
+    stays bounded across polls. Once that context's forge operation finally
+    succeeds the incident is over, so the counter must be cleared — otherwise a
+    recovered one-off blip leaves a stale count behind, and later unrelated blips
+    in the same context resume from it and exhaust the bounded budget
+    prematurely, downgrading or terminating an otherwise-healthy monitor.
+
+    Mirrors the inline clear the ``fetch_pr_status`` / ``pre_merge_recheck`` paths
+    already perform, factored into one helper so every increment context resets
+    symmetrically. Persists only when a counter was actually present, so the
+    common no-blip success path adds no extra DB write.
+
+    The persist removes *only* the counter key, never the whole in-memory state
+    (:func:`_remove_forge_transient_retry_count`): a fix-cycle caller can hold
+    unconfirmed addressed verdicts for *later* ``threads_to_resolve`` whose forge
+    resolve calls have not run yet, and flushing those here would let a cancel
+    during a subsequent transient resolve wait reload them as addressed so
+    ``decide()`` skips still-open feedback and merges over it (#305) — symmetric
+    with :func:`_persist_forge_transient_retry_count` on the wait path.
+    """
+    if _clear_transient_forge_retry_state(state, context=context):
+        await self._remove_forge_transient_retry_count(workspace_id, context=context)
 
 
 async def _wait_after_transient_base_fetch_error(

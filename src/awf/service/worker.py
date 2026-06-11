@@ -7,7 +7,7 @@ import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -23,7 +23,7 @@ from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.enums import TaskKind
+from awf.db.enums import TaskKind, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
@@ -46,6 +46,7 @@ from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_relea
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings
+from awf.service.gc import CLEANUP_EXECUTION_PARTIAL, run_service_workspace_gc
 from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
     OrphanDirReconcileResult,
@@ -104,6 +105,36 @@ def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
     closer = loop.create_task(gh.aclose())
     _PENDING_FORGE_CLIENT_CLOSERS.add(closer)
     closer.add_done_callback(_PENDING_FORGE_CLIENT_CLOSERS.discard)
+
+
+def _combine_terminal_gc_reports(
+    default_report: dict[str, object], discarded_report: dict[str, object]
+) -> dict[str, object]:
+    """Fold the discarded-status (cancelled/destroyed) GC pass into the default pass.
+
+    The worker runs the terminal-workspace GC twice — once under the conservative
+    default policy and once with an explicit ``include_statuses`` for the
+    cancelled/destroyed rows that policy never classifies (#513) — and the cleanup
+    loop logs a single summary, so the two reports are merged here. The passes act on
+    disjoint status sets and never reclaim the same path, so deleted paths /
+    candidates / delete-errors concatenate and preserved counts sum. A ``partial``
+    from either pass wins (it leaked disk it could not reclaim), so a self-protected
+    sweep is never masked behind the other's clean success.
+    """
+    combined = dict(default_report)
+    for key in ("deleted_paths", "candidates", "delete_errors"):
+        first = cast("list[object]", default_report.get(key) or [])
+        second = cast("list[object]", discarded_report.get(key) or [])
+        combined[key] = [*first, *second]
+    combined["deleted_path_count"] = len(cast("list[object]", combined["deleted_paths"]))
+    combined["candidate_count"] = len(cast("list[object]", combined["candidates"]))
+    combined["preserved_count"] = cast("int", default_report.get("preserved_count") or 0) + cast(
+        "int", discarded_report.get("preserved_count") or 0
+    )
+    if "partial" in (default_report.get("status"), discarded_report.get("status")):
+        combined["status"] = "partial"
+        combined["reason_code"] = CLEANUP_EXECUTION_PARTIAL
+    return combined
 
 
 def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
@@ -331,6 +362,82 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             execute=True,
         )
 
+    async def _reap_terminal_workspace_gc() -> dict[str, object]:
+        """Reap per-workspace terminal-workspace auth dirs from the worker (#513).
+
+        The per-workspace ``auth/<id>/`` dirs (~1.7 GB each) of completed/cancelled/
+        destroyed workspaces leak because reclaiming one first unmounts a possible
+        live Claude overlay at ``auth/<id>/claude/merged``, and
+        ``teardown_workspace_auth_overlay`` raises ``OverlayUnmountUnverifiableError``
+        whenever the caller cannot prove it holds CAP_SYS_ADMIN — so the
+        capability-less API ``/v1/service/gc`` path records every auth path ``skipped``
+        and deletes nothing. The worker holds CAP_SYS_ADMIN and shares the agent's
+        mount namespace, so driving the same already-tested GC here makes the
+        unmount-before-remove succeed and the dir is actually removed (same root cause
+        as #509's shared-base reaper, but for the per-workspace dirs it did not cover).
+
+        Reuse the exact assembly wrapper the API route calls
+        (``run_service_workspace_gc``) so the volume-removing compose teardown,
+        companion-image prune, and same-pass claude-base reap are threaded identically
+        and worker/API behaviour stays in lockstep. It is ``async`` and offloads its
+        blocking multi-GB ``rmtree``/DB work via ``asyncio.to_thread`` internally, so
+        just ``await`` it (no extra ``to_thread`` wrap, unlike the sync claude-base
+        reaper above). Reuse the worker's ``compose`` ComposeManager so the GC does not
+        re-resolve the workspace template into a second manager. Return the report dict
+        for the worker's summary logger. The first pass inherits its ``preserves_failed_
+        workspaces=True`` policy and ``min_age_hours`` retention — failed and too-young
+        workspaces are preserved.
+
+        The conservative default policy only classifies completed/failed/superseded rows
+        (``plan_terminal_workspace_gc``; guarded by the
+        ``test_default_gc_policy_ignores_non_pr_terminal_and_unknown_statuses``
+        regression), so it never even looks at ``cancelled``/``destroyed`` workspaces —
+        yet their ~1.7 GB auth dirs leak just the same (#513 lists completed/cancelled/
+        destroyed). Those discarded rows carry no merged-PR work to preserve, so a second
+        explicit ``include_statuses`` pass reaps them by age without disturbing the first
+        pass's completed-merged / failed-preservation / superseded age-cap nuance. The
+        global claude-base reap and companion-image prune already ran in the first pass,
+        so the second pass leaves them off. Both reports are folded into one summary.
+        """
+        default_result = await run_service_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            execute=True,
+            min_age_hours=settings.completed_workspace_retention_hours,
+            limit=settings.workspace_cleanup_batch_limit,
+            cleanup_enabled=settings.workspace_cleanup_enabled,
+            companion_image_cache_enabled=settings.companion_image_cache_enabled,
+            companion_image_retention_hours=settings.companion_image_retention_hours,
+            host_home=host_home,
+            reap_claude_bases=settings.claude_base_gc_enabled,
+            compose_manager=compose,
+        )
+        # Share one cleanup-batch budget across both passes. ``plan_terminal_workspace_gc``
+        # caps each call to ``workspace_cleanup_batch_limit`` candidates (the
+        # "maximum cleanup candidates per batch" invariant), but giving the
+        # discarded-status pass the full limit again would let a single sweep reclaim
+        # up to ~2x the configured guard. Subtract the first pass's selected candidates
+        # so the combined sweep never exceeds one batch budget; a fully-spent budget
+        # makes the second pass a no-op (``limit=0`` selects nothing).
+        discarded_limit = max(
+            settings.workspace_cleanup_batch_limit - len(default_result.plan.candidates),
+            0,
+        )
+        discarded_result = await run_service_workspace_gc(
+            session_factory,
+            work_dir=work_dir,
+            execute=True,
+            min_age_hours=settings.completed_workspace_retention_hours,
+            limit=discarded_limit,
+            cleanup_enabled=settings.workspace_cleanup_enabled,
+            include_statuses=(
+                WorkspaceStatus.cancelled.value,
+                WorkspaceStatus.destroyed.value,
+            ),
+            compose_manager=compose,
+        )
+        return _combine_terminal_gc_reports(default_result.to_dict(), discarded_result.to_dict())
+
     worker = ControlWorker(
         session_factory=session_factory,
         provisioner=provisioner,
@@ -340,6 +447,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         orphan_dir_reconciler=_reconcile_orphan_dirs,
         classified_orphan_reaper=_reap_classified_orphans,
         claude_base_reaper=_reap_superseded_claude_bases,
+        terminal_gc_reaper=_reap_terminal_workspace_gc,
         # The work dir backs ``auth/<id>/claude`` overlays; the worker (alone
         # holding CAP_SYS_ADMIN + the agent's mount namespace) unmounts a reaped
         # workspace's overlay on terminal-runtime-release before GC removes the dir.
@@ -357,6 +465,10 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             claude_base_gc_enabled=settings.claude_base_gc_enabled,
             claude_base_reap_scan_interval_seconds=(
                 settings.claude_base_reap_scan_interval_seconds
+            ),
+            terminal_workspace_gc_enabled=settings.terminal_workspace_gc_enabled,
+            terminal_workspace_gc_scan_interval_seconds=(
+                settings.terminal_workspace_gc_scan_interval_seconds
             ),
             orphan_reconcile_max_per_scan=settings.orphan_reconcile_max_per_scan,
             orphan_reconcile_min_age_hours=settings.orphan_reconcile_min_age_hours,
