@@ -63,7 +63,9 @@ Profiles keep AWF generic rather than tied to one application stack.
 
 A `WorkspaceProfile` can describe:
 
-- `runtime`: agent image, toolchain image, environment variables.
+- `runtime`: agent image, toolchain image, environment variables, and declared
+  language toolchains (e.g. the JDK versions the build needs — see
+  [Declaring language toolchains](#declaring-language-toolchains)).
 - `docker`: no Docker or per-workspace DinD.
 - `services`: profile-declared sidecars.
 - `phases`: setup, pre-agent, post-agent, validate, cleanup commands.
@@ -152,6 +154,45 @@ Preview the profile AWF would resolve for a checkout:
 ```bash
 uv run --python 3.12 --extra dev awf profile preview . --profile auto
 ```
+
+### Declaring language toolchains
+
+`runtime.toolchains` lets a profile declare the language toolchain versions the
+build needs, so satisfying them is a preflight/runtime concern rather than an
+ad-hoc agent repair. It maps a language identifier to the versions that must be
+available in the runtime/toolchain image:
+
+```yaml
+# .awf/workspace.yml — a Gradle repo that builds with JDK 17 but also wants 21 on hand
+gradle-service:
+  name: gradle-service
+  version: 1
+  description: Gradle service that runs its test suite on JDK 17.
+  runtime:
+    toolchains:
+      java: ["17", "21"]
+  phases:
+    setup:
+      - command: ./gradlew --no-daemon dependencies
+    validate:
+      - command: ./gradlew --no-daemon test
+```
+
+The declaration is optional and backward-compatible: an absent `toolchains` map
+(the default) means no toolchain requirement and changes nothing. Language keys
+are normalized to lowercase and must be safe identifiers (`^[a-z][a-z0-9+_.-]*$`);
+each version is a dotted-numeric string (`17`, `21`, `1.8`, `11.0.2`), de-duplicated
+while preserving order. Declarations are bounded (at most 16 languages, 16 versions
+each).
+
+The runtime/toolchain image is expected to provide each declared version side by
+side — for example JDKs installed under `/usr/lib/jvm/temurin-17` and
+`/usr/lib/jvm/temurin-21`, selected per command via `JAVA_HOME` or
+`update-alternatives`. When a declared version is not present in the image, AWF
+surfaces a `RUNTIME_TOOLCHAIN_UNAVAILABLE` warning at preflight (instead of leaving
+the agent to install a JDK by hand). The built-in `java` profile declares
+`java: ["17", "21"]` for exactly this reason: a real Gradle repo needed JDK 17 for
+test execution while the runtime shipped JDK 21.
 
 ### Local egress policy
 
