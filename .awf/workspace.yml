@@ -64,5 +64,7 @@ awf:
         timeout_seconds: 600
       - command: uv run --python 3.12 --extra dev python scripts/generate_openapi.py --check
         timeout_seconds: 300
-      - command: uv run --python 3.12 --extra dev pytest tests/unit -n 3 -q
-        timeout_seconds: 1800
+      # No in-workspace test suite: GitHub CI runs the full sharded pytest+coverage
+      # on every PR commit (the authoritative gate). ruff + mypy above already run
+      # over the changed files, which satisfies the pre-push conformance check
+      # without duplicating CI or saturating the host.
