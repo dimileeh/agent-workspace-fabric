@@ -99,6 +99,22 @@ class TestRepoRefForgeDetection:
     @pytest.mark.parametrize(
         "url",
         [
+            "https://[bad",
+            "https://[bad]:notaport/owner/repo",
+        ],
+    )
+    def test_malformed_ipv6_url_raises_standard_message(self, url: str) -> None:
+        # ``urlsplit``/``.hostname`` raise a bespoke ``ValueError`` (e.g. "Invalid
+        # IPv6 URL") on malformed authorities; normalize to the standard
+        # parse-failure message so no urllib internals leak (thread
+        # PRRT_kwDOSJAM6s6I2g-d).
+        with pytest.raises(ValueError, match=r"^Cannot parse repo from URL: "):
+            RepoRef.from_url(url)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "url",
+        [
             "https://bitbucket.org/workspace",
             "git@gitlab.com:org/repo.git",
         ],

@@ -209,8 +209,15 @@ class RepoRef:
                     forge=forge,
                 )
 
-        parsed = urlsplit(value)
-        parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        # ``urlsplit``/``.hostname`` raise a bespoke ``ValueError`` (e.g. "Invalid
+        # IPv6 URL") on malformed authorities like ``https://[bad``. Normalize that
+        # to this method's standard parse-failure message so callers see one
+        # consistent error and no urllib internals leak through.
+        try:
+            parsed = urlsplit(value)
+            parsed_host = parsed.hostname.lower() if parsed.hostname is not None else None
+        except ValueError as exc:
+            raise ValueError(f"Cannot parse repo from URL: {repo_url!r}") from exc
         url_forge = _HOST_FORGES.get(parsed_host) if parsed_host is not None else None
         is_http_url = parsed.scheme in {"http", "https"}
         is_ssh_url = parsed.scheme == "ssh" and (
