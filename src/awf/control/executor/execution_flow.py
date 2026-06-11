@@ -63,7 +63,6 @@ from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     _setup_dependency_network_failure_details,
 )
-from awf.control.executor.metadata import _str_or_none
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
@@ -75,6 +74,7 @@ from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
     _planning_validation_handoff_from_recovery_payload,
     _recovery_needs_existing_pr_push,
+    _validate_only_recovery_target_head_sha,
 )
 from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
@@ -108,25 +108,6 @@ from awf.runtime.validation import (
     ValidationCoverageResult,
     ValidationResult,
 )
-
-
-def _validate_only_recovery_target_head_sha(
-    recovery: Mapping[str, Any] | None,
-    *,
-    validated_workspace_head_sha: str | None,
-) -> str | None:
-    """Return the recovery source head SHA when this is validate-only recovery."""
-    if not recovery or recovery.get("recovery_mode") != "validate_only":
-        return None
-    source_head_sha = _str_or_none(recovery.get("source_head_sha"))
-    if source_head_sha is None:
-        return None
-    normalized_source_head_sha = source_head_sha.strip()
-    if not normalized_source_head_sha:
-        return None
-    if validated_workspace_head_sha != normalized_source_head_sha:
-        return None
-    return normalized_source_head_sha
 
 
 async def execute(
