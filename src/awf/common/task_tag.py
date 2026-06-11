@@ -77,6 +77,23 @@ def title_with_task_tag(title: str, tag: str | None) -> str:
     return f"{prefix}{title}"
 
 
+def strip_leading_task_tag(text: str, tag: str | None) -> str:
+    """Remove a single leading ``"{tag} "`` prefix from ``text``; no-op if falsy/absent.
+
+    Use this before embedding a (possibly already-tagged) ``task_title`` inside a
+    composed commit subject such as ``f"awf: {title}"``: stripping the leading key
+    first means the subsequent :func:`commit_message_with_task_tag` re-application
+    yields a single leading key (``"{tag} awf: …"``) instead of a duplicated
+    ``"{tag} awf: {tag} …"`` that weakens Jira auto-linking.
+    """
+    if not tag:
+        return text
+    prefix = f"{tag}{MESSAGE_SEP}"
+    if text.startswith(prefix):
+        return text[len(prefix) :]
+    return text
+
+
 def commit_message_with_task_tag(message: str, tag: str | None) -> str:
     """Prepend ``tag`` to a commit ``message``; no-op if falsy.
 

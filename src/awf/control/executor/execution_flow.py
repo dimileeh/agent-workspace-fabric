@@ -30,7 +30,11 @@ from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
 )
-from awf.common.task_tag import commit_message_with_task_tag, title_with_task_tag
+from awf.common.task_tag import (
+    commit_message_with_task_tag,
+    strip_leading_task_tag,
+    title_with_task_tag,
+)
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
@@ -711,7 +715,9 @@ async def execute(
                         message=quality_gate_violation_message(violations)[:2000],
                     )
                     return
-                commit_msg = commit_message_with_task_tag(f"awf: {ws.task_title}", ws.task_tag)[:72]
+                commit_msg = commit_message_with_task_tag(
+                    f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)}", ws.task_tag
+                )[:72]
                 commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
 
                 async def _run_commit() -> CommandResult:
@@ -852,7 +858,9 @@ async def execute(
                 )
                 if reset.ok:
                     recovery_msg = commit_message_with_task_tag(
-                        f"awf: {ws.task_title} (recovered from orphan)", ws.task_tag
+                        f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)} "
+                        "(recovered from orphan)",
+                        ws.task_tag,
                     )[:72]
                     recovery_body = (
                         f"AWF detected orphan history on workspace {workspace_id} "

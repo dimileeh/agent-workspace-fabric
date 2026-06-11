@@ -10,6 +10,7 @@ from awf.common.task_tag import (
     branch_with_task_tag,
     commit_message_with_task_tag,
     normalize_task_tag,
+    strip_leading_task_tag,
     title_with_task_tag,
     validate_task_tag,
 )
@@ -80,11 +81,38 @@ def test_commit_message_with_task_tag_prepends_with_message_sep() -> None:
 
 @pytest.mark.parametrize(
     "helper",
-    [branch_with_task_tag, title_with_task_tag, commit_message_with_task_tag],
+    [
+        branch_with_task_tag,
+        title_with_task_tag,
+        commit_message_with_task_tag,
+        strip_leading_task_tag,
+    ],
 )
 @pytest.mark.parametrize("tag", [None, ""])
 def test_helpers_are_noop_when_tag_absent(helper, tag: str | None) -> None:
     assert helper("original", tag) == "original"
+
+
+def test_strip_leading_task_tag_removes_a_single_leading_key() -> None:
+    assert strip_leading_task_tag("PROJ-123 Fix the bug", "PROJ-123") == "Fix the bug"
+
+
+def test_strip_leading_task_tag_is_noop_without_exact_leading_prefix() -> None:
+    # A mid-text key, or a different leading key, is left untouched.
+    assert strip_leading_task_tag("see PROJ-123 for details", "PROJ-123") == (
+        "see PROJ-123 for details"
+    )
+    assert strip_leading_task_tag("OTHER-1 Fix", "PROJ-123") == "OTHER-1 Fix"
+
+
+def test_strip_then_commit_tag_yields_single_leading_key() -> None:
+    # An already-tagged title embedded in an ``awf:`` subject must not duplicate
+    # the issue key once the tag is re-applied.
+    title = "PROJ-123 Fix the bug"
+    subject = commit_message_with_task_tag(
+        f"awf: {strip_leading_task_tag(title, 'PROJ-123')}", "PROJ-123"
+    )
+    assert subject == "PROJ-123 awf: Fix the bug"
 
 
 def test_title_is_idempotent() -> None:
