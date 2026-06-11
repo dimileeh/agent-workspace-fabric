@@ -29,6 +29,7 @@ from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
 )
+from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.executor.constants import _FILE_DIGEST_CHUNK_SIZE, PLAN_CONFORMANCE_UNSATISFIED
 from awf.control.executor.git_ops import (
     _git_name_lines,
@@ -363,6 +364,7 @@ async def _run_post_validation_conformance_check(
             worktree_path=worktree_path,
             report_path=handoff.report_path,
             validation_run_id=validation_run_id,
+            task_tag=workspace.task_tag,
         )
         await self._record_post_validation_conformance_event(
             workspace_id=workspace.id,
@@ -419,6 +421,7 @@ async def _commit_post_validation_conformance_report(
     worktree_path: Path,
     report_path: Path,
     validation_run_id: str,
+    task_tag: str | None = None,
 ) -> bool:
     report_path_text = report_path.as_posix()
     git_base = [
@@ -475,7 +478,7 @@ async def _commit_post_validation_conformance_report(
             *git_identity_config_args(),
             "commit",
             "-m",
-            "awf: post-validation conformance report",
+            commit_message_with_task_tag("awf: post-validation conformance report", task_tag),
             "-m",
             (
                 "Persist satisfied post-validation conformance report "

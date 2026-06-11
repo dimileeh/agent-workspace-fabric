@@ -1289,6 +1289,55 @@ class TestSelfCommittedAgent:
         reset_call = next(c for c in fake.calls if "reset" in c.args and "--soft" in c.args)
         assert reset_call.args[-1] == "a" * 40  # base_commit
 
+    @pytest.mark.unit
+    async def test_orphan_history_recovery_commit_prepends_task_tag(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """The orphan-history reattach commit subject carries the task tag so
+        the recovery push still auto-links to the Jira issue."""
+        ws_id = await _seed_ready(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.task_tag = "PROJ-7"
+            await s.commit()
+
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (re-staged)
+        # git commit fails: nothing to commit (agent already committed)
+        fake.queue_result(returncode=1, stderr="nothing to commit, working tree clean\n")
+        # rev-list --count base..HEAD → 2 (branch ahead)
+        fake.queue_result(returncode=0, stdout="2\n")
+        # merge-base --is-ancestor: FAIL (orphan history)
+        fake.queue_result(returncode=1, stderr="")
+        # git reset --soft <base> (orphan recovery)
+        fake.queue_result(returncode=0)
+        # git commit (re-anchor orphan)
+        fake.queue_result(returncode=0)
+        # merge-base --is-ancestor: OK after recovery
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake, head="deadbeef01")
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        _queue_pre_push_checks(fake, head="deadbeef01")
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")  # pr create
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        recovery_commit = next(
+            c
+            for c in fake.calls
+            if "commit" in c.args and any("recovered from orphan" in a for a in c.args)
+        )
+        subject = recovery_commit.args[recovery_commit.args.index("-m") + 1]
+        assert subject == "PROJ-7 awf: err-path (recovered from orphan)"
+
 
 class TestValidationInfrastructureError:
     @pytest.mark.unit

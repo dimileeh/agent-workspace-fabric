@@ -1017,6 +1017,36 @@ class TestFixCycleRecoversAfterOneFailure:
             assert ws.pr_url == "https://github.com/x/y/pull/1"
 
     @pytest.mark.unit
+    async def test_fix_pass_commit_prepends_task_tag(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """The validation fix-pass commit subject carries the task tag so the
+        fix push still auto-links to the Jira issue."""
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.task_tag = "PROJ-5"
+            await s.commit()
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")  # validation fails
+        _queue_fix_pass(fake)
+        fake.queue_result(returncode=0)  # validation passes after fix
+        _queue_push_and_pr(fake)
+
+        await executor.execute(ws_id)
+
+        fix_commit = next(
+            c for c in fake.calls if "commit" in c.args and any("fix pass" in arg for arg in c.args)
+        )
+        subject = fix_commit.args[fix_commit.args.index("-m") + 1]
+        assert subject == "PROJ-5 awf: fix pass 1 for trivial"
+
+    @pytest.mark.unit
     async def test_fix_pass_invokes_adapter_a_second_time(
         self,
         fake: FakeCommandRunner,

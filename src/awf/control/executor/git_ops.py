@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.executor.constants import _VALIDATE_ONLY_RECOVERY_SOURCES
 from awf.control.executor.types import _ConformanceSalvageExecutionResult
 from awf.node.git_manager import mirror_path_for_worktree, repair_agent_writable_worktree
@@ -82,6 +83,7 @@ async def _recover_missing_head_from_filesystem(
     worktree_path: Path,
     base_commit: str,
     branch_name: str,
+    task_tag: str | None = None,
 ) -> _GitObjectRecoveryResult | None:
     """Rebuild a valid AWF branch commit from files when HEAD points to a missing object."""
     mirror_path = mirror_path_for_worktree(worktree_path)
@@ -129,7 +131,9 @@ async def _recover_missing_head_from_filesystem(
                 *git_identity_config_args(),
                 "commit",
                 "-m",
-                f"awf: recover {workspace_id} from missing git object"[:72],
+                commit_message_with_task_tag(
+                    f"awf: recover {workspace_id} from missing git object", task_tag
+                )[:72],
                 "-m",
                 (
                     f"AWF recovered workspace {workspace_id} after HEAD pointed at "

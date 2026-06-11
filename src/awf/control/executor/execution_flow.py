@@ -570,6 +570,7 @@ async def execute(
                 from_status=WorkspaceStatus.running,
                 stage="agent_run",
                 error=exc,
+                task_tag=ws.task_tag,
             ):
                 agent_exit_note = (
                     "AWF recovered a missing Git HEAD object during the agent run; "
@@ -869,7 +870,9 @@ async def execute(
                     reason="orphan_history_reset",
                 )
                 if reset.ok:
-                    recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
+                    recovery_msg = commit_message_with_task_tag(
+                        f"awf: {ws.task_title} (recovered from orphan)", ws.task_tag
+                    )[:72]
                     recovery_body = (
                         f"AWF detected orphan history on workspace {workspace_id} "
                         f"(agent: {ws.agent}) and squashed the cumulative diff "
@@ -965,6 +968,7 @@ async def execute(
                 from_status=WorkspaceStatus.running,
                 stage="post_agent_commit",
                 error=exc,
+                task_tag=ws.task_tag,
             ):
                 _log.warning(
                     "executor.commit_step_missing_head_recovered",

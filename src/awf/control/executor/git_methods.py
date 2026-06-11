@@ -200,6 +200,7 @@ async def _recover_missing_git_head_or_mark_failed(
     from_status: WorkspaceStatus,
     stage: str,
     error: BaseException,
+    task_tag: str | None = None,
 ) -> bool:
     if base_commit is None:
         await self._mark_failed(
@@ -220,6 +221,7 @@ async def _recover_missing_git_head_or_mark_failed(
             worktree_path=worktree_path,
             base_commit=base_commit,
             branch_name=branch_name,
+            task_tag=task_tag,
         )
     except Exception as exc:
         _log.exception(

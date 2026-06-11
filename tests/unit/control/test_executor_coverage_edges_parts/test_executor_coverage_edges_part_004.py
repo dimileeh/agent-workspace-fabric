@@ -266,6 +266,48 @@ async def test_missing_head_recovery_recommits_filesystem_state(
 
 
 @pytest.mark.unit
+async def test_missing_head_recovery_commit_prepends_task_tag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The filesystem-recovery commit subject carries the workspace task tag."""
+    mirror, worktree = _fake_linked_worktree(tmp_path)
+    branch_dir = mirror / "refs" / "heads" / "awf"
+    branch_dir.mkdir(parents=True)
+    (branch_dir / "ws_missing_head").write_text(f"{'b' * 40}\n", encoding="utf-8")
+    runner = FakeCommandRunner()
+    for returncode, stdout, stderr in [
+        (0, "", ""),
+        (0, "", ""),
+        (0, "", ""),
+        (0, "", ""),
+        (1, "", ""),
+        (0, "", ""),
+        (0, "c" * 40, ""),
+    ]:
+        runner.queue_result(returncode=returncode, stdout=stdout, stderr=stderr)
+    monkeypatch.setattr(
+        executor_git_ops,
+        "repair_agent_writable_worktree",
+        lambda *_args: None,
+    )
+
+    result = await _recover_missing_head_from_filesystem(
+        runner=runner,
+        workspace_id="ws_missing_head",
+        worktree_path=worktree,
+        base_commit="a" * 40,
+        branch_name="awf/ws_missing_head",
+        task_tag="PROJ-9",
+    )
+
+    assert result is not None
+    commit_call = next(call for call in runner.calls if "commit" in call.args)
+    subject = commit_call.args[commit_call.args.index("-m") + 1]
+    assert subject == "PROJ-9 awf: recover ws_missing_head from missing git object"
+
+
+@pytest.mark.unit
 async def test_missing_head_recovery_returns_success_when_index_matches_base(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

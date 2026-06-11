@@ -19,6 +19,7 @@ from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
 )
+from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.executor.constants import (
     PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
@@ -1230,7 +1231,9 @@ async def run_validation_and_fix_cycle(
                     successful_validation_run_id=successful_validation_run_id,
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                 )
-            commit_msg = f"awf: fix pass {fix_pass_number} for {ws.task_title}"[:72]
+            commit_msg = commit_message_with_task_tag(
+                f"awf: fix pass {fix_pass_number} for {ws.task_title}", ws.task_tag
+            )[:72]
             commit_body = (
                 f"AWF {fix_pass_kind} fix pass {fix_pass_number} of "
                 f"{fix_pass_total_passes} for workspace {workspace_id} "
