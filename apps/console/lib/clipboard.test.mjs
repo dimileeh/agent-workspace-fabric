@@ -23,11 +23,14 @@ function makeFakeDocument({ execResult = true, throwOnExec = false, withSelectio
   const removed = [];
   const execCalls = [];
   const restoredRanges = [];
+  const focusOptions = [];
   const textarea = {
     value: "",
     style: {},
     setAttribute() {},
-    focus() {},
+    focus(options) {
+      focusOptions.push(options);
+    },
     select() {},
     remove() {
       removed.push(this);
@@ -52,7 +55,7 @@ function makeFakeDocument({ execResult = true, throwOnExec = false, withSelectio
       return execResult;
     },
   };
-  return { doc, textarea, appended, removed, execCalls, restoredRanges, range };
+  return { doc, textarea, appended, removed, execCalls, restoredRanges, range, focusOptions };
 }
 
 test("uses navigator.clipboard.writeText in a secure context", async () => {
@@ -95,6 +98,19 @@ test("falls back to execCommand when navigator.clipboard.writeText rejects", asy
   try {
     assert.equal(await copyTextToClipboard("ws_reject"), true);
     assert.deepEqual(execCalls, ["copy"]);
+  } finally {
+    restoreDoc();
+    restoreNav();
+  }
+});
+
+test("focuses the textarea with preventScroll so the page does not jump", async () => {
+  const restoreNav = setGlobal("navigator", {});
+  const { doc, focusOptions } = makeFakeDocument({ execResult: true });
+  const restoreDoc = setGlobal("document", doc);
+  try {
+    await copyTextToClipboard("ws_focus");
+    assert.deepEqual(focusOptions, [{ preventScroll: true }]);
   } finally {
     restoreDoc();
     restoreNav();

@@ -68,7 +68,9 @@ function legacyCopyText(text: string): boolean {
   const previousRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
 
   document.body.appendChild(textarea);
-  textarea.focus();
+  // `preventScroll` stops the browser from scrolling/jumping to the textarea on
+  // focus, which can happen even for a `position: fixed` element.
+  textarea.focus({ preventScroll: true });
   textarea.select();
 
   let copied = false;
