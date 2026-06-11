@@ -40,7 +40,7 @@ from awf.profiles.models import (
     WorkspaceProfile,
 )
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
-from awf.service.report_shape import collect_next_actions, compute_overall_status
+from awf.service.report_shape import NO_ACTION, collect_next_actions, compute_overall_status
 
 # Synthetic, path-safe workspace id handed to the secret-lease resolver. It never
 # touches real workspace state — the resolver only uses it to name a throwaway
@@ -96,7 +96,10 @@ IMAGE_UNAVAILABLE = "unavailable"
 ImageProbe = Callable[[str], str]
 ProfileResolveFn = Callable[..., ProfileResolution]
 
-_NO_ACTION = "No action required."
+# Re-exported alias of the shared sentinel so this module's many phase builders
+# keep their terse ``_NO_ACTION`` reference while the string itself stays defined
+# once in ``report_shape``.
+_NO_ACTION = NO_ACTION
 _PROBE_TIMEOUT_SECONDS = 30.0
 
 
