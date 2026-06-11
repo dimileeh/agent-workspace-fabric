@@ -117,6 +117,18 @@ def test_runtime_toolchains_rejects_non_mapping() -> None:
 
 
 @pytest.mark.unit
+def test_runtime_toolchains_accepts_non_dict_mapping() -> None:
+    """The guard accepts any Mapping (e.g. ``MappingProxyType``), not only ``dict``."""
+    from types import MappingProxyType
+
+    runtime = ProfileRuntime.model_validate(
+        {"toolchains": MappingProxyType({"Java": ["17", "21"]})}
+    )
+
+    assert runtime.toolchains == {"java": ["17", "21"]}
+
+
+@pytest.mark.unit
 def test_runtime_toolchains_rejects_non_list_versions() -> None:
     with pytest.raises(ValidationError):
         ProfileRuntime.model_validate({"toolchains": {"java": "17"}})

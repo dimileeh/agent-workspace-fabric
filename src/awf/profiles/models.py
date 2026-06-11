@@ -97,7 +97,10 @@ class ProfileRuntime(BaseModel):
         """
         if value is None:
             return {}
-        if not isinstance(value, dict):
+        # Accept any Mapping (matching the declared contract / the in-scope ``Mapping`` import),
+        # not just ``dict`` — a ``MappingProxyType``/``ChainMap`` passed by a caller is normalized
+        # into a plain dict below rather than spuriously rejected. ``str``/list/tuple stay rejected.
+        if not isinstance(value, Mapping):
             raise ValueError("runtime.toolchains must be a mapping of language to versions")
         if len(value) > _MAX_TOOLCHAIN_LANGUAGES:
             raise ValueError(
