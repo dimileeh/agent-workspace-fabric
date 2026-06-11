@@ -525,6 +525,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "initial_review_grace_period_seconds",
                 "task_title",
                 "task_prompt",
+                "task_tag",
                 "reason",
             }
         ),
