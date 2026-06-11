@@ -59,7 +59,7 @@ operator:
 Inspect this repository for AWF onboarding. Do not launch a workspace, push,
 open a PR, or start project services. First detect the forge from the repo's
 origin remote (git remote -v) and configure only the matching auth: GitHub
-(github.com) needs gh; BitBucket (bitbucket.org) needs BITBUCKET_API_TOKEN +
+(github.com) needs gh; Bitbucket (bitbucket.org) needs BITBUCKET_API_TOKEN +
 BITBUCKET_EMAIL + BITBUCKET_AUTH_MODE in .env and no gh. Then start with:
 
 `awf init . --write-profile --yes`
