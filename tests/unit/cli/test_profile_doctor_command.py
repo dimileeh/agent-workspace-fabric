@@ -43,6 +43,22 @@ def _stub(monkeypatch: pytest.MonkeyPatch, report: dict) -> None:
         "awf.common.git_remote.detect_repo_url_from_checkout",
         lambda _path: None,
     )
+    # Isolate the report-shaping tests from the real settings resolver, which
+    # runs ``validate_production_settings`` and can raise depending on ambient
+    # env (e.g. AWF_ENV/database URL). These tests assert CLI output shape only,
+    # so the resolved settings just need to be deterministic and non-throwing.
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home="~",
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+        ),
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {},
+    )
 
 
 def test_doctor_json_exit_zero_on_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
