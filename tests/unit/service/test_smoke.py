@@ -11,6 +11,7 @@ import pytest
 
 from awf.service.smoke import (
     MOCKED_SMOKE_PREFLIGHT_HINT,
+    MOCKED_SMOKE_PREFLIGHT_HINT_NONOK,
     _default_config_resolver,
     _default_console_checker,
     _default_disk_profile_preview,
@@ -1011,6 +1012,7 @@ class TestCollectSmokeReportExceptionPaths:
             config_resolver=_config_resolver(),
         )
 
+        assert report["status"] == "ok"
         assert report["preflight_hint"] == MOCKED_SMOKE_PREFLIGHT_HINT
         assert MOCKED_SMOKE_PREFLIGHT_HINT in report["next_actions"]
         assert "awf profile doctor" in MOCKED_SMOKE_PREFLIGHT_HINT
@@ -1031,7 +1033,11 @@ class TestCollectSmokeReportExceptionPaths:
         assert MOCKED_SMOKE_PREFLIGHT_HINT not in report["next_actions"]
 
     async def test_mocked_local_advisory_added_when_project_missing(self, tmp_path: Path) -> None:
-        """The advisory is present even on the missing-project early-return path."""
+        """The advisory is present even on the missing-project early-return path.
+
+        That path resolves to ``fail``, so the advisory must use the non-ok
+        wording and never claim the mocked smoke "passed".
+        """
         report = await collect_smoke_report(
             project=tmp_path / "does-not-exist",
             settings=_settings(),
@@ -1043,8 +1049,11 @@ class TestCollectSmokeReportExceptionPaths:
             config_resolver=_config_resolver(),
         )
 
-        assert report["preflight_hint"] == MOCKED_SMOKE_PREFLIGHT_HINT
-        assert MOCKED_SMOKE_PREFLIGHT_HINT in report["next_actions"]
+        assert report["status"] == "fail"
+        assert report["preflight_hint"] == MOCKED_SMOKE_PREFLIGHT_HINT_NONOK
+        assert MOCKED_SMOKE_PREFLIGHT_HINT_NONOK in report["next_actions"]
+        assert "passed" not in report["preflight_hint"]
+        assert MOCKED_SMOKE_PREFLIGHT_HINT not in report["next_actions"]
 
     async def test_extract_validation_commands_catches_exception_on_broken_phases(
         self, tmp_path: Path

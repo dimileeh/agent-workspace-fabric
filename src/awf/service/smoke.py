@@ -22,6 +22,12 @@ MOCKED_SMOKE_PREFLIGHT_HINT = (
     "mocked smoke passed; real profile preflight NOT run — run "
     "`awf profile doctor <repo>` for real readiness"
 )
+# Non-ok counterpart: a warn/fail mocked run did not pass, so the advisory must
+# not claim it did (would contradict the overall status and mislead operators).
+MOCKED_SMOKE_PREFLIGHT_HINT_NONOK = (
+    "mocked smoke did not pass; real profile preflight NOT run — run "
+    "`awf profile doctor <repo>` for real readiness"
+)
 
 ServiceCollector = Callable[[ServiceSettings], Awaitable[dict[str, Any]]]
 AuthCollector = Callable[..., dict[str, Any]]
@@ -183,8 +189,16 @@ def _finalize_smoke_report(
     ``mocked_local`` is set the report carries ``preflight_hint`` and appends it
     to ``next_actions`` pointing at ``awf profile doctor``. The change is additive
     (new field + appended action) so existing smoke phase assertions stay green.
+
+    The advisory wording tracks ``status`` so a warn/fail mocked run does not
+    claim it "passed" — that would contradict the non-ok overall status.
     """
-    preflight_hint = MOCKED_SMOKE_PREFLIGHT_HINT if mocked_local else None
+    if not mocked_local:
+        preflight_hint = None
+    elif status == "ok":
+        preflight_hint = MOCKED_SMOKE_PREFLIGHT_HINT
+    else:
+        preflight_hint = MOCKED_SMOKE_PREFLIGHT_HINT_NONOK
     if preflight_hint is not None:
         next_actions = [*next_actions, preflight_hint]
     return {
