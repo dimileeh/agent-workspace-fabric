@@ -288,3 +288,7 @@ Local-mode refs currently support `provider: env` with `ref: NAME` or
 `${HOME}`, `${AWF_HOST_HOME}`, `~`, `/home/<user>`, or `/Users/<user>` roots.
 Do not paste token values into `.awf/workspace.yml`. AWF records sanitized lease
 metadata only; this local path does not implement a cloud secret broker.
+
+For a worked example that mounts a host Docker `config.json` so `docker`/Gradle
+in a Docker-in-Docker workspace can pull from a **private registry**, see
+[docs/recipes/dind-private-registry-auth.md](recipes/dind-private-registry-auth.md).
