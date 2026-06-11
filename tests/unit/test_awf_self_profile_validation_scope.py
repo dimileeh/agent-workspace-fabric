@@ -80,12 +80,23 @@ def test_validate_mypy_covers_whole_package_not_only_cli() -> None:
 
 
 @pytest.mark.unit
-def test_validate_pytest_covers_full_unit_suite_not_only_cli() -> None:
+def test_validate_pytest_if_present_covers_full_unit_suite_not_only_cli() -> None:
+    """Guard intent is anti-re-narrowing, not pytest-presence.
+
+    The validate phase intentionally no longer runs the in-workspace test suite
+    (GitHub CI runs the authoritative sharded pytest+coverage on every PR
+    commit). So an absent pytest command is the expected, deliberate state — the
+    #512 regression this file guards against was a *narrowed* validate phase
+    (pytest scoped to ``tests/unit/cli``), not the absence of pytest. If a
+    pytest command is ever re-added, it must still cover the full ``tests/unit``
+    suite rather than the CLI-only slice.
+    """
     pytest_commands = _commands_for_tool("pytest")
-    assert pytest_commands, "validate phase must run pytest"
-    assert any(_targets_path(tokens, "tests/unit") for tokens in pytest_commands), (
-        "pytest must run the full tests/unit suite, not only tests/unit/cli"
-    )
+    for tokens in pytest_commands:
+        assert _targets_path(tokens, "tests/unit"), (
+            "a validate-phase pytest command must run the full tests/unit suite, "
+            "not only tests/unit/cli"
+        )
 
 
 @pytest.mark.unit
