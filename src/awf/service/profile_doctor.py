@@ -57,10 +57,13 @@ PROFILE_DOCTOR_LINT_CLEAN = "PROFILE_DOCTOR_LINT_CLEAN"
 PROFILE_DOCTOR_LINT_WARNINGS = "PROFILE_DOCTOR_LINT_WARNINGS"
 PROFILE_DOCTOR_LINT_ERRORS = "PROFILE_DOCTOR_LINT_ERRORS"
 
-# Secret-lease phase reason codes (success/optional; failures reuse the resolver's
-# own ``reason_code`` — e.g. ``SECRET_LEASE_SOURCE_MISSING``).
+# Secret-lease phase reason codes (success/optional; structured failures reuse the
+# resolver's own ``reason_code`` — e.g. ``SECRET_LEASE_SOURCE_MISSING``).
 PROFILE_DOCTOR_SECRET_LEASES_OK = "PROFILE_DOCTOR_SECRET_LEASES_OK"
 PROFILE_DOCTOR_SECRET_LEASES_OPTIONAL_MISSING = "PROFILE_DOCTOR_SECRET_LEASES_OPTIONAL_MISSING"
+# An *unexpected* (non-``SecretLeaseResolutionError``) failure while probing — e.g.
+# an ``OSError`` from the bitbucket askpass materialization (mkdir/write/chmod).
+PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR = "PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR"
 
 # Docker-image phase reason codes.
 DOCKER_MODE_NOT_DIND = "DOCKER_MODE_NOT_DIND"
@@ -289,6 +292,28 @@ def _secret_leases_phase(
                 "action": (
                     "Make the secret source available to the worker (host_home / env) "
                     "or mark the lease optional."
+                ),
+            }
+        except OSError as exc:
+            # The resolver materializes a bitbucket askpass script (mkdir / write /
+            # chmod) when a git-token lease resolves, so an unexpected filesystem
+            # error (e.g. PermissionError) can escape the structured
+            # SecretLeaseResolutionError path. Surface it as a phase failure rather
+            # than an uncaught traceback so the doctor still reports a usable
+            # report. The exception message can embed a source-adjacent path, so
+            # evidence carries only the error class name, never ``str(exc)``.
+            return {
+                "name": "secret_leases",
+                "status": "fail",
+                "reason_code": PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR,
+                "message": (
+                    "Secret lease resolution failed unexpectedly while probing the worker "
+                    "context; the worker would hit the same error during provisioning."
+                ),
+                "evidence": {"error": type(exc).__name__},
+                "action": (
+                    "Inspect the worker host context (filesystem permissions / paths) "
+                    "and re-run the preflight."
                 ),
             }
 

@@ -32,6 +32,7 @@ from awf.service.profile_doctor import (
     PROFILE_DOCTOR_PROFILE_UNRESOLVED,
     PROFILE_DOCTOR_SECRET_LEASES_OK,
     PROFILE_DOCTOR_SECRET_LEASES_OPTIONAL_MISSING,
+    PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR,
     PROFILE_RESOLUTION_FAILED,
     _default_image_probe,
     _lint_phase,
@@ -135,6 +136,41 @@ def test_optional_missing_lease_warns(tmp_path: Path) -> None:
     assert omitted[0]["secret_name"] == "api-token"
     assert omitted[0]["reason_code"] == "SECRET_LEASE_SOURCE_MISSING"
     assert report["status"] == "warn"
+
+
+def test_secret_lease_unexpected_oserror_fails_structured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected ``OSError`` from the resolver becomes a structured fail phase.
+
+    The resolver materializes a bitbucket askpass script (mkdir/write/chmod) on the
+    git-token path, so a ``PermissionError`` (or similar) can escape the structured
+    ``SecretLeaseResolutionError`` handling. The doctor must report it as a phase
+    failure — never an uncaught traceback — and must not leak the exception message
+    (which can embed a source-adjacent path).
+    """
+    _write_profile(
+        tmp_path,
+        "awf:\n  name: generic\n",
+    )
+
+    class _BoomResolver:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def resolve(self, *_args: object, **_kwargs: object) -> object:
+            raise PermissionError(13, "Permission denied", "/secret/adjacent/path")
+
+    monkeypatch.setattr(profile_doctor, "LocalSecretLeaseMountResolver", _BoomResolver)
+
+    report = collect_profile_doctor_report(tmp_path, repo_url=None, host_env={})
+
+    secret_phase = _phase(report, "secret_leases")
+    assert secret_phase["status"] == "fail"
+    assert secret_phase["reason_code"] == PROFILE_DOCTOR_SECRET_LEASES_PROBE_ERROR
+    assert secret_phase["evidence"] == {"error": "PermissionError"}
+    assert report["status"] == "fail"
+    assert "/secret/adjacent/path" not in json.dumps(report)
 
 
 def test_env_lease_resolves_ok_without_value(tmp_path: Path) -> None:
