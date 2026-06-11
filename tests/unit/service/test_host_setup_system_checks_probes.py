@@ -401,6 +401,10 @@ def test_check_gh_warns_when_missing_and_ok_when_present() -> None:
     # they are not told to install gh for a forge that does not need it (#525).
     assert "BITBUCKET_API_TOKEN" in missing.detail
     assert "bitbucket.org" in missing.detail
+    # Basic auth mode (the default) also requires the email and auth-mode vars, so
+    # the warning must name them — token alone leaves PR/git auth broken (#528).
+    assert "BITBUCKET_EMAIL" in missing.detail
+    assert "BITBUCKET_AUTH_MODE" in missing.detail
 
 
 # --- Python runtime -------------------------------------------------------
