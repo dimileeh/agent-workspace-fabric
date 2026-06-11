@@ -63,10 +63,18 @@ def branch_with_task_tag(branch: str, tag: str | None) -> str:
 
 
 def title_with_task_tag(title: str, tag: str | None) -> str:
-    """Prepend ``tag`` to a PR ``title`` with the message separator; no-op if falsy."""
+    """Prepend ``tag`` to a PR ``title`` with the message separator; no-op if falsy.
+
+    Idempotent: if ``title`` already starts with ``"{tag} "`` it is returned
+    unchanged, consistent with :func:`commit_message_with_task_tag`, so a
+    caller that passes an already-tagged title never accumulates a double prefix.
+    """
     if not tag:
         return title
-    return f"{tag}{MESSAGE_SEP}{title}"
+    prefix = f"{tag}{MESSAGE_SEP}"
+    if title.startswith(prefix):
+        return title
+    return f"{prefix}{title}"
 
 
 def commit_message_with_task_tag(message: str, tag: str | None) -> str:

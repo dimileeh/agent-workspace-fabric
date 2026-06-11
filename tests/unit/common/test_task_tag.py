@@ -87,6 +87,18 @@ def test_helpers_are_noop_when_tag_absent(helper, tag: str | None) -> None:
     assert helper("original", tag) == "original"
 
 
+def test_title_is_idempotent() -> None:
+    once = title_with_task_tag("Fix the bug", "PROJ-123")
+    twice = title_with_task_tag(once, "PROJ-123")
+    assert once == twice == "PROJ-123 Fix the bug"
+
+
+def test_title_idempotency_only_triggers_on_exact_prefix() -> None:
+    # A title that merely contains the tag mid-text still gets prefixed.
+    title = "see PROJ-123 for details"
+    assert title_with_task_tag(title, "PROJ-123") == "PROJ-123 see PROJ-123 for details"
+
+
 def test_commit_message_is_idempotent() -> None:
     once = commit_message_with_task_tag("awf: do work", "PROJ-123")
     twice = commit_message_with_task_tag(once, "PROJ-123")
