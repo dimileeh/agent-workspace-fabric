@@ -405,6 +405,10 @@ def test_check_gh_warns_when_missing_and_ok_when_present() -> None:
     # the warning must name them — token alone leaves PR/git auth broken (#528).
     assert "BITBUCKET_EMAIL" in missing.detail
     assert "BITBUCKET_AUTH_MODE" in missing.detail
+    # The fix must be scoped to GitHub so it does not contradict the Bitbucket
+    # guidance in the detail — a Bitbucket user should not be told to install gh.
+    assert missing.fix is not None
+    assert missing.fix.startswith("For GitHub repos:")
 
 
 # --- Python runtime -------------------------------------------------------
