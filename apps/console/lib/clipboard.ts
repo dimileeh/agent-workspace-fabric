@@ -75,6 +75,11 @@ function legacyCopyText(text: string): boolean {
   // Preserve any existing user selection so we can restore it afterwards.
   const selection = typeof document.getSelection === "function" ? document.getSelection() : null;
   const previousRange = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+  // Remember which element had focus (typically the button that triggered the
+  // copy) so we can hand focus back after the textarea is gone — otherwise
+  // focusing then removing the textarea drops focus to <body>, which breaks
+  // keyboard navigation for the user who just clicked/activated the control.
+  const previouslyFocused = document.activeElement;
 
   document.body.appendChild(textarea);
   // `preventScroll` stops the browser from scrolling/jumping to the textarea on
@@ -94,6 +99,12 @@ function legacyCopyText(text: string): boolean {
   if (selection && previousRange) {
     selection.removeAllRanges();
     selection.addRange(previousRange);
+  }
+
+  // Restore focus to the triggering element. `preventScroll` keeps this from
+  // jumping the viewport, mirroring the textarea focus above.
+  if (previouslyFocused && typeof (previouslyFocused as HTMLElement).focus === "function") {
+    (previouslyFocused as HTMLElement).focus({ preventScroll: true });
   }
 
   return copied;

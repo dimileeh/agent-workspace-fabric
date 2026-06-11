@@ -45,17 +45,35 @@ function makeFakeDocument({ execResult = true, throwOnExec = false, withSelectio
         addRange: (r) => restoredRanges.push(r),
       }
     : { rangeCount: 0, getRangeAt: () => null, removeAllRanges() {}, addRange() {} };
+  const triggerFocusOptions = [];
+  const trigger = {
+    focus(options) {
+      triggerFocusOptions.push(options);
+    },
+  };
   const doc = {
     createElement: () => textarea,
     body: { appendChild: (el) => appended.push(el) },
     getSelection: () => selection,
+    activeElement: trigger,
     execCommand(cmd) {
       execCalls.push(cmd);
       if (throwOnExec) throw new Error("execCommand unavailable");
       return execResult;
     },
   };
-  return { doc, textarea, appended, removed, execCalls, restoredRanges, range, focusOptions };
+  return {
+    doc,
+    textarea,
+    appended,
+    removed,
+    execCalls,
+    restoredRanges,
+    range,
+    focusOptions,
+    trigger,
+    triggerFocusOptions,
+  };
 }
 
 test("uses navigator.clipboard.writeText in a secure context", async () => {
@@ -124,6 +142,37 @@ test("restores the prior text selection after the legacy copy", async () => {
   try {
     await copyTextToClipboard("ws_sel");
     assert.deepEqual(restoredRanges, [range], "the displaced selection is re-added");
+  } finally {
+    restoreDoc();
+    restoreNav();
+  }
+});
+
+test("restores focus to the triggering element after the legacy copy", async () => {
+  const restoreNav = setGlobal("navigator", {});
+  const { doc, triggerFocusOptions } = makeFakeDocument({ execResult: true });
+  const restoreDoc = setGlobal("document", doc);
+  try {
+    await copyTextToClipboard("ws_focus_restore");
+    assert.deepEqual(
+      triggerFocusOptions,
+      [{ preventScroll: true }],
+      "the element focused before the copy regains focus without scrolling",
+    );
+  } finally {
+    restoreDoc();
+    restoreNav();
+  }
+});
+
+test("does not throw when the active element cannot receive focus", async () => {
+  const restoreNav = setGlobal("navigator", {});
+  const { doc } = makeFakeDocument({ execResult: true });
+  // e.g. document.activeElement is null, or an object without a focus() method.
+  doc.activeElement = {};
+  const restoreDoc = setGlobal("document", doc);
+  try {
+    assert.equal(await copyTextToClipboard("ws_no_focus"), true);
   } finally {
     restoreDoc();
     restoreNav();
