@@ -105,8 +105,14 @@ def profile_doctor(
     # bare image probe would inherit the caller shell instead and inspect the wrong
     # daemon, so a green doctor would not match the worker's actual pulls. Thread the
     # merged service env with DOCKER_HOST forced to the resolved daemon so a stray
-    # caller DOCKER_HOST/DOCKER_CONTEXT cannot redirect the probe.
-    docker_environ = {**host_env, "DOCKER_HOST": settings.docker_host}
+    # caller DOCKER_HOST/DOCKER_CONTEXT cannot redirect the probe. Docker's CLI
+    # treats DOCKER_CONTEXT as overriding DOCKER_HOST, so drop it (matching the
+    # service Docker helpers' scrub) or a stale context would still redirect the
+    # probe to the wrong daemon despite the pinned DOCKER_HOST.
+    docker_environ = {
+        key: value for key, value in host_env.items() if key.upper() != "DOCKER_CONTEXT"
+    }
+    docker_environ["DOCKER_HOST"] = settings.docker_host
     report = collect_profile_doctor_report(
         resolved,
         repo_url=detect_repo_url_from_checkout(resolved),

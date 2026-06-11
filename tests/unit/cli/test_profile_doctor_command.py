@@ -441,6 +441,59 @@ def test_doctor_threads_service_docker_environ_to_image_probes(
     assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
 
 
+def test_doctor_scrubs_docker_context_when_forcing_daemon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stray DOCKER_CONTEXT must not survive into the probe environment.
+
+    Docker's CLI treats ``DOCKER_CONTEXT`` as overriding ``DOCKER_HOST``, so a
+    context inherited from the caller shell or the Compose env file would
+    redirect the image probes to a different daemon than ``settings.docker_host``
+    even though this block pins ``DOCKER_HOST``. Drop ``DOCKER_CONTEXT`` (matching
+    the service Docker helpers' scrub) so the probe cannot inspect the wrong
+    daemon.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The merged service env carries a stale DOCKER_CONTEXT alongside config.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"DOCKER_CONTEXT": "desktop-linux", "DOCKER_CONFIG": "/svc/.docker"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="tcp://remote:2375",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    docker_environ = captured["docker_environ"]
+    assert isinstance(docker_environ, dict)
+    assert docker_environ["DOCKER_HOST"] == "tcp://remote:2375"
+    # DOCKER_CONTEXT scrubbed so it cannot override the forced DOCKER_HOST.
+    assert "DOCKER_CONTEXT" not in docker_environ
+    # Other client config still threads through to the probe.
+    assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0
