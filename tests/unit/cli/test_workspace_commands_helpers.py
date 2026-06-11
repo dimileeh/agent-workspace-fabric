@@ -610,6 +610,23 @@ def test_repo_targets_github_host_accepts_real_github_urls(repo: str) -> None:
 @pytest.mark.parametrize(
     "repo",
     [
+        # The `.github.com` suffix branch deliberately admits GitHub subdomains
+        # (API/raw/gist and future GHES-style hosts) as URL targets, not slugs.
+        "git@api.github.com:org/app.git",
+        "https://raw.github.com/org/app",
+        "gist.github.com/org/app",
+        "ssh://git@codeload.github.com/org/app.git",
+    ],
+)
+def test_repo_targets_github_host_accepts_github_subdomains(repo: str) -> None:
+    """The `.github.com` suffix branch host-matches GitHub subdomains, not just the apex."""
+    assert workspace_commands._repo_targets_github_host(repo) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "repo",
+    [
         "owner/repo",
         "dimileeh/aira-web",
         # Bypass attempts that the old "github.com" in repo substring check
