@@ -5,69 +5,48 @@ CodeQL alert (``py/redos``) flagged the bare ``owner/repo`` slug regex in
 group immediately followed by ``(?:\\.git)?`` (whose ``.git`` characters are
 themselves in ``[^/\\s]``) gave a quote/dot-heavy tail exponentially many ways
 to split. These tests pin the *exact* accept/reject set and parsed owner/name
-against an embedded copy of the original (pre-hardening) pattern, and bound the
-runtime on a pathological input so the backtracking cannot return.
+against results captured once from the original (pre-hardening) pattern, and
+bound the runtime on a pathological input so the backtracking cannot return.
+
+The expected owner/name pairs below were captured once from the pre-hardening
+patterns. We bake the expected results as literals rather than re-compiling the
+original (vulnerable) regexes here: re-shipping those literals would itself be a
+``py/redos`` finding, and the differential guard is just as strong asserting the
+hardened parser against the captured pairs.
 """
 
 from __future__ import annotations
 
-import re
 import time
 
 import pytest
 
 from awf.common.github_client import RepoRef
 
-# Embedded copy of the ORIGINAL (pre-hardening) bare-slug regex. Kept local to
-# the test (not imported) so the differential guard proves equivalence without
-# shipping the vulnerable pattern in production code.
-_ORIGINAL_BARE_SLUG_RE = re.compile(r"([^/\s]+)/([^/\s]+?)(?:\.git)?/?")
-
-# Embedded copy of the ORIGINAL (pre-hardening) SSH scp-like regex, kept local for
-# the same reason: it carried the identical lazy ``([^/]+?)`` + ``(?:\.git)?``
-# overlap (CodeQL py/redos) that the bare-slug pattern had.
-_ORIGINAL_SSH_RE = re.compile(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?")
-
-
-def _original_parse(value: str) -> tuple[str, str] | None:
-    """Replicate the original bare-slug owner/name extraction."""
-    match = _ORIGINAL_BARE_SLUG_RE.fullmatch(value)
-    if match is None:
-        return None
-    return match.group(1), match.group(2)
-
-
-def _original_ssh_parse(value: str) -> tuple[str, str] | None:
-    """Replicate the original SSH scp-like owner/name extraction."""
-    match = _ORIGINAL_SSH_RE.fullmatch(value)
-    if match is None:
-        return None
-    return match.group(1), match.group(2)
-
-
-_BARE_SLUG_CASES = [
-    "owner/repo",
-    "owner/repo.git",
-    "owner/repo/",
-    "owner/repo.git/",
-    "owner/repo.git.git",
-    "owner/.git",
-    "owner/repo.github",
-    "o/r",
-    "o/r.git",
-    "owner/repo.gitfoo",
-    "owner/.gitignore",
-    "dimileeh/aira-web",
-    "dimileeh/aira-web.git",
+# (input, expected (owner, name)) captured once from the ORIGINAL pre-hardening
+# bare-slug regex ``([^/\s]+)/([^/\s]+?)(?:\.git)?/?``. Every corpus entry is a
+# valid bare slug, so the expected value is never ``None``.
+_BARE_SLUG_CASES: list[tuple[str, tuple[str, str]]] = [
+    ("owner/repo", ("owner", "repo")),
+    ("owner/repo.git", ("owner", "repo")),
+    ("owner/repo/", ("owner", "repo")),
+    ("owner/repo.git/", ("owner", "repo")),
+    ("owner/repo.git.git", ("owner", "repo.git")),
+    ("owner/.git", ("owner", ".git")),
+    ("owner/repo.github", ("owner", "repo.github")),
+    ("o/r", ("o", "r")),
+    ("o/r.git", ("o", "r")),
+    ("owner/repo.gitfoo", ("owner", "repo.gitfoo")),
+    ("owner/.gitignore", ("owner", ".gitignore")),
+    ("dimileeh/aira-web", ("dimileeh", "aira-web")),
+    ("dimileeh/aira-web.git", ("dimileeh", "aira-web")),
 ]
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("value", _BARE_SLUG_CASES)
-def test_bare_slug_owner_name_matches_original(value: str) -> None:
+@pytest.mark.parametrize("value, expected", _BARE_SLUG_CASES)
+def test_bare_slug_owner_name_matches_original(value: str, expected: tuple[str, str]) -> None:
     """Hardened parsing yields the same owner/name the original regex produced."""
-    expected = _original_parse(value)
-    assert expected is not None, "test corpus entry must be a valid bare slug"
     ref = RepoRef.from_url(value)
     assert (ref.owner, ref.name) == expected
     assert ref.forge == "github"
@@ -117,27 +96,28 @@ def test_bare_slug_pathological_tail_is_linear() -> None:
     assert time.perf_counter() - start < 5.0
 
 
-_SSH_CASES = [
-    "git@github.com:owner/repo",
-    "git@github.com:owner/repo.git",
-    "git@github.com:owner/repo/",
-    "git@github.com:owner/repo.git/",
-    "git@github.com:owner/repo.git.git",
-    "git@github.com:owner/.git",
-    "git@github.com:owner/repo.github",
-    "git@github.com:o/r",
-    "git@github.com:o/r.git",
-    "git@github.com:dimileeh/aira-web",
-    "git@github.com:dimileeh/aira-web.git",
+# (input, expected (owner, name)) captured once from the ORIGINAL pre-hardening
+# SSH scp-like regex ``git@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?``. Every
+# corpus entry is a valid SSH ref, so the expected value is never ``None``.
+_SSH_CASES: list[tuple[str, tuple[str, str]]] = [
+    ("git@github.com:owner/repo", ("owner", "repo")),
+    ("git@github.com:owner/repo.git", ("owner", "repo")),
+    ("git@github.com:owner/repo/", ("owner", "repo")),
+    ("git@github.com:owner/repo.git/", ("owner", "repo")),
+    ("git@github.com:owner/repo.git.git", ("owner", "repo.git")),
+    ("git@github.com:owner/.git", ("owner", ".git")),
+    ("git@github.com:owner/repo.github", ("owner", "repo.github")),
+    ("git@github.com:o/r", ("o", "r")),
+    ("git@github.com:o/r.git", ("o", "r")),
+    ("git@github.com:dimileeh/aira-web", ("dimileeh", "aira-web")),
+    ("git@github.com:dimileeh/aira-web.git", ("dimileeh", "aira-web")),
 ]
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("value", _SSH_CASES)
-def test_ssh_owner_name_matches_original(value: str) -> None:
+@pytest.mark.parametrize("value, expected", _SSH_CASES)
+def test_ssh_owner_name_matches_original(value: str, expected: tuple[str, str]) -> None:
     """Hardened SSH parsing yields the same owner/name the original regex produced."""
-    expected = _original_ssh_parse(value)
-    assert expected is not None, "test corpus entry must be a valid SSH ref"
     ref = RepoRef.from_url(value)
     assert (ref.owner, ref.name) == expected
     assert ref.forge == "github"
