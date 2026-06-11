@@ -64,6 +64,34 @@ A ready-to-run copy of this profile lives at
   `DOCKER_HOST=tcp://docker:2375` when the profile does not already declare it), so
   the `runtime.environment` line above is optional — included only for clarity.
 
+## Make the host `config.json` visible to the control plane (bundled local-service stack)
+
+AWF validates the lease **inside the control-plane worker container**: the
+resolver calls `source.exists()` on the `ref` path *before* the agent container is
+created (`src/awf/node/secret_mounts.py`, run from `src/awf/service/worker.py`). In
+the bundled `docker/compose/local-service.yml` stack the `api`/`worker` containers
+only bind-mount a **fixed allowlist** of host auth paths — `~/.config/gh`,
+`~/.config/gcloud`, `~/.gitconfig`, `~/.ssh`, `~/.codex`, `~/.claude`, `~/.gemini`,
+`~/.config/opencode`, `~/.grok`, `~/.ollama` — and **`~/.docker` is not one of them.**
+So a `ref:` pointing at `~/.docker/config.json` resolves to a path the worker cannot
+see, and a `required: true` lease (the default) fails at provision time with
+`SECRET_LEASE_SOURCE_MISSING` even though the file exists on the host.
+
+Before using this recipe on that stack, make the host config visible to the control
+plane at the **same absolute path** (AWF mounts host auth paths host-equal). Add a
+read-only bind mount of the host `config.json` to **both** the `api` and `worker`
+services, mirroring the existing auth volumes:
+
+```yaml
+# Add to the `api` AND `worker` `volumes:` lists in docker/compose/local-service.yml
+# (or a Compose override merged on top), then point `ref:` at the same host path.
+- ${AWF_HOST_HOME:-${HOME}}/.docker/config.json:${AWF_HOST_HOME:-${HOME}}/.docker/config.json:ro
+```
+
+This applies only to the **bundled local-service stack**. When you run `awf worker`
+directly on the host (no control-plane container), the worker already sees
+`~/.docker/config.json` on the host filesystem and no extra mount is required.
+
 ## `ref` restrictions (read before copying)
 
 `ref` must be a **literal absolute path to an existing file**. AWF deliberately
