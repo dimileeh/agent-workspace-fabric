@@ -12,6 +12,7 @@ from awf.profiles.registry import (
     detect_profile,
     docker_compose_profile,
     get_builtin_profile,
+    java_profile,
 )
 
 
@@ -39,6 +40,26 @@ def test_java_builtin_without_detected_build_tool_uses_default_profile(tmp_path:
 
     assert profile is not None
     assert profile.phases.setup[0].command == "mvn -B -DskipTests dependency:go-offline"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "build_tool",
+    ["maven", "maven-wrapper", "gradle", "gradle-wrapper"],
+)
+def test_java_profile_declares_jdk_toolchains(build_tool: str) -> None:
+    """Every java build-tool variant declares its JDK needs (issue #527, item 6)."""
+    profile = java_profile(build_tool=build_tool)
+
+    assert profile.runtime.toolchains == {"java": ["17", "21"]}
+
+
+@pytest.mark.unit
+def test_java_builtin_resolution_carries_jdk_toolchains(tmp_path: Path) -> None:
+    profile = get_builtin_profile("java", worktree_path=tmp_path)
+
+    assert profile is not None
+    assert profile.runtime.toolchains == {"java": ["17", "21"]}
 
 
 @pytest.mark.unit
