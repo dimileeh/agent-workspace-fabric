@@ -480,6 +480,19 @@ async def execute(
             invocation_id=exc.invocation_id,
             reason_code=exc.reason_code,
         )
+        # A cleanup failure during the agent/planning run leaves the worktree
+        # (preserved on the FAILED workspace) potentially holding the plan +
+        # conformance report the agent already wrote. This handler marks the
+        # workspace FAILED and returns before the post-validation deposit
+        # block, so deposit them now — otherwise the artifacts are stranded in
+        # the worktree and the console can never surface them. Best-effort and
+        # idempotent, mirroring the generic agent-phase failure paths.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,

@@ -1247,6 +1247,70 @@ class TestHappyPathPart002:
         )
 
     @pytest.mark.unit
+    async def test_agent_phase_cleanup_error_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A ``ComposeExecCleanupError`` raised while the agent/planning run is in
+        # flight (e.g. the agent CLI times out and AWF cannot prove its in-
+        # container process tree is gone) lands in the agent-phase
+        # ``except ComposeExecCleanupError`` handler, which marks the workspace
+        # FAILED (infrastructure) and returns BEFORE the post-validation deposit
+        # block. The plan + conformance report the agent already wrote into the
+        # preserved-FAILED worktree must still reach the served artifact dir, the
+        # same guarantee the unexpected-error path already provides.
+        from awf.common.compose_exec import ComposeExecCleanupError
+
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "gaps": []}',
+            encoding="utf-8",
+        )
+
+        async def _raise_cleanup_error(**_kwargs: Any) -> object:
+            raise ComposeExecCleanupError(
+                invocation_id="awf_agent_plan_cleanup",
+                source="agent",
+                label="plan",
+                message="tagged process still running",
+            )
+
+        monkeypatch.setattr(
+            executor,
+            "_run_agent_task_with_optional_planning",
+            _raise_cleanup_error,
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "EXEC_PROCESS_CLEANUP_FAILED" in (ws.failure_message or "")
+
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "satisfied", "gaps": []}'
+        )
+
+    @pytest.mark.unit
     async def test_planning_profile_fails_when_plan_phase_changes_code(
         self,
         executor: WorkspaceExecutor,
