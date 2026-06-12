@@ -836,6 +836,12 @@ def _run_docker(args: list[str], *, env: Mapping[str, str] | None = None) -> int
         return None
 
     if result.returncode != 0 and result.stderr:
+        # Best-effort daemon-down detection: docker has no stable exit code for
+        # connection failures, so we match its standard stderr text. These three
+        # substrings cover the common variants emitted by Docker CE 20.10–27.x
+        # (Linux socket, Windows named pipe, and remote-host connect errors). If
+        # docker ever exposes a stable exit code for unreachable daemons, prefer
+        # that over string matching here.
         stderr_lower = result.stderr.lower()
         if (
             "cannot connect to the docker daemon" in stderr_lower
