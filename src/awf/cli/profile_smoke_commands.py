@@ -146,8 +146,18 @@ def profile_doctor(
         # Probe the SAME agent runtime image the worker renders into every stack
         # (build_worker_runtime -> ComposeStackLauncher(agent_runtime_image=...)),
         # so a missing/private custom AWF_AGENT_RUNTIME_IMAGE fails preflight here
-        # rather than at provision time.
-        agent_runtime_image=settings.agent_runtime_image,
+        # rather than at provision time. The worker resolves settings.agent_runtime_image
+        # from INSIDE the service container, where Compose forwards AWF_AGENT_RUNTIME_IMAGE
+        # (local-service.yml) so Settings() reads the custom image. resolve_service_settings()
+        # here only reads an AWF_-prefixed, cwd-relative .env, so an image set only in the
+        # Compose env file (with the doctor invoked from another cwd) would leave
+        # settings.agent_runtime_image on the bare default while the worker pulls the custom
+        # image. Source AWF_AGENT_RUNTIME_IMAGE from the merged Compose view (host_env, the
+        # same view used for the lease/Docker checks above) first, exactly like the DOCKER_HOST
+        # pin, and fall back to settings.agent_runtime_image.
+        agent_runtime_image=(
+            non_empty_env_value(host_env, "AWF_AGENT_RUNTIME_IMAGE") or settings.agent_runtime_image
+        ),
         docker_environ=docker_environ,
     )
     if fmt == OutputFormat.pretty:

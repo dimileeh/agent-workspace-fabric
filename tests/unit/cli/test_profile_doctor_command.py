@@ -389,6 +389,56 @@ def test_doctor_forwards_configured_agent_runtime_image(
     assert captured["agent_runtime_image"] == "registry.example.com/custom-agent:9"
 
 
+def test_doctor_prefers_compose_env_agent_runtime_image_over_bare_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A custom AWF_AGENT_RUNTIME_IMAGE in the Compose env must win over bare settings.
+
+    The worker resolves ``settings.agent_runtime_image`` from INSIDE the service
+    container, where Compose forwards ``AWF_AGENT_RUNTIME_IMAGE`` from
+    ``docker/compose/.env`` so ``Settings()`` reads the custom image. The doctor's
+    ``resolve_service_settings()`` only reads an ``AWF_``-prefixed, cwd-relative
+    ``.env``, so when the doctor runs from another cwd ``settings.agent_runtime_image``
+    falls back to the bare default while the worker pulls the custom image. The CLI
+    must source the image from the merged Compose view (``host_env``) first -- exactly
+    like the ``DOCKER_HOST`` pin -- so preflight probes the image the worker really uses.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The merged Compose view carries the custom image the worker receives, while
+    # the cwd-relative Settings() only sees the bare default.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"AWF_AGENT_RUNTIME_IMAGE": "registry.example.com/custom-agent:9"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert captured["agent_runtime_image"] == "registry.example.com/custom-agent:9"
+
+
 def test_doctor_threads_service_docker_environ_to_image_probes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
