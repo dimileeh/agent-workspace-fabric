@@ -23,15 +23,9 @@ import pytest
 from awf.common.commands import CommandResult
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import quality_methods as executor_quality_methods
-from awf.control.executor.constants import (
-    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
-)
 from awf.control.executor.types import (
     _PlanningRunFailure,
     _PlanningValidationHandoff,
-    _PostValidationConformanceReportGitError,
-    _PostValidationConformanceReportWriteError,
 )
 from awf.control.quality_gates import PLAN_ONLY_OUTPUT_REASON_CODE
 from awf.db.enums import OperationStatus, WorkspaceStatus
@@ -189,120 +183,6 @@ async def _run_cycle(
         git_in_worktree=git_in_worktree
         or AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
     )
-
-
-@pytest.mark.unit
-async def test_conformance_report_git_error_records_command_reason_code_detail(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A conformance report git failure with a command reason_code enriches details."""
-    profile = WorkspaceProfile.model_validate({"name": "prof-conf-git"})
-    workspace = _workspace("ws_conf_git")
-    _patch_profile(monkeypatch, profile)
-    _patch_clean_worktree(monkeypatch)
-
-    git_error = _PostValidationConformanceReportGitError(
-        operation="commit",
-        result=CommandResult(
-            returncode=1, stdout="", stderr="locked", reason_code="GIT_COMMIT_FAILED"
-        ),
-    )
-
-    class _Validation:
-        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
-            return ValidationResult(commands=[_passing_command(tmp_path)])
-
-    executor = SimpleNamespace(
-        _transition_if_current=AsyncMock(return_value=True),
-        _recheck_status=AsyncMock(return_value=True),
-        _config=SimpleNamespace(
-            max_validation_fix_passes=0,
-            planning_max_iterations_default=3,
-            compose_projects_root=tmp_path / "artifacts",
-        ),
-        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
-        _start_validation_run=AsyncMock(return_value="vr-conf-git"),
-        _finish_validation_run=AsyncMock(),
-        _finish_pending_validate_operations=AsyncMock(),
-        _mark_failed=AsyncMock(),
-        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
-        _update_subphase=AsyncMock(),
-        _validation=_Validation(),
-        _run_post_validation_conformance_check=AsyncMock(side_effect=git_error),
-    )
-    adapter = SimpleNamespace(run=AsyncMock())
-
-    result = await _run_cycle(
-        executor,
-        workspace=workspace,
-        tmp_path=tmp_path,
-        adapter=adapter,
-        planning_validation_handoff=_handoff(tmp_path),
-    )
-
-    assert result.stop
-    mark_kwargs = executor._mark_failed.await_args.kwargs
-    assert mark_kwargs["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
-    assert mark_kwargs["details"]["command_reason_code"] == "GIT_COMMIT_FAILED"
-    assert mark_kwargs["details"]["operation"] == "commit"
-
-
-@pytest.mark.unit
-async def test_conformance_report_write_error_records_errno_detail(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A conformance report write failure with an errno enriches the failure details."""
-    profile = WorkspaceProfile.model_validate({"name": "prof-conf-write"})
-    workspace = _workspace("ws_conf_write")
-    _patch_profile(monkeypatch, profile)
-    _patch_clean_worktree(monkeypatch)
-
-    os_error = OSError("disk full")
-    os_error.errno = 28
-    write_error = _PostValidationConformanceReportWriteError(
-        report_path=tmp_path / "report.md",
-        error=os_error,
-    )
-
-    class _Validation:
-        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
-            return ValidationResult(commands=[_passing_command(tmp_path)])
-
-    executor = SimpleNamespace(
-        _transition_if_current=AsyncMock(return_value=True),
-        _recheck_status=AsyncMock(return_value=True),
-        _config=SimpleNamespace(
-            max_validation_fix_passes=0,
-            planning_max_iterations_default=3,
-            compose_projects_root=tmp_path / "artifacts",
-        ),
-        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
-        _start_validation_run=AsyncMock(return_value="vr-conf-write"),
-        _finish_validation_run=AsyncMock(),
-        _finish_pending_validate_operations=AsyncMock(),
-        _mark_failed=AsyncMock(),
-        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
-        _update_subphase=AsyncMock(),
-        _validation=_Validation(),
-        _run_post_validation_conformance_check=AsyncMock(side_effect=write_error),
-    )
-    adapter = SimpleNamespace(run=AsyncMock())
-
-    result = await _run_cycle(
-        executor,
-        workspace=workspace,
-        tmp_path=tmp_path,
-        adapter=adapter,
-        planning_validation_handoff=_handoff(tmp_path),
-    )
-
-    assert result.stop
-    mark_kwargs = executor._mark_failed.await_args.kwargs
-    assert mark_kwargs["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
-    assert mark_kwargs["details"]["errno"] == 28
-    assert mark_kwargs["details"]["operation"] == "write"
 
 
 @pytest.mark.unit

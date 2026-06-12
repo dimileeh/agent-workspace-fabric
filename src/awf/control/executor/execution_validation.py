@@ -23,8 +23,6 @@ from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task
 from awf.control.executor.constants import (
     PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
 )
 from awf.control.executor.git_ops import _git_name_lines
 from awf.control.executor.helpers import (
@@ -49,8 +47,6 @@ from awf.control.executor.types import (
     _CoverageEvidenceResult,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
-    _PostValidationConformanceReportGitError,
-    _PostValidationConformanceReportWriteError,
     _RebaseRecoveryResult,
 )
 from awf.control.executor.validation_cleanup_guards import (
@@ -585,98 +581,6 @@ async def run_validation_and_fix_cycle(
                             exc,
                             validation_run_id=validation_run_id,
                         ),
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    )
-                except _PostValidationConformanceReportGitError as exc:
-                    reason_code = POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
-                    message = str(exc)
-                    _log.error(
-                        "executor.post_validation_conformance_report_git_failed",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        operation=exc.operation,
-                        returncode=exc.returncode,
-                        command_reason_code=exc.command_reason_code,
-                        reason_code=reason_code,
-                    )
-                    await self._finish_pending_validate_operations(
-                        workspace_id=workspace_id,
-                        status=OperationStatus.failed,
-                        validation_run_id=validation_run_id,
-                        requested_tier=validation_tier,
-                        reason_code=reason_code,
-                        coverage=validation_coverage,
-                        error_message=message,
-                    )
-                    failure_details: dict[str, Any] = {
-                        "validation_run_id": validation_run_id,
-                        "report_path": conformance_handoff.report_path.as_posix(),
-                        "operation": exc.operation,
-                        "returncode": exc.returncode,
-                    }
-                    if exc.command_reason_code is not None:
-                        failure_details["command_reason_code"] = exc.command_reason_code
-                    if exc.cleanup_operation is not None:
-                        failure_details["cleanup_operation"] = exc.cleanup_operation
-                        failure_details["cleanup_returncode"] = exc.cleanup_returncode
-                        failure_details["report_left_staged"] = True
-                    if exc.cleanup_command_reason_code is not None:
-                        failure_details["cleanup_command_reason_code"] = (
-                            exc.cleanup_command_reason_code
-                        )
-                    await self._mark_failed(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.validating,
-                        failure_reason=FailureReason.infrastructure_failure,
-                        message=message,
-                        reason_code=reason_code,
-                        details=failure_details,
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    )
-                except _PostValidationConformanceReportWriteError as exc:
-                    reason_code = POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
-                    message = str(exc)
-                    _log.error(
-                        "executor.post_validation_conformance_report_write_failed",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        report_path=exc.report_path.as_posix(),
-                        error_type=exc.error_type,
-                        errno=exc.errno,
-                        reason_code=reason_code,
-                    )
-                    await self._finish_pending_validate_operations(
-                        workspace_id=workspace_id,
-                        status=OperationStatus.failed,
-                        validation_run_id=validation_run_id,
-                        requested_tier=validation_tier,
-                        reason_code=reason_code,
-                        coverage=validation_coverage,
-                        error_message=message,
-                    )
-                    write_failure_details: dict[str, Any] = {
-                        "validation_run_id": validation_run_id,
-                        "report_path": exc.report_path.as_posix(),
-                        "operation": "write",
-                        "error_type": exc.error_type,
-                    }
-                    if exc.errno is not None:
-                        write_failure_details["errno"] = exc.errno
-                    await self._mark_failed(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.validating,
-                        failure_reason=FailureReason.infrastructure_failure,
-                        message=message,
-                        reason_code=reason_code,
-                        details=write_failure_details,
                     )
                     return ExecutionValidationResult(
                         stop=True,

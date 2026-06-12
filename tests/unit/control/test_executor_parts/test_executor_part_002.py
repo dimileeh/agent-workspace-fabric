@@ -121,14 +121,6 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
-def _queue_post_validation_conformance_report_commit(
-    fake: FakeCommandRunner, report_path: str
-) -> None:
-    fake.queue_result(returncode=0)  # git add report
-    fake.queue_result(returncode=0, stdout=f"{report_path}\n")  # cached report diff
-    fake.queue_result(returncode=0)  # commit refreshed report
-
-
 def _created_pr_body(fake: FakeCommandRunner) -> str:
     create_call = next(call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "create"])
     return create_call[create_call.index("--body") + 1]
@@ -919,7 +911,6 @@ class TestHappyPathPart001:
         report_path = f"docs/awf-plans/{ws_id}.conformance.json"
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        _queue_post_validation_conformance_report_commit(fake, report_path)
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -950,12 +941,12 @@ class TestHappyPathPart001:
         assert "Validation evidence" in prompts[-1]
         assert "VALIDATION_OK" in prompts[-1]
         assert "validation.01_validate.stdout" in prompts[-1]
+        # #544: the satisfied report is written but never staged or committed
+        # (its path is gitignored), so no git add/commit of the report occurs.
         git_calls = [call.args for call in fake.calls if call.args and call.args[0] == "git"]
-        assert any(call[-3:] == ["add", "--", report_path] for call in git_calls)
-        assert any(
-            "commit" in call
-            and "awf: post-validation conformance report" in call
-            and call[-1] == report_path
+        assert not any(call[-3:] == ["add", "--", report_path] for call in git_calls)
+        assert not any(
+            "commit" in call and "awf: post-validation conformance report" in call
             for call in git_calls
         )
 

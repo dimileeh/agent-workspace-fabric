@@ -513,7 +513,8 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     tmp_path: Path,
 ) -> None:
     """When the conformance rerun writes a fresh satisfied report, AWF does not
-    re-synthesize the file and proceeds straight to commit + event."""
+    re-synthesize the file and proceeds straight to recording the event (the
+    report is intentionally never committed — its path is gitignored, #544)."""
     runner = FakeCommandRunner()
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
     worktree_path = tmp_path / "worktree"
@@ -538,13 +539,6 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
         raise AssertionError("fresh report must not be re-written")
 
     executor._write_satisfied_post_validation_conformance_report = _no_rewrite  # type: ignore[method-assign]
-    committed: list[str] = []
-
-    async def _commit(**kwargs: object) -> bool:
-        committed.append(str(kwargs.get("validation_run_id")))
-        return True
-
-    executor._commit_post_validation_conformance_report = _commit  # type: ignore[method-assign]
     recorded: list[str] = []
 
     async def _record_event(**kwargs: object) -> None:
@@ -579,9 +573,10 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     )
 
     assert failure is None
-    assert write_calls == []  # 345->357: fresh report -> skip re-write
-    assert committed == ["validation-run-1"]
+    assert write_calls == []  # fresh report -> skip re-write
     assert recorded == ["validation-run-1"]
+    # The report is recorded as an event but never staged or committed.
+    assert all("commit" not in call.args for call in runner.calls)
 
 
 # ---------------------------------------------------------------------------

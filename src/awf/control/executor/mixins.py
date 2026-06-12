@@ -75,9 +75,6 @@ class ExecutorDelegatesMixin:
     _write_satisfied_post_validation_conformance_report = staticmethod(
         _planning_ops._write_satisfied_post_validation_conformance_report
     )
-    _commit_post_validation_conformance_report = (
-        _planning_ops._commit_post_validation_conformance_report
-    )
     _record_post_validation_conformance_event = (
         _planning_ops._record_post_validation_conformance_event
     )
