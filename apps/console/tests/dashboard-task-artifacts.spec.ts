@@ -136,6 +136,45 @@ test("renders Plan and Validation buttons and their content when both artifacts 
   await expect(content).toContainText('"status": "satisfied"');
 });
 
+test("ignores a slow earlier download after switching artifacts", async ({ page }) => {
+  await mockDashboard(page);
+  // Make the plan download resolve slowly so a subsequent validation click wins
+  // the race; the stale plan response must not overwrite the validation content.
+  await page.unroute("/api/awf/workspaces/ws_full/artifacts/download*");
+  await page.route("/api/awf/workspaces/ws_full/artifacts/download*", async (route) => {
+    const url = route.request().url();
+    if (url.includes("path=plan.md")) {
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      await route.fulfill({
+        headers: { "content-type": "text/markdown" },
+        body: "# Surfaced Plan\n\n- first deposited step\n",
+      });
+      return;
+    }
+    await route.fulfill({
+      headers: { "content-type": "application/json" },
+      body: '{"status":"satisfied","gaps":[]}',
+    });
+  });
+
+  await page.goto("/");
+  await openDetails(page, "ws_full");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // Click Plan (slow), then immediately switch to Validation (fast).
+  await section.getByRole("button", { name: "Plan" }).click();
+  await section.getByRole("button", { name: "Validation" }).click();
+
+  const content = page.getByTestId("task-artifact-content");
+  await expect(content).toContainText('"status": "satisfied"');
+
+  // Wait past the slow plan download; the stale response must be discarded.
+  await page.waitForTimeout(1000);
+  await expect(content).toContainText('"status": "satisfied"');
+  await expect(content).not.toContainText("Surfaced Plan");
+});
+
 test("shows only the Plan button when conformance.json is absent", async ({ page }) => {
   await mockDashboard(page);
   await page.goto("/");

@@ -16,6 +16,7 @@ X
 import {
 useEffect,
 useLayoutEffect,
+useRef,
 useState
 } from "react";
 
@@ -234,6 +235,9 @@ export function TaskArtifactsSection({ workspaceId }: { workspaceId: string }) {
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Monotonic token so a slow download from an earlier click cannot overwrite
+  // the content of the artifact the user has since switched to.
+  const requestSeq = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -267,6 +271,7 @@ export function TaskArtifactsSection({ workspaceId }: { workspaceId: string }) {
 
   const openArtifact = async (target: TaskArtifactView) => {
     const name = target === "plan" ? PLAN_ARTIFACT_NAME : CONFORMANCE_ARTIFACT_NAME;
+    const seq = (requestSeq.current += 1);
     setView(target);
     setLoading(true);
     setError(null);
@@ -277,11 +282,21 @@ export function TaskArtifactsSection({ workspaceId }: { workspaceId: string }) {
         throw new Error(`Request failed with HTTP ${response.status}.`);
       }
       const text = await response.text();
+      // A newer click superseded this download; drop the stale response so it
+      // cannot replace the content of the currently-selected artifact.
+      if (seq !== requestSeq.current) {
+        return;
+      }
       setContent(target === "validation" ? formatConformanceJson(text) : text);
     } catch (cause) {
+      if (seq !== requestSeq.current) {
+        return;
+      }
       setError(cause instanceof Error ? cause.message : "Unable to load artifact.");
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+      }
     }
   };
 
