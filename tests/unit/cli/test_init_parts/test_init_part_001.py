@@ -1225,7 +1225,11 @@ def test_init_without_path_runs_service_bootstrap(
     assert "AWF init: local service bootstrap" in result.output
     assert str(state_dir.resolve()) in result.output
     assert "awf service status" in result.output
-    assert "AWF_GITHUB_TOKEN" in result.output
+    # Service bootstrap is repo-agnostic: it no longer hard-codes the GitHub token
+    # export and instead defers forge-scoped auth to ``awf init <path>`` (issue
+    # #539).
+    assert "AWF_GITHUB_TOKEN" not in result.output
+    assert "BITBUCKET_* env" in result.output
     assert "awf init <path>" in result.output
     assert len(captured["bootstrap_calls"]) == 1
     assert captured["bootstrap_calls"][0]["env_file"] is None
