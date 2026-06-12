@@ -197,6 +197,27 @@ def test_detect_bitbucket_forge_auth_unknown_mode_requires_email() -> None:
 
 
 @pytest.mark.unit
+def test_detect_bitbucket_forge_auth_whitespace_only_values_are_missing() -> None:
+    """Whitespace-only ``BITBUCKET_*`` values are treated as absent.
+
+    Mirrors ``bitbucket_credentials_present``, which strips token and email before
+    the presence check; otherwise a whitespace-only value would falsely report
+    ``auth_ok`` while runtime auth still fails.
+    """
+    auth, auth_ok = init_ops._detect_bitbucket_forge_auth(  # noqa: SLF001
+        {"BITBUCKET_API_TOKEN": "  ", "BITBUCKET_EMAIL": "\t"}
+    )
+
+    assert auth["bitbucket_keys"] == {
+        "BITBUCKET_API_TOKEN": False,
+        "BITBUCKET_EMAIL": False,
+        "BITBUCKET_AUTH_MODE": False,
+    }
+    assert auth["missing"] == ["BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL"]
+    assert auth_ok is False
+
+
+@pytest.mark.unit
 def test_explicit_project_forge_reads_pinned_value_from_disk(tmp_path: Path) -> None:
     """A pinned ``forge:`` in an on-disk profile is read (not the drafted default)."""
     awf_dir = tmp_path / ".awf"

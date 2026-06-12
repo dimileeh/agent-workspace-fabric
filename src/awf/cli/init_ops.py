@@ -583,7 +583,11 @@ def _detect_bitbucket_forge_auth(
     ``os.environ`` when the resolved service env is unavailable.
     """
     env = service_env if service_env is not None else os.environ
-    present = {key: bool(env.get(key)) for key in _BITBUCKET_AUTH_ENV_KEYS}
+    # Strip before the presence check so a whitespace-only value is treated as
+    # absent, mirroring ``bitbucket_credentials_present`` (which strips token and
+    # email before testing). Otherwise a whitespace-only ``BITBUCKET_*`` value would
+    # report ``auth_ok`` with no missing keys while runtime auth still fails.
+    present = {key: bool((env.get(key) or "").strip()) for key in _BITBUCKET_AUTH_ENV_KEYS}
     required = _bitbucket_required_auth_keys(env)
     missing = [key for key in required if not present[key]]
     auth: dict[str, object] = {"bitbucket_keys": present, "missing": missing}
