@@ -403,7 +403,11 @@ export function TaskArtifactsSection({
               Loading {view === "plan" ? "plan" : "validation report"}…
             </div>
           ) : view === "plan" ? (
-            <TaskPromptBody prompt={content} />
+            content.trim() ? (
+              <TaskPromptBody prompt={content} />
+            ) : (
+              <MutedLine>No plan content.</MutedLine>
+            )
           ) : content ? (
             <pre className="mono max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--terminal)] p-3 text-[11px] leading-relaxed text-[var(--terminal-foreground)]">
               {content}

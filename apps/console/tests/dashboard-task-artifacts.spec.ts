@@ -50,6 +50,7 @@ async function mockDashboard(page: Page) {
 
   const full = baseWorkspace("ws_full", "Full Artifacts");
   const planOnly = baseWorkspace("ws_plan", "Plan Only");
+  const emptyPlan = baseWorkspace("ws_emptyplan", "Empty Plan");
   const none = baseWorkspace("ws_none", "No Artifacts");
   const failed = baseWorkspace("ws_fail", "List Error");
   const planDownloadFail = baseWorkspace("ws_dlfail", "Plan Download Error");
@@ -90,6 +91,7 @@ async function mockDashboard(page: Page) {
         items: [
           full,
           planOnly,
+          emptyPlan,
           none,
           failed,
           planDownloadFail,
@@ -168,6 +170,18 @@ async function mockDashboard(page: Page) {
       headers: { "content-type": "text/markdown" },
       body: "# Live Plan Body\n",
     });
+  });
+
+  // Plan artifact lists and downloads successfully, but its body is blank. The
+  // plan view must show a dedicated empty-plan state, not the prompt-only
+  // "No prompt stored for this workspace." placeholder from TaskPromptBody.
+  await page.route("/api/awf/workspaces/ws_emptyplan/artifacts*", async (route) => {
+    await route.fulfill({
+      json: { items: [artifact("ws_emptyplan", "plan.md")], next_cursor: null, has_more: false },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_emptyplan/artifacts/download*", async (route) => {
+    await route.fulfill({ headers: { "content-type": "text/markdown" }, body: "   \n" });
   });
 
   // Plan + conformance present.
@@ -428,6 +442,23 @@ test("follows pagination so controls show when named artifacts are on a later pa
   // surface only if the section followed next_cursor past the first page.
   await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
   await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+});
+
+test("shows a dedicated empty-plan state instead of the prompt placeholder", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_emptyplan");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  await section.getByRole("button", { name: "Plan" }).click();
+
+  // A successful but blank plan.md must render the plan-specific empty state, not
+  // the prompt-only "No prompt stored for this workspace." text from TaskPromptBody.
+  const content = page.getByTestId("task-artifact-content");
+  await expect(content).toContainText("No plan content.");
+  await expect(content).not.toContainText("No prompt stored for this workspace.");
 });
 
 test("shows only the Plan button when conformance.json is absent", async ({ page }) => {
