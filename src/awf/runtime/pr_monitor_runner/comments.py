@@ -115,6 +115,7 @@ async def _address_review_comment(
     compose_file: Path,
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> Verdict:
     result = await runner._address_review_comment_result(
         workspace_id=workspace_id,
@@ -125,6 +126,7 @@ async def _address_review_comment(
         compose_file=compose_file,
         state=state,
         owned_paths=owned_paths,
+        task_tag=task_tag,
     )
     return result.verdict
 

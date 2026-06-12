@@ -340,6 +340,54 @@ async def test_invoke_cli_for_verdict_wrapper_default_forwards_sentinel() -> Non
     assert invoke_tags == [_TASK_TAG_UNSET]
 
 
+def _review_comment_wrapper_runner(result_tags: list[object]) -> SimpleNamespace:
+    async def _result(**kwargs: object) -> VerdictResult:
+        result_tags.append(kwargs.get("task_tag"))
+        return VerdictResult(verdict="fix_committed")
+
+    return SimpleNamespace(_address_review_comment_result=_result)
+
+
+@pytest.mark.unit
+async def test_address_review_comment_wrapper_forwards_explicit_tag() -> None:
+    """The verdict-only review-comment wrapper threads ``task_tag`` to the result helper."""
+    result_tags: list[object] = []
+    runner = _review_comment_wrapper_runner(result_tags)
+
+    verdict = await comments._address_review_comment(
+        runner,
+        workspace_id="ws_1",
+        repo=_FAKE_REPO,
+        pr_number=3,
+        comment=SimpleNamespace(comment_id=11),
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        task_tag="WRAP-7",
+    )
+
+    assert verdict == "fix_committed"
+    assert result_tags == ["WRAP-7"]
+
+
+@pytest.mark.unit
+async def test_address_review_comment_wrapper_default_forwards_sentinel() -> None:
+    """Omitting ``task_tag`` forwards the sentinel so the result helper self-resolves."""
+    result_tags: list[object] = []
+    runner = _review_comment_wrapper_runner(result_tags)
+
+    await comments._address_review_comment(
+        runner,
+        workspace_id="ws_1",
+        repo=_FAKE_REPO,
+        pr_number=3,
+        comment=SimpleNamespace(comment_id=11),
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+    )
+
+    assert result_tags == [_TASK_TAG_UNSET]
+
+
 # --------------------------------------------------------------------------- #
 # 3. Each repair path resolves the tag once and threads the same value through.
 # --------------------------------------------------------------------------- #
