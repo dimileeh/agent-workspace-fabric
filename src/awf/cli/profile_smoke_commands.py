@@ -69,9 +69,15 @@ def profile_doctor(
     agent run, no PR, no workspace creation. Use it before onboarding to catch
     profile/runtime gaps (notably ``SECRET_LEASE_SOURCE_MISSING``).
     """
+    import os
+
     from awf.common.git_remote import detect_repo_url_from_checkout
     from awf.service.config import local_service_environ, resolve_service_settings
-    from awf.service.environment import cleared_docker_cli_client_keys, non_empty_env_value
+    from awf.service.environment import (
+        cleared_docker_cli_client_keys,
+        env_lookup,
+        non_empty_env_value,
+    )
     from awf.service.profile_doctor import collect_profile_doctor_report
 
     resolved = repo.expanduser().resolve()
@@ -126,16 +132,29 @@ def profile_doctor(
     # would survive into the probe and let it talk to a different daemon/config than
     # the worker's compose pulls, so preflight would not match provisioning.
     scrubbed_keys = set(cleared_docker_cli_client_keys(host_env))
+    # Mirror bootstrap._docker_cli_environ's clears_docker_host: when the merged
+    # service env explicitly clears DOCKER_HOST (present but empty) while the caller
+    # shell still exports a non-empty host, the worker scrubs DOCKER_HOST/DOCKER_CONTEXT
+    # and pins NOTHING, so its compose pulls fall back to the default daemon. Without
+    # this the doctor would treat the empty host as merely absent and pin
+    # settings.docker_host below, probing a different daemon than the worker uses.
+    caller_docker_host_found, caller_docker_host_value = env_lookup(os.environ, "DOCKER_HOST")
+    service_docker_host_found, service_docker_host_value = env_lookup(host_env, "DOCKER_HOST")
+    clears_docker_host = (
+        service_docker_host_found
+        and not service_docker_host_value
+        and caller_docker_host_found
+        and bool(caller_docker_host_value)
+    )
     # Docker's CLI treats DOCKER_CONTEXT as overriding DOCKER_HOST. The worker only
-    # drops DOCKER_CONTEXT when it is actually pinning a host-selected daemon
-    # (_docker_cli_environ scrubs it under `if docker_host or clears_docker_host`);
-    # when the service env selects the daemon via DOCKER_CONTEXT alone -- no
-    # AWF_DOCKER_HOST/DOCKER_HOST -- the worker inherits that context. Mirror that:
-    # only scrub DOCKER_CONTEXT when an env-selected DOCKER_HOST will override it, so a
-    # context-only daemon selection is preserved instead of being stripped and
-    # redirected to settings.docker_host (which would probe the wrong daemon).
-    if env_docker_host:
-        scrubbed_keys.add("DOCKER_CONTEXT")
+    # drops DOCKER_CONTEXT when it is actually pinning a host-selected daemon or
+    # clearing a stray caller host (_docker_cli_environ scrubs it under
+    # `if docker_host or clears_docker_host`); when the service env selects the daemon
+    # via DOCKER_CONTEXT alone -- no AWF_DOCKER_HOST/DOCKER_HOST -- the worker inherits
+    # that context. Mirror that exactly so a context-only daemon selection is preserved
+    # instead of being stripped and redirected to settings.docker_host.
+    if env_docker_host or clears_docker_host:
+        scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
     docker_environ = {
         key: value for key, value in host_env.items() if key.upper() not in scrubbed_keys
     }
@@ -143,6 +162,12 @@ def profile_doctor(
         # Pin DOCKER_HOST to the daemon the worker materialises; DOCKER_CONTEXT was
         # scrubbed above so a stale context cannot redirect the pinned daemon.
         docker_environ["DOCKER_HOST"] = env_docker_host
+    elif clears_docker_host:
+        # The service env explicitly cleared DOCKER_HOST to override a stray caller
+        # host; mirror the worker and leave DOCKER_HOST unset (do NOT pin
+        # settings.docker_host) so the probe targets the same default daemon the
+        # worker's compose pulls fall back to. DOCKER_CONTEXT was scrubbed above.
+        pass
     elif not non_empty_env_value(docker_environ, "DOCKER_CONTEXT"):
         # No env-selected daemon and no DOCKER_CONTEXT to honour -> fall back to the
         # resolved settings socket (the worker's settings.docker_host default). When a

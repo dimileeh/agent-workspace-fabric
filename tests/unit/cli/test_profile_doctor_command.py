@@ -812,6 +812,63 @@ def test_doctor_prefers_awf_docker_host_over_bare_docker_host(
     assert docker_environ["DOCKER_HOST"] == "tcp://awf-host:2375"
 
 
+def test_doctor_mirrors_cleared_docker_host_without_pinning_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A service env that clears DOCKER_HOST must not redirect the probe to settings.
+
+    ``bootstrap._docker_cli_environ`` treats a present-but-empty service DOCKER_HOST
+    -- while the caller shell still exports a non-empty host -- as
+    ``clears_docker_host``: it scrubs DOCKER_HOST/DOCKER_CONTEXT and pins NOTHING, so
+    the worker's compose pulls fall back to the default daemon. The doctor must mirror
+    that: leave DOCKER_HOST unset rather than treating the empty host as absent and
+    pinning ``settings.docker_host`` -- which would probe a different daemon than the
+    worker uses.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The caller shell exports a stray host the service env explicitly clears.
+    monkeypatch.setenv("DOCKER_HOST", "tcp://stray-caller:2375")
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"DOCKER_HOST": "", "DOCKER_CONFIG": "/svc/.docker"},
+    )
+    # settings.docker_host is a non-default socket: if the doctor pinned it the probe
+    # would diverge from the worker's default-daemon fallback.
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="tcp://settings-only:2375",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    docker_environ = captured["docker_environ"]
+    assert isinstance(docker_environ, dict)
+    # No DOCKER_HOST is pinned -- the probe falls back to the same default daemon the
+    # worker's compose pulls use, instead of settings.docker_host.
+    assert "DOCKER_HOST" not in docker_environ
+    # Unrelated client config still threads through to the probe.
+    assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0
