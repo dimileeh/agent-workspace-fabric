@@ -1177,6 +1177,16 @@ def _raise_if_policy_conflicts(
                 "requested_owned_paths": list(request.owned_paths),
             },
         )
+    if workspace.task_tag != request.task_tag:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different task_tag policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "existing_task_tag": workspace.task_tag,
+                "requested_task_tag": request.task_tag,
+            },
+        )
     if workspace.auto_merge != request.auto_merge:
         raise PRMonitorAdoptionError(
             error_code="PR_ADOPTION_POLICY_CONFLICT",

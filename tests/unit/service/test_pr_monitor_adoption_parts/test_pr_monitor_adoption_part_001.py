@@ -291,6 +291,64 @@ class TestPullRequestMonitorAdoptionServicePart001:
         }
 
     @pytest.mark.unit
+    async def test_attaching_live_adoption_rejects_different_task_tag(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                )
+            )
+            with pytest.raises(PRMonitorAdoptionError) as excinfo:
+                await service.adopt(
+                    PullRequestMonitorAdoptionRequest(
+                        repo_slug="dimileeh/aira-web",
+                        pr_number=277,
+                        task_tag="PROJ-123",
+                    )
+                )
+
+        assert first.workspace_id.startswith("ws_")
+        assert excinfo.value.error_code == "PR_ADOPTION_POLICY_CONFLICT"
+        assert excinfo.value.detail == {
+            "workspace_id": first.workspace_id,
+            "existing_task_tag": None,
+            "requested_task_tag": "PROJ-123",
+        }
+
+    @pytest.mark.unit
+    async def test_attaching_live_adoption_allows_matching_task_tag(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            service = PullRequestMonitorAdoptionService(session, metadata_fetcher=fetcher)
+            first = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    task_tag="PROJ-123",
+                )
+            )
+            second = await service.adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    task_tag="PROJ-123",
+                )
+            )
+            await session.commit()
+
+        assert second.attached_existing is True
+        assert second.workspace_id == first.workspace_id
+
+    @pytest.mark.unit
     async def test_attaching_live_adoption_allows_reordered_owned_paths(
         self,
         factory: async_sessionmaker[AsyncSession],
