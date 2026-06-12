@@ -13,8 +13,9 @@ Install:
 - Forge access for the target repo — choose the one that matches your repo's host:
   - **GitHub:** the GitHub CLI `gh`, plus a GitHub account with access to the
     target repo.
-  - **Bitbucket:** `BITBUCKET_API_TOKEN`, `BITBUCKET_EMAIL`, and
-    `BITBUCKET_AUTH_MODE` (e.g. `basic`) set in `.env` — no `gh` required.
+  - **Bitbucket:** `BITBUCKET_API_TOKEN` plus either `BITBUCKET_EMAIL` (for the
+    default `basic` auth mode) or `BITBUCKET_AUTH_MODE=bearer` (token alone) set in
+    `.env` — no `gh` required.
 - SSH key or Git credentials that can clone and push the repo.
 - At least one coding-agent credential:
   - Codex CLI auth in `~/.codex`, or OpenAI auth environment as supported by
@@ -32,8 +33,9 @@ Verify forge access (run the check that matches your repo's host):
   gh auth status
   ```
 
-- **Bitbucket:** confirm `BITBUCKET_API_TOKEN`, `BITBUCKET_EMAIL`, and
-  `BITBUCKET_AUTH_MODE` are present in `.env` (no `gh` needed).
+- **Bitbucket:** confirm `BITBUCKET_API_TOKEN` is present in `.env`, plus either
+  `BITBUCKET_EMAIL` (default `basic` mode) or `BITBUCKET_AUTH_MODE=bearer` (token
+  alone) (no `gh` needed).
 
 Verify Docker:
 
