@@ -88,7 +88,16 @@ class AsyncioSubprocessRunner:
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
-        stdout_bytes, stderr_bytes = await proc.communicate(input=input_bytes)
+        try:
+            stdout_bytes, stderr_bytes = await proc.communicate(input=input_bytes)
+        except asyncio.CancelledError:
+            # A timeout wrapper (``asyncio.wait_for``) cancels this coroutine
+            # mid-``communicate``. Without explicit teardown the spawned process
+            # — e.g. a wedged ``docker compose exec`` client driving a toolchain
+            # probe — would be left orphaned and accumulate across workspaces.
+            # Terminate and reap it before propagating the cancellation.
+            await _terminate_process(proc, asyncio.create_task(proc.wait()))
+            raise
         assert proc.returncode is not None
         return CommandResult(
             returncode=proc.returncode,

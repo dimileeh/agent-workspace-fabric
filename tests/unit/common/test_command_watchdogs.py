@@ -123,6 +123,42 @@ async def test_asyncio_runner_cancellation_terminates_subprocess(tmp_path: Path)
 
 
 @pytest.mark.unit
+async def test_asyncio_runner_plain_run_terminates_subprocess_on_cancellation(
+    tmp_path: Path,
+) -> None:
+    runner = AsyncioSubprocessRunner()
+    pid_file = tmp_path / "child.pid"
+
+    task = asyncio.create_task(
+        runner.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os,pathlib,sys,time;"
+                    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()));"
+                    "time.sleep(30)"
+                ),
+                str(pid_file),
+            ],
+        )
+    )
+    pid = await _wait_for_pid_file(pid_file)
+
+    try:
+        # A timeout wrapper (``asyncio.wait_for``) cancels ``run`` mid-flight;
+        # the spawned process must be reaped, not left orphaned.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert not _pid_exists(pid)
+    finally:
+        if _pid_exists(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.unit
 async def test_asyncio_runner_ignores_child_that_closes_stdin_early() -> None:
     runner = AsyncioSubprocessRunner()
     stdout: list[str] = []
