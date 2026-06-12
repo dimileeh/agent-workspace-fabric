@@ -817,6 +817,20 @@ async def execute(
                     reason_code=agent_run_reason_code,
                     details=agent_run_details,
                 )
+                # Planning ran before this no-work check, so the preserved
+                # FAILED worktree can already hold the plan + conformance
+                # report even though the implementation produced no commits.
+                # This branch returns before the post-validation deposit
+                # block, so deposit them now — otherwise the artifacts are
+                # stranded in the worktree and the console Plan/Validation
+                # controls can never surface why the task failed. Best-effort
+                # and idempotent.
+                _planning_artifacts._deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                )
                 if agent_run_failure_reason == FailureReason.agent_failure:
                     await self._prepare_provider_recovery(workspace_id)
                 return
