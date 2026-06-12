@@ -37,10 +37,17 @@ _ENV_COMMENT_KEY_IGNORE_WORDS = frozenset({"awf"})
 # Bitbucket env-auth contract verified at ``awf init`` for bitbucket.org repos
 # (issue #539). These names mirror the private constants in
 # ``awf.common.git_auth``; kept local so init_ops does not import private symbols.
+_BITBUCKET_TOKEN_ENV = "BITBUCKET_API_TOKEN"
+_BITBUCKET_EMAIL_ENV = "BITBUCKET_EMAIL"
+_BITBUCKET_AUTH_MODE_ENV = "BITBUCKET_AUTH_MODE"
+_BITBUCKET_BEARER_MODE = "bearer"
+# All three keys are *reported* (present/absent) for diagnostics, but only the
+# token (always) and email (default ``basic`` mode only) are actually *required* —
+# see :func:`_bitbucket_required_auth_keys`.
 _BITBUCKET_AUTH_ENV_KEYS: tuple[str, ...] = (
-    "BITBUCKET_API_TOKEN",
-    "BITBUCKET_EMAIL",
-    "BITBUCKET_AUTH_MODE",
+    _BITBUCKET_TOKEN_ENV,
+    _BITBUCKET_EMAIL_ENV,
+    _BITBUCKET_AUTH_MODE_ENV,
 )
 
 
@@ -537,17 +544,40 @@ def _detect_github_forge_auth(
     return auth, gh_present and readiness == "ok"
 
 
+def _bitbucket_required_auth_keys(env: Mapping[str, str]) -> tuple[str, ...]:
+    """Return the ``BITBUCKET_*`` env keys actually required for the configured mode.
+
+    Mirrors :func:`awf.common.git_auth.bitbucket_credentials_present`:
+    ``BITBUCKET_API_TOKEN`` is always required; ``BITBUCKET_EMAIL`` only in the
+    default ``basic`` mode (``BITBUCKET_AUTH_MODE=bearer`` authenticates with the
+    token alone). ``BITBUCKET_AUTH_MODE`` is an optional selector that defaults to
+    ``basic`` and is never itself required. Any unrecognized mode is treated
+    conservatively as ``basic`` (requiring the email).
+    """
+    mode = (env.get(_BITBUCKET_AUTH_MODE_ENV) or "basic").strip().lower()
+    if mode == _BITBUCKET_BEARER_MODE:
+        return (_BITBUCKET_TOKEN_ENV,)
+    return (_BITBUCKET_TOKEN_ENV, _BITBUCKET_EMAIL_ENV)
+
+
 def _detect_bitbucket_forge_auth(
     service_env: Mapping[str, str] | None,
 ) -> tuple[dict[str, object], bool]:
-    """Verify the three ``BITBUCKET_*`` env keys; name exactly which are missing.
+    """Verify the *required* ``BITBUCKET_*`` env keys; name exactly which are missing.
 
-    Never mentions gh — a bitbucket.org repo does not need the GitHub CLI. Falls
-    back to ``os.environ`` when the resolved service env is unavailable.
+    Mirrors the real auth contract (:func:`bitbucket_credentials_present`):
+    ``BITBUCKET_API_TOKEN`` is always required, ``BITBUCKET_EMAIL`` only in the
+    default ``basic`` auth mode, and ``BITBUCKET_AUTH_MODE`` is an optional selector
+    that is never itself required — so a token+email basic-mode workspace that omits
+    it is correctly reported as ``auth_ok`` rather than flagged as incomplete.
+    Presence of all three keys is still surfaced for diagnostics. Never mentions
+    gh — a bitbucket.org repo does not need the GitHub CLI. Falls back to
+    ``os.environ`` when the resolved service env is unavailable.
     """
     env = service_env if service_env is not None else os.environ
     present = {key: bool(env.get(key)) for key in _BITBUCKET_AUTH_ENV_KEYS}
-    missing = [key for key in _BITBUCKET_AUTH_ENV_KEYS if not present[key]]
+    required = _bitbucket_required_auth_keys(env)
+    missing = [key for key in required if not present[key]]
     auth: dict[str, object] = {"bitbucket_keys": present, "missing": missing}
     return auth, not missing
 
@@ -645,10 +675,9 @@ def _forge_guidance_lines(forge_block: Mapping[str, object]) -> list[str]:
             names = ", ".join(str(key) for key in missing)
             bitbucket_lines.append(f"  - Set the missing Bitbucket auth env in .env: {names}.")
         else:
-            bitbucket_lines.append(
-                "  - Bitbucket auth env present: "
-                "BITBUCKET_API_TOKEN, BITBUCKET_EMAIL, BITBUCKET_AUTH_MODE."
-            )
+            present_keys = _mapping_value(auth.get("bitbucket_keys"))
+            names = ", ".join(key for key in _BITBUCKET_AUTH_ENV_KEYS if present_keys.get(key))
+            bitbucket_lines.append(f"  - Bitbucket auth env present: {names}.")
         return bitbucket_lines
 
     if forge_block.get("host_detected"):

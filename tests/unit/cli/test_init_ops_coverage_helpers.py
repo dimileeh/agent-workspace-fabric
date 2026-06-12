@@ -126,14 +126,40 @@ def test_detect_github_forge_auth_degrades_to_unknown_without_settings(
 def test_detect_bitbucket_forge_auth_falls_back_to_os_environ(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the resolved service env is unavailable, read ``os.environ``."""
+    """When the resolved service env is unavailable, read ``os.environ``.
+
+    Token + email with no ``BITBUCKET_AUTH_MODE`` is the valid default-basic
+    config, so the optional mode selector must not be reported as missing.
+    """
     monkeypatch.setenv("BITBUCKET_API_TOKEN", "tok")
     monkeypatch.setenv("BITBUCKET_EMAIL", "dev@example.com")
     monkeypatch.delenv("BITBUCKET_AUTH_MODE", raising=False)
 
     auth, auth_ok = init_ops._detect_bitbucket_forge_auth(None)  # noqa: SLF001
 
-    assert auth["missing"] == ["BITBUCKET_AUTH_MODE"]
+    assert auth["missing"] == []
+    assert auth_ok is True
+
+
+@pytest.mark.unit
+def test_detect_bitbucket_forge_auth_bearer_mode_needs_token_only() -> None:
+    """``BITBUCKET_AUTH_MODE=bearer`` authenticates with the token alone."""
+    auth, auth_ok = init_ops._detect_bitbucket_forge_auth(  # noqa: SLF001
+        {"BITBUCKET_API_TOKEN": "tok", "BITBUCKET_AUTH_MODE": "bearer"}
+    )
+
+    assert auth["missing"] == []
+    assert auth_ok is True
+
+
+@pytest.mark.unit
+def test_detect_bitbucket_forge_auth_unknown_mode_requires_email() -> None:
+    """An unrecognized auth mode is treated conservatively as ``basic``."""
+    auth, auth_ok = init_ops._detect_bitbucket_forge_auth(  # noqa: SLF001
+        {"BITBUCKET_API_TOKEN": "tok", "BITBUCKET_AUTH_MODE": "weird"}
+    )
+
+    assert auth["missing"] == ["BITBUCKET_EMAIL"]
     assert auth_ok is False
 
 

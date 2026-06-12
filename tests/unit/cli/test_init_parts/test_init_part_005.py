@@ -140,13 +140,14 @@ def test_init_github_present_but_unauthenticated_reports_both_signals(
 
 
 @pytest.mark.unit
-def test_init_bitbucket_repo_verifies_trio_and_never_mentions_gh(
+def test_init_bitbucket_repo_names_only_required_missing_keys_and_never_mentions_gh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _stub_prereqs(monkeypatch)
     _stub_origin(monkeypatch, "git@bitbucket.org:acme/widgets.git")
     _forbid_check_gh(monkeypatch)
-    # Partial env: only the token is set, so EMAIL + AUTH_MODE must be named.
+    # Partial env: only the token is set. EMAIL is required in the default ``basic``
+    # mode, but AUTH_MODE is an optional selector and must NOT be named as missing.
     monkeypatch.setattr(
         "awf.service.config.local_service_environ",
         lambda *_a, **_k: {"BITBUCKET_API_TOKEN": "tok"},
@@ -162,17 +163,55 @@ def test_init_bitbucket_repo_verifies_trio_and_never_mentions_gh(
         "BITBUCKET_EMAIL": False,
         "BITBUCKET_AUTH_MODE": False,
     }
-    assert forge["auth"]["missing"] == ["BITBUCKET_EMAIL", "BITBUCKET_AUTH_MODE"]
+    assert forge["auth"]["missing"] == ["BITBUCKET_EMAIL"]
     assert forge["auth_ok"] is False
 
     pretty = _runner.invoke(app, ["init", str(tmp_path)])
     assert pretty.exit_code == 0, pretty.output
     assert "Detected forge: bitbucket." in pretty.output
-    assert "BITBUCKET_EMAIL, BITBUCKET_AUTH_MODE" in pretty.output
+    assert "BITBUCKET_EMAIL" in pretty.output
+    # The optional mode selector is never demanded as a missing key.
+    assert "BITBUCKET_AUTH_MODE" not in pretty.output
     # A bitbucket repo must see zero gh noise.
     assert "GitHub" not in pretty.output
     assert "gh auth" not in pretty.output
     assert "install gh" not in pretty.output.lower()
+
+
+@pytest.mark.unit
+def test_init_bitbucket_basic_mode_without_auth_mode_env_is_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Token + email but no ``BITBUCKET_AUTH_MODE`` is a valid default-basic config.
+
+    Regression for the false ``auth_ok: false`` warning: the auth-mode env defaults
+    to ``basic``, which only needs token + email, so omitting it must not flag the
+    workspace as incomplete (PR #541 review).
+    """
+    _stub_prereqs(monkeypatch)
+    _stub_origin(monkeypatch, "https://bitbucket.org/acme/widgets.git")
+    _forbid_check_gh(monkeypatch)
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda *_a, **_k: {
+            "BITBUCKET_API_TOKEN": "tok",
+            "BITBUCKET_EMAIL": "dev@example.com",
+        },
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    forge = json.loads(result.output)["forge"]
+    assert forge["forge"] == "bitbucket"
+    assert forge["auth"]["missing"] == []
+    assert forge["auth_ok"] is True
+    assert forge["level"] == "ok"
+
+    pretty = _runner.invoke(app, ["init", str(tmp_path)])
+    assert "Bitbucket auth env present" in pretty.output
+    # Only the keys that are actually present are listed — not the omitted selector.
+    assert "BITBUCKET_AUTH_MODE" not in pretty.output
 
 
 @pytest.mark.unit
