@@ -121,18 +121,22 @@ def profile_doctor(
         key: value for key, value in host_env.items() if key.upper() not in scrubbed_keys
     }
     # Pin DOCKER_HOST to the daemon the worker actually materialises. The worker
-    # reads its daemon from AWF_DOCKER_HOST in the resolved service environment, so
-    # prefer that key from the merged Compose view (host_env, sourced via
-    # local_service_environ exactly like the lease checks above) and fall back to
+    # derives its daemon in bootstrap._docker_cli_environ from the resolved service
+    # environment as AWF_DOCKER_HOST OR a bare DOCKER_HOST, so mirror that exact
+    # precedence against the merged Compose view (host_env, sourced via
+    # local_service_environ -- the same view the worker's raw_service_env is built
+    # from -- exactly like the lease checks above) and fall back to
     # settings.docker_host. resolve_service_settings()'s Settings() only reads an
-    # AWF_-prefixed, cwd-relative .env, so an AWF_DOCKER_HOST present only in the
-    # Compose env file (with the doctor invoked from another cwd) would otherwise
-    # leave the probe on the default socket while the worker targets the env-file
-    # daemon, so preflight would not match provisioning. A bare, un-namespaced
-    # DOCKER_HOST is intentionally NOT honoured here -- it is the stray caller value
-    # scrubbed/overridden above so it cannot redirect the probe.
+    # AWF_-prefixed, cwd-relative .env, so a daemon selected only via an
+    # AWF_DOCKER_HOST or DOCKER_HOST in the Compose env file (with the doctor invoked
+    # from another cwd) would otherwise leave the probe on the default socket while
+    # the worker targets the env-file daemon, so preflight would not match
+    # provisioning. DOCKER_CONTEXT (which Docker treats as overriding DOCKER_HOST) is
+    # still scrubbed above so a stale context cannot redirect the pinned daemon.
     docker_environ["DOCKER_HOST"] = (
-        non_empty_env_value(host_env, "AWF_DOCKER_HOST") or settings.docker_host
+        non_empty_env_value(host_env, "AWF_DOCKER_HOST")
+        or non_empty_env_value(host_env, "DOCKER_HOST")
+        or settings.docker_host
     )
     report = collect_profile_doctor_report(
         resolved,

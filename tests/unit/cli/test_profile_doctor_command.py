@@ -601,6 +601,105 @@ def test_doctor_prefers_compose_env_docker_host_over_bare_settings(
     assert docker_environ["DOCKER_HOST"] == "tcp://compose-env:2375"
 
 
+def test_doctor_honours_service_selected_bare_docker_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A service-selected bare DOCKER_HOST must steer the probe, matching the worker.
+
+    The worker's ``bootstrap._docker_cli_environ`` derives its daemon from the
+    resolved service environment as ``AWF_DOCKER_HOST`` OR a bare ``DOCKER_HOST``.
+    When the merged Compose view (``local_service_environ()`` -- the same view the
+    worker's ``raw_service_env`` is built from) names a bare ``DOCKER_HOST`` without
+    an ``AWF_DOCKER_HOST``, the worker pulls against that daemon, so the doctor must
+    probe it too rather than falling back to the default ``settings.docker_host``
+    socket -- otherwise a green preflight would not match provisioning.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The merged Compose env selects the daemon via a bare DOCKER_HOST only.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"DOCKER_HOST": "tcp://compose-bare:2375"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    docker_environ = captured["docker_environ"]
+    assert isinstance(docker_environ, dict)
+    # The merged Compose env's bare DOCKER_HOST wins over the default settings socket.
+    assert docker_environ["DOCKER_HOST"] == "tcp://compose-bare:2375"
+
+
+def test_doctor_prefers_awf_docker_host_over_bare_docker_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``AWF_DOCKER_HOST`` must take precedence over a bare ``DOCKER_HOST``.
+
+    This mirrors ``bootstrap._docker_cli_environ``'s ``AWF_DOCKER_HOST`` OR
+    ``DOCKER_HOST`` order so the doctor and worker agree on the daemon when both
+    keys are present in the merged Compose view.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {
+            "AWF_DOCKER_HOST": "tcp://awf-host:2375",
+            "DOCKER_HOST": "tcp://bare-host:2375",
+        },
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    docker_environ = captured["docker_environ"]
+    assert isinstance(docker_environ, dict)
+    assert docker_environ["DOCKER_HOST"] == "tcp://awf-host:2375"
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0
