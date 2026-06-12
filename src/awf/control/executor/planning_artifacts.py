@@ -11,11 +11,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from awf.common.logging import get_logger
 from awf.control.executor.helpers import _failure_salvage_payload
 from awf.control.executor.types import _PlanningRunFailure, _PlanningValidationHandoff
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION, render_workspace_path
 from awf.service.artifacts import deposit_workspace_planning_artifacts
+
+_log = get_logger(__name__)
 
 
 def _deposit_planning_artifacts_best_effort(
@@ -37,14 +40,32 @@ def _deposit_planning_artifacts_best_effort(
     """
     if profile is None or not profile.planning.required:
         return
+    # An invalid plan_path/conformance_report_path template is itself a
+    # planning failure: the planning loop already renders these paths and, on
+    # ``ValueError``, returns the ``"planning profile is invalid"`` string that
+    # routes the workspace to ``_mark_failed``. Re-rendering the same invalid
+    # template here — *before* that ``_mark_failed`` runs — would let the
+    # ValueError escape and strand the workspace in ``running`` instead of
+    # FAILED. The deposit is best-effort, so treat an unrenderable template the
+    # same as a copy failure: log and skip, never raise.
+    try:
+        plan_path = render_workspace_path(profile.planning.plan_path, workspace_id=workspace_id)
+        report_path = render_workspace_path(
+            profile.planning.conformance_report_path, workspace_id=workspace_id
+        )
+    except ValueError as exc:
+        _log.warning(
+            "executor.planning_artifact_deposit_skipped_invalid_profile",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+        )
+        return
     deposit_workspace_planning_artifacts(
         work_dir=self._config.compose_projects_root.parent,
         workspace_id=workspace_id,
         worktree_path=worktree_path,
-        plan_path=render_workspace_path(profile.planning.plan_path, workspace_id=workspace_id),
-        report_path=render_workspace_path(
-            profile.planning.conformance_report_path, workspace_id=workspace_id
-        ),
+        plan_path=plan_path,
+        report_path=report_path,
     )
 
 
