@@ -763,17 +763,28 @@ def _detect_project_forge_auth(
     readiness layer (issue #539). Reuses the existing detection seam
     (``detect_repo_url_from_checkout`` -> ``forge``); an explicit ``forge:`` pinned
     in an on-disk ``.awf/workspace.yml`` (via :func:`_explicit_project_forge`) is
-    honored over the URL host through ``concrete_forge_for_repo``. Missing matching
-    auth is reported as a WARNING and never blocks, preserving the invariant that
-    mocked smoke needs no live forge access. The returned dict is structured and
-    secret-free (the raw remote URL is reduced to its credential-free host).
+    honored over the URL host through ``concrete_forge_for_repo`` — and wins even
+    with no ``origin`` remote at all, so an already-onboarded repo pinning
+    ``forge: bitbucket``/``github`` still gets its forge-specific auth check instead
+    of the neutral no-remote block. Only a checkout with neither an ``origin`` remote
+    nor a concrete pin stays neutral. Missing matching auth is reported as a WARNING
+    and never blocks, preserving the invariant that mocked smoke needs no live forge
+    access. The returned dict is structured and secret-free (the raw remote URL is
+    reduced to its credential-free host).
     """
     from awf.common.forge import concrete_forge_for_repo, detect_forge_from_url
     from awf.common.git_remote import detect_repo_url_from_checkout
 
     repo_url = detect_repo_url_from_checkout(repository)
-    if repo_url is None:
-        # No ``origin`` remote: stay neutral, assume no forge, never block.
+    # Read the explicit ``forge:`` pin up front: documented precedence is explicit
+    # ``forge:`` > URL host > github, so a pinned profile wins even when there is no
+    # URL host. With no ``origin`` remote *and* no concrete pin we stay neutral, but
+    # a repo pinning ``forge: bitbucket``/``github`` must still get its forge-specific
+    # auth check rather than the neutral no-remote block that skips it (PR #541 review).
+    explicit_forge = _explicit_project_forge(repository)
+    if repo_url is None and explicit_forge not in ("bitbucket", "github"):
+        # No ``origin`` remote and no explicit forge pin: stay neutral, assume no
+        # forge, never block.
         return _neutral_forge_block()
 
     # When the caller could not resolve the Compose ``.env``-merged service env
@@ -796,11 +807,12 @@ def _detect_project_forge_auth(
         except (OSError, UnicodeDecodeError, ComposeEnvInterpolationError):
             service_env = None
 
-    explicit_forge = _explicit_project_forge(repository)
     forge = concrete_forge_for_repo(explicit_forge, repo_url)
     # ``host_detected`` distinguishes a recognized host from an unknown host
-    # (GHE/GitLab/self-hosted) that ``forge.py`` defaults to github.
-    host_detected = detect_forge_from_url(repo_url) is not None
+    # (GHE/GitLab/self-hosted) that ``forge.py`` defaults to github. With no
+    # ``origin`` URL to parse (a pinned-forge checkout) there is no host to
+    # recognize, so it stays ``False`` and ``host`` stays ``None``.
+    host_detected = repo_url is not None and detect_forge_from_url(repo_url) is not None
 
     if forge == "bitbucket":
         auth, auth_ok = _detect_bitbucket_forge_auth(service_env)
@@ -808,7 +820,7 @@ def _detect_project_forge_auth(
         auth, auth_ok = _detect_github_forge_auth(settings=settings, service_env=service_env)
 
     return {
-        "host": _redacted_remote_host(repo_url),
+        "host": _redacted_remote_host(repo_url) if repo_url is not None else None,
         "forge": forge,
         "host_detected": host_detected,
         "auth": auth,
@@ -851,6 +863,11 @@ def _forge_guidance_lines(forge_block: Mapping[str, object]) -> list[str]:
 
     if forge_block.get("host_detected"):
         github_lines = ["Detected forge: github."]
+    elif forge_block.get("host") is None:
+        # No ``origin`` URL host to recognize: github came from an explicit
+        # ``forge: github`` pin (a hostless checkout with no pin stays neutral and
+        # never reaches here), so it is not an unrecognized-host default.
+        github_lines = ["Detected forge: github (pinned in .awf/workspace.yml)."]
     else:
         github_lines = [
             f"Forge host {forge_block.get('host')!r} not recognized; defaulting to "

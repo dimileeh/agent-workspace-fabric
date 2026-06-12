@@ -296,6 +296,84 @@ def test_init_no_origin_remote_stays_neutral_and_never_blocks(
 
 
 @pytest.mark.unit
+def test_init_no_origin_with_explicit_bitbucket_pin_honors_forge_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned ``forge: bitbucket`` is honored even with no ``origin`` remote.
+
+    Documented precedence is explicit ``forge:`` > URL host > github, so an
+    already-onboarded repo whose ``.awf/workspace.yml`` pins a concrete forge must
+    still get its forge-specific auth check — not the neutral no-remote block that
+    skips it (PR #541 review).
+    """
+    _stub_prereqs(monkeypatch)
+    _stub_origin(monkeypatch, None)
+    _forbid_check_gh(monkeypatch)
+    awf_dir = tmp_path / ".awf"
+    awf_dir.mkdir()
+    (awf_dir / "workspace.yml").write_text("forge: bitbucket\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda *_a, **_k: {"BITBUCKET_API_TOKEN": "tok"},
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    forge = json.loads(result.output)["forge"]
+    assert forge["forge"] == "bitbucket"
+    assert forge["host"] is None  # no origin URL to parse
+    assert forge["host_detected"] is False
+    # EMAIL is still required in the default basic mode, so this warns (never blocks).
+    assert forge["auth"]["missing"] == ["BITBUCKET_EMAIL"]
+    assert forge["auth_ok"] is False
+    assert forge["level"] == "warning"
+
+    pretty = _runner.invoke(app, ["init", str(tmp_path)])
+    assert pretty.exit_code == 0, pretty.output
+    assert "Detected forge: bitbucket." in pretty.output
+    # The neutral "add a remote" guidance must NOT fire for a pinned profile.
+    assert "No `origin` remote detected" not in pretty.output
+
+
+@pytest.mark.unit
+def test_init_no_origin_with_explicit_github_pin_honors_forge_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned ``forge: github`` runs the GitHub auth check with no ``origin``.
+
+    With no URL host to recognize the guidance must not claim the host is
+    "not recognized; defaulting to github" (the forge was explicitly pinned), and
+    must run the readiness/gh checks rather than the neutral no-remote block.
+    """
+    _stub_prereqs(monkeypatch)
+    _stub_origin(monkeypatch, None)
+    _stub_check_gh(monkeypatch, present=True)
+    _stub_github_readiness(monkeypatch, ok=True)
+    awf_dir = tmp_path / ".awf"
+    awf_dir.mkdir()
+    (awf_dir / "workspace.yml").write_text("forge: github\n", encoding="utf-8")
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    forge = json.loads(result.output)["forge"]
+    assert forge["forge"] == "github"
+    assert forge["host"] is None
+    assert forge["host_detected"] is False
+    assert forge["auth"]["github_readiness"] == "ok"
+    assert forge["auth_ok"] is True
+    assert forge["level"] == "ok"
+
+    pretty = _runner.invoke(app, ["init", str(tmp_path)])
+    assert pretty.exit_code == 0, pretty.output
+    assert "Detected forge: github" in pretty.output
+    # A pinned forge is not an unrecognized-host default.
+    assert "not recognized" not in pretty.output
+    assert "No `origin` remote detected" not in pretty.output
+
+
+@pytest.mark.unit
 def test_init_forge_detection_error_downgrades_to_neutral_and_never_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
