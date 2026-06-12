@@ -77,6 +77,24 @@ def _thread_identifier_set(thread: ReviewThread) -> set[str]:
     return ids
 
 
+def _grep_id_pattern(identifier: str) -> str:
+    """An ``-E`` (ERE) sub-pattern that matches ``identifier`` as a whole token (#548).
+
+    A numeric comment ``databaseId`` (e.g. ``123``) embedded in a bare alternation
+    is unanchored, so ``git log -E --grep '(123)'`` ALSO matches a commit that only
+    addressed ``12345`` — ``123`` is a substring. In a PR carrying multiple outdated
+    threads whose numeric ids overlap, the branch-evidence seed would then mark and
+    resolve the WRONG thread. Anchor numeric ids with a non-digit boundary (or the
+    message start/end) on both sides so ``123`` cannot match inside ``12345``. Node
+    ids (``PRRT_…``) carry letters and ``_``, so a full-length token cannot collide
+    by substring this way — they stay bare (only ``re.escape``-d).
+    """
+    escaped = re.escape(identifier)
+    if identifier.isdigit():
+        return f"(^|[^0-9]){escaped}([^0-9]|$)"
+    return escaped
+
+
 def _thread_has_blocking_comment_verdict(
     thread: ReviewThread,
     state: MonitorState,
@@ -240,9 +258,11 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         # the ids cannot each be their own ``--grep`` (that would require ALL ids in
         # one commit); they are OR-ed inside a single ``-E`` alternation instead, so
         # a comment-path fix (``fix: address review comment issue:4688598838 — …``)
-        # matches on the raw databaseId substring even though ``thread_id`` differs.
-        # Each id is ``re.escape``-d (numeric databaseIds, alnum+``_`` node ids) and
-        # the set is sorted for a deterministic argv. The literal ``fix: address``
+        # matches on the raw databaseId token even though ``thread_id`` differs.
+        # Each id goes through ``_grep_id_pattern`` (numeric databaseIds get a
+        # non-digit boundary so ``123`` cannot match inside ``12345`` — #548; node
+        # ids stay ``re.escape``-d) and the set is sorted for a deterministic argv.
+        # The literal ``fix: address``
         # carries no regex metacharacters so it is safe as its own pattern under
         # ``-E``. Still requiring ``fix: address`` keeps the match specific enough
         # not to seed a thread the branch never addressed. ``%aI`` returns the
@@ -259,7 +279,9 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         # evidence (no seed); a non-empty read is a match whose time may still be
         # ``None`` if git emitted something unparseable.
         id_alternation = (
-            "(" + "|".join(re.escape(i) for i in sorted(_thread_identifier_set(thread))) + ")"
+            "("
+            + "|".join(_grep_id_pattern(i) for i in sorted(_thread_identifier_set(thread)))
+            + ")"
         )
         result = await self._deps.runner.run(
             git_worktree_command(

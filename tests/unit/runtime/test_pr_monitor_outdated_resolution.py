@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
 from awf.runtime.pr_monitor_runner.outdated_resolution import (
     _OUTDATED_RESOLVABLE_THREAD_VERDICTS,
+    _grep_id_pattern,
     _latest_reviewer_comment_at,
     _parse_commit_iso,
     _thread_identifier_set,
@@ -792,10 +793,11 @@ def _grep_argv(worktree_path: Path, *ids: str) -> list[str]:
 
     The id alternation OR-es every identifier the outdated thread could have been
     fixed under — the ``thread_id`` plus any review-comment databaseIds (#547) —
-    each ``re.escape``-d and sorted for a deterministic argv, under ``-E``
-    AND-ed with the literal ``fix: address`` prefix via ``--all-match``.
+    each run through ``_grep_id_pattern`` (numeric ids get a non-digit boundary —
+    #548) and sorted for a deterministic argv, under ``-E`` AND-ed with the literal
+    ``fix: address`` prefix via ``--all-match``.
     """
-    alternation = "(" + "|".join(re.escape(i) for i in sorted(ids)) + ")"
+    alternation = "(" + "|".join(_grep_id_pattern(i) for i in sorted(ids)) + ")"
     return [
         "git",
         "-c",
@@ -1223,6 +1225,66 @@ def test_thread_identifier_set_unions_thread_and_comment_ids() -> None:
         comments=(ReviewThreadComment(comment_id=None, body="x"),),
     )
     assert _thread_identifier_set(none_only) == {"PRRT_noneonly"}
+
+
+@pytest.mark.unit
+def test_grep_id_pattern_anchors_numeric_ids_but_not_node_ids() -> None:
+    """(#548) A numeric databaseId is wrapped in non-digit boundaries so it cannot
+    match as a substring of a longer id, while an alnum node id stays bare."""
+    # Numeric ids get the non-digit (or message edge) boundary on both sides.
+    assert _grep_id_pattern("123") == "(^|[^0-9])123([^0-9]|$)"
+    # Node ids carry letters/``_`` and cannot collide by substring → left bare.
+    assert _grep_id_pattern("PRRT_abc") == "PRRT_abc"
+    # The boundaried pattern matches the id as a whole token but NOT inside a
+    # longer overlapping numeric id — the exact wrong-thread match #548 closes.
+    pattern = _grep_id_pattern("123")
+    assert re.search(pattern, "fix: address review comment issue:123 — done")
+    assert re.search(pattern, "fix: address 123") is not None  # id at message end
+    assert re.search(pattern, "fix: address review comment issue:12345 — other") is None
+    assert re.search(pattern, "fix: address review comment issue:5123 — other") is None
+
+
+@pytest.mark.unit
+async def test_branch_evidence_grep_does_not_cross_match_overlapping_numeric_ids(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#548 regression) The branch-evidence grep for a thread whose comment
+    databaseId is ``123`` must NOT be satisfied by a commit that only addressed a
+    longer overlapping id (``12345``). Pins the unanchored-alternation false match:
+    the recorded grep pattern matches ``…issue:123 —`` but not ``…issue:12345 —``."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_distinct_comment("PRRT_overlap", comment_id="123")
+    # The seed helper issues exactly one bounded ``git log`` grep; its result is
+    # irrelevant here (we assert on the emitted pattern, not the match outcome).
+    cmd.queue_result(returncode=0, stdout="")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    # The alternation pattern is the argument right before the ``HEAD`` revision.
+    argv = cmd.calls[0].args
+    alternation = argv[argv.index("HEAD") - 1]
+    # The real comment-path fix commit for THIS thread matches…
+    assert re.search(alternation, "fix: address review comment issue:123 — done")
+    # …but a sibling thread's longer overlapping id does NOT, so the seed cannot
+    # mark/resolve the wrong outdated thread.
+    assert re.search(alternation, "fix: address review comment issue:12345 — other") is None
 
 
 @pytest.mark.unit
