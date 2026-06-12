@@ -1165,10 +1165,10 @@ class TestDepositWorkspacePlanningArtifacts:
             tmp_path, plan_text="# Plan", report_text="{}"
         )
 
-        def boom(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        def boom(src: Any, dst: Any, *args: Any, **kwargs: Any) -> bool:
             raise OSError("disk full")
 
-        monkeypatch.setattr(artifacts_module.shutil, "copyfileobj", boom)
+        monkeypatch.setattr(artifacts_module, "_copy_capped", boom)
 
         # Must not raise despite every copy failing.
         deposit_workspace_planning_artifacts(
@@ -1274,6 +1274,53 @@ class TestDepositWorkspacePlanningArtifacts:
 
         artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
         assert (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
+    def test_source_growing_after_size_check_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # TOCTOU: ``fstat`` only samples the size *before* the copy starts. A
+        # process still appending to the open descriptor can stream the file past
+        # ``MAX_ARTIFACT_CONTENT_BYTES`` during an unbounded copy, leaving an
+        # oversized artifact the reader can never serve. Simulate a stale small
+        # ``fstat`` over a source whose real bytes exceed the cap: the bounded
+        # copy must refuse it rather than deposit the oversized contents.
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path)
+        (worktree / "docs" / "awf-plans").mkdir(parents=True, exist_ok=True)
+        (worktree / plan_path).write_bytes(b"x" * (MAX_ARTIFACT_CONTENT_BYTES + 1))
+        (worktree / report_path).write_text("{}", encoding="utf-8")
+
+        real_fstat = artifacts_module.os.fstat
+
+        class _UndersizedStat:
+            # Report a size under the cap so the pre-copy guard waves the source
+            # through, while delegating every other field to the real ``fstat``.
+            def __init__(self, real: os.stat_result) -> None:
+                self._real = real
+                self.st_size = 1
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._real, name)
+
+        def small_fstat(fd: int) -> Any:
+            return _UndersizedStat(real_fstat(fd))
+
+        monkeypatch.setattr(artifacts_module.os, "fstat", small_fstat)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        # Oversized plan refused by the bounded copy; the small report still lands.
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+        assert not (artifact_dir / f".{DEPOSITED_PLAN_NAME}.tmp").exists()
+        assert (artifact_dir / DEPOSITED_CONFORMANCE_NAME).exists()
 
     @pytest.mark.unit
     def test_source_escaping_worktree_via_dir_symlink_is_rejected(self, tmp_path: Path) -> None:

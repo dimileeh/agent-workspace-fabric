@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import mimetypes
 import os
-import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,7 +14,7 @@ from itertools import count
 from os import stat_result
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any
+from typing import Any, BinaryIO
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +29,8 @@ _log = get_logger(__name__)
 DEFAULT_ARTIFACT_LIST_LIMIT = 50
 MAX_ARTIFACT_LIST_LIMIT = 500
 MAX_ARTIFACT_CONTENT_BYTES = 1_048_576
+# Streaming chunk size for the bounded planning-artifact copy.
+_COPY_CHUNK_BYTES = 64 * 1024
 
 # Stable filenames for the per-workspace plan + conformance report deposited
 # into the served artifact dir. The console labels artifacts by these names;
@@ -278,14 +279,46 @@ def _copy_planning_source_from_stable_fd(
         dest = artifact_dir / dest_name
         tmp_dest = artifact_dir / f".{dest_name}.tmp"
         try:
+            # ``fstat`` above only sampled the size *before* the copy. A process
+            # still appending to the already-open descriptor could stream well
+            # past ``MAX_ARTIFACT_CONTENT_BYTES`` during an unbounded
+            # ``copyfileobj``, leaving an oversized artifact the reader can never
+            # serve. Bound the copy itself: stop one byte over the cap and reject
+            # the deposit instead of trusting the pre-copy size.
             with os.fdopen(os.dup(fd), "rb") as src, tmp_dest.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
+                oversized = _copy_capped(src, dst, MAX_ARTIFACT_CONTENT_BYTES)
+            if oversized:
+                tmp_dest.unlink(missing_ok=True)
+                _reject_unsafe_planning_source(workspace_id, source, dest_name, "oversized")
+                return
             tmp_dest.replace(dest)
         except OSError:
             tmp_dest.unlink(missing_ok=True)
             raise
     finally:
         os.close(fd)
+
+
+def _copy_capped(src: BinaryIO, dst: BinaryIO, limit: int) -> bool:
+    """Stream ``src`` into ``dst``, copying at most ``limit`` bytes.
+
+    Returns ``True`` if the source held more than ``limit`` bytes — in which case
+    ``dst`` may contain a partial copy the caller must discard — and ``False``
+    when the whole source fit within the cap. The deposit step's ``fstat`` size
+    check only samples the size before the copy; a concurrent writer appending to
+    the open descriptor can grow the file afterwards, so the copy is bounded here
+    rather than trusting that sampled size.
+    """
+    remaining = limit
+    while True:
+        chunk = src.read(_COPY_CHUNK_BYTES)
+        if not chunk:
+            return False
+        if len(chunk) > remaining:
+            dst.write(chunk[:remaining])
+            return True
+        dst.write(chunk)
+        remaining -= len(chunk)
 
 
 def _reject_unsafe_planning_source(
