@@ -216,6 +216,26 @@ class TestBuildFixPrompt:
         assert "tests/unit/test_widget.py::test_handles_edges" in prompt
 
     @pytest.mark.unit
+    def test_instructs_tag_prefix_for_self_committed_fix_when_tag_present(self) -> None:
+        """A tagged workspace whose agent self-commits the fix leaves a clean
+        worktree, so AWF's tagging fallback commit is skipped. The prompt must
+        tell the agent to prefix its own commit subjects with the task tag so
+        the pushed fix-pass commit keeps its Jira link (PRRT_kwDOSJAM6s6I-vMm)."""
+        prompt = build_fix_prompt(self._ctx(task_tag="PROJ-123"))
+
+        assert "task tag `PROJ-123`" in prompt
+        assert "links to its tracking issue" in prompt
+        # Idempotent: an already-tagged subject is left alone.
+        assert "do not add it again" in prompt
+
+    @pytest.mark.unit
+    def test_omits_tag_instruction_when_tag_absent(self) -> None:
+        prompt = build_fix_prompt(self._ctx())
+
+        assert "task tag" not in prompt
+        assert "links to its tracking issue" not in prompt
+
+    @pytest.mark.unit
     def test_retry_prompt_treats_provider_fail_under_as_coverage_work(self) -> None:
         prompt = build_fix_prompt(
             self._ctx(

@@ -82,6 +82,14 @@ class ValidationFixContext:
     failing_test_evidence: tuple[str, ...] = ()
     """Fallback pytest failure evidence when node IDs are unavailable."""
 
+    task_tag: str | None = None
+    """Validated Jira issue key for the workspace, when one is attached.
+
+    When set, the fix prompt instructs the agent to prefix any commit it
+    authors itself with this tag. A fix-pass agent that self-commits leaves a
+    clean worktree, so AWF's tagging fallback commit is skipped and the pushed
+    commit would otherwise lose its Jira link."""
+
 
 def read_output_tail(path: Path, *, max_chars: int = DEFAULT_TAIL_CHARS) -> str:
     """Return up to ``max_chars`` trailing characters from a file.
@@ -205,6 +213,16 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
     if coverage_lines:
         coverage_block = "Coverage context:\n" + "\n".join(f"  - {line}" for line in coverage_lines)
 
+    task_tag_block = ""
+    if context.task_tag:
+        task_tag_block = (
+            f"\n\nIf you commit your fix yourself, prefix every commit subject "
+            f"you create with the task tag `{context.task_tag}` followed by a "
+            f"space (for example `{context.task_tag} fix: …`) so the commit "
+            f"links to its tracking issue. If a subject already starts with that "
+            f"tag, do not add it again."
+        )
+
     return (
         f"Validation failed after your previous pass. This is attempt "
         f"{context.pass_number} of {context.total_passes}.\n\n"
@@ -228,4 +246,5 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
         f"After you exit, validation will run every command above "
         f"again, in order. If any of them fail you'll get one more "
         f"fix prompt until attempts are exhausted."
+        f"{task_tag_block}"
     )

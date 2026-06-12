@@ -890,6 +890,7 @@ async def run_validation_and_fix_cycle(
                 if val_result.coverage is not None
                 else ()
             ),
+            task_tag=ws.task_tag,
         )
         fix_prompt = build_fix_prompt(fix_context)
         _log.info(
