@@ -266,11 +266,16 @@ def run_system_checks(
     compose_checks = (
         [check_compose(run=docker_runner)] if docker_check.data.get("available") else []
     )
+    # ``check_gh`` is intentionally NOT run here: GitHub-CLI presence is a
+    # forge-scoped concern that belongs at ``awf init <PATH>`` (project
+    # onboarding, where the repo's ``git remote`` reveals the forge), not at the
+    # repo-agnostic host/service readiness level. A Bitbucket-only host must see
+    # zero ``gh`` noise at ``awf setup`` (issue #539). ``check_gh`` is kept and
+    # re-exported because ``awf init`` reuses it for GitHub repos.
     return [
         docker_check,
         *compose_checks,
         check_git(),
-        check_gh(),
         check_python_runtime(),
         ports_check,
         postgres_port_check,
