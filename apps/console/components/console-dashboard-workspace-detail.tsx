@@ -264,8 +264,10 @@ export function TaskArtifactsSection({ workspaceId }: { workspaceId: string }) {
   const showValidation = hasConformanceArtifact(items);
 
   // Conditional on presence — render nothing (no empty buttons) until at least
-  // one of the named artifacts has been deposited for this workspace.
-  if (!showPlan && !showValidation) {
+  // one of the named artifacts has been deposited for this workspace. Keep
+  // rendering when the list request failed so the error banner can surface;
+  // otherwise an API failure is indistinguishable from "no artifacts".
+  if (!showPlan && !showValidation && !error) {
     return null;
   }
 

@@ -51,9 +51,10 @@ async function mockDashboard(page: Page) {
   const full = baseWorkspace("ws_full", "Full Artifacts");
   const planOnly = baseWorkspace("ws_plan", "Plan Only");
   const none = baseWorkspace("ws_none", "No Artifacts");
+  const failed = baseWorkspace("ws_fail", "List Error");
 
   await page.route("/api/awf/workspaces/overview*", async (route) => {
-    await route.fulfill({ json: { items: [full, planOnly, none], has_more: false } });
+    await route.fulfill({ json: { items: [full, planOnly, none, failed], has_more: false } });
   });
 
   // Plan + conformance present.
@@ -97,6 +98,11 @@ async function mockDashboard(page: Page) {
   // No artifacts deposited.
   await page.route("/api/awf/workspaces/ws_none/artifacts", async (route) => {
     await route.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
+  });
+
+  // Artifact list request fails — the error must be surfaced, not swallowed.
+  await page.route("/api/awf/workspaces/ws_fail/artifacts", async (route) => {
+    await route.fulfill({ status: 500, json: { detail: { message: "Unable to load artifacts." } } });
   });
 }
 
@@ -193,4 +199,19 @@ test("hides the artifacts section when no named artifacts were deposited", async
   await openDetails(page, "ws_none");
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByTestId("task-artifacts")).toHaveCount(0);
+});
+
+test("surfaces an error banner when the artifact list request fails", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_fail");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  // The list fetch failed, so no named artifacts resolve — but the section must
+  // still mount to surface the failure instead of looking like an empty result.
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  await expect(section).toContainText("Unable to load artifacts.");
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
 });
