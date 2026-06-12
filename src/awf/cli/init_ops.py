@@ -672,13 +672,18 @@ def _detect_project_forge_auth(
     # the same merged view doctor/status use — otherwise a token present only in
     # root ``.env`` is wrongly reported missing/unverified (PR #541 review).
     # Guarded: a second failure degrades to ``None`` and the per-forge
-    # ``os.environ`` fallback, never aborting the diagnostic.
+    # ``os.environ`` fallback, never aborting the diagnostic. Compose ``.env``
+    # merging can fail beyond file I/O (e.g. a ``${VAR:?}`` interpolation raises
+    # ``ComposeEnvInterpolationError``); those must degrade the same way so forge
+    # auth still runs via ``os.environ`` instead of bubbling into a generic
+    # ``detection_error`` block.
     if service_env is None:
         from awf.service.config import local_service_environ
+        from awf.service.environment import ComposeEnvInterpolationError
 
         try:
             service_env = local_service_environ()
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError, ComposeEnvInterpolationError):
             service_env = None
 
     explicit_forge = _explicit_project_forge(repository)

@@ -276,6 +276,41 @@ def test_detect_project_forge_auth_service_env_recompute_failure_is_neutral(
 
 
 @pytest.mark.unit
+def test_detect_project_forge_auth_recompute_interpolation_error_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Compose interpolation error during recompute degrades to ``os.environ``.
+
+    ``local_service_environ`` merges the Compose ``.env``; a malformed interpolation
+    raises :class:`ComposeEnvInterpolationError` (a ``ValueError``). That must degrade
+    to the documented per-forge ``os.environ`` fallback like ``OSError`` does, not
+    bubble up into a generic ``detection_error`` block that skips forge auth.
+    """
+    from awf.service.environment import ComposeEnvInterpolationError
+
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _repo: "https://bitbucket.org/acme/widgets.git",
+    )
+    monkeypatch.setenv("BITBUCKET_API_TOKEN", "tok")
+    monkeypatch.setenv("BITBUCKET_EMAIL", "dev@example.com")
+
+    def _raise() -> dict[str, str]:
+        raise ComposeEnvInterpolationError("MISSING_VAR", "MISSING_VAR is required")
+
+    monkeypatch.setattr("awf.service.config.local_service_environ", _raise)
+
+    block = init_ops._detect_project_forge_auth(  # noqa: SLF001
+        tmp_path, settings=None, service_env=None
+    )
+
+    # Recompute failed; the per-forge ``os.environ`` fallback still verifies auth.
+    assert block["forge"] == "bitbucket"
+    assert block["auth_ok"] is True
+    assert "detection_error" not in block
+
+
+@pytest.mark.unit
 def test_explicit_project_forge_reads_pinned_value_from_disk(tmp_path: Path) -> None:
     """A pinned ``forge:`` in an on-disk profile is read (not the drafted default)."""
     awf_dir = tmp_path / ".awf"
