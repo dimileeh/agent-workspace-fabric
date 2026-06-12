@@ -102,6 +102,7 @@ async def push_and_open_pr(
                     workspace_id=workspace_id,
                     operation=exc.operation,
                     returncode=exc.status if exc.status is not None else 0,
+                    reason_code=exc.reason_code,
                 )
                 await self._record_executor_pr_audit_event(
                     workspace_id,
@@ -152,6 +153,7 @@ async def push_and_open_pr(
             workspace_id=workspace_id,
             operation=exc.operation,
             returncode=exc.returncode,
+            reason_code=exc.reason_code,
         )
         if exc.operation != "git push":
             await self._record_executor_pr_audit_event(
