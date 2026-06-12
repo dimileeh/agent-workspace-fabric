@@ -1183,6 +1183,53 @@ class TestDepositWorkspacePlanningArtifacts:
         assert not (artifact_dir / DEPOSITED_CONFORMANCE_NAME).exists()
 
     @pytest.mark.unit
+    def test_symlinked_source_outside_worktree_is_rejected(self, tmp_path: Path) -> None:
+        # An agent-controlled worktree could leave the plan as a symlink to an
+        # arbitrary host-readable file; the deposit step must refuse to copy it.
+        work_dir = tmp_path / "work"
+        secret = tmp_path / "host-secret.txt"
+        secret.write_text("TOP SECRET", encoding="utf-8")
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path)
+        (worktree / "docs" / "awf-plans").mkdir(parents=True, exist_ok=True)
+        (worktree / plan_path).symlink_to(secret)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
+    def test_source_escaping_worktree_via_dir_symlink_is_rejected(self, tmp_path: Path) -> None:
+        # A regular plan file reached through an intermediate directory symlink
+        # that points outside the worktree must also be refused.
+        work_dir = tmp_path / "work"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "ws_dep.md").write_text("escaped plan", encoding="utf-8")
+        worktree, _, report_path = self._seed_worktree(tmp_path)
+        worktree.mkdir(parents=True, exist_ok=True)
+        (worktree / "docs").mkdir(parents=True, exist_ok=True)
+        (worktree / "docs" / "awf-plans").symlink_to(outside, target_is_directory=True)
+        plan_path = Path("docs/awf-plans/ws_dep.md")
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
     def test_served_dir_matches_api_resolution(self, tmp_path: Path) -> None:
         # The executor passes ``compose_projects_root.parent`` as work_dir; the
         # API resolves the served dir from the same work_dir. Guard the

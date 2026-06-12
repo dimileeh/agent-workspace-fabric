@@ -143,6 +143,7 @@ def deposit_workspace_planning_artifacts(
     must never fail the workspace.
     """
     artifact_dir = workspace_artifact_dir(work_dir, workspace_id)
+    worktree_root = worktree_path.resolve()
     for source, dest_name in (
         (worktree_path / plan_path, DEPOSITED_PLAN_NAME),
         (worktree_path / report_path, DEPOSITED_CONFORMANCE_NAME),
@@ -152,6 +153,7 @@ def deposit_workspace_planning_artifacts(
             workspace_id=workspace_id,
             source=source,
             dest_name=dest_name,
+            worktree_root=worktree_root,
         )
 
 
@@ -161,12 +163,26 @@ def _deposit_one_planning_artifact(
     workspace_id: str,
     source: Path,
     dest_name: str,
+    worktree_root: Path,
 ) -> None:
     try:
+        # The source lives in an agent-writable worktree, so a symlinked
+        # plan/report would otherwise let ``shutil.copyfile`` dereference an
+        # arbitrary host-readable file into the served artifact dir. Mirror the
+        # reader's symlink rejection here: refuse a symlink source outright and
+        # require the resolved target to stay inside the worktree (guarding
+        # against escape via an intermediate directory symlink).
+        if source.is_symlink():
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "symlink")
+            return
         if not source.is_file():
             return
+        resolved = source.resolve(strict=True)
+        if not resolved.is_relative_to(worktree_root):
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "escapes_worktree")
+            return
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, artifact_dir / dest_name)
+        shutil.copyfile(resolved, artifact_dir / dest_name)
     except OSError as exc:
         _log.warning(
             "service.planning_artifact_deposit_failed",
@@ -176,6 +192,21 @@ def _deposit_one_planning_artifact(
             error_type=type(exc).__name__,
             errno=exc.errno,
         )
+
+
+def _reject_unsafe_planning_source(
+    workspace_id: str,
+    source: Path,
+    dest_name: str,
+    reason: str,
+) -> None:
+    _log.warning(
+        "service.planning_artifact_deposit_rejected",
+        workspace_id=workspace_id,
+        source=str(source),
+        dest_name=dest_name,
+        reason=reason,
+    )
 
 
 def list_artifacts(workspace_id: str, artifact_dir: Path) -> list[ArtifactMetadata]:
