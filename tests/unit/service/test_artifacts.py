@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from builtins import open as builtins_open
 from pathlib import Path
@@ -23,6 +24,7 @@ from awf.service.artifacts import (
     _artifact_id,
     _artifact_kind,
     _is_symlink,
+    _open_planning_source_under_root,
     _resolve_artifact_root,
     _workspace_artifact_dir,
     artifact_id,
@@ -1472,6 +1474,58 @@ class TestDepositWorkspacePlanningArtifacts:
 
         artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
         assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
+    def test_open_under_root_rejects_resolved_equal_to_root(self, tmp_path: Path) -> None:
+        # A resolved path that collapsed onto ``worktree_root`` itself leaves no
+        # component to open. The walk must raise ``OSError`` (caught fail-closed
+        # by the deposit) rather than a bare ``IndexError`` from ``rel_parts[-1]``.
+        worktree_root = (tmp_path / "work" / "worktrees" / "ws_dep").resolve()
+        worktree_root.mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(OSError) as excinfo:
+            _open_planning_source_under_root(worktree_root=worktree_root, resolved=worktree_root)
+
+        assert not isinstance(excinfo.value, IndexError)
+        assert excinfo.value.errno == errno.EINVAL
+
+    @pytest.mark.unit
+    def test_source_resolving_onto_worktree_root_after_checks_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # TOCTOU: a benign regular plan passes the symlink/is_file checks, then a
+        # racing swap of the final component to a symlink pointing at the worktree
+        # root collapses ``resolve()`` onto ``worktree_root`` (empty rel_parts).
+        # The deposit must log-and-skip fail-closed — never raise out and fail the
+        # workspace — while an unraced sibling (the report) still lands.
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(
+            tmp_path, plan_text="benign", report_text="{}"
+        )
+        worktree_root = worktree.resolve()
+        plan_source = worktree / plan_path
+        real_resolve = Path.resolve
+
+        def collapsing_resolve(self: Path, *args: Any, **kwargs: Any) -> Path:
+            # Only the raced plan source collapses onto the root; everything else
+            # (including ``worktree_root`` itself) resolves normally.
+            if self == plan_source:
+                return worktree_root
+            return real_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(artifacts_module.Path, "resolve", collapsing_resolve)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+        assert (artifact_dir / DEPOSITED_CONFORMANCE_NAME).exists()
 
     @pytest.mark.unit
     def test_served_dir_matches_api_resolution(self, tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import mimetypes
 import os
 from collections.abc import Iterator
@@ -223,6 +224,16 @@ def _open_planning_source_under_root(*, worktree_root: Path, resolved: Path) -> 
     returned descriptor is proven to live under ``worktree_root``.
     """
     rel_parts = resolved.relative_to(worktree_root).parts
+    if not rel_parts:
+        # ``resolved`` collapsed onto ``worktree_root`` itself, leaving no
+        # in-worktree component to open. Within the TOCTOU threat model the
+        # surrounding guards adopt, a racing agent can swap the final component
+        # for a symlink pointing at the root *after* the ``is_file()`` check, so
+        # ``resolved == worktree_root`` reaches here. Raise ``OSError`` — not the
+        # bare ``IndexError`` a ``rel_parts[-1]`` would, nor a ``ValueError`` —
+        # so the deposit's ``except OSError`` logs and skips fail-closed instead
+        # of letting the workspace fail.
+        raise OSError(errno.EINVAL, "resolved path equals worktree root", str(resolved))
     dir_fd = os.open(worktree_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in rel_parts[:-1]:
