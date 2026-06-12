@@ -657,6 +657,48 @@ class TestMiscMonitorHelpers:
         message = commit_calls[-1].args[commit_calls[-1].args.index("-m") + 1]
         assert message == "PROJ-123 awf: monitor dirty worktree"
 
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_truncates_subject_to_72(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """The monitor dirty-worktree commit subject is capped at 72 chars after tagging.
+
+        Parity with every other AWF-authored commit subject (executor agent/recovery
+        commits, post-validation conformance) which all apply ``[:72]`` after the tag.
+        """
+        workspace_id = await seed_monitoring_workspace(factory)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            workspace.task_tag = "PROJ-123"
+            await session.commit()
+
+        fake = FakeCommandRunner()
+        for result in (
+            {"returncode": 0, "stdout": " M file.py\n"},  # status --porcelain (dirty)
+            {"returncode": 0},  # add -A
+            {"returncode": 1},  # diff --cached --quiet (staged changes present)
+            {"returncode": 0},  # commit
+        ):
+            fake.queue_result(**result)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        long_subject = "fix: address PR review comment " + "x" * 80
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message=long_subject,
+        )
+
+        assert committed is True
+        commit_calls = [call for call in fake.calls if "commit" in call.args and "-m" in call.args]
+        assert commit_calls, "expected a git commit invocation"
+        message = commit_calls[-1].args[commit_calls[-1].args.index("-m") + 1]
+        assert len(message) == 72
+        assert message == ("PROJ-123 " + long_subject)[:72]
+
 
 @pytest.mark.unit
 async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_context(

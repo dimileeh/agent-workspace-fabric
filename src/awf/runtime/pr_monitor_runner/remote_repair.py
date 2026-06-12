@@ -310,7 +310,11 @@ async def _commit_dirty_worktree(
 
     # Prepend the workspace's Jira issue key (if any) so monitor review-fix /
     # CI-fix commits link to the issue. Idempotent: a re-run never double-prefixes.
-    message = commit_message_with_task_tag(message, await _resolve_task_tag(self, workspace_id))
+    # Truncate to [:72] after tagging for parity with every other AWF-authored
+    # commit subject (executor agent/recovery commits, post-validation conformance).
+    message = commit_message_with_task_tag(message, await _resolve_task_tag(self, workspace_id))[
+        :72
+    ]
 
     commit = await self._deps.runner.run(
         git_worktree_command(worktree_path, "commit", "-m", message)
