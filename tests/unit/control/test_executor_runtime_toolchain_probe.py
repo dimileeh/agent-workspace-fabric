@@ -92,9 +92,14 @@ class TestRecordRuntimeToolchainFindings:
             assert ws is not None
             # The probe is non-blocking: status is unchanged.
             assert ws.status == WorkspaceStatus.ready.value
-            events = [
-                e for e in ws.events if e.event_type == RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE
-            ]
+            # ``ws.events`` is ordered only by ``occurred_at``; events written
+            # together can share a timestamp, so sort on the monotonic
+            # ``event_order`` (the canonical insertion tiebreak) for a
+            # backend-independent, deterministic assertion on emission order.
+            events = sorted(
+                (e for e in ws.events if e.event_type == RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE),
+                key=lambda e: e.event_order,
+            )
             assert [e.payload["version"] for e in events] == ["21", "23"]
             assert all(e.reason_code == RUNTIME_TOOLCHAIN_UNAVAILABLE for e in events)
             assert events[0].payload["language"] == "java"
