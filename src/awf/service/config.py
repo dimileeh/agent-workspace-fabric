@@ -366,15 +366,18 @@ def local_service_worker_environment_keys(
             # SafeLoader expands ``<<: *awf-service`` so this already carries the
             # ``&awf-environment`` anchor keys.
             _collect_compose_environment_keys(worker.get("environment"), keys)
-    # Robust fallback that does not depend on merge-key expansion: union the
-    # ``environment`` keys from every top-level ``x-*`` extension template (the
-    # ``x-awf-service`` anchor the worker uses). This captures the anchor keys
-    # even if a loader leaves ``<<`` unexpanded. Intentionally do NOT walk
-    # arbitrary services (avoids pulling in postgres/console env keys the worker
-    # never receives).
-    for key, value in data.items():
-        if isinstance(key, str) and key.startswith("x-") and isinstance(value, Mapping):
-            _collect_compose_environment_keys(value.get("environment"), keys)
+    if not keys:
+        # Robust fallback for loaders that leave ``<<`` unexpanded (so the worker
+        # block above yielded nothing): union the ``environment`` keys from every
+        # top-level ``x-*`` extension template -- the ``x-awf-service`` anchor the
+        # worker uses. Gated on the primary path finding no keys so an unrelated
+        # future ``x-*`` template (e.g. an ``x-debug-service`` for a non-worker
+        # service) cannot silently widen the worker's secret-lease allowlist.
+        # Intentionally does NOT walk arbitrary services (avoids pulling in
+        # postgres/console env keys the worker never receives).
+        for key, value in data.items():
+            if isinstance(key, str) and key.startswith("x-") and isinstance(value, Mapping):
+                _collect_compose_environment_keys(value.get("environment"), keys)
 
     if not keys:
         return None

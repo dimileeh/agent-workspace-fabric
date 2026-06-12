@@ -153,17 +153,26 @@ def test_x_template_only_without_services_key(tmp_path: Path) -> None:
     )
 
 
-def test_ignores_non_string_and_empty_environment_entries(tmp_path: Path) -> None:
-    """Non-string keys/items and empty key names are skipped, not raised on."""
+def test_ignores_non_string_worker_environment_keys(tmp_path: Path) -> None:
+    """Non-string mapping keys on the worker block are skipped, not raised on."""
     compose_file = tmp_path / "local-service.yml"
-    # Mapping form with a non-string key alongside a valid one; the worker also
-    # carries a list-form is exercised in test_list_form_environment_supported.
     compose_file.write_text(
-        "services:\n"
-        "  worker:\n"
-        "    environment:\n"
-        "      GH_TOKEN: x\n"
-        "      123: numeric-key\n"
+        "services:\n  worker:\n    environment:\n      GH_TOKEN: x\n      123: numeric-key\n"
+    )
+
+    keys = local_service_worker_environment_keys(compose_file=compose_file)
+
+    assert keys == frozenset({"GH_TOKEN"})
+
+
+def test_ignores_non_string_and_empty_list_entries_in_x_fallback(tmp_path: Path) -> None:
+    """Non-string list items and empty key names are skipped in the x-* fallback.
+
+    The fallback only runs when the worker block yields no keys, so this exercises
+    the list-form parser via an ``x-*`` template with no worker ``environment``.
+    """
+    compose_file = tmp_path / "local-service.yml"
+    compose_file.write_text(
         "x-awf-service:\n"
         "  environment:\n"
         "    - ANTHROPIC_API_KEY=value\n"
@@ -173,7 +182,38 @@ def test_ignores_non_string_and_empty_environment_entries(tmp_path: Path) -> Non
 
     keys = local_service_worker_environment_keys(compose_file=compose_file)
 
-    assert keys == frozenset({"GH_TOKEN", "ANTHROPIC_API_KEY"})
+    assert keys == frozenset({"ANTHROPIC_API_KEY"})
+
+
+def test_x_fallback_skipped_when_worker_environment_present(tmp_path: Path) -> None:
+    """An unrelated ``x-*`` env block must not widen the worker allowlist (PR #540).
+
+    Regression for the review note: the ``x-*`` fallback runs ONLY when the worker
+    block yields no keys (a loader that left ``<<`` unexpanded). When the worker's
+    ``environment`` already resolved via merge-key expansion, a future non-worker
+    extension template -- here ``x-debug-service`` -- must NOT leak its env keys
+    into the worker's secret-lease allowlist.
+    """
+    compose_file = tmp_path / "local-service.yml"
+    compose_file.write_text(
+        "x-awf-service: &awf-service\n"
+        "  environment: &awf-environment\n"
+        "    GH_TOKEN: ${GH_TOKEN:-}\n"
+        "x-debug-service:\n"
+        "  environment:\n"
+        "    DEBUG_ONLY_SECRET: ${DEBUG_ONLY_SECRET:-}\n"
+        "services:\n"
+        "  worker:\n"
+        "    <<: *awf-service\n"
+        '    command: sh -c "awf worker"\n'
+    )
+
+    keys = local_service_worker_environment_keys(compose_file=compose_file)
+
+    assert keys is not None
+    assert "GH_TOKEN" in keys
+    # The unrelated x-debug-service env key never reaches the worker container.
+    assert "DEBUG_ONLY_SECRET" not in keys
 
 
 def test_real_local_service_yml_contains_expected_keys() -> None:
