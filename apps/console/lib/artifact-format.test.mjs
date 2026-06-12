@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ARTIFACT_LIST_MAX_PAGES,
+  ARTIFACT_LIST_PAGE_SIZE,
   CONFORMANCE_ARTIFACT_NAME,
   PLAN_ARTIFACT_NAME,
   artifactDownloadPath,
+  artifactListPath,
+  collectArtifactsForPresence,
   findArtifactByName,
   formatConformanceJson,
   hasConformanceArtifact,
@@ -67,4 +71,71 @@ test("formatConformanceJson pretty-prints valid JSON", () => {
 
 test("formatConformanceJson falls back to raw text for invalid JSON", () => {
   assert.equal(formatConformanceJson("not json {"), "not json {");
+});
+
+test("artifactListPath requests the large page size and omits a null cursor", () => {
+  assert.equal(
+    artifactListPath("ws 1", null),
+    `/api/awf/workspaces/ws%201/artifacts?limit=${ARTIFACT_LIST_PAGE_SIZE}`,
+  );
+});
+
+test("artifactListPath threads a cursor when one is supplied", () => {
+  assert.equal(
+    artifactListPath("ws_1", "page-2"),
+    `/api/awf/workspaces/ws_1/artifacts?limit=${ARTIFACT_LIST_PAGE_SIZE}&cursor=page-2`,
+  );
+});
+
+test("collectArtifactsForPresence follows next_cursor until both artifacts appear", async () => {
+  const pages = [
+    {
+      items: [artifact("00-early.txt"), artifact("01-early.txt")],
+      next_cursor: "page-2",
+      has_more: true,
+    },
+    {
+      items: [artifact(PLAN_ARTIFACT_NAME), artifact(CONFORMANCE_ARTIFACT_NAME)],
+      next_cursor: "page-3",
+      has_more: true,
+    },
+  ];
+  const cursors = [];
+  const collected = await collectArtifactsForPresence(async (cursor) => {
+    cursors.push(cursor);
+    return pages[cursors.length - 1];
+  });
+  // Stops after page 2 (both found) without fetching the advertised page 3.
+  assert.deepEqual(cursors, [null, "page-2"]);
+  assert.equal(hasPlanArtifact(collected), true);
+  assert.equal(hasConformanceArtifact(collected), true);
+  assert.equal(collected.length, 4);
+});
+
+test("collectArtifactsForPresence stops at the last page when artifacts are absent", async () => {
+  let calls = 0;
+  const collected = await collectArtifactsForPresence(async () => {
+    calls += 1;
+    return { items: [artifact("only.txt")], next_cursor: null, has_more: false };
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(
+    collected.map((item) => item.name),
+    ["only.txt"],
+  );
+});
+
+test("collectArtifactsForPresence returns null when a page request fails", async () => {
+  const collected = await collectArtifactsForPresence(async () => null);
+  assert.equal(collected, null);
+});
+
+test("collectArtifactsForPresence stops at the page ceiling for an endless cursor", async () => {
+  let calls = 0;
+  const collected = await collectArtifactsForPresence(async () => {
+    calls += 1;
+    return { items: [artifact(`f-${calls}.txt`)], next_cursor: `c-${calls}`, has_more: true };
+  });
+  assert.equal(calls, ARTIFACT_LIST_MAX_PAGES);
+  assert.equal(collected.length, ARTIFACT_LIST_MAX_PAGES);
 });

@@ -23,6 +23,8 @@ useState
 import { formatAgentEffort,formatAgentLabel } from "@/lib/agent-format";
 import {
 artifactDownloadPath,
+artifactListPath,
+collectArtifactsForPresence,
 CONFORMANCE_ARTIFACT_NAME,
 formatConformanceJson,
 hasConformanceArtifact,
@@ -252,18 +254,30 @@ export function TaskArtifactsSection({
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const result = await apiGet<WorkspaceArtifactList>(
-        `/api/awf/workspaces/${workspaceId}/artifacts`,
-      );
+      let failure: string | null = null;
+      // The list endpoint is cursor-paginated (default 50) and sorted by
+      // relative_path, so plan.md / conformance.json can sit on a later page for
+      // an artifact-heavy workspace. Follow next_cursor before deciding presence
+      // so the Plan/Validation controls are not hidden when the files do exist.
+      const collected = await collectArtifactsForPresence(async (cursor) => {
+        const result = await apiGet<WorkspaceArtifactList>(
+          artifactListPath(workspaceId, cursor),
+        );
+        if (!result.ok) {
+          failure = result.message;
+          return null;
+        }
+        return result.data;
+      });
       if (cancelled) {
         return;
       }
-      if (!result.ok) {
-        setError(result.message);
+      if (collected === null) {
+        setError(failure);
         return;
       }
       setError(null);
-      setItems(result.data.items);
+      setItems(collected);
     })();
     return () => {
       cancelled = true;

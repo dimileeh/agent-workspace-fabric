@@ -53,6 +53,7 @@ async function mockDashboard(page: Page) {
   const none = baseWorkspace("ws_none", "No Artifacts");
   const failed = baseWorkspace("ws_fail", "List Error");
   const planDownloadFail = baseWorkspace("ws_dlfail", "Plan Download Error");
+  const paged = baseWorkspace("ws_paged", "Paged Artifacts");
 
   // A still-running task whose artifacts are deposited only after the modal is
   // already open. The overview poll bumps updated_at on its second response, and
@@ -72,7 +73,7 @@ async function mockDashboard(page: Page) {
     };
     await route.fulfill({
       json: {
-        items: [full, planOnly, none, failed, planDownloadFail, liveSnapshot],
+        items: [full, planOnly, none, failed, planDownloadFail, paged, liveSnapshot],
         has_more: false,
       },
     });
@@ -83,7 +84,7 @@ async function mockDashboard(page: Page) {
   // (not the artifact-call count) keeps any mount-time fetches empty even under
   // React StrictMode's double-invoke, so the buttons can appear only once a
   // post-mount updated_at change re-drives the list fetch.
-  await page.route("/api/awf/workspaces/ws_live/artifacts", async (route) => {
+  await page.route("/api/awf/workspaces/ws_live/artifacts*", async (route) => {
     const items =
       overviewCalls >= 2
         ? [artifact("ws_live", "plan.md"), artifact("ws_live", "conformance.json")]
@@ -98,7 +99,7 @@ async function mockDashboard(page: Page) {
   });
 
   // Plan + conformance present.
-  await page.route("/api/awf/workspaces/ws_full/artifacts", async (route) => {
+  await page.route("/api/awf/workspaces/ws_full/artifacts*", async (route) => {
     await route.fulfill({
       json: {
         items: [artifact("ws_full", "plan.md"), artifact("ws_full", "conformance.json")],
@@ -123,7 +124,7 @@ async function mockDashboard(page: Page) {
   });
 
   // Only the plan artifact present.
-  await page.route("/api/awf/workspaces/ws_plan/artifacts", async (route) => {
+  await page.route("/api/awf/workspaces/ws_plan/artifacts*", async (route) => {
     await route.fulfill({
       json: { items: [artifact("ws_plan", "plan.md")], next_cursor: null, has_more: false },
     });
@@ -136,24 +137,63 @@ async function mockDashboard(page: Page) {
   });
 
   // No artifacts deposited.
-  await page.route("/api/awf/workspaces/ws_none/artifacts", async (route) => {
+  await page.route("/api/awf/workspaces/ws_none/artifacts*", async (route) => {
     await route.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
   });
 
   // Artifact list request fails — the error must be surfaced, not swallowed.
-  await page.route("/api/awf/workspaces/ws_fail/artifacts", async (route) => {
+  await page.route("/api/awf/workspaces/ws_fail/artifacts*", async (route) => {
     await route.fulfill({ status: 500, json: { detail: { message: "Unable to load artifacts." } } });
   });
 
   // Plan artifact is listed, but its download fails — the error banner must show
   // without the empty-state "No prompt stored" text leaking through.
-  await page.route("/api/awf/workspaces/ws_dlfail/artifacts", async (route) => {
+  await page.route("/api/awf/workspaces/ws_dlfail/artifacts*", async (route) => {
     await route.fulfill({
       json: { items: [artifact("ws_dlfail", "plan.md")], next_cursor: null, has_more: false },
     });
   });
   await page.route("/api/awf/workspaces/ws_dlfail/artifacts/download*", async (route) => {
     await route.fulfill({ status: 500, json: { detail: { message: "boom" } } });
+  });
+
+  // The named artifacts sort after a full page of unrelated files, so they land
+  // on the second page. The section must follow next_cursor before deciding
+  // presence — reading only the first page would hide the controls even though
+  // plan.md / conformance.json exist and are downloadable.
+  await page.route("/api/awf/workspaces/ws_paged/artifacts*", async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    if (cursor === null) {
+      await route.fulfill({
+        json: {
+          items: [artifact("ws_paged", "00-early.txt"), artifact("ws_paged", "01-early.txt")],
+          next_cursor: "page-2",
+          has_more: true,
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        items: [artifact("ws_paged", "plan.md"), artifact("ws_paged", "conformance.json")],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_paged/artifacts/download*", async (route) => {
+    const url = route.request().url();
+    if (url.includes("path=plan.md")) {
+      await route.fulfill({
+        headers: { "content-type": "text/markdown" },
+        body: "# Paged Plan\n",
+      });
+      return;
+    }
+    await route.fulfill({
+      headers: { "content-type": "application/json" },
+      body: '{"status":"satisfied","gaps":[]}',
+    });
   });
 }
 
@@ -244,6 +284,22 @@ test("refetches artifacts as an open, still-running task deposits them", async (
   // modal — proves the refetch happened; a single mount-time fetch never would.
   const section = page.getByTestId("task-artifacts");
   await expect(section.getByRole("button", { name: "Plan" })).toBeVisible({ timeout: 15_000 });
+  await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+});
+
+test("follows pagination so controls show when named artifacts are on a later page", async ({
+  page,
+}) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_paged");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // plan.md / conformance.json only appear on the second page; the buttons can
+  // surface only if the section followed next_cursor past the first page.
+  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
   await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
 });
 
