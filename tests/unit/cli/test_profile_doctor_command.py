@@ -296,10 +296,13 @@ def test_doctor_host_env_includes_service_compose_env_file_creds(
 def test_doctor_host_env_omits_token_when_settings_unset(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No service token => the doctor forwards the shell env unchanged.
+    """No service token => the doctor does not inject a GH_TOKEN/GITHUB_TOKEN value.
 
-    A ``None`` ``settings.github_token`` must not inject empty GH_TOKEN/GITHUB_TOKEN
-    keys, which would otherwise mask a genuinely missing token source.
+    The worker container receives ``GH_TOKEN``/``GITHUB_TOKEN`` materialized as
+    ``""`` from Compose ``${...:-}`` when nothing is set, and the secret-lease
+    resolver treats an empty value as missing. A ``None`` ``settings.github_token``
+    must therefore leave them empty (not masked with a value), so a genuinely
+    missing token source is still surfaced as ``SECRET_LEASE_SOURCE_MISSING``.
     """
     captured: dict[str, object] = {}
 
@@ -317,12 +320,17 @@ def test_doctor_host_env_omits_token_when_settings_unset(
     )
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    # Pin the merged Compose env view so the absence assertion does not depend on
-    # a real docker/compose/.env that may carry GH_TOKEN/GITHUB_TOKEN; otherwise
-    # this guard would pass without the file and fail with it.
+    # Pin the merged Compose env view so the assertion does not depend on a real
+    # docker/compose/.env that may carry GH_TOKEN/GITHUB_TOKEN.
     monkeypatch.setattr(
         "awf.service.config.local_service_environ",
         lambda: {},
+    )
+    # The worker materializes GH_TOKEN/GITHUB_TOKEN as "" from Compose ${...:-}
+    # when nothing is set; model that empty materialized view.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment",
+        lambda _merged_env: {"GH_TOKEN": "", "GITHUB_TOKEN": ""},
     )
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
@@ -339,8 +347,10 @@ def test_doctor_host_env_omits_token_when_settings_unset(
     assert result.exit_code == 0
     host_env = captured["host_env"]
     assert isinstance(host_env, dict)
-    assert "GH_TOKEN" not in host_env
-    assert "GITHUB_TOKEN" not in host_env
+    # A None service token must not mask a missing source: the tokens stay empty
+    # (treated as missing by the resolver), never populated with a value.
+    assert host_env["GH_TOKEN"] == ""
+    assert host_env["GITHUB_TOKEN"] == ""
 
 
 def test_doctor_forwards_configured_agent_runtime_image(
@@ -867,6 +877,389 @@ def test_doctor_mirrors_cleared_docker_host_without_pinning_settings(
     assert "DOCKER_HOST" not in docker_environ
     # Unrelated client config still threads through to the probe.
     assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
+
+
+def test_doctor_drops_host_only_export_outside_worker_allowlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A host-only export not on the worker's env allowlist must NOT reach host_env.
+
+    The worker's ``LocalSecretLeaseMountResolver`` only sees variables on the
+    local-service Compose ``environment:`` block, not every caller-shell export.
+    A ``provider: env`` lease satisfiable only by a host-only variable (e.g.
+    ``MY_CUSTOM_TOKEN``) FAILS at provision with ``SECRET_LEASE_SOURCE_MISSING``,
+    so the doctor must drop it -- modelling host_env on the worker allowlist --
+    rather than falsely passing it from the over-inclusive merged shell view.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # Merged view carries an allowlisted var and a host-only export outside it.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"MY_CUSTOM_TOKEN": "x", "ANTHROPIC_API_KEY": "y"},
+    )
+    # The materialized worker env only carries the worker ``environment:`` block
+    # keys, resolved from the merged view -- the host-only export is never on it.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment",
+        lambda merged_env: {
+            key: merged_env[key]
+            for key in ("ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN")
+            if key in merged_env
+        },
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # Allowlisted var survives; the host-only export is dropped (matches the
+    # worker's provision-time SECRET_LEASE_SOURCE_MISSING).
+    assert host_env["ANTHROPIC_API_KEY"] == "y"
+    assert "MY_CUSTOM_TOKEN" not in host_env
+
+
+def test_doctor_keeps_compose_env_allowlisted_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An allowlisted var present only via the merged view must survive (no false negative).
+
+    PR #531 fixed a false negative where a var on the worker's Compose
+    ``environment:`` block but exported in the operator shell (not ``.env``) was
+    wrongly reported missing. The allowlist is a superset of ``.env`` for such
+    shell-exported allowlisted vars, so the doctor must keep them in host_env.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The merged view carries the bitbucket creds (shell-exported, allowlisted).
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {
+            "BITBUCKET_API_TOKEN": "bb_token",
+            "BITBUCKET_EMAIL": "dev@example.com",
+        },
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment",
+        lambda merged_env: {
+            key: merged_env[key]
+            for key in ("BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL", "GH_TOKEN", "GITHUB_TOKEN")
+            if key in merged_env
+        },
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    assert host_env["BITBUCKET_API_TOKEN"] == "bb_token"
+    assert host_env["BITBUCKET_EMAIL"] == "dev@example.com"
+
+
+def test_doctor_falls_back_to_merged_view_when_allowlist_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the materialized worker env cannot be resolved, host_env keeps the merged view.
+
+    If the compose asset cannot be located/parsed,
+    ``local_service_worker_environment`` returns ``None`` and the doctor falls
+    back to the unrestricted merged view -- preserving legacy behavior so the
+    preflight never crashes or over-fails.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"MY_CUSTOM_TOKEN": "x", "ANTHROPIC_API_KEY": "y"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment",
+        lambda _merged_env: None,
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # Legacy behavior: the full merged view is preserved when the allowlist is
+    # unavailable (the doctor degrades safely rather than over-failing).
+    assert host_env["MY_CUSTOM_TOKEN"] == "x"
+    assert host_env["ANTHROPIC_API_KEY"] == "y"
+
+
+def test_doctor_mirrors_worker_git_env_into_host_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The doctor must mirror ALL worker-injected git env, not just the GH tokens.
+
+    ``build_worker_runtime`` calls ``_apply_service_git_environment(git_env)`` --
+    ``os.environ.update(git_env)`` -- BEFORE constructing its
+    ``LocalSecretLeaseMountResolver(host_env=os.environ)``. So the worker's real
+    lease env carries every key ``_service_git_environment`` injects after Compose
+    startup -- notably ``HOME`` (= ``host_home``) -- none of which live on the
+    Compose ``environment:`` allowlist. A ``provider: env`` lease satisfiable only
+    by such a worker-injected source (e.g. ``HOME``) provisioning would satisfy
+    must NOT be falsely reported as ``SECRET_LEASE_SOURCE_MISSING``, so the doctor
+    must forward the same ``git_env`` (overriding the allowlisted view, exactly as
+    ``os.environ.update`` does).
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The materialized worker env does not carry HOME; only the worker's git_env does.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"ANTHROPIC_API_KEY": "y"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment",
+        lambda merged_env: {
+            key: merged_env[key]
+            for key in ("ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN")
+            if key in merged_env
+        },
+    )
+    host_home = tmp_path / "worker-host-home"
+    host_home.mkdir()
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(host_home),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # HOME is injected by the worker's git_env even though it is not on the
+    # Compose allowlist, so the lease probe sees the same source the worker has.
+    assert host_env["HOME"] == str(host_home.expanduser().resolve())
+    # The allowlisted var still survives alongside the mirrored git_env.
+    assert host_env["ANTHROPIC_API_KEY"] == "y"
+
+
+def test_doctor_mirrors_worker_injected_bitbucket_git_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Bitbucket-conditional git env is mirrored from the worker's forwarded env.
+
+    ``_service_git_environment`` adds ``GIT_TERMINAL_PROMPT`` and the bitbucket
+    ``GIT_CONFIG_*`` helper only when Bitbucket creds are visible in its
+    ``source_env``. The real worker reads its Compose-forwarded container env --
+    where ``BITBUCKET_API_TOKEN``/``BITBUCKET_EMAIL`` (both on the worker
+    ``environment:`` allowlist) arrive from ``docker/compose/.env`` -- so it injects
+    those keys. When the creds live ONLY in that env file and not the caller shell,
+    the doctor must feed the function the same allowlisted view (not the caller
+    os.environ) so the mirror includes the Bitbucket additions; otherwise a lease
+    satisfiable by those worker-injected keys is still falsely surfaced as
+    ``SECRET_LEASE_SOURCE_MISSING``.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # Creds absent from the caller shell; present only in the merged Compose view.
+    monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+    monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"BITBUCKET_API_TOKEN": "bb_token", "BITBUCKET_EMAIL": "dev@example.com"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment",
+        lambda merged_env: {
+            key: merged_env[key]
+            for key in ("BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL")
+            if key in merged_env
+        },
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # The worker would inject GIT_TERMINAL_PROMPT + the bitbucket helper from the
+    # forwarded creds; the mirror now reflects them despite the caller shell lacking
+    # the creds. The token never lands in any rendered git-config value (it stays in
+    # the BITBUCKET_API_TOKEN env entry the credential helper reads on demand).
+    assert host_env["GIT_TERMINAL_PROMPT"] == "0"
+    count = int(host_env["GIT_CONFIG_COUNT"])
+    config_keys = {host_env[f"GIT_CONFIG_KEY_{index}"] for index in range(count)}
+    config_values = {host_env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)}
+    assert "credential.https://bitbucket.org.helper" in config_keys
+    assert all("bb_token" not in value for value in config_values)
+
+
+def test_doctor_host_env_carries_materialized_compose_alias(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An aliased Compose default materialized by the worker reaches the lease host_env.
+
+    Regression for the PR #540 review note: the worker container receives
+    ``AWF_GITHUB_TOKEN`` populated from a host ``GH_TOKEN`` via
+    ``${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}``. The doctor must model
+    that materialized worker env -- not filter the pre-interpolation inputs -- so a
+    ``provider: env`` lease with ``ref: AWF_GITHUB_TOKEN`` provisioning satisfies is
+    not falsely reported as ``SECRET_LEASE_SOURCE_MISSING``.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    monkeypatch.delenv("AWF_GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    # Only GH_TOKEN is present in the merged Compose view -- the worker interpolates
+    # AWF_GITHUB_TOKEN/GITHUB_TOKEN from it.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"GH_TOKEN": "ghp_alias"},
+    )
+
+    def _materialize(merged_env: dict[str, str]) -> dict[str, str]:
+        token = (
+            merged_env.get("AWF_GITHUB_TOKEN")
+            or merged_env.get("GH_TOKEN")
+            or merged_env.get("GITHUB_TOKEN")
+            or ""
+        )
+        return {"AWF_GITHUB_TOKEN": token, "GH_TOKEN": token, "GITHUB_TOKEN": token}
+
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment",
+        _materialize,
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # The materialized alias reaches the lease probe even though its NAME is absent
+    # from the pre-interpolation host inputs (only GH_TOKEN was set).
+    assert host_env["AWF_GITHUB_TOKEN"] == "ghp_alias"
+    assert host_env["GITHUB_TOKEN"] == "ghp_alias"
+    assert host_env["GH_TOKEN"] == "ghp_alias"
 
 
 def test_doctor_appears_in_profile_help() -> None:
