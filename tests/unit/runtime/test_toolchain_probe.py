@@ -176,6 +176,20 @@ class TestProbeRuntimeToolchains:
 
         assert findings == ()
 
+    async def test_dotted_declared_1_8_0_satisfied_by_legacy_underscore_patch(self) -> None:
+        # Regression for PRRT_kwDOSJAM6s6JENkD: legacy JDK release strings join the
+        # update level with an underscore (``1.8.0_392``), which is a refining
+        # boundary just like a dot — a declared ``1.8.0`` must be satisfied by an
+        # installed ``1.8.0_392`` rather than warning RUNTIME_TOOLCHAIN_UNAVAILABLE.
+        profile = _profile_with_toolchains({"java": ["1.8.0"]})
+        spy = _SpyExec(
+            [ProbeExecResult(returncode=0, stdout='openjdk version "1.8.0_392"\n', stderr="")]
+        )
+
+        findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+
     async def test_dotted_declared_absent_still_warns(self) -> None:
         # A finer dotted declaration whose major is missing still warns, and the
         # warning surfaces the discovered majors in available_versions.

@@ -178,12 +178,17 @@ def _declared_version_satisfied(
     equals it or refines it at a component boundary — ``"1.8"`` by an installed
     ``1.8.0``, ``"11.0.2"`` by an installed ``11.0.2`` — never merely by a sibling
     patch on the same major, so a declared ``"11.0.2"`` is *not* satisfied by an
-    installed ``11.0.1``.
+    installed ``11.0.1``. Legacy JDK release strings join the update level with an
+    underscore (``1.8.0_392``), so that too counts as a refining boundary —
+    ``"1.8.0"`` is satisfied by an installed ``1.8.0_392``.
     """
     if "." not in version:
         major = normalize(version)
         return major is not None and major in discovered_majors
-    return any(exact == version or exact.startswith(f"{version}.") for exact in discovered_exact)
+    return any(
+        exact == version or exact.startswith(f"{version}.") or exact.startswith(f"{version}_")
+        for exact in discovered_exact
+    )
 
 
 # Per-language discovery registry. node/python/go/rust/cpp slot in here later by
