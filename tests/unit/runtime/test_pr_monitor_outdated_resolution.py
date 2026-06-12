@@ -1481,3 +1481,137 @@ async def test_mixed_verdict_outdated_thread_not_seeded_from_branch_evidence(
     assert "PRRT_mixed_seed" not in state.threads_addressed_ids
     # No git call: the seed's ``unseeded`` filter excluded the blocked thread.
     assert cmd.calls == []
+
+
+def _outdated_thread_with_reply(
+    tid: str,
+    *,
+    addressed_comment_id: str,
+    addressed_at: datetime,
+    reply_at: datetime,
+) -> ReviewThread:
+    """An outdated thread whose head comment was addressed comment-by-comment and
+    which then gained a LATER untriaged reviewer reply (#548 / PRRT_kwDOSJAM6s6JHeA2).
+
+    The head comment carries ``addressed_comment_id`` (the fix-cycle COMMENT path
+    keys its verdict on it); the reply carries no verdict and is stamped after the
+    addressed comment, so the reconcile's post-fix activity guard must treat it as
+    fresh feedback.
+    """
+    return ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id=addressed_comment_id,
+                body="please fix this finding",
+                author="greptile",
+                created_at=addressed_at,
+                updated_at=addressed_at,
+            ),
+            ReviewThreadComment(
+                comment_id="reply-99",
+                body="actually this is still broken",
+                author="greptile",
+                created_at=reply_at,
+                updated_at=reply_at,
+            ),
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_comment_keyed_post_fix_reply_blocks_resolve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(PRRT_kwDOSJAM6s6JHeA2) A reviewer reply that postdates a comment-keyed fix
+    must NOT be silently resolved over by the in-memory reconcile.
+
+    ``_mark_review_thread_addressed`` snapshots the thread's CURRENT body, so a reply
+    that landed after the comment-path ``fix_committed`` verdict was recorded would be
+    baked into the snapshot and ``_review_thread_needs_attention`` would see a matching
+    hash and resolve — unlike the thread-keyed path, whose snapshot predates the reply
+    and blocks. The reconcile mirrors the branch-evidence seed's post-fix activity
+    guard: a reviewer comment newer than the addressed comment seeds ``needs_human``
+    instead, so the resolve loop leaves the thread open and ``decide`` blocks merge."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_reply(
+        "PRRT_postfix_reply",
+        addressed_comment_id="4688598838",
+        addressed_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+        reply_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+    )
+    # Only the original comment was addressed via the COMMENT path; the later reply
+    # carries no verdict and was never re-triaged.
+    state.mark_addressed("4688598838", "fix_committed")
+
+    status = _status_with_outdated(thread)
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    # Not resolved — the fresh reply postdates the fix.
+    assert gh.attempts == []
+    assert state.threads_addressed_ids["PRRT_postfix_reply"] == "needs_human"
+    # No git call: the in-memory reconcile decided before the branch-evidence seed.
+    assert cmd.calls == []
+    # ``decide`` holds the merge-ready PR at NotifyHuman so a human sees the reply.
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+
+
+@pytest.mark.unit
+async def test_comment_keyed_pre_fix_reply_still_resolves(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A reviewer comment that PREDATES the addressed (newest) comment is feedback the
+    fix already covers, so the post-fix guard does not fire: the resolvable verdict is
+    promoted and the outdated thread is resolved — the #540 unblock is preserved."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    # The addressed comment is the NEWEST reviewer activity (the earlier comment was
+    # superseded), so no reviewer comment postdates the fix.
+    thread = _outdated_thread_with_reply(
+        "PRRT_prefix_reply",
+        addressed_comment_id="4688598838",
+        addressed_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+        reply_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+    )
+    state.mark_addressed("4688598838", "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == ["PRRT_prefix_reply"]
+    assert state.threads_addressed_ids["PRRT_prefix_reply"] == "fix_committed"
+    assert cmd.calls == []

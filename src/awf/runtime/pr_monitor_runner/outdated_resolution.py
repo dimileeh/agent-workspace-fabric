@@ -124,6 +124,27 @@ def _parse_commit_iso(raw: str) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _addressed_comment_activity_at(thread: ReviewThread, comment_id: str) -> datetime | None:
+    """Newest ``created_at`` / ``updated_at`` of the thread comment ``comment_id``.
+
+    The reconcile's post-fix activity guard (#548) compares the newest reviewer
+    comment against the comment the fix actually addressed (the one carrying the
+    resolvable verdict). The reviewer posted that comment no later than AWF fixed
+    it, so its own timestamp is a conservative lower bound on fix time — any
+    reviewer comment newer than it is a reply AWF never re-triaged. Returns ``None``
+    when the comment carries no usable timestamp (the guard then keeps the
+    promote-baseline, mirroring the branch-evidence seed when ordering is unprovable).
+    """
+    latest: datetime | None = None
+    for comment in thread.comments:
+        if comment.comment_id != comment_id:
+            continue
+        for stamp in (comment.created_at, comment.updated_at):
+            if stamp is not None and (latest is None or stamp > latest):
+                latest = stamp
+    return latest
+
+
 def _latest_reviewer_comment_at(thread: ReviewThread) -> datetime | None:
     """Newest non-viewer (reviewer/human/bot) comment timestamp on the thread.
 
@@ -324,6 +345,17 @@ def _reconcile_comment_keyed_outdated_verdicts(
     in that case would resolve the thread and let ``decide`` merge over the
     blocking sibling, so ``_thread_has_blocking_comment_verdict`` gates promotion:
     a thread with any non-resolvable comment verdict stays open (#548).
+
+    Finally, an UNTRIAGED reviewer reply (a new comment carrying no verdict) that
+    postdates the comment-path fix must not be silently resolved over. Because
+    promotion snapshots the thread's CURRENT body via ``_mark_review_thread_addressed``,
+    the reply would be baked into the snapshot and ``_review_thread_needs_attention``
+    would see a matching hash and resolve — unlike the thread-keyed path, whose
+    snapshot predates the reply and blocks. Mirroring the branch-evidence seed's
+    post-fix activity guard, when a reviewer comment is newer than the addressed
+    comment this seeds ``needs_human`` (resolve loop skips it, ``decide`` blocks
+    merge) instead of promoting the resolvable verdict
+    (#548 / PRRT_kwDOSJAM6s6JHeA2).
     """
     for thread in status.outdated_unresolved_inline_threads:
         if state.threads_addressed_ids.get(thread.thread_id) is not None:
@@ -339,9 +371,32 @@ def _reconcile_comment_keyed_outdated_verdicts(
         comment_ids = sorted(_thread_identifier_set(thread) - {thread.thread_id})
         for comment_id in comment_ids:
             verdict = state.threads_addressed_ids.get(comment_id)
-            if verdict in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+            if verdict not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+                continue
+            # Post-fix reviewer activity guard (#548 / PRRT_kwDOSJAM6s6JHeA2),
+            # mirroring the branch-evidence seed above. ``_mark_review_thread_addressed``
+            # snapshots the thread's CURRENT body, so a reviewer reply that landed
+            # AFTER the comment-path fix would be baked into the snapshot and
+            # ``_review_thread_needs_attention`` would see a matching hash and resolve
+            # over it — unlike the thread-keyed path, whose snapshot predates the reply
+            # and blocks. The comment-path verdict stored no thread body-hash at fix
+            # time, so detect the post-fix reply by timestamp: when a reviewer comment
+            # is newer than the addressed comment, seed ``needs_human`` (which the
+            # resolve loop skips and ``decide`` treats as a merge blocker) instead of
+            # promoting the resolvable verdict. When timestamps are unavailable we
+            # cannot prove ordering, so keep the promote-baseline (the common no-reply
+            # case still resolves and unblocks the PR).
+            addressed_at = _addressed_comment_activity_at(thread, comment_id)
+            latest_comment_at = _latest_reviewer_comment_at(thread)
+            if (
+                addressed_at is not None
+                and latest_comment_at is not None
+                and latest_comment_at > addressed_at
+            ):
+                state.mark_addressed(thread.thread_id, "needs_human")
+            else:
                 _mark_review_thread_addressed(state, thread, verdict)
-                break
+            break
 
 
 async def _resolve_addressed_outdated_threads(
