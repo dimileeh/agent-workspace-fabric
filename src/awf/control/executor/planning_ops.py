@@ -478,7 +478,7 @@ async def _commit_post_validation_conformance_report(
             *git_identity_config_args(),
             "commit",
             "-m",
-            commit_message_with_task_tag("awf: post-validation conformance report", task_tag),
+            commit_message_with_task_tag("awf: post-validation conformance report", task_tag)[:72],
             "-m",
             (
                 "Persist satisfied post-validation conformance report "
