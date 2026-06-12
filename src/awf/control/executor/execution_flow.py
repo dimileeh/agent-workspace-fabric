@@ -141,6 +141,19 @@ async def execute(
     compose_project = ws.compose_project_name or f"awf_{workspace_id}"
     worktree_path = self._config.worktrees_root / workspace_id
 
+    def _deposit_planning_artifacts() -> None:
+        # Best-effort, idempotent deposit of the plan + conformance report the
+        # agent may have written into the (preserved-FAILED) worktree, for the
+        # many handlers that mark the workspace FAILED and return before the
+        # post-validation deposit block. ``profile`` is bound by the time any of
+        # those handlers run, matching the inline call sites this replaces.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+
     # Deprecated/unsupported task kinds must fail fast unconditionally,
     # BEFORE branching on recovery. The recovery branch below skips
     # ``_dispatch_non_feature_task_kind``, so a ``monitor_release_pr`` or
@@ -481,12 +494,7 @@ async def execute(
         # block, so deposit them now — otherwise the artifacts are stranded in
         # the worktree and the console can never surface them. Best-effort and
         # idempotent, mirroring the generic agent-phase failure paths.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
-            self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-        )
+        _deposit_planning_artifacts()
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
@@ -560,12 +568,7 @@ async def execute(
                 # missing, so deposit them now — this returns before the post-
                 # validation deposit block, mirroring the ComposeExecCleanupError
                 # handler above. Best-effort and idempotent.
-                _planning_artifacts._deposit_planning_artifacts_best_effort(
-                    self,
-                    profile=profile,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                )
+                _deposit_planning_artifacts()
                 return
         else:
             _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
@@ -574,12 +577,7 @@ async def execute(
             # conformance report the agent already wrote into the preserved-FAILED
             # worktree. Deposit them first, mirroring the ComposeExecCleanupError
             # handler. Best-effort and idempotent.
-            _planning_artifacts._deposit_planning_artifacts_best_effort(
-                self,
-                profile=profile,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-            )
+            _deposit_planning_artifacts()
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
@@ -608,12 +606,7 @@ async def execute(
         # but this skip returns before the post-validation deposit block.
         # Deposit them first, mirroring the agent-phase failure handlers above,
         # so the console can still surface them. Best-effort and idempotent.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
-            self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-        )
+        _deposit_planning_artifacts()
         return
 
     # Coding CLIs make file edits reliably but are inconsistent about git:
@@ -641,12 +634,7 @@ async def execute(
         # conformance report the agent already wrote into the preserved-
         # FAILED worktree. Deposit them first, mirroring the agent-phase
         # failure handlers above. Best-effort and idempotent.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
-            self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-        )
+        _deposit_planning_artifacts()
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
@@ -722,12 +710,7 @@ async def execute(
                 # the deposit, record an empty artifact list, then never refetch
                 # — hiding the Plan/Validation controls. Best-effort and
                 # idempotent.
-                _planning_artifacts._deposit_planning_artifacts_best_effort(
-                    self,
-                    profile=profile,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                )
+                _deposit_planning_artifacts()
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
@@ -753,12 +736,7 @@ async def execute(
                     # empty artifact list, then never refetch — hiding the
                     # Plan/Validation controls. This branch returns before the
                     # post-validation deposit block. Best-effort and idempotent.
-                    _planning_artifacts._deposit_planning_artifacts_best_effort(
-                        self,
-                        profile=profile,
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
-                    )
+                    _deposit_planning_artifacts()
                     # The plan-only gate above already confirmed the staged
                     # delta is entirely internal plan artifacts, so this marks
                     # the workspace FAILED (PLAN_ONLY_OUTPUT) and returns True.
@@ -791,12 +769,7 @@ async def execute(
                     # never refetch — hiding the Plan/Validation controls. This
                     # branch returns before the post-validation deposit block.
                     # Best-effort and idempotent.
-                    _planning_artifacts._deposit_planning_artifacts_best_effort(
-                        self,
-                        profile=profile,
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
-                    )
+                    _deposit_planning_artifacts()
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -900,12 +873,7 @@ async def execute(
                 # empty artifact list, then never refetch — hiding the
                 # Plan/Validation controls. This branch returns before the
                 # post-validation deposit block. Best-effort and idempotent.
-                _planning_artifacts._deposit_planning_artifacts_best_effort(
-                    self,
-                    profile=profile,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                )
+                _deposit_planning_artifacts()
                 # Provider recovery reads the failed state event, so
                 # persist the structured reason/details first. The
                 # recovery service creates an authorized delayed retry
@@ -1011,12 +979,7 @@ async def execute(
                     # post-validation deposit block, and a plain ``return``
                     # bypasses the ``except`` deposit handlers below.
                     # Best-effort and idempotent.
-                    _planning_artifacts._deposit_planning_artifacts_best_effort(
-                        self,
-                        profile=profile,
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
-                    )
+                    _deposit_planning_artifacts()
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -1067,12 +1030,7 @@ async def execute(
                 # inside the ``try`` before the post-validation deposit block,
                 # and a plain ``return`` bypasses the ``except`` deposit handlers
                 # below. Best-effort and idempotent.
-                _planning_artifacts._deposit_planning_artifacts_best_effort(
-                    self,
-                    profile=profile,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                )
+                _deposit_planning_artifacts()
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
@@ -1093,12 +1051,7 @@ async def execute(
         # commit-step failure (e.g. a pre-commit hook rejecting the staged
         # changes) strands the artifacts in the worktree. Best-effort and
         # idempotent.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
-            self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-        )
+        _deposit_planning_artifacts()
         await self._mark_post_agent_commit_failed(
             workspace_id=workspace_id,
             error=exc,
@@ -1117,12 +1070,7 @@ async def execute(
         # unrecoverable missing-HEAD) strands the artifacts in the worktree and
         # the console can never surface them. Best-effort and idempotent: the
         # recovery fall-through redeposits at the post-validation block.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
-            self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-        )
+        _deposit_planning_artifacts()
         if _git_error_indicates_missing_head_object(str(exc)):
             if await self._recover_missing_git_head_or_mark_failed(
                 workspace_id=workspace_id,
@@ -1179,12 +1127,7 @@ async def execute(
     # dir before teardown so the console can surface them (best-effort; see the
     # helper). Runs on the success path and the validation/conformance stop
     # paths (preserved FAILED workspaces) while the worktree still exists.
-    _planning_artifacts._deposit_planning_artifacts_best_effort(
-        self,
-        profile=profile,
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-    )
+    _deposit_planning_artifacts()
     if validation_result.stop:
         return
     assert profile is not None
