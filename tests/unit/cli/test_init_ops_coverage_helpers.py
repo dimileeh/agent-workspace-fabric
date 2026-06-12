@@ -218,6 +218,64 @@ def test_detect_bitbucket_forge_auth_whitespace_only_values_are_missing() -> Non
 
 
 @pytest.mark.unit
+def test_detect_project_forge_auth_recomputes_service_env_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``None`` service env is recomputed from the Compose ``.env``-merged view.
+
+    When onboarding collection leaves ``service_env`` unset (e.g.
+    ``local_service_environ`` raised after settings resolved), forge auth must still
+    verify the same merged view doctor/status use — not bare ``os.environ`` — so a
+    Bitbucket token present only in root ``.env`` is not wrongly reported missing.
+    """
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _repo: "https://bitbucket.org/acme/widgets.git",
+    )
+    # ``os.environ`` lacks the credentials; only the merged ``.env`` view carries them.
+    monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+    monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"BITBUCKET_API_TOKEN": "tok", "BITBUCKET_EMAIL": "dev@example.com"},
+    )
+
+    block = init_ops._detect_project_forge_auth(  # noqa: SLF001
+        tmp_path, settings=None, service_env=None
+    )
+
+    assert block["forge"] == "bitbucket"
+    assert block["auth_ok"] is True
+    assert block["auth"]["missing"] == []  # type: ignore[index]
+
+
+@pytest.mark.unit
+def test_detect_project_forge_auth_service_env_recompute_failure_is_neutral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed env recompute degrades to ``os.environ``, never raising out."""
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _repo: "https://bitbucket.org/acme/widgets.git",
+    )
+    monkeypatch.setenv("BITBUCKET_API_TOKEN", "tok")
+    monkeypatch.setenv("BITBUCKET_EMAIL", "dev@example.com")
+
+    def _raise() -> dict[str, str]:
+        raise OSError("env file unreadable")
+
+    monkeypatch.setattr("awf.service.config.local_service_environ", _raise)
+
+    block = init_ops._detect_project_forge_auth(  # noqa: SLF001
+        tmp_path, settings=None, service_env=None
+    )
+
+    # Recompute failed; the per-forge ``os.environ`` fallback still verifies auth.
+    assert block["forge"] == "bitbucket"
+    assert block["auth_ok"] is True
+
+
+@pytest.mark.unit
 def test_explicit_project_forge_reads_pinned_value_from_disk(tmp_path: Path) -> None:
     """A pinned ``forge:`` in an on-disk profile is read (not the drafted default)."""
     awf_dir = tmp_path / ".awf"

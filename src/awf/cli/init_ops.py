@@ -666,6 +666,21 @@ def _detect_project_forge_auth(
         # No ``origin`` remote: stay neutral, assume no forge, never block.
         return _neutral_forge_block()
 
+    # When the caller could not resolve the Compose ``.env``-merged service env
+    # (e.g. ``local_service_environ`` itself raised during onboarding collection,
+    # which runs after settings resolve), recompute it here so forge auth verifies
+    # the same merged view doctor/status use — otherwise a token present only in
+    # root ``.env`` is wrongly reported missing/unverified (PR #541 review).
+    # Guarded: a second failure degrades to ``None`` and the per-forge
+    # ``os.environ`` fallback, never aborting the diagnostic.
+    if service_env is None:
+        from awf.service.config import local_service_environ
+
+        try:
+            service_env = local_service_environ()
+        except (OSError, UnicodeDecodeError):
+            service_env = None
+
     explicit_forge = _explicit_project_forge(repository)
     forge = concrete_forge_for_repo(explicit_forge, repo_url)
     # ``host_detected`` distinguishes a recognized host from an unknown host
