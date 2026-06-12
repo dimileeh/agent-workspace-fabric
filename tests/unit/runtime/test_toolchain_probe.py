@@ -90,15 +90,29 @@ class TestProbeRuntimeToolchains:
         assert finding.details["language"] == "java"
         assert finding.details["version"] == "21"
 
-    async def test_probe_exec_exception_is_silent(self) -> None:
+    async def test_probe_exec_oserror_is_silent(self) -> None:
         profile = _profile_with_toolchains({"java": ["17", "21"]})
         spy = _SpyExec()
-        spy.raise_exc = RuntimeError("cannot exec into container")
+        # OSError models the only operational probe-infra failure the exec itself
+        # raises (container exec cannot spawn — missing binary, etc.).
+        spy.raise_exc = OSError("cannot exec into container")
 
         findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
 
         # Probe-infra failure -> available=None -> globally silent.
         assert findings == ()
+        assert len(spy.calls) == 1
+
+    async def test_probe_exec_unexpected_exception_propagates(self) -> None:
+        # A non-OSError out of the injected exec is a programmer bug, not an
+        # expected probe miss: it must surface instead of being downgraded into a
+        # silent suppression of RUNTIME_TOOLCHAIN_UNAVAILABLE findings.
+        profile = _profile_with_toolchains({"java": ["17", "21"]})
+        spy = _SpyExec()
+        spy.raise_exc = RuntimeError("regression in the exec path")
+
+        with pytest.raises(RuntimeError, match="regression in the exec path"):
+            await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
         assert len(spy.calls) == 1
 
     async def test_probe_returncode_nonzero_is_silent(self) -> None:
@@ -255,8 +269,9 @@ class TestProbeRuntimeToolchains:
     async def test_later_language_probe_exception_keeps_earlier_findings(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Same as above but the second language's probe *raises* mid-loop: java's
-        # finding is still preserved and the failed language stays silent.
+        # Same as above but the second language's probe *raises* an operational
+        # OSError mid-loop: java's finding is still preserved and the failed
+        # language stays silent.
         monkeypatch.setitem(
             _TOOLCHAIN_DISCOVERY,
             "node",
@@ -277,7 +292,7 @@ class TestProbeRuntimeToolchains:
                 self.calls.append(cli_args)
                 if len(self.calls) == 1:
                     return ProbeExecResult(returncode=0, stdout=_RELEASE_17, stderr="")
-                raise RuntimeError("cannot exec into container")
+                raise OSError("cannot exec into container")
 
         spy = _OneGoodThenRaise()
 

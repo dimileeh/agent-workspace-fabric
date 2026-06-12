@@ -17,10 +17,11 @@ tracked compose-exec path) — so it stays unit-testable.
 The probe is strictly additive and non-blocking. The ``available`` contract is
 the crux of avoiding false warnings:
 
-* probe infrastructure cannot exec into the container at all (the discovery
-  command raises, or returns non-zero — it is written to always exit 0 when the
-  container is reachable) -> ``available is None`` -> the helper stays globally
-  silent;
+* probe infrastructure cannot exec into the container at all (the exec raises
+  ``OSError``, or the command returns non-zero — it is written to always exit 0
+  when the container is reachable) -> ``available is None`` -> the helper stays
+  globally silent. Any *other* exception out of the injected exec is an
+  unexpected programmer error and is left to propagate, not swallowed;
 * a declared language's tool is genuinely absent from a reachable image ->
   that language maps to an empty set -> the helper warns every declared version;
 * a declared language with no registered discovery strategy is treated as
@@ -229,10 +230,18 @@ async def probe_runtime_toolchains(
             continue
         try:
             result = await exec_in_container(list(strategy.command))
-        except Exception:
+        except OSError:
+            # The injected exec_in_container already translates the operational
+            # failures it expects (e.g. a wedged exec -> rc 124) into a non-zero
+            # ProbeExecResult, so the only exception that still signals genuine
+            # probe-infra failure here is the container exec being unable to spawn
+            # at all (OSError: missing binary, spawn failure, ...). Swallow that as
+            # a probe miss, but let any other exception — a programmer error in the
+            # exec path — propagate rather than silently suppressing
+            # RUNTIME_TOOLCHAIN_UNAVAILABLE findings.
             result = None
         # The discovery command always exits 0 when the container is reachable, so
-        # an exception or a non-zero return both signal a probe-infra failure for
+        # an OSError or a non-zero return both signal a probe-infra failure for
         # this language. If nothing has been probed yet the container is wholly
         # unreachable -> stay globally silent (available is None). But once an
         # earlier language has probed cleanly the container *is* reachable, so
