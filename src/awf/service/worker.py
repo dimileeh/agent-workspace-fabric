@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -526,9 +527,24 @@ def _is_postgres_database_url(database_url: str) -> bool:
     return False
 
 
-def _service_git_environment(host_home: Path, *, github_token: str | None = None) -> dict[str, str]:
-    """Git/SSH environment for service-worker host repository operations."""
+def _service_git_environment(
+    host_home: Path,
+    *,
+    github_token: str | None = None,
+    source_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Git/SSH environment for service-worker host repository operations.
 
+    ``source_env`` is the process environment the Bitbucket/SSH wiring inspects for
+    credentials and the agent socket. It defaults to ``os.environ`` — what the real
+    worker sees inside the service container (Compose-forwarded vars). Callers that
+    run from a *different* process context (e.g. ``awf profile doctor`` from the
+    operator shell) pass the worker's forwarded env explicitly so the
+    Bitbucket-conditional additions match what the worker would inject, rather than
+    silently reading the caller shell.
+    """
+
+    resolved_source: Mapping[str, str] = os.environ if source_env is None else source_env
     env = {"HOME": str(host_home)}
     _add_git_config_entries(env, (("safe.directory", "*"),))
     if github_token:
@@ -544,13 +560,13 @@ def _service_git_environment(host_home: Path, *, github_token: str | None = None
             ),
         )
     # Bitbucket git-over-HTTPS auth, host-scoped to bitbucket.org so the GitHub
-    # path above is byte-for-byte unchanged. Reads the live process environment
-    # (where ``BitbucketClient.from_env`` also reads its credentials) and never
-    # places the token in any returned env value — git invokes the helper, which
-    # reads the secret from the environment on demand.
-    apply_bitbucket_git_auth(env, os.environ)
+    # path above is byte-for-byte unchanged. Reads ``source_env`` (the live process
+    # environment by default, where ``BitbucketClient.from_env`` also reads its
+    # credentials) and never places the token in any returned env value — git
+    # invokes the helper, which reads the secret from the environment on demand.
+    apply_bitbucket_git_auth(env, resolved_source)
     ssh_command = ["ssh"]
-    if ssh_auth_sock := os.environ.get("SSH_AUTH_SOCK"):
+    if ssh_auth_sock := resolved_source.get("SSH_AUTH_SOCK"):
         env["SSH_AUTH_SOCK"] = ssh_auth_sock
         ssh_command.extend(["-o", f"IdentityAgent={ssh_auth_sock}"])
     ssh_config = host_home / ".ssh" / "config"
