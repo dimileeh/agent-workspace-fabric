@@ -1168,6 +1168,85 @@ class TestHappyPathPart002:
         )
 
     @pytest.mark.unit
+    async def test_unexpected_commit_step_error_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # Planning succeeds (handoff), the commit lands, but the post-commit
+        # ``git rev-list --count`` raises an unexpected error. That falls into
+        # the generic ``except Exception`` handler, which marks the workspace
+        # FAILED (infrastructure) and returns BEFORE the post-validation deposit
+        # block — the same gap the ``_PostAgentCommitStepError`` branch already
+        # closes. The plan + conformance report the agent wrote into the
+        # preserved-FAILED worktree must still reach the served artifact dir.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "gaps": []}',
+            encoding="utf-8",
+        )
+
+        handoff_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Only AWF validation evidence is missing.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+            }
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout=handoff_report)
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                f"?? docs/awf-plans/{ws_id}.md\n"
+                f"?? docs/awf-plans/{ws_id}.conformance.json\n"
+                " M src/x.py\n"
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch (drift)
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="src/x.py\n")  # cached diff --name-only
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=1, stderr="fatal: bad revision")  # rev-list count FAILS
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            # A non-missing-HEAD commit-step error is infrastructure, not agent.
+            assert ws.failure_reason == "infrastructure_failure"
+
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "satisfied", "gaps": []}'
+        )
+
+    @pytest.mark.unit
     async def test_planning_profile_fails_when_plan_phase_changes_code(
         self,
         executor: WorkspaceExecutor,

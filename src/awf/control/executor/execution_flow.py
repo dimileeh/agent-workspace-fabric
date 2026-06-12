@@ -943,6 +943,20 @@ async def execute(
         )
         return
     except Exception as exc:  # unexpected — mark infrastructure
+        # Planning ran before the commit step, so the worktree (preserved on the
+        # FAILED workspace) can already hold the plan + conformance report. Every
+        # failure-return path below marks the workspace FAILED and returns before
+        # the post-validation deposit block, so deposit them now — otherwise an
+        # unexpected commit-step error (e.g. a failed ``git rev-list`` or an
+        # unrecoverable missing-HEAD) strands the artifacts in the worktree and
+        # the console can never surface them. Best-effort and idempotent: the
+        # recovery fall-through redeposits at the post-validation block.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
         if _git_error_indicates_missing_head_object(str(exc)):
             if await self._recover_missing_git_head_or_mark_failed(
                 workspace_id=workspace_id,
