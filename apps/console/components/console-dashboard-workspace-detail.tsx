@@ -266,6 +266,13 @@ export function TaskArtifactsSection({
       // an artifact-heavy workspace. Follow next_cursor before deciding presence
       // so the Plan/Validation controls are not hidden when the files do exist.
       const collected = await collectArtifactsForPresence(async (cursor) => {
+        // Stop paginating the moment the effect is cancelled (unmount or
+        // refreshKey change): the post-loop guard already discards the result,
+        // but bailing here also avoids firing the remaining page requests whose
+        // responses would just be thrown away.
+        if (cancelled) {
+          return null;
+        }
         const result = await apiGet<WorkspaceArtifactList>(
           artifactListPath(workspaceId, cursor),
         );
