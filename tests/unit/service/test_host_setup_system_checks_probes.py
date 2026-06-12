@@ -400,7 +400,11 @@ def test_check_gh_warns_when_missing_and_ok_when_present() -> None:
     # The missing-gh warning must point Bitbucket users at the .env auth path so
     # they are not told to install gh for a forge that does not need it (#525).
     assert "BITBUCKET_API_TOKEN" in missing.detail
-    assert "bitbucket.org" in missing.detail
+    # Assert the host within its "repos" phrase rather than the bare "bitbucket.org"
+    # token: the trailing word keeps this a help-text presence check and stops
+    # CodeQL (py/incomplete-url-substring-sanitization) from misreading a bare
+    # domain literal in `in` as URL-substring sanitization.
+    assert "bitbucket.org repos" in missing.detail
     # Basic auth mode (the default) also requires the email and auth-mode vars, so
     # the warning must name them — token alone leaves PR/git auth broken (#528).
     assert "BITBUCKET_EMAIL" in missing.detail
@@ -410,8 +414,10 @@ def test_check_gh_warns_when_missing_and_ok_when_present() -> None:
     assert missing.fix is not None
     assert missing.fix.startswith("For GitHub repos:")
     # The fix must also offer the forge-aware Bitbucket alternative so a Bitbucket
-    # user sees the .env auth path, not just the gh-install path (#528).
-    assert "bitbucket.org" in missing.fix
+    # user sees the .env auth path, not just the gh-install path (#528). Assert the
+    # host within its "repos" phrase (see the detail assertion above) to avoid the
+    # CodeQL incomplete-url-substring-sanitization false positive on a bare domain.
+    assert "bitbucket.org repos" in missing.fix
     assert "BITBUCKET_API_TOKEN" in missing.fix
     # Basic auth also needs the email and auth-mode vars in the fix, not just the
     # detail — otherwise a Bitbucket user following the fix sets only the token and
