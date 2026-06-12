@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import os
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from heapq import heappop, heappush
 from itertools import count
 from os import stat_result
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -167,11 +169,11 @@ def _deposit_one_planning_artifact(
 ) -> None:
     try:
         # The source lives in an agent-writable worktree, so a symlinked
-        # plan/report would otherwise let ``shutil.copyfile`` dereference an
-        # arbitrary host-readable file into the served artifact dir. Mirror the
-        # reader's symlink rejection here: refuse a symlink source outright and
-        # require the resolved target to stay inside the worktree (guarding
-        # against escape via an intermediate directory symlink).
+        # plan/report would otherwise let the copy dereference an arbitrary
+        # host-readable file into the served artifact dir. Mirror the reader's
+        # symlink rejection here: refuse a symlink source outright and require
+        # the resolved target to stay inside the worktree (guarding against
+        # escape via an intermediate directory symlink).
         if source.is_symlink():
             _reject_unsafe_planning_source(workspace_id, source, dest_name, "symlink")
             return
@@ -181,26 +183,20 @@ def _deposit_one_planning_artifact(
         if not resolved.is_relative_to(worktree_root):
             _reject_unsafe_planning_source(workspace_id, source, dest_name, "escapes_worktree")
             return
-        # A hard link shares its inode with another host file, so it passes the
-        # symlink and escape guards above while still letting ``copyfile`` pull
-        # an arbitrary host-readable file's contents into the served artifact
-        # dir. Mirror the content reader's ``st_nlink > 1`` rejection to keep
-        # both code paths fail-closed against link-based exfiltration.
-        stat = resolved.stat()
-        if stat.st_nlink > 1:
-            _reject_unsafe_planning_source(workspace_id, source, dest_name, "hard_link")
-            return
-        # The source lives in an agent-writable worktree, so a buggy or malicious
-        # agent could emit an arbitrarily large plan/report and have ``copyfile``
-        # both fill the served artifact dir and synchronously block the executor.
-        # The content reader caps reads at ``MAX_ARTIFACT_CONTENT_BYTES``, so a
-        # larger deposit is unreadable anyway — reject it before copying rather
-        # than depositing bytes that can never be served.
-        if stat.st_size > MAX_ARTIFACT_CONTENT_BYTES:
-            _reject_unsafe_planning_source(workspace_id, source, dest_name, "oversized")
-            return
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(resolved, artifact_dir / dest_name)
+        # A background agent process can swap ``resolved`` (or a path component)
+        # after the checks above but before the bytes are copied. ``copyfile``
+        # re-opens by path, so that TOCTOU window would let a symlink/hard-link/
+        # oversized replacement slip past every guard. Open the source once with
+        # ``O_NOFOLLOW`` and validate + copy from that same descriptor, so the
+        # checks apply to the exact file whose bytes land in the served dir.
+        _copy_planning_source_from_stable_fd(
+            artifact_dir=artifact_dir,
+            workspace_id=workspace_id,
+            source=source,
+            resolved=resolved,
+            dest_name=dest_name,
+        )
     except OSError as exc:
         _log.warning(
             "service.planning_artifact_deposit_failed",
@@ -210,6 +206,57 @@ def _deposit_one_planning_artifact(
             error_type=type(exc).__name__,
             errno=exc.errno,
         )
+
+
+def _copy_planning_source_from_stable_fd(
+    *,
+    artifact_dir: Path,
+    workspace_id: str,
+    source: Path,
+    resolved: Path,
+    dest_name: str,
+) -> None:
+    # ``O_NOFOLLOW`` refuses a final-component symlink swapped in after the
+    # path-based checks; the ``fstat`` below then re-validates the *opened*
+    # inode so a hard-link or oversized replacement is caught on the very file
+    # that gets copied rather than on a path that may have changed underneath us.
+    fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        stat = os.fstat(fd)
+        if not S_ISREG(stat.st_mode):
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "not_regular_file")
+            return
+        # A hard link shares its inode with another host file, so it passes the
+        # symlink and escape guards while still letting the copy pull an
+        # arbitrary host-readable file's contents into the served artifact dir.
+        # Mirror the content reader's ``st_nlink > 1`` rejection to keep both
+        # code paths fail-closed against link-based exfiltration.
+        if stat.st_nlink > 1:
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "hard_link")
+            return
+        # A buggy or malicious agent could emit an arbitrarily large plan/report
+        # and have the copy both fill the served artifact dir and synchronously
+        # block the executor. The content reader caps reads at
+        # ``MAX_ARTIFACT_CONTENT_BYTES``, so a larger deposit is unreadable
+        # anyway — reject it before copying rather than depositing bytes that
+        # can never be served.
+        if stat.st_size > MAX_ARTIFACT_CONTENT_BYTES:
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "oversized")
+            return
+        # Copy through a temp file and atomically ``os.replace`` it into place so
+        # a failed copy never leaves a truncated artifact behind and a concurrent
+        # reader never observes a half-written deposit.
+        dest = artifact_dir / dest_name
+        tmp_dest = artifact_dir / f".{dest_name}.tmp"
+        try:
+            with os.fdopen(os.dup(fd), "rb") as src, tmp_dest.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            tmp_dest.replace(dest)
+        except OSError:
+            tmp_dest.unlink(missing_ok=True)
+            raise
+    finally:
+        os.close(fd)
 
 
 def _reject_unsafe_planning_source(

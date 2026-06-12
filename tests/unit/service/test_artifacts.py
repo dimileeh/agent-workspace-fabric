@@ -1168,7 +1168,7 @@ class TestDepositWorkspacePlanningArtifacts:
         def boom(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
             raise OSError("disk full")
 
-        monkeypatch.setattr(artifacts_module.shutil, "copyfile", boom)
+        monkeypatch.setattr(artifacts_module.shutil, "copyfileobj", boom)
 
         # Must not raise despite every copy failing.
         deposit_workspace_planning_artifacts(
@@ -1288,6 +1288,78 @@ class TestDepositWorkspacePlanningArtifacts:
         (worktree / "docs").mkdir(parents=True, exist_ok=True)
         (worktree / "docs" / "awf-plans").symlink_to(outside, target_is_directory=True)
         plan_path = Path("docs/awf-plans/ws_dep.md")
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
+    def test_source_swapped_to_hard_link_after_checks_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # TOCTOU: a benign plan passes the path-based symlink/escape checks, then
+        # a racing agent process replaces it with a hard link to a host secret
+        # just before the bytes are copied. Validating + copying from the opened
+        # descriptor must catch the swap (st_nlink > 1) rather than depositing
+        # the secret a stale path-based stat would have waved through.
+        work_dir = tmp_path / "work"
+        secret = tmp_path / "host-secret.txt"
+        secret.write_text("TOP SECRET", encoding="utf-8")
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path, plan_text="benign")
+        target = worktree / plan_path
+        resolved_target = target.resolve()
+
+        real_os_open = artifacts_module.os.open
+
+        def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(path) == resolved_target and target.exists() and not _swapped:
+                _swapped.add(True)
+                target.unlink()
+                os.link(secret, target)
+            return real_os_open(path, flags, *args, **kwargs)
+
+        _swapped: set[bool] = set()
+        monkeypatch.setattr(artifacts_module.os, "open", swapping_open)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
+    def test_source_swapped_to_non_regular_file_after_checks_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The opened descriptor must be a regular file: a swap to a directory (or
+        # other non-regular inode) after the path checks must be refused rather
+        # than handed to the copy.
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path, plan_text="benign")
+        target = worktree / plan_path
+        resolved_target = target.resolve()
+
+        real_os_open = artifacts_module.os.open
+
+        def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(path) == resolved_target and target.is_file():
+                target.unlink()
+                target.mkdir()
+            return real_os_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(artifacts_module.os, "open", swapping_open)
 
         deposit_workspace_planning_artifacts(
             work_dir=work_dir,
