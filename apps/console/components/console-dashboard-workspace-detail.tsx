@@ -150,7 +150,11 @@ export function TaskDetailsModal({
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
           <CoordinationWarningBlock warnings={workspace.coordination_warnings} status={workspace.status} />
-          <TaskArtifactsSection key={workspace.workspace_id} workspaceId={workspace.workspace_id} />
+          <TaskArtifactsSection
+            key={workspace.workspace_id}
+            workspaceId={workspace.workspace_id}
+            refreshKey={workspace.updated_at}
+          />
           <section className="grid gap-2 rounded-md border border-line bg-surface-2 p-3">
             <div className="text-xs font-semibold text-fg-muted">Prompt sent to AWF</div>
             <TaskPromptBody prompt={workspace.task_prompt} />
@@ -229,7 +233,13 @@ export function TaskPromptBody({ prompt }: { prompt: string }) {
 
 type TaskArtifactView = "plan" | "validation";
 
-export function TaskArtifactsSection({ workspaceId }: { workspaceId: string }) {
+export function TaskArtifactsSection({
+  workspaceId,
+  refreshKey,
+}: {
+  workspaceId: string;
+  refreshKey?: string;
+}) {
   const [items, setItems] = useState<WorkspaceArtifact[]>([]);
   const [view, setView] = useState<TaskArtifactView | null>(null);
   const [content, setContent] = useState("");
@@ -258,7 +268,12 @@ export function TaskArtifactsSection({ workspaceId }: { workspaceId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId]);
+    // refreshKey tracks the workspace's last-updated marker so the surrounding
+    // overview poll re-runs this fetch as a live task progresses. Without it the
+    // list is fetched once on mount: opening details mid-run (no artifacts yet)
+    // would leave the Plan/Validation buttons hidden until the modal is closed
+    // and reopened, even after the executor deposits the files.
+  }, [workspaceId, refreshKey]);
 
   const showPlan = hasPlanArtifact(items);
   const showValidation = hasConformanceArtifact(items);

@@ -54,9 +54,46 @@ async function mockDashboard(page: Page) {
   const failed = baseWorkspace("ws_fail", "List Error");
   const planDownloadFail = baseWorkspace("ws_dlfail", "Plan Download Error");
 
+  // A still-running task whose artifacts are deposited only after the modal is
+  // already open. The overview poll bumps updated_at on its second response, and
+  // the artifact list flips from empty to populated, so the section must refetch
+  // and surface the buttons without the modal being closed and reopened.
+  const live = baseWorkspace("ws_live", "Live Monitoring");
+  let overviewCalls = 0;
+
   await page.route("/api/awf/workspaces/overview*", async (route) => {
+    overviewCalls += 1;
+    // Each poll reports a fresh updated_at, mirroring a workspace that is still
+    // advancing. That changing marker is what must re-drive the artifact fetch.
+    const liveSnapshot = {
+      ...live,
+      status: "running",
+      updated_at: `2026-06-12T16:38:${String(overviewCalls).padStart(2, "0")}.000Z`,
+    };
     await route.fulfill({
-      json: { items: [full, planOnly, none, failed, planDownloadFail], has_more: false },
+      json: {
+        items: [full, planOnly, none, failed, planDownloadFail, liveSnapshot],
+        has_more: false,
+      },
+    });
+  });
+
+  // The deposit becomes visible only after the overview has polled again — i.e.
+  // strictly after the modal first mounted. Gating on the overview-poll count
+  // (not the artifact-call count) keeps any mount-time fetches empty even under
+  // React StrictMode's double-invoke, so the buttons can appear only once a
+  // post-mount updated_at change re-drives the list fetch.
+  await page.route("/api/awf/workspaces/ws_live/artifacts", async (route) => {
+    const items =
+      overviewCalls >= 2
+        ? [artifact("ws_live", "plan.md"), artifact("ws_live", "conformance.json")]
+        : [];
+    await route.fulfill({ json: { items, next_cursor: null, has_more: false } });
+  });
+  await page.route("/api/awf/workspaces/ws_live/artifacts/download*", async (route) => {
+    await route.fulfill({
+      headers: { "content-type": "text/markdown" },
+      body: "# Live Plan Body\n",
     });
   });
 
@@ -193,6 +230,21 @@ test("ignores a slow earlier download after switching artifacts", async ({ page 
   await page.waitForTimeout(1000);
   await expect(content).toContainText('"status": "satisfied"');
   await expect(content).not.toContainText("Surfaced Plan");
+});
+
+test("refetches artifacts as an open, still-running task deposits them", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_live");
+
+  // The very first artifact-list fetch (modal just opened, task still running)
+  // returns nothing, so the buttons can only appear if a later overview poll
+  // re-drives the fetch. Asserting they show — without closing/reopening the
+  // modal — proves the refetch happened; a single mount-time fetch never would.
+  const section = page.getByTestId("task-artifacts");
+  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible({ timeout: 15_000 });
+  await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
 });
 
 test("shows only the Plan button when conformance.json is absent", async ({ page }) => {
