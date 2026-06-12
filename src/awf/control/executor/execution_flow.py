@@ -673,6 +673,19 @@ async def execute(
                     reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
                     message=_supply_chain_block_message(supply_chain_result.findings)[:2000],
                 )
+                # Planning ran before this post-agent policy gate, so the
+                # preserved FAILED worktree can already hold the plan +
+                # conformance report. This branch returns before the
+                # post-validation deposit block, so deposit them now —
+                # otherwise the artifacts are stranded in the worktree and
+                # the console can never surface why the task failed.
+                # Best-effort and idempotent.
+                _planning_artifacts._deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                )
                 return
             if staged_paths:
                 if await self._committed_and_staged_output_is_plan_only(
@@ -684,6 +697,17 @@ async def execute(
                     changed_paths=staged_paths,
                     expected_status=WorkspaceStatus.running,
                 ):
+                    # Plan-only output already marked the workspace FAILED.
+                    # The preserved worktree holds the plan + conformance
+                    # report, and this branch returns before the
+                    # post-validation deposit block — deposit them now so the
+                    # console can surface them. Best-effort and idempotent.
+                    _planning_artifacts._deposit_planning_artifacts_best_effort(
+                        self,
+                        profile=profile,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                    )
                     return
                 protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
                     worktree_path=worktree_path,
@@ -703,6 +727,18 @@ async def execute(
                         failure_reason=FailureReason.policy_failure,
                         reason_code="QUALITY_GATE_POLICY_CHANGED",
                         message=quality_gate_violation_message(violations)[:2000],
+                    )
+                    # Planning ran before this gate, so the preserved FAILED
+                    # worktree can already hold the plan + conformance report.
+                    # This branch returns before the post-validation deposit
+                    # block, so deposit them now — otherwise the artifacts are
+                    # stranded and the console can never surface why the task
+                    # failed. Best-effort and idempotent.
+                    _planning_artifacts._deposit_planning_artifacts_best_effort(
+                        self,
+                        profile=profile,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
                     )
                     return
                 commit_msg = commit_message_with_task_tag(

@@ -1388,6 +1388,224 @@ class TestHappyPathPart002:
             '{"status": "satisfied", "gaps": []}'
         )
 
+    async def _queue_planning_through_post_agent_add(
+        self,
+        fake: FakeCommandRunner,
+        ws_id: str,
+        *,
+        cached_diff_stdout: str,
+    ) -> None:
+        """Queue planning → handoff → post-agent ``git add`` / cached diff.
+
+        Stops right after the post-agent ``git diff --cached --name-only`` so
+        the caller can drive one of the post-agent policy gates that return
+        before the post-validation deposit block.
+        """
+        handoff_report = json.dumps(
+            {
+                "status": "needs_iteration",
+                "summary": "Only AWF validation evidence is missing.",
+                "reason_code": CONFORMANCE_REQUIRES_AWF_VALIDATION,
+                "gaps": ["AWF-owned validation evidence is missing for pytest."],
+            }
+        )
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout=handoff_report)
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                f"?? docs/awf-plans/{ws_id}.md\n"
+                f"?? docs/awf-plans/{ws_id}.conformance.json\n"
+                " M src/x.py\n"
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD post-iter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch (drift)
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout=cached_diff_stdout)  # cached diff --name-only
+
+    def _write_worktree_plan_artifacts(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        ws_id: str,
+    ) -> None:
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "gaps": []}',
+            encoding="utf-8",
+        )
+
+    def _assert_served_plan_artifacts(self, tmp_path: Path, ws_id: str) -> None:
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "satisfied", "gaps": []}'
+        )
+
+    @pytest.mark.unit
+    async def test_supply_chain_block_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Planning succeeds (handoff) and writes the plan + conformance report
+        # into the worktree, but the post-agent supply-chain policy gate blocks
+        # the staged output. That branch marks the workspace FAILED (policy
+        # failure) and returns BEFORE the post-validation deposit block, so the
+        # plan + conformance report the agent left in the preserved-FAILED
+        # worktree must still reach the served artifact dir.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        self._write_worktree_plan_artifacts(factory, ws_id)
+        await self._queue_planning_through_post_agent_add(
+            fake, ws_id, cached_diff_stdout="src/x.py\n"
+        )
+
+        async def _blocked(**_kwargs: Any) -> Any:
+            return SimpleNamespace(policy_blocked=True, findings=[])
+
+        monkeypatch.setattr(executor, "_refresh_supply_chain_policy_for_workspace", _blocked)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == "SUPPLY_CHAIN_POLICY_BLOCKED"
+
+        self._assert_served_plan_artifacts(tmp_path, ws_id)
+
+    @pytest.mark.unit
+    async def test_plan_only_post_agent_gate_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # Planning succeeds and writes the plan + conformance report, but the
+        # post-agent staged output is plan-only, so the PLAN_ONLY_OUTPUT gate
+        # marks the workspace FAILED and returns BEFORE the post-validation
+        # deposit block. The preserved worktree's plan + conformance report
+        # must still reach the served artifact dir.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        self._write_worktree_plan_artifacts(factory, ws_id)
+        await self._queue_planning_through_post_agent_add(
+            fake, ws_id, cached_diff_stdout=f"docs/awf-plans/{ws_id}.md\n"
+        )
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (base..HEAD) empty
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == "PLAN_ONLY_OUTPUT"
+
+        self._assert_served_plan_artifacts(tmp_path, ws_id)
+
+    @pytest.mark.unit
+    async def test_quality_gate_block_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Planning succeeds and writes the plan + conformance report, but the
+        # post-agent output changes a protected quality-gate file. That gate
+        # marks the workspace FAILED (policy failure) and returns BEFORE the
+        # post-validation deposit block, so the preserved worktree's plan +
+        # conformance report must still reach the served artifact dir.
+        from awf.control.executor import execution_flow as _execution_flow
+
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        self._write_worktree_plan_artifacts(factory, ws_id)
+        await self._queue_planning_through_post_agent_add(
+            fake, ws_id, cached_diff_stdout="src/x.py\n"
+        )
+
+        async def _no_diffs(**_kwargs: Any) -> dict[str, Any]:
+            return {}
+
+        monkeypatch.setattr(executor, "_protected_file_diffs_for_staged_paths", _no_diffs)
+        monkeypatch.setattr(
+            _execution_flow,
+            "find_protected_quality_gate_changes",
+            lambda **_kwargs: ["policy-change"],
+        )
+        monkeypatch.setattr(
+            _execution_flow,
+            "quality_gate_violation_message",
+            lambda _violations: "protected quality-gate file changed",
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == "QUALITY_GATE_POLICY_CHANGED"
+
+        self._assert_served_plan_artifacts(tmp_path, ws_id)
+
     @pytest.mark.unit
     async def test_planning_profile_fails_when_plan_phase_changes_code(
         self,
