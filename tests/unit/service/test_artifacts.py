@@ -1231,6 +1231,51 @@ class TestDepositWorkspacePlanningArtifacts:
         assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
 
     @pytest.mark.unit
+    def test_oversized_source_is_rejected(self, tmp_path: Path) -> None:
+        # A buggy or malicious agent could emit an arbitrarily large plan and
+        # have ``copyfile`` fill the served artifact dir while synchronously
+        # blocking the executor. The deposit step must refuse a source larger
+        # than ``MAX_ARTIFACT_CONTENT_BYTES`` (the cap the reader enforces).
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path)
+        (worktree / "docs" / "awf-plans").mkdir(parents=True, exist_ok=True)
+        (worktree / plan_path).write_bytes(b"x" * (MAX_ARTIFACT_CONTENT_BYTES + 1))
+        (worktree / report_path).write_text("{}", encoding="utf-8")
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        # Oversized plan refused, but the small conformance report still deposits.
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+        assert (artifact_dir / DEPOSITED_CONFORMANCE_NAME).exists()
+
+    @pytest.mark.unit
+    def test_source_at_size_cap_is_deposited(self, tmp_path: Path) -> None:
+        # A source exactly at the cap is still readable by the content reader,
+        # so it must be deposited rather than rejected.
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path)
+        (worktree / "docs" / "awf-plans").mkdir(parents=True, exist_ok=True)
+        (worktree / plan_path).write_bytes(b"x" * MAX_ARTIFACT_CONTENT_BYTES)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
     def test_source_escaping_worktree_via_dir_symlink_is_rejected(self, tmp_path: Path) -> None:
         # A regular plan file reached through an intermediate directory symlink
         # that points outside the worktree must also be refused.

@@ -186,8 +186,18 @@ def _deposit_one_planning_artifact(
         # an arbitrary host-readable file's contents into the served artifact
         # dir. Mirror the content reader's ``st_nlink > 1`` rejection to keep
         # both code paths fail-closed against link-based exfiltration.
-        if resolved.stat().st_nlink > 1:
+        stat = resolved.stat()
+        if stat.st_nlink > 1:
             _reject_unsafe_planning_source(workspace_id, source, dest_name, "hard_link")
+            return
+        # The source lives in an agent-writable worktree, so a buggy or malicious
+        # agent could emit an arbitrarily large plan/report and have ``copyfile``
+        # both fill the served artifact dir and synchronously block the executor.
+        # The content reader caps reads at ``MAX_ARTIFACT_CONTENT_BYTES``, so a
+        # larger deposit is unreadable anyway — reject it before copying rather
+        # than depositing bytes that can never be served.
+        if stat.st_size > MAX_ARTIFACT_CONTENT_BYTES:
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "oversized")
             return
         artifact_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(resolved, artifact_dir / dest_name)
