@@ -5,19 +5,26 @@ import type { WorkspaceArtifact } from "@/lib/types";
 export const PLAN_ARTIFACT_NAME = "plan.md";
 export const CONFORMANCE_ARTIFACT_NAME = "conformance.json";
 
-export function findArtifactByName(
+// Match on ``relative_path``, not ``name``: the artifacts API exposes nested
+// files with ``name`` set to the basename only, so a nested
+// ``validation_worktree/plan.md`` would otherwise satisfy a basename match for
+// ``plan.md`` even though no root artifact exists. The download endpoint is
+// then called with ``path=plan.md`` (the stable root path) and 404s. The
+// deposited plan/conformance artifacts live at the root, where
+// ``relative_path`` equals the stable filename.
+export function findArtifactByRelativePath(
   items: WorkspaceArtifact[],
-  name: string,
+  relativePath: string,
 ): WorkspaceArtifact | undefined {
-  return items.find((item) => item.name === name);
+  return items.find((item) => item.relative_path === relativePath);
 }
 
 export function hasPlanArtifact(items: WorkspaceArtifact[]): boolean {
-  return findArtifactByName(items, PLAN_ARTIFACT_NAME) !== undefined;
+  return findArtifactByRelativePath(items, PLAN_ARTIFACT_NAME) !== undefined;
 }
 
 export function hasConformanceArtifact(items: WorkspaceArtifact[]): boolean {
-  return findArtifactByName(items, CONFORMANCE_ARTIFACT_NAME) !== undefined;
+  return findArtifactByRelativePath(items, CONFORMANCE_ARTIFACT_NAME) !== undefined;
 }
 
 export function artifactDownloadPath(workspaceId: string, name: string): string {

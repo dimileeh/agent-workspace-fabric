@@ -9,29 +9,43 @@ import {
   artifactDownloadPath,
   artifactListPath,
   collectArtifactsForPresence,
-  findArtifactByName,
+  findArtifactByRelativePath,
   formatConformanceJson,
   hasConformanceArtifact,
   hasPlanArtifact,
 } from "./artifact-format.ts";
 
-function artifact(name) {
+function artifact(relativePath) {
   return {
-    artifact_id: `art_${name}`,
+    artifact_id: `art_${relativePath}`,
     workspace_id: "ws_1",
-    name,
-    relative_path: name,
-    path: `/work/artifacts/ws_1/${name}`,
-    kind: name.endsWith(".json") ? "json" : "md",
+    // The API sets ``name`` to the basename only; ``relative_path`` is the
+    // downloadable path. Root artifacts have ``relative_path === name``.
+    name: relativePath.split("/").pop(),
+    relative_path: relativePath,
+    path: `/work/artifacts/ws_1/${relativePath}`,
+    kind: relativePath.endsWith(".json") ? "json" : "md",
     size_bytes: 12,
     modified_at: "2026-06-12T00:00:00.000Z",
   };
 }
 
-test("findArtifactByName returns the matching artifact or undefined", () => {
+test("findArtifactByRelativePath returns the matching artifact or undefined", () => {
   const items = [artifact(PLAN_ARTIFACT_NAME), artifact("other.txt")];
-  assert.equal(findArtifactByName(items, PLAN_ARTIFACT_NAME)?.name, PLAN_ARTIFACT_NAME);
-  assert.equal(findArtifactByName(items, "missing.md"), undefined);
+  assert.equal(
+    findArtifactByRelativePath(items, PLAN_ARTIFACT_NAME)?.relative_path,
+    PLAN_ARTIFACT_NAME,
+  );
+  assert.equal(findArtifactByRelativePath(items, "missing.md"), undefined);
+});
+
+test("findArtifactByRelativePath ignores a nested file that only shares the basename", () => {
+  // ``validation_worktree/plan.md`` has ``name === "plan.md"`` but is not the
+  // root deposit the download endpoint serves at ``path=plan.md``.
+  const nested = artifact("validation_worktree/plan.md");
+  assert.equal(nested.name, PLAN_ARTIFACT_NAME);
+  assert.equal(findArtifactByRelativePath([nested], PLAN_ARTIFACT_NAME), undefined);
+  assert.equal(hasPlanArtifact([nested]), false);
 });
 
 test("hasPlanArtifact / hasConformanceArtifact detect presence", () => {
