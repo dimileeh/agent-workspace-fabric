@@ -467,8 +467,10 @@ def test_init_unknown_host_defaults_to_github_without_hard_fail(
     assert forge["host"] == "gitlab.com"
 
     pretty = _runner.invoke(app, ["init", str(tmp_path)])
-    assert "not recognized" in pretty.output
-    assert "gitlab.com" in pretty.output
+    # Assert the full rendered message (which names the unrecognized host) rather
+    # than a bare-host substring check — the latter is an incomplete-URL-
+    # sanitization pattern flagged by static analysis.
+    assert "Forge host 'gitlab.com' not recognized" in pretty.output
 
 
 @pytest.mark.unit

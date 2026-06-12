@@ -14,6 +14,7 @@ import structlog
 
 from awf.common.audit import REDACTION_MARKER
 from awf.common.config import Settings
+from awf.common.git_auth import bitbucket_git_config_entries
 from awf.node.companion_images import CompanionImageBuilder
 from awf.profiles.models import ProfileMonitor, ProfileRuntime, ProfileService, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
@@ -1204,7 +1205,10 @@ def test_service_git_environment_unchanged_without_bitbucket_credentials(
     entries = {
         env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
     }
-    assert not any("bitbucket.org" in key for key in entries)
+    # Compare against the exact bitbucket-scoped config keys rather than a substring
+    # of the host (a bare-host substring check is an incomplete-URL-sanitization
+    # pattern flagged by static analysis).
+    assert {key for key, _ in bitbucket_git_config_entries()}.isdisjoint(entries)
     assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
 
 
@@ -1271,7 +1275,10 @@ def test_service_git_environment_source_env_overrides_caller_environ(
     entries = {
         env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
     }
-    assert not any("bitbucket.org" in key for key in entries)
+    # Compare against the exact bitbucket-scoped config keys rather than a substring
+    # of the host (a bare-host substring check is an incomplete-URL-sanitization
+    # pattern flagged by static analysis).
+    assert {key for key, _ in bitbucket_git_config_entries()}.isdisjoint(entries)
 
 
 class _RecordingForgeClient:
