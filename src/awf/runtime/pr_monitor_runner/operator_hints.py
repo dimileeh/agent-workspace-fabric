@@ -60,6 +60,9 @@ async def _run_operator_hint_cycle(
     if head_result is not None:
         return cast(_GitPushResult, head_result)
 
+    # Resolve the workspace's optional Jira issue key once for this repair path
+    # and thread it into the commit sink so the cycle does not re-query the DB.
+    task_tag = await self._resolve_task_tag(workspace_id)
     prompt = operator_hint_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
@@ -67,7 +70,7 @@ async def _run_operator_hint_cycle(
         directive=hint.directive,
         operation_id=hint.operation_id,
         workspace_runtime_context=self._workspace_runtime_context,
-        task_tag=await self._resolve_task_tag(workspace_id),
+        task_tag=task_tag,
     )
     try:
         verdict = await self._invoke_cli_for_verdict_result(
@@ -77,6 +80,7 @@ async def _run_operator_hint_cycle(
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,
+            task_tag=task_tag,
         )
     except ProtectedScopeDiffError as exc:
         push_result = cast(
