@@ -712,25 +712,28 @@ async def execute(
                 changed_paths=staged_paths,
             )
             if supply_chain_result.policy_blocked:
+                # Planning ran before this post-agent policy gate, so the
+                # preserved FAILED worktree can already hold the plan +
+                # conformance report. Deposit them BEFORE ``_mark_failed``
+                # publishes the terminal status: the console keys its artifact
+                # refetch on the workspace ``updated_at`` (TaskArtifactsSection
+                # ``refreshKey``), and marking FAILED first would bump
+                # ``updated_at`` and let a poll observe it in the window before
+                # the deposit, record an empty artifact list, then never refetch
+                # — hiding the Plan/Validation controls. Best-effort and
+                # idempotent.
+                _planning_artifacts._deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                )
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
                     failure_reason=FailureReason.policy_failure,
                     reason_code="SUPPLY_CHAIN_POLICY_BLOCKED",
                     message=_supply_chain_block_message(supply_chain_result.findings)[:2000],
-                )
-                # Planning ran before this post-agent policy gate, so the
-                # preserved FAILED worktree can already hold the plan +
-                # conformance report. This branch returns before the
-                # post-validation deposit block, so deposit them now —
-                # otherwise the artifacts are stranded in the worktree and
-                # the console can never surface why the task failed.
-                # Best-effort and idempotent.
-                _planning_artifacts._deposit_planning_artifacts_best_effort(
-                    self,
-                    profile=profile,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
                 )
                 return
             if staged_paths:
@@ -977,6 +980,25 @@ async def execute(
                             ["merge-base", "--is-ancestor", base_commit, "HEAD"]
                         )
                 if not ancestor.ok:
+                    # Planning ran before this commit step, so the preserved
+                    # FAILED worktree can already hold the plan + conformance
+                    # report. Deposit them BEFORE ``_mark_failed`` publishes the
+                    # terminal status: the console keys its artifact refetch on
+                    # the workspace ``updated_at`` (TaskArtifactsSection
+                    # ``refreshKey``), and marking FAILED first would bump
+                    # ``updated_at`` and let a poll observe it in the window
+                    # before the deposit, record an empty artifact list, then
+                    # never refetch — hiding the Plan/Validation controls. This
+                    # branch returns from inside the ``try`` before the
+                    # post-validation deposit block, and a plain ``return``
+                    # bypasses the ``except`` deposit handlers below.
+                    # Best-effort and idempotent.
+                    _planning_artifacts._deposit_planning_artifacts_best_effort(
+                        self,
+                        profile=profile,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                    )
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -988,19 +1010,6 @@ async def execute(
                             "The coding CLI likely ran `git checkout --orphan` or reinitialised "
                             "the repo; inspect the worktree manually."
                         ),
-                    )
-                    # Planning ran before this commit step, so the preserved
-                    # FAILED worktree can already hold the plan + conformance
-                    # report. This branch returns from inside the ``try`` before
-                    # the post-validation deposit block, and a plain ``return``
-                    # bypasses the ``except`` deposit handlers below — so deposit
-                    # them now, mirroring the other post-planning failure
-                    # returns. Best-effort and idempotent.
-                    _planning_artifacts._deposit_planning_artifacts_best_effort(
-                        self,
-                        profile=profile,
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
                     )
                     return
                 _log.info(
@@ -1028,6 +1037,24 @@ async def execute(
                     reason_code="MONITOR_RECOVERY_REBASE_FAILED",
                     error_message=message,
                 )
+                # Planning may have run before this monitor-rebase recovery, so
+                # the preserved FAILED worktree can already hold the plan +
+                # conformance report. Deposit them BEFORE ``_mark_failed``
+                # publishes the terminal status: the console keys its artifact
+                # refetch on the workspace ``updated_at`` (TaskArtifactsSection
+                # ``refreshKey``), and marking FAILED first would bump
+                # ``updated_at`` and let a poll observe it in the window before
+                # the deposit, record an empty artifact list, then never refetch
+                # — hiding the Plan/Validation controls. This branch returns from
+                # inside the ``try`` before the post-validation deposit block,
+                # and a plain ``return`` bypasses the ``except`` deposit handlers
+                # below. Best-effort and idempotent.
+                _planning_artifacts._deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                )
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
@@ -1035,21 +1062,25 @@ async def execute(
                     message=message,
                     reason_code="MONITOR_RECOVERY_REBASE_FAILED",
                 )
-                # Planning may have run before this monitor-rebase recovery, so
-                # the preserved FAILED worktree can already hold the plan +
-                # conformance report. This branch returns from inside the
-                # ``try`` before the post-validation deposit block, and a plain
-                # ``return`` bypasses the ``except`` deposit handlers below — so
-                # deposit them now, mirroring the other post-planning failure
-                # returns. Best-effort and idempotent.
-                _planning_artifacts._deposit_planning_artifacts_best_effort(
-                    self,
-                    profile=profile,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                )
                 return
     except _PostAgentCommitStepError as exc:
+        # Planning ran before the commit step, so the worktree (preserved on
+        # the FAILED workspace) can already hold the plan + conformance report.
+        # Deposit them BEFORE ``_mark_post_agent_commit_failed`` publishes the
+        # terminal status: the console keys its artifact refetch on the
+        # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
+        # marking FAILED first would bump ``updated_at`` and let a poll observe
+        # it in the window before the deposit, record an empty artifact list,
+        # then never refetch — hiding the Plan/Validation controls. Otherwise a
+        # commit-step failure (e.g. a pre-commit hook rejecting the staged
+        # changes) strands the artifacts in the worktree. Best-effort and
+        # idempotent.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
         await self._mark_post_agent_commit_failed(
             workspace_id=workspace_id,
             error=exc,
@@ -1057,18 +1088,6 @@ async def execute(
             agent_run_details=agent_run_details,
             agent_exit_note=agent_exit_note,
             upstream_failure_reason=agent_run_failure_reason,
-        )
-        # Planning ran before the commit step, so the worktree (preserved on
-        # the FAILED workspace) can already hold the plan + conformance report.
-        # This branch returns before the post-validation deposit block, so
-        # deposit them now — otherwise a commit-step failure (e.g. a pre-commit
-        # hook rejecting the staged changes) strands the artifacts in the
-        # worktree and the console can never surface them.
-        _planning_artifacts._deposit_planning_artifacts_best_effort(
-            self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
         )
         return
     except Exception as exc:  # unexpected — mark infrastructure

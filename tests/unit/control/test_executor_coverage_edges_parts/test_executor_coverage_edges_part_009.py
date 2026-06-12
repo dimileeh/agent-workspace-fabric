@@ -470,6 +470,91 @@ async def test_fix_pass_git_add_failure_records_command_reason_code(
 
 
 @pytest.mark.unit
+async def test_validation_failure_deposits_planning_artifacts_before_mark_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A terminal in-cycle validation failure deposits the plan/conformance
+    artifacts BEFORE publishing the FAILED status.
+
+    The console keys its artifact refetch on the workspace ``updated_at``
+    (TaskArtifactsSection ``refreshKey``); ``_mark_failed`` bumps ``updated_at``
+    when it publishes FAILED, but the filesystem deposit does not touch the row.
+    Depositing after the mark would let a poll observe the terminal status in
+    the window before the copy, record an empty artifact list, then never
+    refetch — hiding the Plan/Validation controls. The cycle must therefore
+    deposit before every in-cycle ``_mark_failed``.
+    """
+    profile = WorkspaceProfile.model_validate(
+        {"name": "prof-validation-deposit", "planning": {"required": True}}
+    )
+    workspace = _workspace("ws_validation_deposit")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    order: list[str] = []
+    real_deposit = (
+        executor_execution_validation._planning_artifacts._deposit_planning_artifacts_best_effort
+    )
+
+    def _spy_deposit(*args: object, **kwargs: object) -> None:
+        order.append("deposit")
+        real_deposit(*args, **kwargs)
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
+    async def _mark_failed(**_kwargs: object) -> None:
+        order.append("mark_failed")
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_failing_command(tmp_path)])
+
+    # A fix-pass ``git add -A`` failure drives a terminal in-cycle ``_mark_failed``
+    # deterministically without the agent producing a real fix.
+    git_in_worktree = AsyncMock(
+        return_value=CommandResult(
+            returncode=1, stdout="", stderr="index lock", reason_code="GIT_ADD_LOCKED"
+        )
+    )
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=1,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-validation-deposit"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=_mark_failed,
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _repair_agent_git_ownership=AsyncMock(),
+    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=adapter,
+        git_in_worktree=git_in_worktree,
+    )
+
+    assert result.stop
+    assert order.index("deposit") < order.index("mark_failed")
+
+
+@pytest.mark.unit
 async def test_fix_pass_plan_only_output_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

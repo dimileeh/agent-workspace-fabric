@@ -24,6 +24,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.db.enums import (
     AgentRuntime,
     FailureReason,
@@ -153,6 +154,44 @@ def _adapter_prompt_calls(fake: FakeCommandRunner) -> list[tuple[int, str]]:
 
 def _adapter_prompts(fake: FakeCommandRunner) -> list[str]:
     return [prompt for _, prompt in _adapter_prompt_calls(fake)]
+
+
+def _record_deposit_vs_mark_order(
+    executor: WorkspaceExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    """Spy on planning-artifact deposits and FAILED-status marks, recording
+    their relative order.
+
+    The console keys its artifact refetch on the workspace ``updated_at``
+    (TaskArtifactsSection ``refreshKey``); ``_mark_failed`` bumps ``updated_at``
+    when it publishes the terminal FAILED status, but the filesystem deposit
+    does not touch the row. If a deposit ran *after* the mark, a poll could
+    observe the new ``updated_at`` in the window before the copy, record an
+    empty artifact list, then never refetch — hiding the Plan/Validation
+    controls. Every failure handler must therefore deposit BEFORE marking
+    FAILED. The returned list records ``"deposit"``/``"mark_failed"`` in call
+    order so a test can assert the deposit lands first.
+    """
+    order: list[str] = []
+    real_deposit = _planning_artifacts._deposit_planning_artifacts_best_effort
+
+    def _spy_deposit(*args: Any, **kwargs: Any) -> None:
+        order.append("deposit")
+        real_deposit(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _planning_artifacts, "_deposit_planning_artifacts_best_effort", _spy_deposit
+    )
+
+    real_mark = executor._mark_failed
+
+    async def _spy_mark(**kwargs: Any) -> None:
+        order.append("mark_failed")
+        await real_mark(**kwargs)
+
+    monkeypatch.setattr(executor, "_mark_failed", _spy_mark)
+    return order
 
 
 async def _insert_validate_handoff_recovery_operation(
@@ -1106,6 +1145,7 @@ class TestHappyPathPart002:
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Planning succeeds (handoff) but the post-agent commit step fails — a
         # pre-commit hook (here a failing ``git add -A``) rejects the staged
@@ -1160,6 +1200,8 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch (drift)
         fake.queue_result(returncode=1, stderr="permission denied")  # git add -A fails
 
+        order = _record_deposit_vs_mark_order(executor, monkeypatch)
+
         await executor.execute(ws_id)
 
         async with factory() as s:
@@ -1172,6 +1214,10 @@ class TestHappyPathPart002:
         assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
             '{"status": "satisfied", "gaps": []}'
         )
+        # ``_mark_post_agent_commit_failed`` routes through ``_mark_failed``; the
+        # deposit must precede it so the console's ``updated_at``-keyed refetch
+        # always observes the artifacts on the preserved-FAILED workspace.
+        assert order.index("deposit") < order.index("mark_failed")
 
     @pytest.mark.unit
     async def test_unexpected_commit_step_error_deposits_planning_artifacts(
@@ -1741,6 +1787,7 @@ class TestHappyPathPart002:
             return SimpleNamespace(policy_blocked=True, findings=[])
 
         monkeypatch.setattr(executor, "_refresh_supply_chain_policy_for_workspace", _blocked)
+        order = _record_deposit_vs_mark_order(executor, monkeypatch)
 
         await executor.execute(ws_id)
 
@@ -1758,6 +1805,9 @@ class TestHappyPathPart002:
             assert failed_event.reason_code == "SUPPLY_CHAIN_POLICY_BLOCKED"
 
         self._assert_served_plan_artifacts(tmp_path, ws_id)
+        # The deposit must land BEFORE the FAILED-status bump so the console's
+        # ``updated_at``-keyed refetch always observes the artifacts.
+        assert order.index("deposit") < order.index("mark_failed")
 
     @pytest.mark.unit
     async def test_plan_only_post_agent_gate_deposits_planning_artifacts(
