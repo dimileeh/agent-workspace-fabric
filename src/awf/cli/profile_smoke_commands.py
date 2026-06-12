@@ -72,7 +72,11 @@ def profile_doctor(
     import os
 
     from awf.common.git_remote import detect_repo_url_from_checkout
-    from awf.service.config import local_service_environ, resolve_service_settings
+    from awf.service.config import (
+        local_service_environ,
+        local_service_worker_environment_keys,
+        resolve_service_settings,
+    )
     from awf.service.environment import (
         cleared_docker_cli_client_keys,
         env_lookup,
@@ -87,24 +91,43 @@ def profile_doctor(
     # shell's HOME, falling back to Path.home() would check the wrong directory
     # and produce false passes/failures despite advertising the worker's context.
     settings = resolve_service_settings()
-    # Probe secret leases against the SAME effective env the worker uses. The
-    # worker constructs its LocalSecretLeaseMountResolver with host_env=os.environ
-    # from INSIDE the service container, where Compose forwards every provider
-    # credential (e.g. BITBUCKET_API_TOKEN/BITBUCKET_EMAIL) from
-    # docker/compose/.env. Source host_env from that same merged Compose view
-    # (local_service_environ) rather than the bare caller shell, so a provider:
-    # bitbucket (or any env-backed) lease provisioning would satisfy is not
-    # falsely reported as SECRET_LEASE_SOURCE_MISSING when the credential lives in
-    # the service env file but is not exported in the current shell.
-    host_env = dict(local_service_environ())
+    # The merged Compose view (local_service_environ) overlays docker/compose/.env
+    # with the entire caller shell. It is the right source for the Docker
+    # daemon/agent-image pins below (the worker reads those from the resolved
+    # service env), but it OVER-includes every shell export for secret-lease
+    # evaluation. Keep it as merged_env for the Docker/image probes; the lease
+    # env is derived from it but restricted to the worker's real allowlist below.
+    merged_env = dict(local_service_environ())
+    # Probe secret leases against the SAME env the worker's resolver actually
+    # sees. The worker constructs its LocalSecretLeaseMountResolver with
+    # host_env=os.environ from INSIDE the service container, where os.environ is
+    # only what Docker Compose forwarded -- the KEYS on the worker service's
+    # environment: block in docker/compose/local-service.yml (the shared
+    # &awf-environment anchor), each interpolated from .env/host. Restrict the
+    # merged view to that allowlist so a provider: env lease satisfiable only by a
+    # host-only shell export (whose NAME is not on the worker's environment:
+    # block) is surfaced as a finding -- matching provisioning's
+    # SECRET_LEASE_SOURCE_MISSING -- instead of falsely passing. A var that IS on
+    # the allowlist but lives only in the operator shell still passes (Compose
+    # forwards it), preserving the false-negative fix from PR #531. When the
+    # compose asset cannot be located/parsed the allowlist is None and we fall
+    # back to the unrestricted merged view (legacy behavior; never over-fail).
+    allowlist = local_service_worker_environment_keys()
+    lease_host_env = (
+        dict(merged_env)
+        if allowlist is None
+        else {key: value for key, value in merged_env.items() if key in allowlist}
+    )
     # The worker additionally exports settings.github_token into
     # GH_TOKEN/GITHUB_TOKEN before constructing the resolver (build_worker_runtime
     # -> _service_git_environment + _apply_service_git_environment). Mirror that
     # explicit forward so a token that resolves only through service settings (not
-    # the env file) still satisfies a provider: github lease.
+    # the env file) still satisfies a provider: github lease. GH_TOKEN/GITHUB_TOKEN
+    # are on the worker allowlist, so this also supplies a value when it comes from
+    # settings rather than the env file.
     if settings.github_token:
-        host_env["GH_TOKEN"] = settings.github_token
-        host_env["GITHUB_TOKEN"] = settings.github_token
+        lease_host_env["GH_TOKEN"] = settings.github_token
+        lease_host_env["GITHUB_TOKEN"] = settings.github_token
     # Run the image probes against the SAME Docker daemon/config the worker's
     # compose pulls target. The worker selects its daemon from the resolved service
     # environment (AWF_DOCKER_HOST, materialised as DOCKER_HOST -- settings.docker_host
@@ -114,16 +137,18 @@ def profile_doctor(
     # merged service env with DOCKER_HOST forced to the resolved daemon so a stray
     # caller DOCKER_HOST/DOCKER_CONTEXT cannot redirect the probe. Mirror
     # bootstrap._docker_cli_environ's daemon precedence exactly: prefer AWF_DOCKER_HOST
-    # OR a bare DOCKER_HOST from the merged Compose view (host_env, sourced via
+    # OR a bare DOCKER_HOST from the merged Compose view (merged_env, sourced via
     # local_service_environ -- the same view the worker's raw_service_env is built
-    # from -- exactly like the lease checks above). resolve_service_settings()'s
+    # from). The Docker/image probes keep using the full merged view (not the lease
+    # allowlist) because the worker resolves its daemon and agent image from the
+    # resolved service env, not the secret-lease resolver. resolve_service_settings()'s
     # Settings() only reads an AWF_-prefixed, cwd-relative .env, so a daemon selected
     # only via an AWF_DOCKER_HOST/DOCKER_HOST in the Compose env file (with the doctor
     # invoked from another cwd) would otherwise leave the probe on the default socket
     # while the worker targets the env-file daemon, so preflight would not match
     # provisioning.
-    env_docker_host = non_empty_env_value(host_env, "AWF_DOCKER_HOST") or non_empty_env_value(
-        host_env, "DOCKER_HOST"
+    env_docker_host = non_empty_env_value(merged_env, "AWF_DOCKER_HOST") or non_empty_env_value(
+        merged_env, "DOCKER_HOST"
     )
     # Always scrub the Docker CLI client keys (DOCKER_CONFIG/DOCKER_CERT_PATH/
     # DOCKER_TLS*/...) the service environment explicitly clears, exactly as the
@@ -131,7 +156,7 @@ def profile_doctor(
     # without it a stale caller client key (e.g. a TLS config the service env blanks)
     # would survive into the probe and let it talk to a different daemon/config than
     # the worker's compose pulls, so preflight would not match provisioning.
-    scrubbed_keys = set(cleared_docker_cli_client_keys(host_env))
+    scrubbed_keys = set(cleared_docker_cli_client_keys(merged_env))
     # Mirror bootstrap._docker_cli_environ's clears_docker_host: when the merged
     # service env explicitly clears DOCKER_HOST (present but empty) while the caller
     # shell still exports a non-empty host, the worker scrubs DOCKER_HOST/DOCKER_CONTEXT
@@ -139,7 +164,7 @@ def profile_doctor(
     # this the doctor would treat the empty host as merely absent and pin
     # settings.docker_host below, probing a different daemon than the worker uses.
     caller_docker_host_found, caller_docker_host_value = env_lookup(os.environ, "DOCKER_HOST")
-    service_docker_host_found, service_docker_host_value = env_lookup(host_env, "DOCKER_HOST")
+    service_docker_host_found, service_docker_host_value = env_lookup(merged_env, "DOCKER_HOST")
     clears_docker_host = (
         service_docker_host_found
         and not service_docker_host_value
@@ -156,7 +181,7 @@ def profile_doctor(
     if env_docker_host or clears_docker_host:
         scrubbed_keys.update({"DOCKER_CONTEXT", "DOCKER_HOST"})
     docker_environ = {
-        key: value for key, value in host_env.items() if key.upper() not in scrubbed_keys
+        key: value for key, value in merged_env.items() if key.upper() not in scrubbed_keys
     }
     if env_docker_host:
         # Pin DOCKER_HOST to the daemon the worker materialises; DOCKER_CONTEXT was
@@ -178,7 +203,7 @@ def profile_doctor(
         resolved,
         repo_url=detect_repo_url_from_checkout(resolved),
         host_home=Path(settings.host_home).expanduser().resolve(),
-        host_env=host_env,
+        host_env=lease_host_env,
         # Probe the SAME agent runtime image the worker renders into every stack
         # (build_worker_runtime -> ComposeStackLauncher(agent_runtime_image=...)),
         # so a missing/private custom AWF_AGENT_RUNTIME_IMAGE fails preflight here
@@ -188,11 +213,13 @@ def profile_doctor(
         # here only reads an AWF_-prefixed, cwd-relative .env, so an image set only in the
         # Compose env file (with the doctor invoked from another cwd) would leave
         # settings.agent_runtime_image on the bare default while the worker pulls the custom
-        # image. Source AWF_AGENT_RUNTIME_IMAGE from the merged Compose view (host_env, the
-        # same view used for the lease/Docker checks above) first, exactly like the DOCKER_HOST
-        # pin, and fall back to settings.agent_runtime_image.
+        # image. Source AWF_AGENT_RUNTIME_IMAGE from the full merged Compose view
+        # (merged_env, the same view used for the Docker checks above -- not the lease
+        # allowlist) first, exactly like the DOCKER_HOST pin, and fall back to
+        # settings.agent_runtime_image.
         agent_runtime_image=(
-            non_empty_env_value(host_env, "AWF_AGENT_RUNTIME_IMAGE") or settings.agent_runtime_image
+            non_empty_env_value(merged_env, "AWF_AGENT_RUNTIME_IMAGE")
+            or settings.agent_runtime_image
         ),
         docker_environ=docker_environ,
     )

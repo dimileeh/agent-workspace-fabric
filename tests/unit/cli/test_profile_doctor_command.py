@@ -869,6 +869,170 @@ def test_doctor_mirrors_cleared_docker_host_without_pinning_settings(
     assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
 
 
+def test_doctor_drops_host_only_export_outside_worker_allowlist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A host-only export not on the worker's env allowlist must NOT reach host_env.
+
+    The worker's ``LocalSecretLeaseMountResolver`` only sees variables on the
+    local-service Compose ``environment:`` block, not every caller-shell export.
+    A ``provider: env`` lease satisfiable only by a host-only variable (e.g.
+    ``MY_CUSTOM_TOKEN``) FAILS at provision with ``SECRET_LEASE_SOURCE_MISSING``,
+    so the doctor must drop it -- modelling host_env on the worker allowlist --
+    rather than falsely passing it from the over-inclusive merged shell view.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # Merged view carries an allowlisted var and a host-only export outside it.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"MY_CUSTOM_TOKEN": "x", "ANTHROPIC_API_KEY": "y"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment_keys",
+        lambda: frozenset({"ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"}),
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # Allowlisted var survives; the host-only export is dropped (matches the
+    # worker's provision-time SECRET_LEASE_SOURCE_MISSING).
+    assert host_env["ANTHROPIC_API_KEY"] == "y"
+    assert "MY_CUSTOM_TOKEN" not in host_env
+
+
+def test_doctor_keeps_compose_env_allowlisted_var(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An allowlisted var present only via the merged view must survive (no false negative).
+
+    PR #531 fixed a false negative where a var on the worker's Compose
+    ``environment:`` block but exported in the operator shell (not ``.env``) was
+    wrongly reported missing. The allowlist is a superset of ``.env`` for such
+    shell-exported allowlisted vars, so the doctor must keep them in host_env.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The merged view carries the bitbucket creds (shell-exported, allowlisted).
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {
+            "BITBUCKET_API_TOKEN": "bb_token",
+            "BITBUCKET_EMAIL": "dev@example.com",
+        },
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment_keys",
+        lambda: frozenset({"BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL", "GH_TOKEN", "GITHUB_TOKEN"}),
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    assert host_env["BITBUCKET_API_TOKEN"] == "bb_token"
+    assert host_env["BITBUCKET_EMAIL"] == "dev@example.com"
+
+
+def test_doctor_falls_back_to_merged_view_when_allowlist_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the worker allowlist cannot be resolved, host_env keeps the merged view.
+
+    If the compose asset cannot be located/parsed,
+    ``local_service_worker_environment_keys`` returns ``None`` and the doctor
+    falls back to the unrestricted merged view -- preserving legacy behavior so
+    the preflight never crashes or over-fails.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"MY_CUSTOM_TOKEN": "x", "ANTHROPIC_API_KEY": "y"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment_keys",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # Legacy behavior: the full merged view is preserved when the allowlist is
+    # unavailable (the doctor degrades safely rather than over-failing).
+    assert host_env["MY_CUSTOM_TOKEN"] == "x"
+    assert host_env["ANTHROPIC_API_KEY"] == "y"
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+import yaml
 from sqlalchemy.engine import make_url
 
 from awf.common.config import (
@@ -60,6 +61,7 @@ __all__ = [
     "LOCAL_SERVICE_INCLUDED_COMPOSE_FILE",
     "ServiceSettings",
     "local_service_environ",
+    "local_service_worker_environment_keys",
     "resolve_local_service_compose_env_file",
     "resolve_local_service_provider_environ",
     "resolve_service_settings",
@@ -327,6 +329,73 @@ def local_service_environ(
     _populate_compose_postgres_password(merged)
     _populate_local_compose_defaults(merged)
     return merged
+
+
+def local_service_worker_environment_keys(
+    *, compose_file: Path | None = None
+) -> frozenset[str] | None:
+    """Return the env var NAMES the worker container is launched with.
+
+    The worker's secret-lease resolver only sees variables defined on the
+    local-service Compose ``environment:`` block (the worker service inherits the
+    shared ``&awf-environment`` anchor via ``<<: *awf-service``), NOT every
+    caller-shell export. Returns those mapping KEYS -- the real worker env
+    allowlist -- parsed from the canonical ``docker/compose/local-service.yml``.
+    ``None`` when the compose asset cannot be located/parsed (caller falls back
+    to the unrestricted merged view, preserving legacy behavior).
+    """
+
+    resolved = compose_file
+    if resolved is None:
+        resolved = _local_service_asset_path(LOCAL_SERVICE_INCLUDED_COMPOSE_FILE)
+    if resolved is None or not resolved.exists():
+        return None
+    try:
+        data = yaml.safe_load(resolved.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, Mapping):
+        return None
+
+    keys: set[str] = set()
+    services = data.get("services")
+    if isinstance(services, Mapping):
+        worker = services.get("worker")
+        if isinstance(worker, Mapping):
+            # Primary source: the worker's own ``environment`` block. PyYAML's
+            # SafeLoader expands ``<<: *awf-service`` so this already carries the
+            # ``&awf-environment`` anchor keys.
+            _collect_compose_environment_keys(worker.get("environment"), keys)
+    # Robust fallback that does not depend on merge-key expansion: union the
+    # ``environment`` keys from every top-level ``x-*`` extension template (the
+    # ``x-awf-service`` anchor the worker uses). This captures the anchor keys
+    # even if a loader leaves ``<<`` unexpanded. Intentionally do NOT walk
+    # arbitrary services (avoids pulling in postgres/console env keys the worker
+    # never receives).
+    for key, value in data.items():
+        if isinstance(key, str) and key.startswith("x-") and isinstance(value, Mapping):
+            _collect_compose_environment_keys(value.get("environment"), keys)
+
+    if not keys:
+        return None
+    return frozenset(keys)
+
+
+def _collect_compose_environment_keys(environment: object, keys: set[str]) -> None:
+    """Collect Compose ``environment:`` key names from mapping or list shapes."""
+
+    if isinstance(environment, Mapping):
+        for key in environment:
+            if isinstance(key, str):
+                keys.add(key)
+        return
+    if isinstance(environment, Sequence) and not isinstance(environment, str | bytes | bytearray):
+        for item in environment:
+            if not isinstance(item, str):
+                continue
+            name = item.split("=", 1)[0].strip()
+            if name:
+                keys.add(name)
 
 
 def resolve_local_service_provider_environ(
