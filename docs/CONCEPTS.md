@@ -188,11 +188,14 @@ each).
 The runtime/toolchain image is expected to provide each declared version side by
 side — for example JDKs installed under `/usr/lib/jvm/temurin-17` and
 `/usr/lib/jvm/temurin-21`, selected per command via `JAVA_HOME` or
-`update-alternatives`. When a declared version is not present in the image, AWF
-surfaces a `RUNTIME_TOOLCHAIN_UNAVAILABLE` warning at preflight (instead of leaving
-the agent to install a JDK by hand). The built-in `java` profile declares
-`java: ["17", "21"]` for exactly this reason: a real Gradle repo needed JDK 17 for
-test execution while the runtime shipped JDK 21.
+`update-alternatives`. When a declared version is not present in the image, the
+pure, I/O-free `runtime_toolchain_findings` lint seam yields a
+`RUNTIME_TOOLCHAIN_UNAVAILABLE` warning (instead of leaving the agent to install a
+JDK by hand). A preflight that introspects the runtime/toolchain image must supply
+the seam the versions it discovered; that image introspection is not wired into
+`awf profile doctor` yet, so the declaration is advisory until then. The built-in
+`java` profile declares `java: ["17", "21"]` for exactly this reason: a real Gradle
+repo needed JDK 17 for test execution while the runtime shipped JDK 21.
 
 ### Local egress policy
 
