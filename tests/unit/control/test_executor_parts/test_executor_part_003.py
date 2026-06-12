@@ -1305,6 +1305,7 @@ class TestHappyPathPart002:
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Planning succeeds (handoff) and writes the plan + conformance report
         # into the worktree, but the implementation produces no staged changes,
@@ -1361,6 +1362,8 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout="")  # cached diff --name-only: no staged paths
         fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0 → no-work exit
 
+        order = _record_deposit_vs_mark_order(executor, monkeypatch)
+
         await executor.execute(ws_id)
 
         async with factory() as s:
@@ -1375,6 +1378,9 @@ class TestHappyPathPart002:
         assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
             '{"status": "satisfied", "gaps": []}'
         )
+        # The deposit must land BEFORE the FAILED-status bump so the console's
+        # ``updated_at``-keyed refetch always observes the artifacts.
+        assert order.index("deposit") < order.index("mark_failed")
 
     @pytest.mark.unit
     async def test_agent_phase_cleanup_error_deposits_planning_artifacts(
@@ -1816,6 +1822,7 @@ class TestHappyPathPart002:
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Planning succeeds and writes the plan + conformance report, but the
         # post-agent staged output is plan-only, so the PLAN_ONLY_OUTPUT gate
@@ -1836,6 +1843,8 @@ class TestHappyPathPart002:
         )
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (base..HEAD) empty
 
+        order = _record_deposit_vs_mark_order(executor, monkeypatch)
+
         await executor.execute(ws_id)
 
         async with factory() as s:
@@ -1852,6 +1861,10 @@ class TestHappyPathPart002:
             assert failed_event.reason_code == "PLAN_ONLY_OUTPUT"
 
         self._assert_served_plan_artifacts(tmp_path, ws_id)
+        # ``_fail_if_plan_only_paths`` routes through ``_mark_failed``; the
+        # deposit must precede it so the console's ``updated_at``-keyed refetch
+        # always observes the artifacts on the preserved-FAILED workspace.
+        assert order.index("deposit") < order.index("mark_failed")
 
     @pytest.mark.unit
     async def test_quality_gate_block_deposits_planning_artifacts(
@@ -1897,6 +1910,8 @@ class TestHappyPathPart002:
             lambda _violations: "protected quality-gate file changed",
         )
 
+        order = _record_deposit_vs_mark_order(executor, monkeypatch)
+
         await executor.execute(ws_id)
 
         async with factory() as s:
@@ -1913,6 +1928,9 @@ class TestHappyPathPart002:
             assert failed_event.reason_code == "QUALITY_GATE_POLICY_CHANGED"
 
         self._assert_served_plan_artifacts(tmp_path, ws_id)
+        # The deposit must land BEFORE the FAILED-status bump so the console's
+        # ``updated_at``-keyed refetch always observes the artifacts.
+        assert order.index("deposit") < order.index("mark_failed")
 
     @pytest.mark.unit
     async def test_planning_profile_fails_when_plan_phase_changes_code(
