@@ -922,6 +922,63 @@ async def test_fix_pass_plan_only_reverted_real_output_still_fails(
     assert finish_kwargs["reason_code"] == PLAN_ONLY_OUTPUT_REASON_CODE
 
 
+@pytest.mark.unit
+async def test_fix_pass_plan_only_deposits_artifacts_before_marking_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6JPz04: the plan-only fix-pass path must deposit
+    planning artifacts BEFORE the terminal FAILED status is published.
+
+    ``_fail_if_plan_only_paths`` routes through bare ``_mark_failed`` (not the
+    ``_mark_failed_preserving_planning_artifacts`` helper every other terminal
+    path in this cycle uses), so depositing afterward would let the console
+    observe the FAILED ``updated_at`` and cache an empty artifact list before the
+    post-cycle deposit (in ``execution_flow``) lands — never refetching and
+    hiding the Plan/Validation controls. The deposit must precede the
+    ``_fail_if_plan_only_paths`` call.
+    """
+    profile = WorkspaceProfile.model_validate({"name": "prof-fix-plan-deposit"})
+    workspace = _workspace("ws_fix_plan_deposit")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    order: list[str] = []
+
+    def _spy_deposit(*_args: object, **_kwargs: object) -> None:
+        order.append("deposit")
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
+    executor = _plan_only_guard_executor(tmp_path, committed_paths=set())
+
+    async def _fail(*_args: object, **_kwargs: object) -> bool:
+        order.append("fail")
+        return True
+
+    executor._fail_if_plan_only_paths = AsyncMock(side_effect=_fail)
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=adapter,
+        git_in_worktree=_conformance_fix_pass_git(tmp_path),
+    )
+
+    assert result.stop
+    # The artifact deposit happens strictly before the terminal FAILED publish.
+    assert order == ["deposit", "fail"]
+    executor._fail_if_plan_only_paths.assert_awaited_once()
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["reason_code"] == PLAN_ONLY_OUTPUT_REASON_CODE
+
+
 # --- Direct unit tests for the guard helper itself ------------------------
 
 
