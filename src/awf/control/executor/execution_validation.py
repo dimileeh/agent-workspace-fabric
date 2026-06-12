@@ -287,6 +287,8 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
+                profile=profile,
+                worktree_path=worktree_path,
             )
         if validation_workspace_head_sha is None:
             return await _fail_validation_worktree_guard(
@@ -296,6 +298,8 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
                 message="could not capture workspace HEAD before AWF validation",
+                profile=profile,
+                worktree_path=worktree_path,
             )
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
@@ -352,6 +356,8 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
+                    profile=profile,
+                    worktree_path=worktree_path,
                     check_callback_after_cleanup=True,
                 )
             ) is not None:
@@ -408,6 +414,8 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
+                    profile=profile,
+                    worktree_path=worktree_path,
                     check_callback_after_cleanup=True,
                 )
             ) is not None:
@@ -462,6 +470,8 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
+                    profile=profile,
+                    worktree_path=worktree_path,
                     check_callback_after_cleanup=True,
                 )
             ) is not None:
@@ -1228,6 +1238,8 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
+                profile=profile,
+                worktree_path=worktree_path,
             )
 
         # Loop back to re-validate.
