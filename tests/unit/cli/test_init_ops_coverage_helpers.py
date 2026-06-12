@@ -123,6 +123,39 @@ def test_detect_github_forge_auth_degrades_to_unknown_without_settings(
 
 
 @pytest.mark.unit
+def test_detect_github_forge_auth_ok_when_token_present_without_gh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured token authenticates even with the ``gh`` CLI uninstalled.
+
+    Regression for the misleading ``auth_ok: false`` (PR #541 review): AWF's
+    GitHub API operations rely on ``AWF_GITHUB_TOKEN`` (readiness), not the ``gh``
+    binary, so a present+valid token with ``gh`` absent is genuinely authenticated.
+    ``gh`` presence stays reported as a separate advisory signal but must not drag
+    ``auth_ok`` to ``False``.
+    """
+    from awf.host_setup.system_checks import SetupCheckLevel, SetupCheckResult
+
+    monkeypatch.setattr(
+        "awf.host_setup.system_checks.check_gh",
+        lambda **_kwargs: SetupCheckResult(
+            name="gh", level=SetupCheckLevel.WARNING, summary="missing", detail="missing"
+        ),
+    )
+    monkeypatch.setattr(
+        "awf.service.provider_readiness.check_single_provider_readiness",
+        lambda *_a, **_k: {"ok": True},
+    )
+
+    auth, auth_ok = init_ops._detect_github_forge_auth(  # noqa: SLF001
+        settings=object(), service_env=None
+    )
+
+    assert auth == {"gh_present": False, "github_readiness": "ok"}
+    assert auth_ok is True
+
+
+@pytest.mark.unit
 def test_detect_bitbucket_forge_auth_falls_back_to_os_environ(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

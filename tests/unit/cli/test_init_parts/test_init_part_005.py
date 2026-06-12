@@ -140,6 +140,36 @@ def test_init_github_present_but_unauthenticated_reports_both_signals(
 
 
 @pytest.mark.unit
+def test_init_github_token_present_without_gh_is_authenticated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid token with ``gh`` absent reports ``auth_ok``/``level=ok`` (PR #541).
+
+    AWF's GitHub API operations rely on ``AWF_GITHUB_TOKEN`` (readiness), not the
+    ``gh`` binary, so the top-level ``auth_ok`` must follow the readiness signal and
+    not be dragged to ``False`` by a missing CLI. The ``gh`` install hint is still
+    surfaced separately, but onboarding is not flagged as a warning.
+    """
+    _stub_prereqs(monkeypatch)
+    _stub_origin(monkeypatch, "https://github.com/acme/widgets.git")
+    _stub_check_gh(monkeypatch, present=False)
+    _stub_github_readiness(monkeypatch, ok=True)
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    forge = json.loads(result.output)["forge"]
+    assert forge["auth"]["gh_present"] is False
+    assert forge["auth"]["github_readiness"] == "ok"
+    assert forge["auth_ok"] is True
+    assert forge["level"] == "ok"
+
+    pretty = _runner.invoke(app, ["init", str(tmp_path)])
+    assert "GitHub auth verified." in pretty.output
+    assert "Install the GitHub CLI (gh)" in pretty.output
+
+
+@pytest.mark.unit
 def test_init_bitbucket_repo_names_only_required_missing_keys_and_never_mentions_gh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

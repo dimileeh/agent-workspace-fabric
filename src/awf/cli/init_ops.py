@@ -530,6 +530,14 @@ def _detect_github_forge_auth(
     separately: a gh CLI installed but unauthenticated is ``gh_present=True`` with
     ``github_readiness="fail"``. Readiness degrades to ``"unknown"`` (never
     blocking) when local service settings are unavailable.
+
+    ``auth_ok`` tracks *authentication* only — the provider readiness signal,
+    which AWF's GitHub API operations actually depend on (the ``AWF_GITHUB_TOKEN``)
+    — and deliberately ignores ``gh_present``: a configured token with the ``gh``
+    CLI uninstalled is genuinely authenticated, so reporting ``auth_ok=False``
+    there would contradict the readiness signal (PR #541 review). The ``gh``
+    presence stays surfaced in ``auth`` and in the guidance lines as a separate,
+    advisory install hint, never folded into ``auth_ok``.
     """
     from awf.host_setup.system_checks import SetupCheckLevel, check_gh
 
@@ -541,7 +549,7 @@ def _detect_github_forge_auth(
         result = check_single_provider_readiness(settings, provider="github", environ=service_env)
         readiness = "ok" if result.get("ok") else "fail"
     auth: dict[str, object] = {"gh_present": gh_present, "github_readiness": readiness}
-    return auth, gh_present and readiness == "ok"
+    return auth, readiness == "ok"
 
 
 def _bitbucket_required_auth_keys(env: Mapping[str, str]) -> tuple[str, ...]:
