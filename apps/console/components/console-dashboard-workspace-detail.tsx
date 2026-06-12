@@ -150,7 +150,7 @@ export function TaskDetailsModal({
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
           <CoordinationWarningBlock warnings={workspace.coordination_warnings} status={workspace.status} />
-          <TaskArtifactsSection workspaceId={workspace.workspace_id} />
+          <TaskArtifactsSection key={workspace.workspace_id} workspaceId={workspace.workspace_id} />
           <section className="grid gap-2 rounded-md border border-line bg-surface-2 p-3">
             <div className="text-xs font-semibold text-fg-muted">Prompt sent to AWF</div>
             <TaskPromptBody prompt={workspace.task_prompt} />
