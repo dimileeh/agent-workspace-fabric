@@ -198,6 +198,7 @@ async def _invoke_cli_for_verdict(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> Verdict:
     return (
         await runner._invoke_cli_for_verdict_result(
@@ -207,6 +208,7 @@ async def _invoke_cli_for_verdict(
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,
+            task_tag=task_tag,
         )
     ).verdict
 

@@ -283,6 +283,52 @@ async def test_invoke_cli_for_verdict_result_default_forwards_sentinel() -> None
     assert sink_task_tags == [_TASK_TAG_UNSET]
 
 
+def _verdict_wrapper_runner(invoke_tags: list[object]) -> SimpleNamespace:
+    async def _invoke(**kwargs: object) -> VerdictResult:
+        invoke_tags.append(kwargs.get("task_tag"))
+        return VerdictResult(verdict="fix_committed")
+
+    return SimpleNamespace(_invoke_cli_for_verdict_result=_invoke)
+
+
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_wrapper_forwards_explicit_tag() -> None:
+    """The verdict-only wrapper threads ``task_tag`` to the result helper."""
+    invoke_tags: list[object] = []
+    runner = _verdict_wrapper_runner(invoke_tags)
+
+    verdict = await comments._invoke_cli_for_verdict(
+        runner,
+        workspace_id="ws_1",
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        task_tag="WRAP-9",
+    )
+
+    assert verdict == "fix_committed"
+    assert invoke_tags == ["WRAP-9"]
+
+
+@pytest.mark.unit
+async def test_invoke_cli_for_verdict_wrapper_default_forwards_sentinel() -> None:
+    """Omitting ``task_tag`` forwards the sentinel so the sink self-resolves."""
+    invoke_tags: list[object] = []
+    runner = _verdict_wrapper_runner(invoke_tags)
+
+    await comments._invoke_cli_for_verdict(
+        runner,
+        workspace_id="ws_1",
+        prompt="p",
+        commit_message="fix: x",
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+    )
+
+    assert invoke_tags == [_TASK_TAG_UNSET]
+
+
 # --------------------------------------------------------------------------- #
 # 3. Each repair path resolves the tag once and threads the same value through.
 # --------------------------------------------------------------------------- #
