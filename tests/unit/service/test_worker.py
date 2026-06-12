@@ -1208,6 +1208,72 @@ def test_service_git_environment_unchanged_without_bitbucket_credentials(
     assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
 
 
+@pytest.mark.unit
+def test_service_git_environment_reads_bitbucket_and_ssh_from_source_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``source_env`` (not the caller os.environ) drives the Bitbucket/SSH wiring.
+
+    The real worker reads its Compose-forwarded container env; callers that run
+    from a different process context (``awf profile doctor``) pass that env via
+    ``source_env`` so the Bitbucket-conditional additions match the worker. Here
+    the creds and agent socket live ONLY in ``source_env`` and are absent from the
+    caller os.environ, yet the Bitbucket helper, GIT_TERMINAL_PROMPT, and the
+    SSH_AUTH_SOCK/GIT_SSH_COMMAND wiring are still emitted.
+    """
+    monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+    monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+
+    env = worker_mod._service_git_environment(
+        tmp_path / "host-home",
+        github_token="ghp_service_token",
+        source_env={
+            "BITBUCKET_API_TOKEN": "bb_token",
+            "BITBUCKET_EMAIL": "dev@example.com",
+            "SSH_AUTH_SOCK": "/run/host-services/ssh-auth.sock",
+        },
+    )
+
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    count = int(env["GIT_CONFIG_COUNT"])
+    entries = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
+    }
+    assert "credential.https://bitbucket.org.helper" in entries
+    assert env["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
+    assert "IdentityAgent=/run/host-services/ssh-auth.sock" in env["GIT_SSH_COMMAND"]
+
+
+@pytest.mark.unit
+def test_service_git_environment_source_env_overrides_caller_environ(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicit ``source_env`` fully replaces os.environ for Bitbucket detection.
+
+    Bitbucket creds in the caller os.environ but absent from ``source_env`` must
+    NOT add the Bitbucket helper: the worker context modelled by ``source_env``
+    lacks them, so the doctor must not over-add keys the worker would not inject.
+    """
+    monkeypatch.setenv("BITBUCKET_API_TOKEN", "caller_token")
+    monkeypatch.setenv("BITBUCKET_EMAIL", "caller@example.com")
+
+    env = worker_mod._service_git_environment(
+        tmp_path / "host-home",
+        github_token="ghp_service_token",
+        source_env={},
+    )
+
+    assert "GIT_TERMINAL_PROMPT" not in env
+    count = int(env["GIT_CONFIG_COUNT"])
+    entries = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)
+    }
+    assert not any("bitbucket.org" in key for key in entries)
+
+
 class _RecordingForgeClient:
     """Minimal ForgeClient stub that records aclose() calls."""
 

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+import yaml
 from sqlalchemy.engine import make_url
 
 from awf.common.config import (
@@ -24,7 +25,11 @@ from awf.common.config import (
     settings_constructor_fields,
     validate_production_settings,
 )
-from awf.service.environment import compose_env_file_values
+from awf.service.environment import (
+    compose_env_file_values,
+    compose_expand_value,
+    env_lookup,
+)
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = DEFAULT_LOCAL_DATABASE_URL
 DEFAULT_LOCAL_SERVICE_API_BASE_URL = str(Settings.model_fields["api_base_url"].default)
@@ -60,6 +65,8 @@ __all__ = [
     "LOCAL_SERVICE_INCLUDED_COMPOSE_FILE",
     "ServiceSettings",
     "local_service_environ",
+    "local_service_worker_environment",
+    "local_service_worker_environment_keys",
     "resolve_local_service_compose_env_file",
     "resolve_local_service_provider_environ",
     "resolve_service_settings",
@@ -327,6 +334,142 @@ def local_service_environ(
     _populate_compose_postgres_password(merged)
     _populate_local_compose_defaults(merged)
     return merged
+
+
+def local_service_worker_environment_keys(
+    *, compose_file: Path | None = None
+) -> frozenset[str] | None:
+    """Return the env var NAMES the worker container is launched with.
+
+    The worker's secret-lease resolver only sees variables defined on the
+    local-service Compose ``environment:`` block (the worker service inherits the
+    shared ``&awf-environment`` anchor via ``<<: *awf-service``), NOT every
+    caller-shell export. Returns those mapping KEYS -- the real worker env
+    allowlist -- parsed from the canonical ``docker/compose/local-service.yml``.
+    ``None`` when the compose asset cannot be located/parsed (caller falls back
+    to the unrestricted merged view, preserving legacy behavior).
+    """
+
+    pairs = _local_service_worker_environment_pairs(compose_file=compose_file)
+    if pairs is None:
+        return None
+    return frozenset(pairs)
+
+
+def local_service_worker_environment(
+    merged_env: Mapping[str, str], *, compose_file: Path | None = None
+) -> dict[str, str] | None:
+    """Return the worker container's MATERIALIZED Compose environment.
+
+    Unlike :func:`local_service_worker_environment_keys` (NAMES only), this
+    resolves each declared value on the worker's Compose ``environment:`` block by
+    interpolating it against ``merged_env`` (the merged Compose view: env file
+    overlaid with the caller shell), reproducing the values Docker Compose
+    actually injects into the worker container. This materializes aliased defaults
+    such as ``AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}``
+    -- a key whose NAME is absent from ``merged_env`` yet which the worker receives
+    populated from ``GH_TOKEN`` -- so a ``provider: env`` lease with
+    ``ref: AWF_GITHUB_TOKEN`` is evaluated against the value the real worker has,
+    rather than being falsely reported as ``SECRET_LEASE_SOURCE_MISSING`` by a
+    filter of the pre-interpolation inputs. A bare list-form entry (``- KEY``)
+    forwards the host value unchanged (omitted when the host does not set it,
+    matching Compose). Keys that resolve to an empty string are kept (the worker
+    receives them as ``""``); the secret-lease resolver treats an empty value as
+    missing, so this does not weaken the signal. ``None`` when the compose asset
+    cannot be located/parsed (caller falls back to the unrestricted merged view,
+    preserving legacy behavior).
+    """
+
+    pairs = _local_service_worker_environment_pairs(compose_file=compose_file)
+    if pairs is None:
+        return None
+    materialized: dict[str, str] = {}
+    for key, raw_value in pairs.items():
+        if raw_value is None:
+            # Bare ``- KEY`` list entry: Compose forwards the host value verbatim,
+            # and omits the key when the host does not set it.
+            found, value = env_lookup(merged_env, key)
+            if found:
+                materialized[key] = value
+            continue
+        materialized[key] = compose_expand_value(raw_value, environ=merged_env)
+    return materialized
+
+
+def _local_service_worker_environment_pairs(
+    *, compose_file: Path | None = None
+) -> dict[str, str | None] | None:
+    """Parse the worker service's Compose ``environment:`` key->raw-value pairs.
+
+    Single source of truth for both the worker env KEY allowlist
+    (:func:`local_service_worker_environment_keys`) and the materialized worker
+    env (:func:`local_service_worker_environment`). Mapping values are kept as
+    declared (interpolated later); a bare list-form entry (``- KEY``) maps to
+    ``None`` meaning "forward the host value". ``None`` when the compose asset
+    cannot be located/parsed.
+    """
+
+    resolved = compose_file
+    if resolved is None:
+        resolved = _local_service_asset_path(LOCAL_SERVICE_INCLUDED_COMPOSE_FILE)
+    if resolved is None or not resolved.exists():
+        return None
+    try:
+        data = yaml.safe_load(resolved.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, Mapping):
+        return None
+
+    pairs: dict[str, str | None] = {}
+    services = data.get("services")
+    if isinstance(services, Mapping):
+        worker = services.get("worker")
+        if isinstance(worker, Mapping):
+            # Primary source: the worker's own ``environment`` block. PyYAML's
+            # SafeLoader expands ``<<: *awf-service`` so this already carries the
+            # ``&awf-environment`` anchor entries.
+            _collect_compose_environment_pairs(worker.get("environment"), pairs)
+    if not pairs:
+        # Robust fallback for loaders that leave ``<<`` unexpanded (so the worker
+        # block above yielded nothing): union the ``environment`` entries from every
+        # top-level ``x-*`` extension template -- the ``x-awf-service`` anchor the
+        # worker uses. Gated on the primary path finding no entries so an unrelated
+        # future ``x-*`` template (e.g. an ``x-debug-service`` for a non-worker
+        # service) cannot silently widen the worker's secret-lease allowlist.
+        # Intentionally does NOT walk arbitrary services (avoids pulling in
+        # postgres/console env keys the worker never receives).
+        for key, value in data.items():
+            if isinstance(key, str) and key.startswith("x-") and isinstance(value, Mapping):
+                _collect_compose_environment_pairs(value.get("environment"), pairs)
+
+    if not pairs:
+        return None
+    return pairs
+
+
+def _collect_compose_environment_pairs(environment: object, pairs: dict[str, str | None]) -> None:
+    """Collect Compose ``environment:`` key->raw-value pairs from mapping or list shapes.
+
+    Mapping values are kept verbatim (coerced to ``str``; a YAML null stays
+    ``None``). A list ``KEY=value`` entry keeps ``value``; a bare ``KEY`` entry
+    maps to ``None`` (Compose forwards the host value unchanged).
+    """
+
+    if isinstance(environment, Mapping):
+        for key, value in environment.items():
+            if isinstance(key, str):
+                pairs[key] = None if value is None else str(value)
+        return
+    if isinstance(environment, Sequence) and not isinstance(environment, str | bytes | bytearray):
+        for item in environment:
+            if not isinstance(item, str):
+                continue
+            name, separator, value = item.partition("=")
+            name = name.strip()
+            if not name:
+                continue
+            pairs[name] = value if separator else None
 
 
 def resolve_local_service_provider_environ(

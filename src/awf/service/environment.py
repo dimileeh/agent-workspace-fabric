@@ -449,6 +449,18 @@ def _strip_compose_inline_comment(raw_value: str) -> str:
     return raw_value
 
 
+def compose_expand_value(value: str, *, environ: Mapping[str, str]) -> str:
+    """Expand a Compose ``${VAR:-default}`` expression against ``environ``.
+
+    Public wrapper over the env-file value interpolator so callers outside this
+    module (e.g. the worker-environment materializer) can resolve a Compose
+    ``environment:`` value to what Docker Compose would inject, without reaching
+    into the private helper.
+    """
+
+    return _compose_expand_env_value(value, caller_environ=environ, values={})
+
+
 def _compose_expand_env_value(
     value: str,
     *,
