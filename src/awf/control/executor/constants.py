@@ -58,6 +58,8 @@ SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE = (
     "workspace.setup_dependency_network_retry_exhausted"
 )
 
+RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE = "workspace.runtime_toolchain_unavailable"
+
 _PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
 
 _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
