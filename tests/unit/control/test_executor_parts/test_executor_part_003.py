@@ -1584,6 +1584,68 @@ class TestHappyPathPart002:
             '{"status": "satisfied", "gaps": []}'
         )
 
+    @pytest.mark.unit
+    async def test_post_agent_stale_status_skip_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # If the workspace transitions out of ``running`` concurrently (e.g. a
+        # cancel) between the agent run and the post-agent commit step, the
+        # ``_recheck_status`` guard skips the rest of execution and returns
+        # BEFORE the post-validation deposit block. The plan + conformance
+        # report the agent already wrote into the worktree must still reach the
+        # served artifact dir, mirroring the other post-planning early returns.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "gaps": []}',
+            encoding="utf-8",
+        )
+
+        async def _agent_run_cancels(**_kwargs: Any) -> None:
+            # Successful agent/planning run, but a concurrent cancel moves the
+            # workspace out of ``running`` so the post-agent ``_recheck_status``
+            # guard skips the commit step and returns.
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                ws.status = WorkspaceStatus.cancelled.value
+                await s.commit()
+
+        monkeypatch.setattr(
+            executor,
+            "_run_agent_task_with_optional_planning",
+            _agent_run_cancels,
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            # The executor backs off without overwriting the concurrent status.
+            assert ws.status == WorkspaceStatus.cancelled.value
+
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "satisfied", "gaps": []}'
+        )
+
     async def _queue_planning_through_post_agent_add(
         self,
         fake: FakeCommandRunner,

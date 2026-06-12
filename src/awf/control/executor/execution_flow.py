@@ -602,6 +602,18 @@ async def execute(
         expected=WorkspaceStatus.running,
         action="post_agent_commit",
     ):
+        # The workspace transitioned out of ``running`` concurrently (e.g. a
+        # cancel that preserves the worktree). Planning may already have
+        # finished and written the plan + conformance report into the worktree,
+        # but this skip returns before the post-validation deposit block.
+        # Deposit them first, mirroring the agent-phase failure handlers above,
+        # so the console can still surface them. Best-effort and idempotent.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
         return
 
     # Coding CLIs make file edits reliably but are inconsistent about git:
