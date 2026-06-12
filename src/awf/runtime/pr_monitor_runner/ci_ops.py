@@ -78,13 +78,16 @@ async def _run_ci_fix(
     )
     if head_result is not None:
         return cast(_GitPushResult, head_result)
+    # Resolve the workspace's optional Jira issue key once for this repair path
+    # and thread it into the commit sink so the cycle does not re-query the DB.
+    task_tag = await self._resolve_task_tag(workspace_id)
     prompt = fix_ci_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         failures=failures,
         workspace_runtime_context=self._workspace_runtime_context,
         owned_paths=await _owned_paths_for_prompt(self, workspace_id),
-        task_tag=await self._resolve_task_tag(workspace_id),
+        task_tag=task_tag,
     )
     agent_run_err = None
     command_evidence: list[str] = []
@@ -115,6 +118,7 @@ async def _run_ci_fix(
             compose_project=compose_project,
             compose_file=compose_file,
             command_evidence=command_evidence,
+            task_tag=task_tag,
         )
     except ProtectedScopeDiffError as exc:
         return cast(

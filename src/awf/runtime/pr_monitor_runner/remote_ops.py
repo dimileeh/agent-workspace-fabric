@@ -759,6 +759,7 @@ async def _run_sync_base(
                 workspace_id=workspace_id,
                 message=f"fix: resolve PR #{pr_number} base conflicts",
                 command_evidence=command_evidence,
+                task_tag=task_tag,
             )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
