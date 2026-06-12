@@ -16,10 +16,15 @@ from awf.service.report_shape import collect_next_actions, compute_overall_statu
         (["ok", "warn"], "warn"),
         (["ok", "warn", "fail"], "fail"),
         (["fail", "warn"], "fail"),
+        # ``skipped`` is neutral: it never raises or lowers the overall status.
+        (["skipped"], "ok"),
+        (["ok", "skipped"], "ok"),
+        (["warn", "skipped"], "warn"),
+        (["fail", "skipped"], "fail"),
     ],
 )
 def test_compute_overall_status_precedence(statuses: list[str], expected: str) -> None:
-    """fail dominates warn dominates ok; empty collapses to ok."""
+    """fail dominates warn dominates ok; empty and ``skipped`` collapse to ok."""
     assert compute_overall_status(statuses) == expected
 
 
