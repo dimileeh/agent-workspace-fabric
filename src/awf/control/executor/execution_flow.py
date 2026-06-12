@@ -36,6 +36,7 @@ from awf.common.task_tag import (
     title_with_task_tag,
 )
 from awf.control.executor import execution_validation as _execution_validation
+from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _AUDIT_PR_CREATED_EVENT,
@@ -59,7 +60,6 @@ from awf.control.executor.helpers import (
     _existing_pr_remote_push_url,
     _extract_pr_number,
     _failure_reason_for_phase,
-    _failure_salvage_payload,
     _profile_for_workspace,
     _provider_recovery_default_model_for_monitor_handoff,
 )
@@ -84,7 +84,6 @@ from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
     _MonitorRebaseRecoveryError,
-    _PlanningRunFailure,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
@@ -106,43 +105,11 @@ from awf.runtime.ownership import (
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
-from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION, render_workspace_path
 from awf.runtime.pr_creator import PullRequestError
 from awf.runtime.validation import (
     ValidationCoverageResult,
     ValidationResult,
 )
-from awf.service.artifacts import deposit_workspace_planning_artifacts
-
-
-def _deposit_planning_artifacts_best_effort(
-    self: Any,
-    *,
-    profile: Any,
-    workspace_id: str,
-    worktree_path: Path,
-) -> None:
-    """Deposit the worktree plan + conformance report into the served artifact
-    dir (a sibling of the worktree) before any teardown removes the worktree,
-    so the console can surface them. Gated on the resolved planning profile —
-    the only reliable "planning was required" signal (the handoff is set only
-    on the AWF-validation path, not when conformance is satisfied inline).
-    Runs on the success path, the validation/conformance stop paths, and the
-    early planning-failure return — all preserve a FAILED workspace whose
-    worktree still holds the plan/report. A copy failure is best-effort and
-    non-fatal.
-    """
-    if profile is None or not profile.planning.required:
-        return
-    deposit_workspace_planning_artifacts(
-        work_dir=self._config.compose_projects_root.parent,
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        plan_path=render_workspace_path(profile.planning.plan_path, workspace_id=workspace_id),
-        report_path=render_workspace_path(
-            profile.planning.conformance_report_path, workspace_id=workspace_id
-        ),
-    )
 
 
 async def execute(
@@ -470,50 +437,18 @@ async def execute(
                 model=run_model,
                 command_evidence=agent_command_evidence,
             )
-            if isinstance(planning_failure, _PlanningValidationHandoff):
-                planning_validation_handoff = planning_failure
-                await self._record_planning_validation_handoff_event(
-                    workspace_id=workspace_id,
-                    handoff=planning_failure,
-                )
-            elif planning_failure is not None:
-                failure_message = (
-                    planning_failure
-                    if isinstance(planning_failure, str)
-                    else planning_failure.message
-                )
-                reason_code = (
-                    None if isinstance(planning_failure, str) else planning_failure.reason_code
-                )
-                details = None if isinstance(planning_failure, str) else planning_failure.details
-                await self._mark_failed(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.agent_failure,
-                    message=failure_message[:2000],
-                    reason_code=reason_code,
-                    details=details,
-                    salvage=_failure_salvage_payload(ws, worktree_path=worktree_path),
-                )
-                # The planning loop preserves the FAILED workspace's worktree,
-                # which can already hold the plan + (unsatisfied) conformance
-                # report. Deposit them now — this branch returns before the
-                # post-validation deposit block, so without this the console
-                # could not surface the failed report.
-                _deposit_planning_artifacts_best_effort(
-                    self,
-                    profile=profile,
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                )
-                if (
-                    isinstance(planning_failure, _PlanningRunFailure)
-                    and planning_failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
-                ):
-                    await self._auto_retry_planning_scope_failure(
-                        workspace_id=workspace_id,
-                        failure=planning_failure,
-                    )
+            (
+                planning_validation_handoff,
+                planning_should_return,
+            ) = await _planning_artifacts.handle_agent_planning_result(
+                self,
+                workspace_id=workspace_id,
+                ws=ws,
+                worktree_path=worktree_path,
+                profile=profile,
+                planning_failure=planning_failure,
+            )
+            if planning_should_return:
                 return
         else:
             # Recovery dispatch created the validate Operation in ``pending``;
@@ -1052,7 +987,7 @@ async def execute(
     # dir before teardown so the console can surface them (best-effort; see the
     # helper). Runs on the success path and the validation/conformance stop
     # paths (preserved FAILED workspaces) while the worktree still exists.
-    _deposit_planning_artifacts_best_effort(
+    _planning_artifacts._deposit_planning_artifacts_best_effort(
         self,
         profile=profile,
         workspace_id=workspace_id,

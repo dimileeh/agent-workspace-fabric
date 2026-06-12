@@ -18,7 +18,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, FakeCommandRunner
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -1179,3 +1180,91 @@ class TestIdempotency:
     ) -> None:
         await executor.execute("ws_never_existed")
         assert fake.calls == []
+
+
+class TestPlanningValidationHandoffCleanup:
+    @pytest.mark.unit
+    async def test_planning_validation_handoff_cleanup_failure_finishes_validate_operation(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned-recovery",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 2,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        await _insert_validate_handoff_recovery_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id="op_validate_handoff_cleanup_failed",
+        )
+
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
+        fake.queue_result(
+            returncode=124,
+            stderr="idle timeout exceeded",
+            reason_code=COMMAND_IDLE_TIMEOUT_REASON,
+        )
+        fake.queue_result(returncode=1, stderr="cleanup still saw tagged processes")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            run = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, reason_code
+                            FROM validation_runs
+                            WHERE workspace_id = :workspace_id
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            operation = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, error_code, error_message, result, finished_at
+                            FROM operations
+                            WHERE id = 'op_validate_handoff_cleanup_failed'
+                            """
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert EXEC_PROCESS_CLEANUP_FAILED in (ws.failure_message or "")
+        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert operation["finished_at"] is not None
+        assert EXEC_PROCESS_CLEANUP_FAILED in operation["error_message"]
+        result = _json_value(operation["result"])
+        assert result["reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert result["validation_run_id"]
