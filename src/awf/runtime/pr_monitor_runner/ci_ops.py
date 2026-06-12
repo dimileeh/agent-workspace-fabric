@@ -84,6 +84,7 @@ async def _run_ci_fix(
         failures=failures,
         workspace_runtime_context=self._workspace_runtime_context,
         owned_paths=await _owned_paths_for_prompt(self, workspace_id),
+        task_tag=await self._resolve_task_tag(workspace_id),
     )
     agent_run_err = None
     command_evidence: list[str] = []

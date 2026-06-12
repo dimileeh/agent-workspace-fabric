@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.audit import redact_audit_value
+from awf.common.task_tag import branch_with_task_tag
 from awf.common.workspace_policy import release_sync_source_branch
 from awf.db.enums import EgressDecision
 from awf.db.models import Workspace
@@ -101,13 +102,20 @@ def _provision_local_branch_name(
     *,
     workspace_id: str,
     branch_prefix: str,
+    task_tag: str | None = None,
 ) -> str:
-    """Return the local branch name for a workspace's provisioning worktree."""
+    """Return the local branch name for a workspace's provisioning worktree.
+
+    For ``feature_branch_pr`` workspaces a task tag (Jira issue key) is prepended
+    → ``PROJ-123-awf/<id>`` so the pushed branch auto-links to the issue. Sync /
+    release branches are left untouched: their remote push semantics are special
+    and the tag is a feature-PR-creation concept.
+    """
     if ws.task_kind == "sync_feature_pr":
         return f"feature-sync/{workspace_id}"
     if ws.task_kind == "sync_release_pr":
         return f"release-sync/{workspace_id}"
-    return f"{branch_prefix}/{workspace_id}"
+    return branch_with_task_tag(f"{branch_prefix}/{workspace_id}", task_tag)
 
 
 def _provision_checkout_base_branch(ws: Workspace) -> str:

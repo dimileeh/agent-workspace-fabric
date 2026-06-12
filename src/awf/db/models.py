@@ -87,6 +87,11 @@ class Workspace(Base):
     branch_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     """Local branch in the worktree — what the agent commits to."""
 
+    task_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """Optional Jira-style issue key (e.g. ``PROJ-123``) prepended to the
+    branch name, PR title, and every AWF-authored commit message so work
+    auto-links to the issue in Jira/BitBucket. Nullable; absent = no-op."""
+
     remote_push_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
     """Remote branch the monitor pushes to. For ``feature_branch_pr`` this
     equals ``branch_name`` (push feature branch back to its own remote

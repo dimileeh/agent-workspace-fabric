@@ -66,6 +66,7 @@ async def _address_thread(
         thread=thread,
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
+        task_tag=await runner._resolve_task_tag(workspace_id),
     )
     result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -138,6 +139,7 @@ async def _address_review_comment_result(
         comment=comment,
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
+        task_tag=await runner._resolve_task_tag(workspace_id),
     )
     return await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,

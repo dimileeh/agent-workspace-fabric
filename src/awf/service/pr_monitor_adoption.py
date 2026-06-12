@@ -319,6 +319,7 @@ class PullRequestMonitorAdoptionService:
             task_external_id=_adoption_external_id(
                 repo_slug=repo.slug(), pr_number=metadata.number
             ),
+            task_tag=request.task_tag,
             agent=request.agent.value,
             test_commands=[],
             requires_database=False,
@@ -1174,6 +1175,16 @@ def _raise_if_policy_conflicts(
                 "workspace_id": workspace.id,
                 "existing_owned_paths": list(workspace.owned_paths),
                 "requested_owned_paths": list(request.owned_paths),
+            },
+        )
+    if workspace.task_tag != request.task_tag:
+        raise PRMonitorAdoptionError(
+            error_code="PR_ADOPTION_POLICY_CONFLICT",
+            message="Existing adopted PR monitor uses a different task_tag policy.",
+            detail={
+                "workspace_id": workspace.id,
+                "existing_task_tag": workspace.task_tag,
+                "requested_task_tag": request.task_tag,
             },
         )
     if workspace.auto_merge != request.auto_merge:

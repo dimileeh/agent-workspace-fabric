@@ -4159,6 +4159,18 @@
             ],
             "title": "Task Prompt"
           },
+          "task_tag": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Tag"
+          },
           "task_title": {
             "anyOf": [
               {
@@ -10603,6 +10615,17 @@
             "title": "Task Prompt",
             "type": "string"
           },
+          "task_tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Tag"
+          },
           "task_title": {
             "title": "Task Title",
             "type": "string"
@@ -11177,6 +11200,18 @@
                 "type": "null"
               }
             ]
+          },
+          "task_tag": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Tag"
           },
           "title": {
             "maxLength": 512,

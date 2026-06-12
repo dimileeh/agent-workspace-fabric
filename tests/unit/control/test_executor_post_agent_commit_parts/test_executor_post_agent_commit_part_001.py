@@ -384,6 +384,36 @@ async def test_post_agent_commit_format_only_failure_repairs_and_retries(
 
 
 @pytest.mark.unit
+async def test_post_agent_commit_message_prepends_task_tag(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The post-agent commit message carries the workspace's Jira issue key."""
+    ws_id = await _seed_ready(factory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        ws.task_tag = "PROJ-123"
+        await s.commit()
+
+    fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+    fake.queue_result(returncode=0, stdout="awf/x\n")  # drift check
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/foo.py\n")  # cached diff (staged)
+    fake.queue_result(returncode=0)  # git commit ok
+    fake.queue_result(returncode=0, stdout="0\n")  # rev-list count = 0 (terminate)
+
+    executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+    await executor.execute(ws_id)
+
+    commit_calls = [call for call in fake.calls if "commit" in call.args and "-m" in call.args]
+    assert commit_calls, "expected a git commit invocation"
+    message = commit_calls[0].args[commit_calls[0].args.index("-m") + 1]
+    assert message == "PROJ-123 awf: err-path"
+
+
+@pytest.mark.unit
 async def test_post_agent_commit_format_repair_retry_still_fails_marks_precommit(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],

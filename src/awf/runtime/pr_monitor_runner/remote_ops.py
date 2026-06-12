@@ -94,7 +94,13 @@ _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE = "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
 _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS = 5
-_BROKEN_AWF_REF_RE = re.compile(r"refs/heads/awf/(ws_[A-Za-z0-9_-]+)")
+# Orphaned AWF branch refs surface as ``refs/heads/awf/ws_...`` and, for
+# task-tagged workspaces, ``refs/heads/<TAG>-awf/ws_...`` (the provisioner
+# prepends a Jira issue key like ``PROJ-123-`` via ``branch_with_task_tag``).
+# Group 1 captures the full branch (with any tag prefix) so the repair deletes
+# the exact ref; group 2 captures the bare workspace id for the active-workspace
+# guard. Keep the tag shape in lockstep with ``TASK_TAG_PATTERN`` + ``BRANCH_SEP``.
+_BROKEN_AWF_REF_RE = re.compile(r"refs/heads/((?:[A-Z][A-Z0-9]+-[0-9]+-)?awf/(ws_[A-Za-z0-9_-]+))")
 _TERMINAL_WORKSPACE_STATUSES = {
     WorkspaceStatus.completed.value,
     WorkspaceStatus.failed.value,
@@ -361,8 +367,8 @@ async def _repair_orphaned_broken_awf_ref(
     match = _BROKEN_AWF_REF_RE.search(stderr or "")
     if match is None:
         return False
-    broken_workspace_id = match.group(1)
-    broken_ref = f"refs/heads/awf/{broken_workspace_id}"
+    broken_ref = f"refs/heads/{match.group(1)}"
+    broken_workspace_id = match.group(2)
     if not await runner._can_remove_broken_awf_ref(broken_workspace_id):
         _log.warning(
             "monitor.git_mirror_broken_ref_active_workspace",
@@ -704,6 +710,7 @@ async def _run_sync_base(
             base_branch=base_branch,
             conflicting_files=conflicting_files,
             workspace_runtime_context=runner._workspace_runtime_context,
+            task_tag=await runner._resolve_task_tag(workspace_id),
         )
         agent_run_err = None
         command_evidence: list[str] = []

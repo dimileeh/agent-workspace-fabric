@@ -262,6 +262,7 @@ class Provisioner(ProvisionerHostPortCheckMixin, ProvisionerShortTxnHelpersMixin
             ws,
             workspace_id=workspace_id,
             branch_prefix=self._config.branch_prefix,
+            task_tag=ws.task_tag,
         )
         checkout_base = _provision_checkout_base_branch(ws)
         egress_plan: LocalEgressPlan | None = None

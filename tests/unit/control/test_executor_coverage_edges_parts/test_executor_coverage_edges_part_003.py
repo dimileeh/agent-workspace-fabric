@@ -245,6 +245,7 @@ async def test_planning_required_prompts_include_coordination_warning(
             id="ws_coord_plan",
             task_prompt="do overlapping work",
             task_policy=_coordination_task_policy(),
+            task_tag=None,
         ),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
@@ -276,6 +277,7 @@ async def test_planning_disabled_direct_prompt_includes_coordination_warning(
             id="ws_coord_direct",
             task_prompt="do overlapping work",
             task_policy=_coordination_task_policy(),
+            task_tag=None,
         ),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
@@ -308,7 +310,7 @@ async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: P
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_missing", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_missing", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -379,7 +381,7 @@ async def test_planning_required_accepts_ignored_plan_file_written_by_agent(
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_ignored", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_ignored", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -434,7 +436,7 @@ async def test_planning_required_skips_digest_fallback_when_git_reports_plan_fil
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_tracked", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_tracked", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",

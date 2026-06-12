@@ -132,6 +132,41 @@ class TestWorkspaceAdoptPr:
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
 
     @pytest.mark.unit
+    def test_task_tag_is_injected_and_validated(self) -> None:
+        """A valid --task-tag populates the adoption body; malformed values fail locally."""
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_adopt"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--pr-url",
+                    "https://github.com/dimileeh/aira-web/pull/277",
+                    "--task-tag",
+                    "PROJ-123",
+                ],
+            )
+        assert result.exit_code == 0
+        assert mock.call_args.kwargs["json"]["task_tag"] == "PROJ-123"
+
+        with patch("awf.cli.main.httpx.request") as mock_bad:
+            bad = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "adopt-pr",
+                    "--pr-url",
+                    "https://github.com/dimileeh/aira-web/pull/277",
+                    "--task-tag",
+                    "bad-tag",
+                ],
+            )
+        assert bad.exit_code != 0
+        assert "task tag" in bad.output
+        mock_bad.assert_not_called()
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         ("base_url",),
         (
@@ -1372,3 +1407,49 @@ class TestServiceDoctorBundle:
         assert bundle_path is not None
         bundle = json.loads(bundle_path.read_text())
         assert bundle.get("doctor_report", {}).get("status") == "fail"
+
+
+class TestWorkspaceRebase:
+    """Workspace rebase command tests."""
+
+    @pytest.mark.unit
+    def test_posts_rebase_request_with_reason(self) -> None:
+        """Post rebase requests with the requested reason."""
+        response = _mock_response(
+            status_code=202,
+            payload={
+                "operation_id": "op_rebase",
+                "operation_status": "requested",
+                "status": "rebasing",
+                "workspace_id": "ws_rebase",
+                "message": "workspace rebase requested",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "rebase",
+                    "ws_rebase",
+                    "--reason",
+                    "recover merge conflicts",
+                    "--idempotency-key",
+                    "rebase-key",
+                    "--if-match",
+                    "11",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "op_rebase" in result.stdout
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_rebase/rebase",
+        )
+        assert mock.call_args.kwargs["json"] == {"reason": "recover merge conflicts"}
+        _assert_control_headers(
+            mock.call_args.kwargs["headers"],
+            idempotency_key="rebase-key",
+            if_match="11",
+        )

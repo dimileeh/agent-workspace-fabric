@@ -11,7 +11,7 @@ from awf.control.executor.constants import (
     _VALIDATE_ONLY_RECOVERY_MODES,
     _VALIDATE_ONLY_RECOVERY_SOURCES,
 )
-from awf.control.executor.metadata import _int_or_none
+from awf.control.executor.metadata import _int_or_none, _str_or_none
 from awf.control.executor.types import _PlanningValidationHandoff, _RebaseRecoveryResult
 from awf.db.enums import OperationType
 from awf.profiles.models import WorkspaceProfile
@@ -168,6 +168,25 @@ def _recovery_conformance_gaps(conformance: Mapping[str, Any]) -> tuple[str, ...
     if isinstance(value, str) and value.strip():
         return (value.strip(),)
     return ()
+
+
+def _validate_only_recovery_target_head_sha(
+    recovery: Mapping[str, Any] | None,
+    *,
+    validated_workspace_head_sha: str | None,
+) -> str | None:
+    """Return the recovery source head SHA when this is validate-only recovery."""
+    if not recovery or recovery.get("recovery_mode") != "validate_only":
+        return None
+    source_head_sha = _str_or_none(recovery.get("source_head_sha"))
+    if source_head_sha is None:
+        return None
+    normalized_source_head_sha = source_head_sha.strip()
+    if not normalized_source_head_sha:
+        return None
+    if validated_workspace_head_sha != normalized_source_head_sha:
+        return None
+    return normalized_source_head_sha
 
 
 def _recovery_needs_existing_pr_push(

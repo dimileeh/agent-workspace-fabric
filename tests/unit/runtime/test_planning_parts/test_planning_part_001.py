@@ -246,6 +246,35 @@ def test_agent_planning_and_execution_prompts_include_workspace_runtime_context(
 
 
 @pytest.mark.unit
+def test_agent_and_execution_prompts_render_task_tag_commit_guidance() -> None:
+    plan = Path("docs/awf-plans/ws_123.md")
+    agent_prompt = build_agent_task_prompt(task_prompt="Add metrics", task_tag="PROJ-123")
+    execution_prompt = build_execution_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        iteration=0,
+        gaps=(),
+        task_tag="PROJ-123",
+    )
+    for prompt in (agent_prompt, execution_prompt):
+        assert "Prefix every commit message with `PROJ-123 `" in prompt
+
+
+@pytest.mark.unit
+def test_prompts_omit_task_tag_guidance_when_absent() -> None:
+    plan = Path("docs/awf-plans/ws_123.md")
+    # No tag, no other sections → agent prompt is the bare task prompt (no-op).
+    assert build_agent_task_prompt(task_prompt="Add metrics") == "Add metrics"
+    execution_prompt = build_execution_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        iteration=0,
+        gaps=(),
+    )
+    assert "Commit message tag" not in execution_prompt
+
+
+@pytest.mark.unit
 def test_conformance_prompt_is_evidence_only_and_does_not_rerun_validation() -> None:
     prompt = build_conformance_prompt(
         task_prompt="Add metrics",

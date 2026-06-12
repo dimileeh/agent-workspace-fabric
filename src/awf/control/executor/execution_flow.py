@@ -30,6 +30,11 @@ from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
 )
+from awf.common.task_tag import (
+    commit_message_with_task_tag,
+    strip_leading_task_tag,
+    title_with_task_tag,
+)
 from awf.control.executor import execution_validation as _execution_validation
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
@@ -62,7 +67,6 @@ from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
     _setup_dependency_network_failure_details,
 )
-from awf.control.executor.metadata import _str_or_none
 from awf.control.executor.protocols import _MonitorRunnerProto
 from awf.control.executor.quality_gates import (
     _classify_post_agent_commit_failure,
@@ -74,6 +78,7 @@ from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
     _planning_validation_handoff_from_recovery_payload,
     _recovery_needs_existing_pr_push,
+    _validate_only_recovery_target_head_sha,
 )
 from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
@@ -107,25 +112,6 @@ from awf.runtime.validation import (
     ValidationCoverageResult,
     ValidationResult,
 )
-
-
-def _validate_only_recovery_target_head_sha(
-    recovery: Mapping[str, Any] | None,
-    *,
-    validated_workspace_head_sha: str | None,
-) -> str | None:
-    """Return the recovery source head SHA when this is validate-only recovery."""
-    if not recovery or recovery.get("recovery_mode") != "validate_only":
-        return None
-    source_head_sha = _str_or_none(recovery.get("source_head_sha"))
-    if source_head_sha is None:
-        return None
-    normalized_source_head_sha = source_head_sha.strip()
-    if not normalized_source_head_sha:
-        return None
-    if validated_workspace_head_sha != normalized_source_head_sha:
-        return None
-    return normalized_source_head_sha
 
 
 async def execute(
@@ -569,6 +555,7 @@ async def execute(
                 from_status=WorkspaceStatus.running,
                 stage="agent_run",
                 error=exc,
+                task_tag=ws.task_tag,
             ):
                 agent_exit_note = (
                     "AWF recovered a missing Git HEAD object during the agent run; "
@@ -728,7 +715,9 @@ async def execute(
                         message=quality_gate_violation_message(violations)[:2000],
                     )
                     return
-                commit_msg = f"awf: {ws.task_title}"[:72]
+                commit_msg = commit_message_with_task_tag(
+                    f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)}", ws.task_tag
+                )[:72]
                 commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
 
                 async def _run_commit() -> CommandResult:
@@ -868,7 +857,11 @@ async def execute(
                     reason="orphan_history_reset",
                 )
                 if reset.ok:
-                    recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
+                    recovery_msg = commit_message_with_task_tag(
+                        f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)} "
+                        "(recovered from orphan)",
+                        ws.task_tag,
+                    )[:72]
                     recovery_body = (
                         f"AWF detected orphan history on workspace {workspace_id} "
                         f"(agent: {ws.agent}) and squashed the cumulative diff "
@@ -964,6 +957,7 @@ async def execute(
                 from_status=WorkspaceStatus.running,
                 stage="post_agent_commit",
                 error=exc,
+                task_tag=ws.task_tag,
             ):
                 _log.warning(
                     "executor.commit_step_missing_head_recovered",
@@ -1202,7 +1196,7 @@ async def execute(
     ):
         return
 
-    pr_title = ws.task_title
+    pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
     pr_body = _build_pr_body(ws, defaults=defaults)
     push_branch_name = ws.branch_name or f"awf/{workspace_id}"
     existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None

@@ -893,6 +893,59 @@ class TestSyncReleasePrHandoff:
             assert candidate.pr_url == "https://github.com/x/y/pull/321"
 
     @pytest.mark.unit
+    async def test_ahead_creates_tagged_release_pr_title_when_task_tag_set(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # A ``sync_release_pr`` workspace may carry a ``task_tag`` (the kind is a
+        # public direct-create kind), and the documented task-tag contract
+        # prepends the tag to the PR title. The release PR title must therefore be
+        # tagged ``PROJ-123 Release: merge ...`` so it still auto-links to Jira.
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del workspace_id, compose_project, compose_file
+
+        fake.queue_result(returncode=0)  # git fetch
+        fake.queue_result(returncode=0, stdout="3\n")  # rev-list --count
+        fake.queue_result(returncode=0)  # post-setup git fetch
+        fake.queue_result(returncode=0, stdout="3\n")  # post-setup rev-list --count
+        fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/321\n")  # gh pr create
+        fake.queue_result(returncode=0, stdout=_release_adoption_payload(number=321))  # gh pr view
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_release_pr",
+            auto_merge=False,
+            create_task_attempt=True,
+            task_policy=_release_sync_policy(),
+        )
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            ws.task_tag = "PROJ-123"
+            await s.commit()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_a, **_k: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        create_calls = [c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"]]
+        assert len(create_calls) == 1
+        title = create_calls[0].args[create_calls[0].args.index("--title") + 1]
+        assert title == "PROJ-123 Release: merge development into main"
+
+    @pytest.mark.unit
     async def test_release_pr_ready_recheck_blocks_monitor_factory(
         self,
         monkeypatch: pytest.MonkeyPatch,

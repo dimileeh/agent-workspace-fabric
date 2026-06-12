@@ -97,6 +97,7 @@ async def test_reparent_fix_pass_commit_success_uses_identity_and_parent(
         fix_start_head=fix_start_head,
         current_head=current_head,
         pass_number=1,
+        task_tag=None,
     )
 
     assert head == new_sha
@@ -156,6 +157,7 @@ async def test_reparent_fix_pass_commit_rev_parse_failures_are_reparent_failed(
         fix_start_head="1" * 40,
         current_head="2" * 40,
         pass_number=1,
+        task_tag=None,
     )
 
     assert head is None
@@ -196,6 +198,7 @@ async def test_reparent_fix_pass_commit_blank_stdout_warning_carries_diagnostics
             fix_start_head="1" * 40,
             current_head="2" * 40,
             pass_number=1,
+            task_tag=None,
         )
 
     assert head is None
@@ -246,6 +249,7 @@ async def test_reparent_fix_pass_commit_no_net_change_signals_no_commit(
             fix_start_head="1" * 40,
             current_head="2" * 40,
             pass_number=1,
+            task_tag=None,
         )
 
     assert head is None
@@ -308,6 +312,7 @@ async def test_reparent_fix_pass_commit_commit_tree_failure_is_reparent_failed(
         fix_start_head="1" * 40,
         current_head="2" * 40,
         pass_number=1,
+        task_tag=None,
     )
 
     assert head is None
@@ -349,6 +354,7 @@ async def test_reparent_fix_pass_commit_reset_failure_is_reparent_failed(
         fix_start_head="1" * 40,
         current_head="2" * 40,
         pass_number=1,
+        task_tag=None,
     )
 
     assert head is None
@@ -398,6 +404,7 @@ async def test_reparent_fix_pass_commit_message_fallback(
         fix_start_head="1" * 40,
         current_head="2" * 40,
         pass_number=1,
+        task_tag=None,
     )
 
     assert failure_reason is None
