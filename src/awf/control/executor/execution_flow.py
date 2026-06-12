@@ -624,6 +624,17 @@ async def execute(
     # inject the literal string "None" into a git command. Fail
     # cleanly instead of passing "None..HEAD" to git.
     if ws.base_commit is None:
+        # This invariant violation marks the workspace FAILED and returns
+        # before the post-validation deposit block, stranding any plan +
+        # conformance report the agent already wrote into the preserved-
+        # FAILED worktree. Deposit them first, mirroring the agent-phase
+        # failure handlers above. Best-effort and idempotent.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,

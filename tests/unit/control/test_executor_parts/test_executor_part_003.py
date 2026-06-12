@@ -1521,6 +1521,69 @@ class TestHappyPathPart002:
             '{"status": "satisfied", "gaps": []}'
         )
 
+    @pytest.mark.unit
+    async def test_missing_base_commit_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A ``ready`` workspace whose ``base_commit`` is missing is an upstream
+        # invariant violation: the post-agent commit step marks the workspace
+        # FAILED (infrastructure) and returns BEFORE the post-validation deposit
+        # block. The plan + conformance report the agent already wrote into the
+        # preserved-FAILED worktree must still reach the served artifact dir,
+        # mirroring the agent-phase failure handlers above.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.base_commit = None
+            await s.commit()
+
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "gaps": []}',
+            encoding="utf-8",
+        )
+
+        async def _agent_run_ok(**_kwargs: Any) -> None:
+            # Successful agent/planning run (no failure) so execution reaches
+            # the post-agent ``base_commit`` invariant check.
+            return None
+
+        monkeypatch.setattr(
+            executor,
+            "_run_agent_task_with_optional_planning",
+            _agent_run_ok,
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "base_commit" in (ws.failure_message or "")
+
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "satisfied", "gaps": []}'
+        )
+
     async def _queue_planning_through_post_agent_add(
         self,
         fake: FakeCommandRunner,
