@@ -60,6 +60,10 @@ class ToolchainDiscoveryStrategy:
 
     command: tuple[str, ...]
     parse: Callable[[str], set[str]]
+    # Map a *declared* version string to the same granularity ``parse`` emits, so a
+    # finer declared version (the schema accepts dotted forms like ``1.8`` / ``11.0.2``)
+    # can be matched against the discovered majors. Returns ``None`` if unparseable.
+    normalize: Callable[[str], str | None]
 
 
 # Enumerate *all* installed JDKs, not just the default ``java -version`` reports.
@@ -137,6 +141,7 @@ _TOOLCHAIN_DISCOVERY: dict[str, ToolchainDiscoveryStrategy] = {
     "java": ToolchainDiscoveryStrategy(
         command=_JAVA_DISCOVERY_COMMAND,
         parse=_parse_java_versions,
+        normalize=_normalize_java_version,
     ),
 }
 
@@ -177,6 +182,17 @@ async def probe_runtime_toolchains(
             return runtime_toolchain_findings(profile, None)
         # Reachable image: an empty parse means the tool is genuinely absent, so
         # the helper warns every declared version for this language.
-        available[language] = strategy.parse(result.stdout)
+        discovered = strategy.parse(result.stdout)
+        # ``discovered`` holds majors (``17``), but the helper compares declared
+        # strings exactly and the schema accepts finer dotted declarations (``1.8``,
+        # ``11.0.2``). Add each declared version whose normalized major is present so
+        # an installed ``11.0.2`` satisfies a declared ``11.0.2`` instead of warning,
+        # keeping the discovered majors too so bare-major declarations still match.
+        satisfied = {
+            version
+            for version in profile.runtime.toolchains[language]
+            if strategy.normalize(version) in discovered
+        }
+        available[language] = discovered | satisfied
 
     return runtime_toolchain_findings(profile, available)

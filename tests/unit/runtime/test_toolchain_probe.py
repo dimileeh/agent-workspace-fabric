@@ -123,6 +123,43 @@ class TestProbeRuntimeToolchains:
 
         assert findings == ()
 
+    async def test_dotted_declared_11_0_2_satisfied_by_installed_11_0_2(self) -> None:
+        # The schema accepts finer dotted declarations; an installed 11.0.2 must
+        # satisfy a declared "11.0.2" rather than warning against discovered "11".
+        profile = _profile_with_toolchains({"java": ["11.0.2"]})
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout='JAVA_VERSION="11.0.2"\n', stderr="")])
+
+        findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+
+    async def test_legacy_dotted_declared_1_8_satisfied_by_installed_jdk8(self) -> None:
+        profile = _profile_with_toolchains({"java": ["1.8"]})
+        spy = _SpyExec(
+            [
+                ProbeExecResult(
+                    returncode=0,
+                    stdout="/usr/lib/jvm/java-1.8.0-openjdk-amd64/bin/java\n",
+                    stderr="",
+                )
+            ]
+        )
+
+        findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+
+    async def test_dotted_declared_absent_still_warns(self) -> None:
+        # A finer dotted declaration whose major is missing still warns, and the
+        # warning surfaces the discovered majors in available_versions.
+        profile = _profile_with_toolchains({"java": ["23.0.1"]})
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout=_RELEASE_17, stderr="")])
+
+        findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
+
+        assert [f.details["version"] for f in findings] == ["23.0.1"]
+        assert findings[0].details["available_versions"] == ["17"]
+
     async def test_declared_23_with_only_17_21_installed_warns(self) -> None:
         profile = _profile_with_toolchains({"java": ["17", "21", "23"]})
         spy = _SpyExec([ProbeExecResult(returncode=0, stdout=_RELEASE_17 + _RELEASE_21, stderr="")])
