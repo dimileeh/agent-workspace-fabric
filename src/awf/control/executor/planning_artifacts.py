@@ -76,6 +76,24 @@ async def handle_agent_planning_result(
         )
         reason_code = None if isinstance(planning_failure, str) else planning_failure.reason_code
         details = None if isinstance(planning_failure, str) else planning_failure.details
+        # The planning loop preserves the FAILED workspace's worktree,
+        # which can already hold the plan + (unsatisfied) conformance
+        # report. Deposit them BEFORE ``_mark_failed`` publishes the
+        # terminal status, mirroring every agent-phase failure handler in
+        # ``execution_flow``. The console keys its artifact refetch on the
+        # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``);
+        # marking FAILED first would bump ``updated_at`` and let the poll
+        # observe it in the window before the deposit, record an empty
+        # artifact list, then never refetch (the filesystem copy does not
+        # touch the row) — leaving the Plan/Validation buttons hidden.
+        # Depositing first orders artifact availability ahead of the
+        # polling signal. Best-effort and non-fatal.
+        _deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
@@ -84,17 +102,6 @@ async def handle_agent_planning_result(
             reason_code=reason_code,
             details=details,
             salvage=_failure_salvage_payload(ws, worktree_path=worktree_path),
-        )
-        # The planning loop preserves the FAILED workspace's worktree,
-        # which can already hold the plan + (unsatisfied) conformance
-        # report. Deposit them now — this branch returns before the
-        # post-validation deposit block, so without this the console
-        # could not surface the failed report.
-        _deposit_planning_artifacts_best_effort(
-            self,
-            profile=profile,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
         )
         if (
             isinstance(planning_failure, _PlanningRunFailure)
