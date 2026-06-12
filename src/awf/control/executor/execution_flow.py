@@ -989,6 +989,19 @@ async def execute(
                             "the repo; inspect the worktree manually."
                         ),
                     )
+                    # Planning ran before this commit step, so the preserved
+                    # FAILED worktree can already hold the plan + conformance
+                    # report. This branch returns from inside the ``try`` before
+                    # the post-validation deposit block, and a plain ``return``
+                    # bypasses the ``except`` deposit handlers below — so deposit
+                    # them now, mirroring the other post-planning failure
+                    # returns. Best-effort and idempotent.
+                    _planning_artifacts._deposit_planning_artifacts_best_effort(
+                        self,
+                        profile=profile,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                    )
                     return
                 _log.info(
                     "executor.orphan_history_recovered",
@@ -1021,6 +1034,19 @@ async def execute(
                     failure_reason=FailureReason.infrastructure_failure,
                     message=message,
                     reason_code="MONITOR_RECOVERY_REBASE_FAILED",
+                )
+                # Planning may have run before this monitor-rebase recovery, so
+                # the preserved FAILED worktree can already hold the plan +
+                # conformance report. This branch returns from inside the
+                # ``try`` before the post-validation deposit block, and a plain
+                # ``return`` bypasses the ``except`` deposit handlers below — so
+                # deposit them now, mirroring the other post-planning failure
+                # returns. Best-effort and idempotent.
+                _planning_artifacts._deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
                 )
                 return
     except _PostAgentCommitStepError as exc:

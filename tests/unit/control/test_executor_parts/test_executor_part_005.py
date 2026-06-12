@@ -1011,6 +1011,73 @@ class TestFailurePaths:
             assert "history" in (ws.failure_message or "").lower()
             assert ws.pr_url is None
 
+    @pytest.mark.unit
+    async def test_orphan_history_recovery_failure_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # An agent that severs git history (orphan branch) where automatic
+        # recovery also fails marks the workspace FAILED and returns from inside
+        # the post-agent ``try`` BEFORE the post-validation deposit block. The
+        # plan + conformance report the agent already wrote into the preserved
+        # worktree must still reach the served artifact dir, mirroring the other
+        # post-planning failure returns.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "gaps": []}',
+            encoding="utf-8",
+        )
+
+        async def _agent_run_ok(**_kwargs: Any) -> None:
+            # Successful agent/planning run (no failure) so execution reaches
+            # the post-agent commit step. The agent already wrote the plan +
+            # conformance report into the worktree (seeded above).
+            return None
+
+        monkeypatch.setattr(
+            executor,
+            "_run_agent_task_with_optional_planning",
+            _agent_run_ok,
+        )
+
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # drift: abbrev-ref HEAD
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="")  # diff --cached (already committed)
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(
+            returncode=128, stderr="fatal: unknown revision"
+        )  # git reset --soft: FAIL
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert "history" in (ws.failure_message or "").lower()
+
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "satisfied", "gaps": []}'
+        )
+
 
 class TestMonitorHandoff:
     """When a PR monitor is wired, the executor transitions ``pushing →
