@@ -23,6 +23,7 @@ from awf.runtime.toolchain_probe import (
     ProbeExecResult,
     ToolchainDiscoveryStrategy,
     _normalize_java_version,
+    _parse_java_exact_versions,
     _parse_java_versions,
     probe_runtime_toolchains,
 )
@@ -136,6 +137,29 @@ class TestProbeRuntimeToolchains:
 
         assert findings == ()
 
+    async def test_dotted_declared_11_0_2_warns_when_only_sibling_patch_installed(self) -> None:
+        # Regression for PRRT_kwDOSJAM6s6JD_5P: a dotted declaration carries
+        # patch-level intent, so a *different* patch on the same major (11.0.1) must
+        # NOT silence a declared 11.0.2 — the missing exact patch still warns, with
+        # the discovered major surfaced in available_versions.
+        profile = _profile_with_toolchains({"java": ["11.0.2"]})
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout='JAVA_VERSION="11.0.1"\n', stderr="")])
+
+        findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
+
+        assert [f.details["version"] for f in findings] == ["11.0.2"]
+        assert findings[0].details["available_versions"] == ["11"]
+
+    async def test_bare_major_11_satisfied_by_any_installed_patch(self) -> None:
+        # A bare-major declaration stays coarse: an installed 11.0.1 satisfies a
+        # declared "11" regardless of patch (contrast the dotted case above).
+        profile = _profile_with_toolchains({"java": ["11"]})
+        spy = _SpyExec([ProbeExecResult(returncode=0, stdout='JAVA_VERSION="11.0.1"\n', stderr="")])
+
+        findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
+
+        assert findings == ()
+
     async def test_legacy_dotted_declared_1_8_satisfied_by_installed_jdk8(self) -> None:
         profile = _profile_with_toolchains({"java": ["1.8"]})
         spy = _SpyExec(
@@ -196,6 +220,7 @@ class TestProbeRuntimeToolchains:
             ToolchainDiscoveryStrategy(
                 command=("sh", "-c", "true"),
                 parse=lambda _output: set(),
+                parse_exact=lambda _output: set(),
                 normalize=lambda version: version,
             ),
         )
@@ -224,6 +249,7 @@ class TestProbeRuntimeToolchains:
             ToolchainDiscoveryStrategy(
                 command=("sh", "-c", "boom"),
                 parse=lambda _output: set(),
+                parse_exact=lambda _output: set(),
                 normalize=lambda version: version,
             ),
         )
@@ -314,6 +340,23 @@ class TestParseJavaVersions:
         output = 'openjdk version "21.0.1" 2023-10-17\nOpenJDK Runtime Environment\n'
 
         assert _parse_java_versions(output) == {"21"}
+
+
+@pytest.mark.unit
+class TestParseJavaExactVersions:
+    def test_keeps_full_patch_versions_not_just_majors(self) -> None:
+        # Unlike _parse_java_versions, the exact parser preserves patch granularity
+        # (and the legacy dotted path) so patch-precise declarations can be matched.
+        output = (
+            'JAVA_VERSION="17.0.9"\n'
+            'JAVA_VERSION="11.0.2"\n'
+            "/usr/lib/jvm/java-1.8.0-openjdk-amd64/bin/java\n"
+        )
+
+        assert _parse_java_exact_versions(output) == {"17.0.9", "11.0.2", "1.8.0"}
+
+    def test_empty_output_is_empty_set(self) -> None:
+        assert _parse_java_exact_versions("") == set()
 
 
 @pytest.mark.unit

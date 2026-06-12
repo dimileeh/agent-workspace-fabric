@@ -60,9 +60,14 @@ class ToolchainDiscoveryStrategy:
 
     command: tuple[str, ...]
     parse: Callable[[str], set[str]]
+    # Parse discovery output into the *exact* installed version strings (e.g.
+    # ``17.0.9`` / ``1.8.0``), not coarsened to majors. Used to honour the
+    # patch-level intent of a dotted declaration (``11.0.2``) so a sibling patch on
+    # the same major (``11.0.1``) does not silence it.
+    parse_exact: Callable[[str], set[str]]
     # Map a *declared* version string to the same granularity ``parse`` emits, so a
-    # finer declared version (the schema accepts dotted forms like ``1.8`` / ``11.0.2``)
-    # can be matched against the discovered majors. Returns ``None`` if unparseable.
+    # bare-major declaration (``17``) matches a discovered major regardless of patch.
+    # Returns ``None`` if unparseable.
     normalize: Callable[[str], str | None]
 
 
@@ -141,12 +146,53 @@ def _parse_java_versions(output: str) -> set[str]:
     return versions
 
 
+def _parse_java_exact_versions(output: str) -> set[str]:
+    """Parse discovery output into the set of *exact* installed Java versions.
+
+    Unlike :func:`_parse_java_versions` (which coarsens to majors), this keeps the
+    full discovered version string — ``17.0.9`` from ``JAVA_VERSION="17.0.9"``,
+    ``1.8.0`` from a legacy ``java-1.8.0-openjdk`` path — so a patch-precise
+    declaration (``11.0.2``) can be matched against the installed patch rather than
+    merely its major. Each raw capture is stripped of surrounding quotes/whitespace.
+    """
+    exact: set[str] = set()
+    for pattern in (_JAVA_RELEASE_VERSION_RE, _JAVA_QUOTED_VERSION_RE, _JAVA_PATH_MAJOR_RE):
+        # Each pattern's capture group is digit-led and quote-free, so the raw match
+        # is already a clean version string (just trim any incidental whitespace).
+        exact.update(raw.strip() for raw in pattern.findall(output))
+    return exact
+
+
+def _declared_version_satisfied(
+    version: str,
+    discovered_majors: set[str],
+    discovered_exact: set[str],
+    normalize: Callable[[str], str | None],
+) -> bool:
+    """Decide whether one declared toolchain version is satisfied by discovery.
+
+    A *bare-major* declaration (no dot, e.g. ``"17"`` / ``"21"``) matches by major,
+    so an installed ``17.0.9`` satisfies ``"17"`` regardless of patch level. A
+    *dotted* declaration carries patch-level intent the operator must be warned
+    about when unmet: it is satisfied only by an exact discovered version that
+    equals it or refines it at a component boundary — ``"1.8"`` by an installed
+    ``1.8.0``, ``"11.0.2"`` by an installed ``11.0.2`` — never merely by a sibling
+    patch on the same major, so a declared ``"11.0.2"`` is *not* satisfied by an
+    installed ``11.0.1``.
+    """
+    if "." not in version:
+        major = normalize(version)
+        return major is not None and major in discovered_majors
+    return any(exact == version or exact.startswith(f"{version}.") for exact in discovered_exact)
+
+
 # Per-language discovery registry. node/python/go/rust/cpp slot in here later by
 # adding a discovery command + parser; the orchestration below is language-agnostic.
 _TOOLCHAIN_DISCOVERY: dict[str, ToolchainDiscoveryStrategy] = {
     "java": ToolchainDiscoveryStrategy(
         command=_JAVA_DISCOVERY_COMMAND,
         parse=_parse_java_versions,
+        parse_exact=_parse_java_exact_versions,
         normalize=_normalize_java_version,
     ),
 }
@@ -195,15 +241,21 @@ async def probe_runtime_toolchains(
         # Reachable image: an empty parse means the tool is genuinely absent, so
         # the helper warns every declared version for this language.
         discovered = strategy.parse(result.stdout)
-        # ``discovered`` holds majors (``17``), but the helper compares declared
-        # strings exactly and the schema accepts finer dotted declarations (``1.8``,
-        # ``11.0.2``). Add each declared version whose normalized major is present so
-        # an installed ``11.0.2`` satisfies a declared ``11.0.2`` instead of warning,
-        # keeping the discovered majors too so bare-major declarations still match.
+        discovered_exact = strategy.parse_exact(result.stdout)
+        # ``discovered`` holds majors (``17``); the helper compares declared strings
+        # exactly and the schema accepts both bare majors (``17``) and finer dotted
+        # declarations (``1.8``, ``11.0.2``). A bare-major declaration is satisfied by
+        # any installed patch on that major, but a dotted declaration carries
+        # patch-level intent: match it only against an exact discovered version that
+        # equals or refines it, so an installed ``11.0.1`` does *not* silence a
+        # declared ``11.0.2``. Keep the discovered majors in ``available`` so
+        # bare-major declarations still match (and surface as ``available_versions``).
         satisfied = {
             version
             for version in profile.runtime.toolchains[language]
-            if strategy.normalize(version) in discovered
+            if _declared_version_satisfied(
+                version, discovered, discovered_exact, strategy.normalize
+            )
         }
         available[language] = discovered | satisfied
 
