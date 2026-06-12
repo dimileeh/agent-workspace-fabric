@@ -18,7 +18,9 @@ from awf.profiles.models import (
     WorkspaceProfile,
 )
 from awf.runtime.toolchain_probe import (
+    _TOOLCHAIN_DISCOVERY,
     ProbeExecResult,
+    ToolchainDiscoveryStrategy,
     _normalize_java_version,
     _parse_java_versions,
     probe_runtime_toolchains,
@@ -178,6 +180,70 @@ class TestProbeRuntimeToolchains:
 
         assert findings == ()
         assert spy.calls == []
+
+    async def test_later_language_probe_failure_keeps_earlier_findings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Register a second discovery strategy so the multi-language orchestration
+        # path is exercised: java probes cleanly (warning that 21 is missing), then
+        # the second language's probe returns non-zero. A per-language infra
+        # failure must not discard java's accurate finding, nor warn for the failed
+        # language (whose installed versions are unknown).
+        monkeypatch.setitem(
+            _TOOLCHAIN_DISCOVERY,
+            "node",
+            ToolchainDiscoveryStrategy(
+                command=("sh", "-c", "true"),
+                parse=lambda _output: set(),
+                normalize=lambda version: version,
+            ),
+        )
+        profile = _profile_with_toolchains({"java": ["17", "21"], "node": ["20"]})
+        spy = _SpyExec(
+            [
+                ProbeExecResult(returncode=0, stdout=_RELEASE_17, stderr=""),
+                ProbeExecResult(returncode=1, stdout="", stderr="boom"),
+            ]
+        )
+
+        findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
+
+        # Only java's genuine "21 missing" warning survives; node stays silent.
+        assert [(f.details["language"], f.details["version"]) for f in findings] == [("java", "21")]
+        assert len(spy.calls) == 2
+
+    async def test_later_language_probe_exception_keeps_earlier_findings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same as above but the second language's probe *raises* mid-loop: java's
+        # finding is still preserved and the failed language stays silent.
+        monkeypatch.setitem(
+            _TOOLCHAIN_DISCOVERY,
+            "node",
+            ToolchainDiscoveryStrategy(
+                command=("sh", "-c", "boom"),
+                parse=lambda _output: set(),
+                normalize=lambda version: version,
+            ),
+        )
+        profile = _profile_with_toolchains({"java": ["17", "21"], "node": ["20"]})
+
+        class _OneGoodThenRaise:
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            async def __call__(self, cli_args: list[str]) -> ProbeExecResult:
+                self.calls.append(cli_args)
+                if len(self.calls) == 1:
+                    return ProbeExecResult(returncode=0, stdout=_RELEASE_17, stderr="")
+                raise RuntimeError("cannot exec into container")
+
+        spy = _OneGoodThenRaise()
+
+        findings = await probe_runtime_toolchains(profile=profile, exec_in_container=spy)
+
+        assert [(f.details["language"], f.details["version"]) for f in findings] == [("java", "21")]
+        assert len(spy.calls) == 2
 
     async def test_unprobed_language_alongside_probed_java(self) -> None:
         # Java is probed (and satisfied); the unsupported language is treated as

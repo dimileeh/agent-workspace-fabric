@@ -173,13 +173,19 @@ async def probe_runtime_toolchains(
         try:
             result = await exec_in_container(list(strategy.command))
         except Exception:
-            # Cannot exec into the container at all -> probe-infra failure ->
-            # stay globally silent rather than warn on missing introspection.
-            return runtime_toolchain_findings(profile, None)
-        if result.returncode != 0:
-            # The discovery command always exits 0 when reachable, so a non-zero
-            # return means the container/compose-exec is unreachable -> silent.
-            return runtime_toolchain_findings(profile, None)
+            result = None
+        # The discovery command always exits 0 when the container is reachable, so
+        # an exception or a non-zero return both signal a probe-infra failure for
+        # this language. If nothing has been probed yet the container is wholly
+        # unreachable -> stay globally silent (available is None). But once an
+        # earlier language has probed cleanly the container *is* reachable, so
+        # preserve those accurate findings and treat only this language as
+        # satisfied (silent for it) instead of discarding the partial results.
+        if result is None or result.returncode != 0:
+            if not available:
+                return runtime_toolchain_findings(profile, None)
+            available[language] = set(profile.runtime.toolchains[language])
+            continue
         # Reachable image: an empty parse means the tool is genuinely absent, so
         # the helper warns every declared version for this language.
         discovered = strategy.parse(result.stdout)
