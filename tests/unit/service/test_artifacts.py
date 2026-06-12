@@ -1301,6 +1301,53 @@ class TestDepositWorkspacePlanningArtifacts:
         assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
 
     @pytest.mark.unit
+    def test_parent_dir_swapped_to_symlink_after_checks_is_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # TOCTOU: a benign plan under a real intermediate directory passes the
+        # resolve()/escape checks, then a racing agent swaps the *parent*
+        # directory for a symlink pointing outside the worktree before the bytes
+        # are opened. ``O_NOFOLLOW`` guards only the final component, so opening
+        # the resolved pathname would follow the swapped parent and exfiltrate a
+        # host file; the dir_fd component walk must refuse the swapped parent.
+        import shutil as shutil_module
+
+        work_dir = tmp_path / "work"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "ws_dep.md").write_text("escaped plan", encoding="utf-8")
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path, plan_text="benign")
+        parent_dir = (worktree / plan_path).parent
+        worktree_root = worktree.resolve()
+
+        real_os_open = artifacts_module.os.open
+        _swapped: set[bool] = set()
+
+        def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            # On the first descriptor the copy walk opens (the worktree root,
+            # after resolve() canonicalised the real parent), replace the real
+            # intermediate directory with an outside symlink of the same name.
+            if not _swapped and Path(path) == worktree_root and parent_dir.is_dir():
+                _swapped.add(True)
+                shutil_module.rmtree(parent_dir)
+                parent_dir.symlink_to(outside, target_is_directory=True)
+            return real_os_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(artifacts_module.os, "open", swapping_open)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        assert _swapped, "swap hook never fired"
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
     def test_source_swapped_to_hard_link_after_checks_is_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1314,18 +1361,24 @@ class TestDepositWorkspacePlanningArtifacts:
         secret.write_text("TOP SECRET", encoding="utf-8")
         worktree, plan_path, report_path = self._seed_worktree(tmp_path, plan_text="benign")
         target = worktree / plan_path
-        resolved_target = target.resolve()
 
         real_os_open = artifacts_module.os.open
+        _swapped: set[bool] = set()
 
         def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-            if Path(path) == resolved_target and target.exists() and not _swapped:
+            # The copy opens the leaf via a ``dir_fd`` component walk, so key the
+            # swap on that final (non-directory) ``openat`` rather than a full path.
+            if (
+                kwargs.get("dir_fd") is not None
+                and not flags & os.O_DIRECTORY
+                and target.exists()
+                and not _swapped
+            ):
                 _swapped.add(True)
                 target.unlink()
                 os.link(secret, target)
             return real_os_open(path, flags, *args, **kwargs)
 
-        _swapped: set[bool] = set()
         monkeypatch.setattr(artifacts_module.os, "open", swapping_open)
 
         deposit_workspace_planning_artifacts(
@@ -1349,12 +1402,13 @@ class TestDepositWorkspacePlanningArtifacts:
         work_dir = tmp_path / "work"
         worktree, plan_path, report_path = self._seed_worktree(tmp_path, plan_text="benign")
         target = worktree / plan_path
-        resolved_target = target.resolve()
 
         real_os_open = artifacts_module.os.open
 
         def swapping_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-            if Path(path) == resolved_target and target.is_file():
+            # Swap the leaf for a directory on the final (non-directory) ``openat``
+            # of the ``dir_fd`` component walk, after the path checks resolved it.
+            if kwargs.get("dir_fd") is not None and not flags & os.O_DIRECTORY and target.is_file():
                 target.unlink()
                 target.mkdir()
             return real_os_open(path, flags, *args, **kwargs)

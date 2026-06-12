@@ -187,15 +187,17 @@ def _deposit_one_planning_artifact(
         # A background agent process can swap ``resolved`` (or a path component)
         # after the checks above but before the bytes are copied. ``copyfile``
         # re-opens by path, so that TOCTOU window would let a symlink/hard-link/
-        # oversized replacement slip past every guard. Open the source once with
-        # ``O_NOFOLLOW`` and validate + copy from that same descriptor, so the
-        # checks apply to the exact file whose bytes land in the served dir.
+        # oversized replacement slip past every guard. Open the source once by
+        # walking each component from the worktree root with ``O_NOFOLLOW`` and
+        # validate + copy from that same descriptor, so the checks apply to the
+        # exact file whose bytes land in the served dir.
         _copy_planning_source_from_stable_fd(
             artifact_dir=artifact_dir,
             workspace_id=workspace_id,
             source=source,
             resolved=resolved,
             dest_name=dest_name,
+            worktree_root=worktree_root,
         )
     except OSError as exc:
         _log.warning(
@@ -208,6 +210,29 @@ def _deposit_one_planning_artifact(
         )
 
 
+def _open_planning_source_under_root(*, worktree_root: Path, resolved: Path) -> int:
+    """Open ``resolved`` by descending each path component from ``worktree_root``
+    with ``dir_fd`` + ``O_NOFOLLOW``, so no component — final *or* intermediate —
+    may be a symlink.
+
+    ``O_NOFOLLOW`` on a single ``os.open(resolved)`` only refuses a final-component
+    symlink, leaving a TOCTOU window where a parent directory swapped for a symlink
+    after ``resolve()`` would let the open escape the worktree. Walking component by
+    component refuses any swapped link (the ``openat`` raises ``OSError``), so the
+    returned descriptor is proven to live under ``worktree_root``.
+    """
+    rel_parts = resolved.relative_to(worktree_root).parts
+    dir_fd = os.open(worktree_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in rel_parts[:-1]:
+            child_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = child_fd
+        return os.open(rel_parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def _copy_planning_source_from_stable_fd(
     *,
     artifact_dir: Path,
@@ -215,12 +240,16 @@ def _copy_planning_source_from_stable_fd(
     source: Path,
     resolved: Path,
     dest_name: str,
+    worktree_root: Path,
 ) -> None:
-    # ``O_NOFOLLOW`` refuses a final-component symlink swapped in after the
-    # path-based checks; the ``fstat`` below then re-validates the *opened*
-    # inode so a hard-link or oversized replacement is caught on the very file
-    # that gets copied rather than on a path that may have changed underneath us.
-    fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW)
+    # Walk each component from ``worktree_root`` with ``O_NOFOLLOW`` so neither
+    # the final file nor any intermediate directory can be a symlink. A single
+    # ``os.open(resolved, O_NOFOLLOW)`` guards only the final component, so a
+    # parent directory swapped for a symlink after ``resolve()`` would still be
+    # followed out of the worktree. The ``fstat`` below then re-validates the
+    # *opened* inode so a hard-link or oversized replacement is caught on the
+    # very file that gets copied rather than on a path that may have changed.
+    fd = _open_planning_source_under_root(worktree_root=worktree_root, resolved=resolved)
     try:
         stat = os.fstat(fd)
         if not S_ISREG(stat.st_mode):
