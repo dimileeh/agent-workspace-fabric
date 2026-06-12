@@ -20,6 +20,7 @@ here we resolve only the ones the monitor already recorded with a fix verdict.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -55,6 +56,74 @@ from awf.runtime.pr_monitor_runner.logging import _log
 _OUTDATED_RESOLVABLE_THREAD_VERDICTS = _RESOLVABLE_THREAD_VERDICTS - frozenset({"defer"})
 
 
+def _thread_identifier_set(thread: ReviewThread) -> set[str]:
+    """All ids an outdated thread's fix could have been recorded under (#547).
+
+    A GitHub inline comment surfaces in AWF as BOTH a ``ReviewThread`` (carrying
+    ``thread_id``, e.g. ``PRRT_…``) AND — when the fix-cycle took the COMMENT
+    path rather than the thread path — a verdict keyed by the comment's
+    ``databaseId`` (``comment_id``, e.g. ``4688598838``; the commit reads
+    ``fix: address review comment issue:4688598838 — …``). The outdated-thread
+    resolution keys on ``thread_id`` only, so a comment-path fix is invisible to
+    it. The thread already carries its comment ids, so reconcile on the READ
+    side: build the full identifier set and test the verdict store / branch
+    evidence against ALL of them.
+
+    ``None`` comment ids are filtered out; the set de-dups naturally. A thread
+    with no comment ids falls back to ``{thread_id}`` (existing behavior).
+    """
+    ids = {thread.thread_id}
+    ids.update(comment.comment_id for comment in thread.comments if comment.comment_id)
+    return ids
+
+
+def _grep_id_pattern(identifier: str) -> str:
+    """An ``-E`` (ERE) sub-pattern that matches ``identifier`` as a whole token (#548).
+
+    A numeric comment ``databaseId`` (e.g. ``123``) embedded in a bare alternation
+    is unanchored, so ``git log -E --grep '(123)'`` ALSO matches a commit that only
+    addressed ``12345`` — ``123`` is a substring. In a PR carrying multiple outdated
+    threads whose numeric ids overlap, the branch-evidence seed would then mark and
+    resolve the WRONG thread. Anchor numeric ids with a non-digit boundary (or the
+    message start/end) on both sides so ``123`` cannot match inside ``12345``. Node
+    ids (``PRRT_…``) carry letters and ``_``, so a full-length token cannot collide
+    by substring this way — they stay bare (only ``re.escape``-d).
+    """
+    escaped = re.escape(identifier)
+    if identifier.isdigit():
+        return f"(^|[^0-9]){escaped}([^0-9]|$)"
+    return escaped
+
+
+def _thread_has_blocking_comment_verdict(
+    thread: ReviewThread,
+    state: MonitorState,
+) -> bool:
+    """True if any of the thread's comment ids carries a non-resolvable verdict (#548).
+
+    A single inline thread can accumulate per-comment verdicts under different
+    comment databaseIds (the fix-cycle COMMENT path keys on ``comment_id``, so a
+    thread with a reply addressed comment-by-comment can hold more than one). If
+    ONE comment resolved (``fix_committed`` / ``false_positive``) but ANOTHER
+    needs a human (``needs_human`` / ``agent_failed`` / ``defer``), the thread
+    must stay open: promoting the resolvable verdict and resolving the thread
+    would silently close — and let ``decide`` merge over — the blocking sibling.
+
+    Returns ``True`` when any comment id (excluding the ``thread_id`` itself)
+    carries a recorded verdict that is NOT in
+    ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``. Both the in-memory reconcile and the
+    branch-evidence seed consult this so neither path resolves a thread that still
+    holds an unaddressed-by-a-human sibling verdict. Threads with no recorded
+    comment verdicts (the common re-adoption case, where state is fresh) return
+    ``False`` and behave exactly as before.
+    """
+    for comment_id in _thread_identifier_set(thread) - {thread.thread_id}:
+        verdict = state.threads_addressed_ids.get(comment_id)
+        if verdict is not None and verdict not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+            return True
+    return False
+
+
 def _parse_commit_iso(raw: str) -> datetime | None:
     """Parse a ``git log --format=%aI`` author date into a UTC-aware datetime.
 
@@ -71,6 +140,36 @@ def _parse_commit_iso(raw: str) -> datetime | None:
     if parsed.tzinfo is None:  # pragma: no cover - %aI always carries an offset
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _addressed_comment_created_at(thread: ReviewThread, comment_id: str) -> datetime | None:
+    """``created_at`` of the thread comment ``comment_id`` (its fix-time lower bound).
+
+    The reconcile's post-fix activity guard (#548) compares the newest reviewer
+    comment against the comment the fix actually addressed (the one carrying the
+    resolvable verdict). The reviewer posted that comment no later than AWF fixed
+    it, so its ``created_at`` is a conservative lower bound on fix time — any
+    reviewer comment newer than it is feedback AWF never re-triaged.
+
+    Use ``created_at`` ONLY, not ``max(created_at, updated_at)``: when the addressed
+    comment is itself EDITED after the fix, its ``updated_at`` advances past the fix
+    time and is simultaneously the newest reviewer activity that
+    ``_latest_reviewer_comment_at`` reports. A ``updated_at`` baseline would then move
+    in lockstep with that activity, so ``latest_comment_at > addressed_at`` could never
+    fire and the edited body would be snapshotted as handled — silently closing an
+    untriaged edit (#548 / PRRT_kwDOSJAM6s6JH9Zx). ``created_at`` cannot move with an
+    edit, so it stays a true lower bound and the guard catches the edit. The cost is a
+    conservative ``needs_human`` when a comment was edited BEFORE the fix (ordering is
+    unprovable without a recorded fix time), which surfaces to a human rather than
+    merging over feedback — the safe direction, matching the rest of this module.
+
+    Returns ``None`` when the comment carries no ``created_at`` (the guard then keeps
+    the promote-baseline, mirroring the branch-evidence seed when ordering is unprovable).
+    """
+    for comment in thread.comments:
+        if comment.comment_id == comment_id:
+            return comment.created_at
+    return None
 
 
 def _latest_reviewer_comment_at(thread: ReviewThread) -> datetime | None:
@@ -148,28 +247,51 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         thread
         for thread in status.outdated_unresolved_inline_threads
         if state.threads_addressed_ids.get(thread.thread_id) is None
+        # #548: never seed ``fix_committed`` from branch evidence onto a thread
+        # that already holds a blocking sibling comment verdict (``needs_human`` /
+        # ``agent_failed`` / ``defer``). The matching ``fix: address`` commit for a
+        # resolved sibling would otherwise re-introduce the merge-gate bypass the
+        # reconcile guard above closes. A fresh re-adoption state carries no comment
+        # verdicts, so this never changes the common branch-evidence path.
+        and not _thread_has_blocking_comment_verdict(thread, state)
     ]
     if not unseeded:
         return
     worktree_path = self._worktrees_root / workspace_id
 
     async def _matching_fix_commit_time(thread: ReviewThread) -> tuple[bool, datetime | None]:
-        # ``-F --all-match`` requires BOTH literal substrings (the unique thread id
-        # AND ``fix: address``) present in one commit message — matching both AWF
-        # commit shapes while staying specific enough not to seed a thread the
-        # branch never addressed. ``%aI`` returns the newest matching commit's
-        # AUTHOR time so the caller can detect reviewer replies that postdate the
-        # fix. Author (not committer, ``%cI``) time is deliberate: AWF's rebase
-        # recovery (``control/executor/git_methods.py``) runs ``git rebase`` on a
-        # stale PR branch, which rewrites every replayed commit's COMMITTER date
-        # while preserving its author date. In the sequence fix commit → reviewer
-        # follow-up → rebase recovery → re-adoption, the rewritten committer date
-        # is newer than the follow-up, so a ``%cI`` ordering would seed
-        # ``fix_committed`` over the untriaged reply; the author date stays anchored
-        # to the original fix time and keeps the post-fix guard correct. Returns
-        # ``(matched, commit_time)``: an empty / failed read means no durable
+        # ``-E --all-match`` requires BOTH ``--grep`` patterns present in one commit
+        # message: the literal ``fix: address`` prefix AND an alternation over the
+        # thread's full identifier set (``thread_id`` plus any review-comment
+        # databaseIds — #547). Multiple ``--grep`` with ``--all-match`` is AND, so
+        # the ids cannot each be their own ``--grep`` (that would require ALL ids in
+        # one commit); they are OR-ed inside a single ``-E`` alternation instead, so
+        # a comment-path fix (``fix: address review comment issue:4688598838 — …``)
+        # matches on the raw databaseId token even though ``thread_id`` differs.
+        # Each id goes through ``_grep_id_pattern`` (numeric databaseIds get a
+        # non-digit boundary so ``123`` cannot match inside ``12345`` — #548; node
+        # ids stay ``re.escape``-d) and the set is sorted for a deterministic argv.
+        # The literal ``fix: address``
+        # carries no regex metacharacters so it is safe as its own pattern under
+        # ``-E``. Still requiring ``fix: address`` keeps the match specific enough
+        # not to seed a thread the branch never addressed. ``%aI`` returns the
+        # newest matching commit's AUTHOR time so the caller can detect reviewer
+        # replies that postdate the fix. Author (not committer, ``%cI``) time is
+        # deliberate: AWF's rebase recovery (``control/executor/git_methods.py``)
+        # runs ``git rebase`` on a stale PR branch, which rewrites every replayed
+        # commit's COMMITTER date while preserving its author date. In the sequence
+        # fix commit → reviewer follow-up → rebase recovery → re-adoption, the
+        # rewritten committer date is newer than the follow-up, so a ``%cI`` ordering
+        # would seed ``fix_committed`` over the untriaged reply; the author date stays
+        # anchored to the original fix time and keeps the post-fix guard correct.
+        # Returns ``(matched, commit_time)``: an empty / failed read means no durable
         # evidence (no seed); a non-empty read is a match whose time may still be
         # ``None`` if git emitted something unparseable.
+        id_alternation = (
+            "("
+            + "|".join(_grep_id_pattern(i) for i in sorted(_thread_identifier_set(thread)))
+            + ")"
+        )
         result = await self._deps.runner.run(
             git_worktree_command(
                 worktree_path,
@@ -177,12 +299,12 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
                 "-n",
                 "1",
                 "--format=%aI",
-                "-F",
+                "-E",
                 "--all-match",
                 "--grep",
-                thread.thread_id,
-                "--grep",
                 "fix: address",
+                "--grep",
+                id_alternation,
                 "HEAD",
             )
         )
@@ -214,6 +336,142 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
             state.mark_addressed(thread.thread_id, "needs_human")
             continue
         _mark_review_thread_addressed(state, thread, "fix_committed")
+
+
+def _reconcile_comment_keyed_outdated_verdicts(
+    status: PRStatus,
+    state: MonitorState,
+) -> None:
+    """Promote a comment-keyed resolvable verdict onto its outdated thread (#547).
+
+    The fix-cycle's COMMENT path records a verdict under the review comment's
+    ``databaseId`` (``comment_id``), not the ``thread_id``. The same inline
+    comment also surfaces as a ``ReviewThread`` whose ``comments`` carry that
+    ``comment_id``. So an outdated thread can be fully addressed in memory yet
+    invisible to the thread-keyed resolve loop (the #540 case: a continuous
+    monitor whose comment-keyed verdict was in state, but the thread-keyed
+    lookup missed it).
+
+    Reconcile in memory BEFORE the branch-evidence seed: for each outdated thread
+    with no ``thread_id`` verdict yet, if ANY of its comment ids carries a
+    resolvable verdict (``_OUTDATED_RESOLVABLE_THREAD_VERDICTS`` — still excludes
+    ``defer``), promote it onto the thread via ``_mark_review_thread_addressed``.
+    That records the ``thread_id`` verdict AND the current thread body-hash
+    snapshot, so the resolve loop's ``_review_thread_needs_attention`` guard sees
+    a matching hash and resolves — mirroring how the branch-evidence seed
+    promotes durable evidence. Because promotion sets the ``thread_id`` verdict,
+    the seed step's ``unseeded`` filter then excludes these threads, so the pure
+    in-memory case issues no git call.
+
+    A bare verdict-membership broadening (without promotion) would still be
+    blocked: ``_review_thread_needs_attention`` keys on the thread body-hash
+    snapshot, which a comment-path verdict never stored, so the hash would
+    mismatch and the resolve would be skipped. Promotion is what closes the gap.
+    ``defer`` is excluded (a deferred thread must stay open with its tracking
+    issue), and a thread the branch never addressed carries no resolvable verdict
+    under any id, so it is not falsely promoted.
+
+    A thread can also hold MIXED per-comment verdicts (one comment
+    ``fix_committed``, a reply ``needs_human``). Promoting the resolvable verdict
+    in that case would resolve the thread and let ``decide`` merge over the
+    blocking sibling, so ``_thread_has_blocking_comment_verdict`` gates promotion:
+    a thread with any non-resolvable comment verdict instead has ``needs_human``
+    promoted onto its ``thread_id`` (#548 / PRRT_kwDOSJAM6s6JIGQB). Merely
+    skipping is insufficient — ``decide``'s outdated gate consults only the
+    ``thread_id`` verdict, never the comment ids, so a comment-keyed blocking
+    verdict alone would not block the merge; promoting ``needs_human`` keeps the
+    thread open AND makes ``decide`` return ``NotifyHuman``.
+
+    Finally, an UNTRIAGED reviewer reply (a new comment carrying no verdict) that
+    postdates the comment-path fix must not be silently resolved over. Because
+    promotion snapshots the thread's CURRENT body via ``_mark_review_thread_addressed``,
+    the reply would be baked into the snapshot and ``_review_thread_needs_attention``
+    would see a matching hash and resolve — unlike the thread-keyed path, whose
+    snapshot predates the reply and blocks. Mirroring the branch-evidence seed's
+    post-fix activity guard, when a reviewer comment is newer than the addressed
+    comment this seeds ``needs_human`` (resolve loop skips it, ``decide`` blocks
+    merge) instead of promoting the resolvable verdict
+    (#548 / PRRT_kwDOSJAM6s6JHeA2).
+    """
+    for thread in status.outdated_unresolved_inline_threads:
+        if state.threads_addressed_ids.get(thread.thread_id) is not None:
+            continue
+        # #548: a thread can hold mixed per-comment verdicts — e.g. one comment
+        # ``fix_committed`` and a reply ``needs_human``. Promoting the resolvable
+        # verdict here (and resolving the thread) would silently bypass the
+        # blocking sibling's safety gate.
+        #
+        # But a bare ``continue`` is NOT enough to keep ``decide`` blocking
+        # (PRRT_kwDOSJAM6s6JIGQB): the blocking verdict is recorded under the
+        # sibling's ``comment_id``, while ``decide``'s outdated gate
+        # (``_outdated_thread_blocks_merge``) only consults ``thread.thread_id``,
+        # the requeue flag, and the body-hash snapshot — it never looks up the
+        # thread's comment ids. So skipping would leave the outdated thread with
+        # NO thread-keyed verdict and the PR could auto-merge over the blocking
+        # sibling. Promote a ``needs_human`` verdict onto the ``thread_id`` so the
+        # gate's ``== "needs_human"`` check fires (``decide`` → ``NotifyHuman``).
+        # Plain ``mark_addressed`` (no body-hash snapshot) suffices — ``needs_human``
+        # is not in ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS`` so the resolve loop
+        # still leaves the thread open, and the outdated gate keys on the verdict
+        # alone, not the hash.
+        if _thread_has_blocking_comment_verdict(thread, state):
+            state.mark_addressed(thread.thread_id, "needs_human")
+            continue
+        comment_ids = sorted(_thread_identifier_set(thread) - {thread.thread_id})
+        resolvable_comment_ids = [
+            comment_id
+            for comment_id in comment_ids
+            if state.threads_addressed_ids.get(comment_id) in _OUTDATED_RESOLVABLE_THREAD_VERDICTS
+        ]
+        if not resolvable_comment_ids:
+            continue
+        # Post-fix reviewer activity guard (#548 / PRRT_kwDOSJAM6s6JHeA2),
+        # mirroring the branch-evidence seed above. ``_mark_review_thread_addressed``
+        # snapshots the thread's CURRENT body, so a reviewer reply that landed
+        # AFTER the comment-path fix would be baked into the snapshot and
+        # ``_review_thread_needs_attention`` would see a matching hash and resolve
+        # over it — unlike the thread-keyed path, whose snapshot predates the reply
+        # and blocks. The comment-path verdict stored no thread body-hash at fix
+        # time, so detect post-fix activity by timestamp: when a reviewer comment
+        # is newer than the addressed comment's CREATION, seed ``needs_human`` (which
+        # the resolve loop skips and ``decide`` treats as a merge blocker) instead of
+        # promoting the resolvable verdict.
+        #
+        # The baseline is the NEWEST handled comment's ``created_at``, across ALL of
+        # the thread's resolvable-verdict comments — not just the first sorted one
+        # (#548 / PRRT_kwDOSJAM6s6JISCM). A thread can hold several comment-keyed
+        # resolvable verdicts; if a sibling comment was ALSO already handled but was
+        # created later than the promoted one, anchoring on only the promoted comment
+        # would make that handled sibling's own ``created_at`` satisfy
+        # ``latest_comment_at > addressed_at`` and falsely seed ``needs_human``,
+        # leaving a fully-addressed thread open and blocking auto-merge. Taking the
+        # max over every handled comment treats a handled sibling as part of the fix,
+        # not fresh feedback, while a genuinely untriaged reply newer than them all
+        # still trips the guard.
+        #
+        # Use ``created_at``, NOT ``max(created_at, updated_at)``: an EDIT to a handled
+        # comment advances its ``updated_at`` and is also the newest reviewer activity,
+        # so a ``updated_at`` baseline would move in lockstep and never fire
+        # (PRRT_kwDOSJAM6s6JH9Zx). When timestamps are unavailable we cannot prove
+        # ordering, so keep the promote-baseline (the common no-activity case still
+        # resolves and unblocks the PR).
+        addressed_ats = [
+            created_at
+            for comment_id in resolvable_comment_ids
+            if (created_at := _addressed_comment_created_at(thread, comment_id)) is not None
+        ]
+        addressed_at = max(addressed_ats, default=None)
+        latest_comment_at = _latest_reviewer_comment_at(thread)
+        if (
+            addressed_at is not None
+            and latest_comment_at is not None
+            and latest_comment_at > addressed_at
+        ):
+            state.mark_addressed(thread.thread_id, "needs_human")
+        else:
+            _mark_review_thread_addressed(
+                state, thread, state.threads_addressed_ids[resolvable_comment_ids[0]]
+            )
 
 
 async def _resolve_addressed_outdated_threads(
@@ -250,6 +508,10 @@ async def _resolve_addressed_outdated_threads(
     is in-memory only, matching the rest of the transient path.
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
+    # #547: reconcile comment-keyed verdicts onto their outdated thread FIRST, so
+    # the (continuous-monitor) in-memory case resolves without a git call and the
+    # branch-evidence seed below naturally skips the now-seeded threads.
+    _reconcile_comment_keyed_outdated_verdicts(status, state)
     # #484: seed verdicts for outdated threads a prior instance already addressed
     # (re-adoption / handoff) from durable branch evidence, so the resolve loop
     # below — which gates on a recorded verdict — can resolve them this iteration

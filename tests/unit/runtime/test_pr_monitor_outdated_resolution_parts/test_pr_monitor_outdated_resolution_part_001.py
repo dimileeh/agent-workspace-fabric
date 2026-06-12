@@ -12,11 +12,16 @@ iterates ``PRStatus.outdated_unresolved_inline_threads`` and resolves only the
 threads the monitor already recorded with a fix verdict
 (``fix_committed`` / ``false_positive``). ``defer`` / ``needs_human`` /
 ``agent_failed`` threads legitimately stay open.
+
+Part 1 of 2 — the #473 resolve-hygiene cases, the #484 branch-evidence seeding
+cases, and the pure-helper unit tests. Part 2 holds the #547 / #548
+comment-keyed reconcile cases. Shared builders live in ``._helpers``; the
+PostgreSQL ``factory`` fixture lives in the package ``conftest``.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,9 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.bitbucket_client import BITBUCKET_API_ERROR, BitbucketClientError
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClientError, RepoRef
+from awf.common.github_client import GitHubClientError
 from awf.db.repositories import WorkspaceRepository
-from awf.db.session import make_session_factory
 from awf.runtime.monitor_state_keys import _outdated_resolve_requeued_key
 from awf.runtime.pr_monitor import (
     _CLOSED_OUTDATED_THREAD_VERDICTS,
@@ -46,135 +50,26 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner.fix_cycle import _RESOLVABLE_THREAD_VERDICTS
 from awf.runtime.pr_monitor_runner.outdated_resolution import (
     _OUTDATED_RESOLVABLE_THREAD_VERDICTS,
+    _grep_id_pattern,
     _latest_reviewer_comment_at,
     _parse_commit_iso,
+    _thread_identifier_set,
 )
-from tests.postgres import postgres_test_engine
-from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
     seed_monitoring_workspace,
 )
-
-
-@pytest.fixture
-async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    async with postgres_test_engine() as engine:
-        yield make_session_factory(engine)
-
-
-class _RecordingGitHub(DefaultMergeMethodGitHubClient):
-    """Forge stub that records ``resolve_thread`` calls and optionally raises.
-
-    The runner step is forge-neutral — it only calls ``gh.resolve_thread`` — so
-    a single recording stub exercises both the GitHub and Bitbucket paths; the
-    POST-not-DELETE resolve semantics are covered by the client-level tests.
-    """
-
-    def __init__(self, inner: FakeCommandRunner, *, error: Exception | None = None) -> None:
-        super().__init__(inner)
-        self.resolved: list[str] = []
-        self.attempts: list[str] = []
-        self._error = error
-
-    async def resolve_thread(self, *, thread_id: str) -> None:
-        self.attempts.append(thread_id)
-        if self._error is not None:
-            raise self._error
-        self.resolved.append(thread_id)
-
-
-def _outdated_thread(
-    tid: str,
-    *,
-    path: str = "src/anchor.py",
-    body_excerpt: str = "please fix this finding",
-) -> ReviewThread:
-    return ReviewThread(
-        thread_id=tid,
-        path=path,
-        line=7,
-        body_excerpt=body_excerpt,
-        author="greptile",
-        is_resolved=False,
-        is_outdated=True,
-    )
-
-
-def _outdated_thread_with_comment(
-    tid: str,
-    *,
-    comment_at: datetime,
-    viewer_did_author: bool = False,
-) -> ReviewThread:
-    """An outdated thread carrying one reviewer comment stamped ``comment_at``.
-
-    Used to exercise the post-fix-activity guard: the seed compares this
-    timestamp against the matching fix commit's author time.
-    """
-    return ReviewThread(
-        thread_id=tid,
-        path="src/anchor.py",
-        line=7,
-        body_excerpt="please fix this finding",
-        author="greptile",
-        is_resolved=False,
-        is_outdated=True,
-        comments=(
-            ReviewThreadComment(
-                comment_id="c1",
-                body="please fix this finding",
-                author="greptile",
-                created_at=comment_at,
-                updated_at=comment_at,
-                viewer_did_author=viewer_did_author,
-            ),
-        ),
-    )
-
-
-def _status_with_outdated(*outdated: ReviewThread) -> PRStatus:
-    return PRStatus(
-        number=42,
-        head_sha="abc1234567890def",
-        mergeable=MergeableState.MERGEABLE,
-        check_state=CheckState.SUCCESS,
-        unresolved_inline_threads=(),
-        unresolved_review_comments=(),
-        base_behind_count=0,
-        merge_state_status=MergeStateStatus.CLEAN,
-        outdated_unresolved_inline_threads=outdated,
-    )
-
-
-def _resolution_events(ws: object, *, outcome: str | None = None) -> list:
-    return [
-        event
-        for event in ws.events  # type: ignore[attr-defined]
-        if event.event_type == "workspace.audit.comment_resolution"
-        and (event.payload or {}).get("action") == "resolve_outdated_thread"
-        and (outcome is None or (event.payload or {}).get("outcome") == outcome)
-    ]
-
-
-async def _call_resolve(
-    runner: object,
-    *,
-    workspace_id: str,
-    status: PRStatus,
-    state: MonitorState,
-) -> None:
-    await runner._resolve_addressed_outdated_threads(  # type: ignore[attr-defined]
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        status=status,
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-    )
+from tests.unit.runtime.test_pr_monitor_outdated_resolution_parts._helpers import (
+    _call_resolve,
+    _grep_argv,
+    _outdated_thread,
+    _outdated_thread_with_comment,
+    _RecordingGitHub,
+    _resolution_events,
+    _status_with_outdated,
+)
 
 
 @pytest.mark.unit
@@ -714,28 +609,6 @@ async def test_permanent_resolve_downgrade_survives_state_reload(
     assert gh.attempts == [bb_id]  # exactly one resolve attempt across both polls
 
 
-def _grep_argv(worktree_path: Path, thread_id: str) -> list[str]:
-    """The bounded ``git log`` evidence grep the seeding helper issues (#484)."""
-    return [
-        "git",
-        "-c",
-        f"safe.directory={worktree_path}",
-        "-C",
-        str(worktree_path),
-        "log",
-        "-n",
-        "1",
-        "--format=%aI",
-        "-F",
-        "--all-match",
-        "--grep",
-        thread_id,
-        "--grep",
-        "fix: address",
-        "HEAD",
-    ]
-
-
 @pytest.mark.unit
 async def test_outdated_thread_seeded_from_branch_evidence_is_resolved(
     factory: async_sessionmaker[AsyncSession],
@@ -1012,7 +885,7 @@ async def test_outdated_thread_post_fix_guard_uses_author_date_across_rebase(
     # rebase-proof. (A regression to ``%cI`` would surface the committer date and
     # silently resolve over the reply.)
     worktree = tmp_path / "worktrees" / workspace_id
-    assert cmd.calls[0].args == _grep_argv(worktree, "PRRT_rebased")
+    assert cmd.calls[0].args == _grep_argv(worktree, "PRRT_rebased", "c1")
     assert "--format=%aI" in cmd.calls[0].args
     # Reply postdates the (author-dated) fix → not resolved, merge blocked.
     assert gh.attempts == []
@@ -1111,3 +984,52 @@ def test_outdated_resolvable_verdicts_exclude_defer() -> None:
     # constants are documented to mirror each other (same verdicts, different
     # derivation paths), so any new verdict added to one must reach the other.
     assert _CLOSED_OUTDATED_THREAD_VERDICTS == _OUTDATED_RESOLVABLE_THREAD_VERDICTS
+
+
+@pytest.mark.unit
+def test_thread_identifier_set_unions_thread_and_comment_ids() -> None:
+    """(#547) The identifier set is ``{thread_id}`` ∪ non-``None`` comment ids,
+    de-duped. A thread with no comments / only ``None`` comment ids falls back to
+    ``{thread_id}`` (existing behavior; no crash)."""
+    thread = ReviewThread(
+        thread_id="PRRT_abc",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="finding",
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(comment_id="4688598838", body="x"),
+            ReviewThreadComment(comment_id=None, body="y"),  # filtered out
+            ReviewThreadComment(comment_id="4688598838", body="dup"),  # de-duped
+        ),
+    )
+    assert _thread_identifier_set(thread) == {"PRRT_abc", "4688598838"}
+    # No comments → thread_id only.
+    assert _thread_identifier_set(_outdated_thread("PRRT_lonely")) == {"PRRT_lonely"}
+    # Only a None-id comment → thread_id only (no crash).
+    none_only = ReviewThread(
+        thread_id="PRRT_noneonly",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="finding",
+        is_outdated=True,
+        comments=(ReviewThreadComment(comment_id=None, body="x"),),
+    )
+    assert _thread_identifier_set(none_only) == {"PRRT_noneonly"}
+
+
+@pytest.mark.unit
+def test_grep_id_pattern_anchors_numeric_ids_but_not_node_ids() -> None:
+    """(#548) A numeric databaseId is wrapped in non-digit boundaries so it cannot
+    match as a substring of a longer id, while an alnum node id stays bare."""
+    # Numeric ids get the non-digit (or message edge) boundary on both sides.
+    assert _grep_id_pattern("123") == "(^|[^0-9])123([^0-9]|$)"
+    # Node ids carry letters/``_`` and cannot collide by substring → left bare.
+    assert _grep_id_pattern("PRRT_abc") == "PRRT_abc"
+    # The boundaried pattern matches the id as a whole token but NOT inside a
+    # longer overlapping numeric id — the exact wrong-thread match #548 closes.
+    pattern = _grep_id_pattern("123")
+    assert re.search(pattern, "fix: address review comment issue:123 — done")
+    assert re.search(pattern, "fix: address 123") is not None  # id at message end
+    assert re.search(pattern, "fix: address review comment issue:12345 — other") is None
+    assert re.search(pattern, "fix: address review comment issue:5123 — other") is None
