@@ -32,8 +32,9 @@ def _stub_non_docker_checks_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_ok(name: str) -> SetupCheckResult:
         return SetupCheckResult(name=name, level=SetupCheckLevel.OK, summary="ok", detail="ok")
 
+    # ``check_gh`` is no longer part of ``run_system_checks`` (issue #539): forge
+    # presence moved to ``awf init``, so it is not stubbed here.
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
-    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
     monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
     monkeypatch.setattr(
@@ -86,7 +87,6 @@ def _patch_probes_capture_port(
     )
     monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
-    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
     monkeypatch.setattr(system_checks, "check_ports", fake_ports)
     monkeypatch.setattr(
@@ -126,7 +126,6 @@ def _patch_probes_capture_postgres_port(
     )
     monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
-    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
     monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
     monkeypatch.setattr(system_checks, "check_postgres_port", fake_postgres_port)
@@ -164,7 +163,6 @@ def _patch_probes_capture_disk_path(
     )
     monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
-    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
     monkeypatch.setattr(system_checks, "check_ports", lambda _port: fake_ok("ports"))
     monkeypatch.setattr(
