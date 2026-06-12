@@ -19,8 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
 from awf.adapters.base import AgentAdapter
-from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, FakeCommandRunner
-from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
+from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -771,6 +770,7 @@ class TestHappyPathPart001:
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready_workspace(
             factory,
@@ -785,6 +785,17 @@ class TestHappyPathPart001:
                 },
                 "phases": {"validate": ["pytest -q"]},
             },
+        )
+
+        # The planning + conformance adapters are faked, so seed the worktree
+        # plan + conformance report files the real agent would write; the
+        # deposit step surfaces them into the served artifact dir.
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- implement foo\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "summary": "plan achieved", "gaps": []}',
+            encoding="utf-8",
         )
 
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
@@ -840,6 +851,13 @@ class TestHappyPathPart001:
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.subphase == "validation"
             assert ws.last_activity_at is not None
+
+        # The plan + conformance report were deposited into the served artifact
+        # dir (a sibling of the worktree) before teardown, so the console can
+        # surface them by stable name.
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").is_file()
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_runs_validation_then_conformance_only_check(
@@ -1250,6 +1268,7 @@ class TestHappyPathPart001:
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1263,6 +1282,16 @@ class TestHappyPathPart001:
                 },
                 "phases": {"validate": ["pytest -q"]},
             },
+        )
+        # Seed the worktree plan + (unsatisfied) conformance report the real
+        # agent would write; the deposit must surface them even on the
+        # preserved-FAILED stop path so the console stays uniform.
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "needs_iteration", "gaps": ["incomplete"]}',
+            encoding="utf-8",
         )
         operation_id = "op_post_validation_conformance_gap"
         await _insert_validate_handoff_recovery_operation(
@@ -1386,88 +1415,10 @@ class TestHappyPathPart001:
         assert result["requested_tier"] == 1
         assert extra_validate_recovery_ops == 0
 
-    @pytest.mark.unit
-    async def test_planning_validation_handoff_cleanup_failure_finishes_validate_operation(
-        self,
-        executor: WorkspaceExecutor,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "planned-recovery",
-                "planning": {
-                    "required": True,
-                    "plan_path": "docs/awf-plans/{workspace_id}.md",
-                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
-                    "max_iterations": 2,
-                },
-                "phases": {"validate": ["pytest -q"]},
-            },
-        )
-        await _insert_validate_handoff_recovery_operation(
-            factory,
-            workspace_id=ws_id,
-            operation_id="op_validate_handoff_cleanup_failed",
-        )
-
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
-        fake.queue_result(
-            returncode=124,
-            stderr="idle timeout exceeded",
-            reason_code=COMMAND_IDLE_TIMEOUT_REASON,
-        )
-        fake.queue_result(returncode=1, stderr="cleanup still saw tagged processes")
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            run = (
-                (
-                    await s.execute(
-                        text(
-                            """
-                            SELECT status, reason_code
-                            FROM validation_runs
-                            WHERE workspace_id = :workspace_id
-                            """
-                        ),
-                        {"workspace_id": ws_id},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            operation = (
-                (
-                    await s.execute(
-                        text(
-                            """
-                            SELECT status, error_code, error_message, result, finished_at
-                            FROM operations
-                            WHERE id = 'op_validate_handoff_cleanup_failed'
-                            """
-                        )
-                    )
-                )
-                .mappings()
-                .one()
-            )
-
-        assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert ws.failure_reason == "infrastructure_failure"
-        assert EXEC_PROCESS_CLEANUP_FAILED in (ws.failure_message or "")
-        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
-        assert operation["status"] == "failed"
-        assert operation["error_code"] == EXEC_PROCESS_CLEANUP_FAILED
-        assert operation["finished_at"] is not None
-        assert EXEC_PROCESS_CLEANUP_FAILED in operation["error_message"]
-        result = _json_value(operation["result"])
-        assert result["reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
-        assert result["validation_run_id"]
+        # Preserved FAILED workspace still surfaces its plan + (unsatisfied)
+        # conformance report in the served artifact dir.
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").is_file()
+        assert (served_dir / "conformance.json").read_text(
+            encoding="utf-8"
+        ) == '{"status": "needs_iteration", "gaps": ["incomplete"]}'

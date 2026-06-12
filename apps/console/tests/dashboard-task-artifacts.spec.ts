@@ -1,0 +1,537 @@
+import { expect, type Page, test } from "@playwright/test";
+
+function baseWorkspace(workspaceId: string, title: string) {
+  return {
+    workspace_id: workspaceId,
+    title,
+    repo_url: "https://github.com/test/repo",
+    base_branch: "main",
+    agent: "test-agent",
+    status: "completed",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    task_prompt: "do the thing",
+    lifecycle: [],
+    llm_usage: null,
+    recovery: null,
+    coordination_warnings: [],
+  };
+}
+
+function artifact(workspaceId: string, name: string) {
+  return {
+    artifact_id: `art_${workspaceId}_${name}`,
+    workspace_id: workspaceId,
+    name,
+    relative_path: name,
+    path: `/work/artifacts/${workspaceId}/${name}`,
+    kind: name.endsWith(".json") ? "json" : "md",
+    size_bytes: 32,
+    modified_at: new Date().toISOString(),
+  };
+}
+
+async function mockDashboard(page: Page) {
+  await page.route("/api/awf/health", async (route) => {
+    await route.fulfill({ json: { status: "ok" } });
+  });
+  await page.route("/api/awf/metrics/resources/saturation", async (route) => {
+    await route.fulfill({ json: { generated_at: new Date().toISOString() } });
+  });
+  await page.route("/api/awf/metrics/workspaces/summary", async (route) => {
+    await route.fulfill({ json: { active: 0, failed: 0 } });
+  });
+  await page.route("/api/awf/merge-queue*", async (route) => {
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+  await page.route("/api/awf/metrics/failures/summary", async (route) => {
+    await route.fulfill({ json: { taxonomy: [], latest_examples: [], total_failures: 0 } });
+  });
+
+  const full = baseWorkspace("ws_full", "Full Artifacts");
+  const planOnly = baseWorkspace("ws_plan", "Plan Only");
+  const emptyPlan = baseWorkspace("ws_emptyplan", "Empty Plan");
+  const none = baseWorkspace("ws_none", "No Artifacts");
+  const failed = baseWorkspace("ws_fail", "List Error");
+  const planDownloadFail = baseWorkspace("ws_dlfail", "Plan Download Error");
+  const paged = baseWorkspace("ws_paged", "Paged Artifacts");
+
+  // A still-running task whose artifacts are deposited only after the modal is
+  // already open. The overview poll bumps updated_at on its second response, and
+  // the artifact list flips from empty to populated, so the section must refetch
+  // and surface the buttons without the modal being closed and reopened.
+  const live = baseWorkspace("ws_live", "Live Monitoring");
+  // A still-running task whose artifacts list loads on first fetch (buttons show)
+  // but whose later, poll-driven refetch fails. The buttons must drop because a
+  // failed list fetch is not authoritative about presence.
+  const refetchFail = baseWorkspace("ws_refetchfail", "Refetch Failure");
+  // A still-running task whose plan content is opened from an authoritative first
+  // fetch, after which a poll-driven list refetch fails. The failed refetch must
+  // not only drop the buttons but also collapse the open view, so the previously
+  // loaded plan text cannot linger below the list-error banner.
+  const staleContent = baseWorkspace("ws_stalecontent", "Stale Content Refetch");
+  // A still-running task whose plan download fails, after which the poll-driven
+  // list refetch keeps succeeding. The successful refetch must not clear the
+  // download error, or the plan view would leak the empty "No prompt stored"
+  // placeholder once the banner is dismissed.
+  const dlFailRefetch = baseWorkspace("ws_dlfail_refetch", "Download Error Refetch");
+  let overviewCalls = 0;
+
+  await page.route("/api/awf/workspaces/overview*", async (route) => {
+    overviewCalls += 1;
+    // Each poll reports a fresh updated_at, mirroring a workspace that is still
+    // advancing. That changing marker is what must re-drive the artifact fetch.
+    const stamp = `2026-06-12T16:38:${String(overviewCalls).padStart(2, "0")}.000Z`;
+    const liveSnapshot = { ...live, status: "running", updated_at: stamp };
+    const refetchFailSnapshot = { ...refetchFail, status: "running", updated_at: stamp };
+    const staleContentSnapshot = { ...staleContent, status: "running", updated_at: stamp };
+    const dlFailRefetchSnapshot = { ...dlFailRefetch, status: "running", updated_at: stamp };
+    await route.fulfill({
+      json: {
+        items: [
+          full,
+          planOnly,
+          emptyPlan,
+          none,
+          failed,
+          planDownloadFail,
+          paged,
+          liveSnapshot,
+          refetchFailSnapshot,
+          staleContentSnapshot,
+          dlFailRefetchSnapshot,
+        ],
+        has_more: false,
+      },
+    });
+  });
+
+  // First list fetch returns both artifacts; once a later overview poll re-drives
+  // the fetch, the list endpoint starts failing. The section must surface the
+  // error and stop asserting presence (no Plan/Validation buttons).
+  await page.route("/api/awf/workspaces/ws_refetchfail/artifacts*", async (route) => {
+    if (overviewCalls >= 2) {
+      await route.fulfill({
+        status: 500,
+        json: { detail: { message: "Unable to load artifacts." } },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        items: [artifact("ws_refetchfail", "plan.md"), artifact("ws_refetchfail", "conformance.json")],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+
+  // The first list fetch returns both artifacts (so the plan content can be
+  // opened), then a later poll-driven refetch fails. Gating on overviewCalls >= 3
+  // leaves a comfortable window to click Plan and load its content before the
+  // failure invalidates presence and the open view must collapse.
+  await page.route("/api/awf/workspaces/ws_stalecontent/artifacts*", async (route) => {
+    if (overviewCalls >= 3) {
+      await route.fulfill({
+        status: 500,
+        json: { detail: { message: "Unable to load artifacts." } },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        items: [artifact("ws_stalecontent", "plan.md"), artifact("ws_stalecontent", "conformance.json")],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_stalecontent/artifacts/download*", async (route) => {
+    await route.fulfill({
+      headers: { "content-type": "text/markdown" },
+      body: "# Stale Plan Body\n\n- earlier deposited step\n",
+    });
+  });
+
+  // The deposit becomes visible only after the overview has polled again — i.e.
+  // strictly after the modal first mounted. Gating on the overview-poll count
+  // (not the artifact-call count) keeps any mount-time fetches empty even under
+  // React StrictMode's double-invoke, so the buttons can appear only once a
+  // post-mount updated_at change re-drives the list fetch.
+  await page.route("/api/awf/workspaces/ws_live/artifacts*", async (route) => {
+    const items =
+      overviewCalls >= 2
+        ? [artifact("ws_live", "plan.md"), artifact("ws_live", "conformance.json")]
+        : [];
+    await route.fulfill({ json: { items, next_cursor: null, has_more: false } });
+  });
+  await page.route("/api/awf/workspaces/ws_live/artifacts/download*", async (route) => {
+    await route.fulfill({
+      headers: { "content-type": "text/markdown" },
+      body: "# Live Plan Body\n",
+    });
+  });
+
+  // Plan artifact lists and downloads successfully, but its body is blank. The
+  // plan view must show a dedicated empty-plan state, not the prompt-only
+  // "No prompt stored for this workspace." placeholder from TaskPromptBody.
+  await page.route("/api/awf/workspaces/ws_emptyplan/artifacts*", async (route) => {
+    await route.fulfill({
+      json: { items: [artifact("ws_emptyplan", "plan.md")], next_cursor: null, has_more: false },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_emptyplan/artifacts/download*", async (route) => {
+    await route.fulfill({ headers: { "content-type": "text/markdown" }, body: "   \n" });
+  });
+
+  // Plan + conformance present.
+  await page.route("/api/awf/workspaces/ws_full/artifacts*", async (route) => {
+    await route.fulfill({
+      json: {
+        items: [artifact("ws_full", "plan.md"), artifact("ws_full", "conformance.json")],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_full/artifacts/download*", async (route) => {
+    const url = route.request().url();
+    if (url.includes("path=plan.md")) {
+      await route.fulfill({
+        headers: { "content-type": "text/markdown" },
+        body: "# Surfaced Plan\n\n- first deposited step\n",
+      });
+      return;
+    }
+    await route.fulfill({
+      headers: { "content-type": "application/json" },
+      body: '{"status":"satisfied","gaps":[]}',
+    });
+  });
+
+  // Only the plan artifact present.
+  await page.route("/api/awf/workspaces/ws_plan/artifacts*", async (route) => {
+    await route.fulfill({
+      json: { items: [artifact("ws_plan", "plan.md")], next_cursor: null, has_more: false },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_plan/artifacts/download*", async (route) => {
+    await route.fulfill({
+      headers: { "content-type": "text/markdown" },
+      body: "# Plan Only Body\n",
+    });
+  });
+
+  // No artifacts deposited.
+  await page.route("/api/awf/workspaces/ws_none/artifacts*", async (route) => {
+    await route.fulfill({ json: { items: [], next_cursor: null, has_more: false } });
+  });
+
+  // Artifact list request fails — the error must be surfaced, not swallowed.
+  await page.route("/api/awf/workspaces/ws_fail/artifacts*", async (route) => {
+    await route.fulfill({ status: 500, json: { detail: { message: "Unable to load artifacts." } } });
+  });
+
+  // Plan artifact is listed, but its download fails — the error banner must show
+  // without the empty-state "No prompt stored" text leaking through.
+  await page.route("/api/awf/workspaces/ws_dlfail/artifacts*", async (route) => {
+    await route.fulfill({
+      json: { items: [artifact("ws_dlfail", "plan.md")], next_cursor: null, has_more: false },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_dlfail/artifacts/download*", async (route) => {
+    await route.fulfill({ status: 500, json: { detail: { message: "boom" } } });
+  });
+
+  // Plan artifact lists successfully on every poll, but its download fails. The
+  // poll-driven list refetch (changing updated_at) keeps succeeding, which must
+  // not dismiss the standing download error nor leak the empty-prompt placeholder.
+  await page.route("/api/awf/workspaces/ws_dlfail_refetch/artifacts*", async (route) => {
+    await route.fulfill({
+      json: { items: [artifact("ws_dlfail_refetch", "plan.md")], next_cursor: null, has_more: false },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_dlfail_refetch/artifacts/download*", async (route) => {
+    await route.fulfill({ status: 500, json: { detail: { message: "boom" } } });
+  });
+
+  // The named artifacts sort after a full page of unrelated files, so they land
+  // on the second page. The section must follow next_cursor before deciding
+  // presence — reading only the first page would hide the controls even though
+  // plan.md / conformance.json exist and are downloadable.
+  await page.route("/api/awf/workspaces/ws_paged/artifacts*", async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    if (cursor === null) {
+      await route.fulfill({
+        json: {
+          items: [artifact("ws_paged", "00-early.txt"), artifact("ws_paged", "01-early.txt")],
+          next_cursor: "page-2",
+          has_more: true,
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        items: [artifact("ws_paged", "plan.md"), artifact("ws_paged", "conformance.json")],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_paged/artifacts/download*", async (route) => {
+    const url = route.request().url();
+    if (url.includes("path=plan.md")) {
+      await route.fulfill({
+        headers: { "content-type": "text/markdown" },
+        body: "# Paged Plan\n",
+      });
+      return;
+    }
+    await route.fulfill({
+      headers: { "content-type": "application/json" },
+      body: '{"status":"satisfied","gaps":[]}',
+    });
+  });
+}
+
+async function openDetails(page: Page, workspaceId: string) {
+  await page
+    .getByTestId(`workspace-card-${workspaceId}`)
+    .getByRole("button", { name: "Details", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+}
+
+test("renders Plan and Validation buttons and their content when both artifacts exist", async ({
+  page,
+}) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_full");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  const planButton = section.getByRole("button", { name: "Plan" });
+  const validationButton = section.getByRole("button", { name: "Validation" });
+  await expect(planButton).toBeVisible();
+  await expect(validationButton).toBeVisible();
+
+  // No content region until a button is clicked.
+  await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
+
+  await planButton.click();
+  const content = page.getByTestId("task-artifact-content");
+  await expect(content).toContainText("Surfaced Plan");
+  await expect(content).toContainText("first deposited step");
+
+  await validationButton.click();
+  // Pretty-printed JSON keeps the key/value spacing.
+  await expect(content).toContainText('"status": "satisfied"');
+});
+
+test("ignores a slow earlier download after switching artifacts", async ({ page }) => {
+  await mockDashboard(page);
+  // Make the plan download resolve slowly so a subsequent validation click wins
+  // the race; the stale plan response must not overwrite the validation content.
+  await page.unroute("/api/awf/workspaces/ws_full/artifacts/download*");
+  await page.route("/api/awf/workspaces/ws_full/artifacts/download*", async (route) => {
+    const url = route.request().url();
+    if (url.includes("path=plan.md")) {
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      await route.fulfill({
+        headers: { "content-type": "text/markdown" },
+        body: "# Surfaced Plan\n\n- first deposited step\n",
+      });
+      return;
+    }
+    await route.fulfill({
+      headers: { "content-type": "application/json" },
+      body: '{"status":"satisfied","gaps":[]}',
+    });
+  });
+
+  await page.goto("/");
+  await openDetails(page, "ws_full");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // Click Plan (slow), then immediately switch to Validation (fast).
+  await section.getByRole("button", { name: "Plan" }).click();
+  await section.getByRole("button", { name: "Validation" }).click();
+
+  const content = page.getByTestId("task-artifact-content");
+  await expect(content).toContainText('"status": "satisfied"');
+
+  // Wait past the slow plan download; the stale response must be discarded.
+  await page.waitForTimeout(1000);
+  await expect(content).toContainText('"status": "satisfied"');
+  await expect(content).not.toContainText("Surfaced Plan");
+});
+
+test("refetches artifacts as an open, still-running task deposits them", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_live");
+
+  // The very first artifact-list fetch (modal just opened, task still running)
+  // returns nothing, so the buttons can only appear if a later overview poll
+  // re-drives the fetch. Asserting they show — without closing/reopening the
+  // modal — proves the refetch happened; a single mount-time fetch never would.
+  const section = page.getByTestId("task-artifacts");
+  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible({ timeout: 15_000 });
+  await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+});
+
+test("drops the artifact buttons when a later refetch fails", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_refetchfail");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // First fetch succeeds, so the buttons surface from authoritative presence.
+  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+
+  // A later overview poll re-drives the fetch, which now fails. The error must
+  // surface and the buttons must drop — stale presence cannot keep them visible
+  // while the list API is failing.
+  await expect(section).toContainText("Unable to load artifacts.", { timeout: 15_000 });
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+});
+
+test("collapses an open artifact view when a later refetch fails", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_stalecontent");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // First fetch is authoritative, so the buttons surface and the plan content
+  // loads on click.
+  await section.getByRole("button", { name: "Plan" }).click();
+  const content = page.getByTestId("task-artifact-content");
+  await expect(content).toContainText("Stale Plan Body");
+
+  // A later overview poll re-drives the fetch, which now fails. Presence is
+  // invalidated and the buttons drop — but the previously loaded plan text must
+  // not linger below the error banner with no button left to dismiss it.
+  await expect(section).toContainText("Unable to load artifacts.", { timeout: 15_000 });
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
+  await expect(section).not.toContainText("Stale Plan Body");
+});
+
+test("follows pagination so controls show when named artifacts are on a later page", async ({
+  page,
+}) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_paged");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // plan.md / conformance.json only appear on the second page; the buttons can
+  // surface only if the section followed next_cursor past the first page.
+  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+});
+
+test("shows a dedicated empty-plan state instead of the prompt placeholder", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_emptyplan");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  await section.getByRole("button", { name: "Plan" }).click();
+
+  // A successful but blank plan.md must render the plan-specific empty state, not
+  // the prompt-only "No prompt stored for this workspace." text from TaskPromptBody.
+  const content = page.getByTestId("task-artifact-content");
+  await expect(content).toContainText("No plan content.");
+  await expect(content).not.toContainText("No prompt stored for this workspace.");
+});
+
+test("shows only the Plan button when conformance.json is absent", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_plan");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+});
+
+test("hides the artifacts section when no named artifacts were deposited", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_none");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByTestId("task-artifacts")).toHaveCount(0);
+});
+
+test("surfaces an error banner when the artifact list request fails", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_fail");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  // The list fetch failed, so no named artifacts resolve — but the section must
+  // still mount to surface the failure instead of looking like an empty result.
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+  await expect(section).toContainText("Unable to load artifacts.");
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+});
+
+test("shows the download error without leaking the empty-prompt placeholder", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_dlfail");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  await section.getByRole("button", { name: "Plan" }).click();
+
+  // The download failure surfaces as an error banner...
+  await expect(section).toContainText("Request failed with HTTP 500.");
+  // ...and the content panel must not render the misleading empty-state path,
+  // which would otherwise claim "No prompt stored for this workspace."
+  await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
+  await expect(section).not.toContainText("No prompt stored for this workspace.");
+});
+
+test("keeps the download error when a later list refetch succeeds", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_dlfail_refetch");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // The download fails, raising the error banner and hiding the content panel.
+  await section.getByRole("button", { name: "Plan" }).click();
+  await expect(section).toContainText("Request failed with HTTP 500.");
+
+  // Subsequent overview polls re-drive the artifact list fetch, which succeeds.
+  // That success clears only the list error — it must not dismiss the standing
+  // download failure. If it did, the now-error-free plan view would render empty
+  // content as the misleading "No prompt stored for this workspace." placeholder.
+  await page.waitForTimeout(3_000);
+  await expect(section).toContainText("Request failed with HTTP 500.");
+  await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
+  await expect(section).not.toContainText("No prompt stored for this workspace.");
+});

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,18 +13,30 @@ from heapq import heappop, heappush
 from itertools import count
 from os import stat_result
 from pathlib import Path
-from typing import Any
+from stat import S_ISREG
+from typing import Any, BinaryIO
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceArtifactListResponse, WorkspaceArtifactResponse
 from awf.common.config import get_settings
+from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.service.bounded_list import BoundedListPage, paginate_bounded_iterable
+
+_log = get_logger(__name__)
 
 DEFAULT_ARTIFACT_LIST_LIMIT = 50
 MAX_ARTIFACT_LIST_LIMIT = 500
 MAX_ARTIFACT_CONTENT_BYTES = 1_048_576
+# Streaming chunk size for the bounded planning-artifact copy.
+_COPY_CHUNK_BYTES = 64 * 1024
+
+# Stable filenames for the per-workspace plan + conformance report deposited
+# into the served artifact dir. The console labels artifacts by these names;
+# ``artifact_kind`` stays suffix-based (``md`` / ``json``).
+DEPOSITED_PLAN_NAME = "plan.md"
+DEPOSITED_CONFORMANCE_NAME = "conformance.json"
 
 
 class ArtifactPathError(ValueError):
@@ -112,6 +125,215 @@ def _workspace_artifact_dir(
 ) -> Path:
     root = Path(work_dir) if work_dir is not None else Path(get_settings().work_dir)
     return workspace_artifact_dir(root, workspace_id)
+
+
+def deposit_workspace_planning_artifacts(
+    *,
+    work_dir: str | Path,
+    workspace_id: str,
+    worktree_path: Path,
+    plan_path: Path,
+    report_path: Path,
+) -> None:
+    """Best-effort copy of the worktree plan + conformance report into the
+    served artifact dir under stable names.
+
+    ``plan_path`` and ``report_path`` are worktree-relative. The served artifact
+    dir (``work_dir/artifacts/{workspace_id}``) is a sibling of the worktree, so
+    deposits made here survive successful-workspace teardown. Each file is
+    copied independently (either may be absent) and overwritten on re-run.
+    A copy failure is logged and skipped — depositing an inspectable artifact
+    must never fail the workspace.
+    """
+    artifact_dir = workspace_artifact_dir(work_dir, workspace_id)
+    worktree_root = worktree_path.resolve()
+    for source, dest_name in (
+        (worktree_path / plan_path, DEPOSITED_PLAN_NAME),
+        (worktree_path / report_path, DEPOSITED_CONFORMANCE_NAME),
+    ):
+        _deposit_one_planning_artifact(
+            artifact_dir=artifact_dir,
+            workspace_id=workspace_id,
+            source=source,
+            dest_name=dest_name,
+            worktree_root=worktree_root,
+        )
+
+
+def _deposit_one_planning_artifact(
+    *,
+    artifact_dir: Path,
+    workspace_id: str,
+    source: Path,
+    dest_name: str,
+    worktree_root: Path,
+) -> None:
+    try:
+        # The source lives in an agent-writable worktree, so a symlinked
+        # plan/report would otherwise let the copy dereference an arbitrary
+        # host-readable file into the served artifact dir. Mirror the reader's
+        # symlink rejection here: refuse a symlink source outright and require
+        # the resolved target to stay inside the worktree (guarding against
+        # escape via an intermediate directory symlink).
+        if source.is_symlink():
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "symlink")
+            return
+        if not source.is_file():
+            return
+        resolved = source.resolve(strict=True)
+        if not resolved.is_relative_to(worktree_root):
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "escapes_worktree")
+            return
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        # A background agent process can swap ``resolved`` (or a path component)
+        # after the checks above but before the bytes are copied. ``copyfile``
+        # re-opens by path, so that TOCTOU window would let a symlink/hard-link/
+        # oversized replacement slip past every guard. Open the source once by
+        # walking each component from the worktree root with ``O_NOFOLLOW`` and
+        # validate + copy from that same descriptor, so the checks apply to the
+        # exact file whose bytes land in the served dir.
+        _copy_planning_source_from_stable_fd(
+            artifact_dir=artifact_dir,
+            workspace_id=workspace_id,
+            source=source,
+            resolved=resolved,
+            dest_name=dest_name,
+            worktree_root=worktree_root,
+        )
+    except OSError as exc:
+        _log.warning(
+            "service.planning_artifact_deposit_failed",
+            workspace_id=workspace_id,
+            source=str(source),
+            dest_name=dest_name,
+            error_type=type(exc).__name__,
+            errno=exc.errno,
+        )
+
+
+def _open_planning_source_under_root(*, worktree_root: Path, resolved: Path) -> int:
+    """Open ``resolved`` by descending each path component from ``worktree_root``
+    with ``dir_fd`` + ``O_NOFOLLOW``, so no component — final *or* intermediate —
+    may be a symlink.
+
+    ``O_NOFOLLOW`` on a single ``os.open(resolved)`` only refuses a final-component
+    symlink, leaving a TOCTOU window where a parent directory swapped for a symlink
+    after ``resolve()`` would let the open escape the worktree. Walking component by
+    component refuses any swapped link (the ``openat`` raises ``OSError``), so the
+    returned descriptor is proven to live under ``worktree_root``.
+    """
+    rel_parts = resolved.relative_to(worktree_root).parts
+    dir_fd = os.open(worktree_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in rel_parts[:-1]:
+            child_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = child_fd
+        return os.open(rel_parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _copy_planning_source_from_stable_fd(
+    *,
+    artifact_dir: Path,
+    workspace_id: str,
+    source: Path,
+    resolved: Path,
+    dest_name: str,
+    worktree_root: Path,
+) -> None:
+    # Walk each component from ``worktree_root`` with ``O_NOFOLLOW`` so neither
+    # the final file nor any intermediate directory can be a symlink. A single
+    # ``os.open(resolved, O_NOFOLLOW)`` guards only the final component, so a
+    # parent directory swapped for a symlink after ``resolve()`` would still be
+    # followed out of the worktree. The ``fstat`` below then re-validates the
+    # *opened* inode so a hard-link or oversized replacement is caught on the
+    # very file that gets copied rather than on a path that may have changed.
+    fd = _open_planning_source_under_root(worktree_root=worktree_root, resolved=resolved)
+    try:
+        stat = os.fstat(fd)
+        if not S_ISREG(stat.st_mode):
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "not_regular_file")
+            return
+        # A hard link shares its inode with another host file, so it passes the
+        # symlink and escape guards while still letting the copy pull an
+        # arbitrary host-readable file's contents into the served artifact dir.
+        # Mirror the content reader's ``st_nlink > 1`` rejection to keep both
+        # code paths fail-closed against link-based exfiltration.
+        if stat.st_nlink > 1:
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "hard_link")
+            return
+        # A buggy or malicious agent could emit an arbitrarily large plan/report
+        # and have the copy both fill the served artifact dir and synchronously
+        # block the executor. The content reader caps reads at
+        # ``MAX_ARTIFACT_CONTENT_BYTES``, so a larger deposit is unreadable
+        # anyway — reject it before copying rather than depositing bytes that
+        # can never be served.
+        if stat.st_size > MAX_ARTIFACT_CONTENT_BYTES:
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "oversized")
+            return
+        # Copy through a temp file and atomically ``os.replace`` it into place so
+        # a failed copy never leaves a truncated artifact behind and a concurrent
+        # reader never observes a half-written deposit.
+        dest = artifact_dir / dest_name
+        tmp_dest = artifact_dir / f".{dest_name}.tmp"
+        try:
+            # ``fstat`` above only sampled the size *before* the copy. A process
+            # still appending to the already-open descriptor could stream well
+            # past ``MAX_ARTIFACT_CONTENT_BYTES`` during an unbounded
+            # ``copyfileobj``, leaving an oversized artifact the reader can never
+            # serve. Bound the copy itself: stop one byte over the cap and reject
+            # the deposit instead of trusting the pre-copy size.
+            with os.fdopen(os.dup(fd), "rb") as src, tmp_dest.open("wb") as dst:
+                oversized = _copy_capped(src, dst, MAX_ARTIFACT_CONTENT_BYTES)
+            if oversized:
+                tmp_dest.unlink(missing_ok=True)
+                _reject_unsafe_planning_source(workspace_id, source, dest_name, "oversized")
+                return
+            tmp_dest.replace(dest)
+        except OSError:
+            tmp_dest.unlink(missing_ok=True)
+            raise
+    finally:
+        os.close(fd)
+
+
+def _copy_capped(src: BinaryIO, dst: BinaryIO, limit: int) -> bool:
+    """Stream ``src`` into ``dst``, copying at most ``limit`` bytes.
+
+    Returns ``True`` if the source held more than ``limit`` bytes — in which case
+    ``dst`` may contain a partial copy the caller must discard — and ``False``
+    when the whole source fit within the cap. The deposit step's ``fstat`` size
+    check only samples the size before the copy; a concurrent writer appending to
+    the open descriptor can grow the file afterwards, so the copy is bounded here
+    rather than trusting that sampled size.
+    """
+    remaining = limit
+    while True:
+        chunk = src.read(_COPY_CHUNK_BYTES)
+        if not chunk:
+            return False
+        if len(chunk) > remaining:
+            dst.write(chunk[:remaining])
+            return True
+        dst.write(chunk)
+        remaining -= len(chunk)
+
+
+def _reject_unsafe_planning_source(
+    workspace_id: str,
+    source: Path,
+    dest_name: str,
+    reason: str,
+) -> None:
+    _log.warning(
+        "service.planning_artifact_deposit_rejected",
+        workspace_id=workspace_id,
+        source=str(source),
+        dest_name=dest_name,
+        reason=reason,
+    )
 
 
 def list_artifacts(workspace_id: str, artifact_dir: Path) -> list[ArtifactMetadata]:

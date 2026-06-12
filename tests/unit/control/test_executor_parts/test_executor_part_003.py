@@ -24,7 +24,13 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.control.executor import planning_artifacts as _planning_artifacts
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    WorkspaceStatus,
+)
 from awf.db.repositories import (
     OperationRepository,
     WorkspaceEventRepository,
@@ -147,6 +153,44 @@ def _adapter_prompt_calls(fake: FakeCommandRunner) -> list[tuple[int, str]]:
 
 def _adapter_prompts(fake: FakeCommandRunner) -> list[str]:
     return [prompt for _, prompt in _adapter_prompt_calls(fake)]
+
+
+def _record_deposit_vs_mark_order(
+    executor: WorkspaceExecutor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    """Spy on planning-artifact deposits and FAILED-status marks, recording
+    their relative order.
+
+    The console keys its artifact refetch on the workspace ``updated_at``
+    (TaskArtifactsSection ``refreshKey``); ``_mark_failed`` bumps ``updated_at``
+    when it publishes the terminal FAILED status, but the filesystem deposit
+    does not touch the row. If a deposit ran *after* the mark, a poll could
+    observe the new ``updated_at`` in the window before the copy, record an
+    empty artifact list, then never refetch — hiding the Plan/Validation
+    controls. Every failure handler must therefore deposit BEFORE marking
+    FAILED. The returned list records ``"deposit"``/``"mark_failed"`` in call
+    order so a test can assert the deposit lands first.
+    """
+    order: list[str] = []
+    real_deposit = _planning_artifacts._deposit_planning_artifacts_best_effort
+
+    def _spy_deposit(*args: Any, **kwargs: Any) -> None:
+        order.append("deposit")
+        real_deposit(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _planning_artifacts, "_deposit_planning_artifacts_best_effort", _spy_deposit
+    )
+
+    real_mark = executor._mark_failed
+
+    async def _spy_mark(**kwargs: Any) -> None:
+        order.append("mark_failed")
+        await real_mark(**kwargs)
+
+    monkeypatch.setattr(executor, "_mark_failed", _spy_mark)
+    return order
 
 
 async def _insert_validate_handoff_recovery_operation(

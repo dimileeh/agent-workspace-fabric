@@ -555,6 +555,23 @@ export interface WorkspaceLogRead {
   data: string;
 }
 
+export interface WorkspaceArtifact {
+  artifact_id: string;
+  workspace_id: string;
+  name: string;
+  relative_path: string;
+  path: string;
+  kind: string;
+  size_bytes: number;
+  modified_at: string;
+}
+
+export interface WorkspaceArtifactList {
+  items: WorkspaceArtifact[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
 export interface Operation {
   id: string;
   workspace_id: string;
