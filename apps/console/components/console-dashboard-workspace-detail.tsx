@@ -246,7 +246,13 @@ export function TaskArtifactsSection({
   const [view, setView] = useState<TaskArtifactView | null>(null);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The list refetch and an artifact download are independent failure sources
+  // that must not share one error slot: a poll-driven list refetch succeeds and
+  // clears its own error, but it must NOT dismiss a download failure raised by an
+  // earlier button click. If it did, the now-error-free plan view would render
+  // empty content as the misleading "No prompt stored for this workspace."
+  const [listError, setListError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   // Monotonic token so a slow download from an earlier click cannot overwrite
   // the content of the artifact the user has since switched to.
   const requestSeq = useRef(0);
@@ -273,7 +279,7 @@ export function TaskArtifactsSection({
         return;
       }
       if (collected === null) {
-        setError(failure);
+        setListError(failure);
         // A failed list fetch is not authoritative about presence, so drop any
         // artifacts a prior successful fetch surfaced. Retaining them would keep
         // the Plan/Validation buttons visible off stale data while the list API
@@ -282,7 +288,7 @@ export function TaskArtifactsSection({
         setItems([]);
         return;
       }
-      setError(null);
+      setListError(null);
       setItems(collected);
     })();
     return () => {
@@ -302,7 +308,7 @@ export function TaskArtifactsSection({
   // one of the named artifacts has been deposited for this workspace. Keep
   // rendering when the list request failed so the error banner can surface;
   // otherwise an API failure is indistinguishable from "no artifacts".
-  if (!showPlan && !showValidation && !error) {
+  if (!showPlan && !showValidation && !listError) {
     return null;
   }
 
@@ -311,7 +317,7 @@ export function TaskArtifactsSection({
     const seq = (requestSeq.current += 1);
     setView(target);
     setLoading(true);
-    setError(null);
+    setDownloadError(null);
     setContent("");
     try {
       const response = await fetch(artifactDownloadPath(workspaceId, name), { cache: "no-store" });
@@ -329,7 +335,7 @@ export function TaskArtifactsSection({
       if (seq !== requestSeq.current) {
         return;
       }
-      setError(cause instanceof Error ? cause.message : "Unable to load artifact.");
+      setDownloadError(cause instanceof Error ? cause.message : "Unable to load artifact.");
     } finally {
       if (seq === requestSeq.current) {
         setLoading(false);
@@ -376,12 +382,12 @@ export function TaskArtifactsSection({
           ) : null}
         </div>
       </div>
-      {error ? (
+      {(downloadError ?? listError) ? (
         <div className="rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-xs text-danger-text">
-          {error}
+          {downloadError ?? listError}
         </div>
       ) : null}
-      {view && !error ? (
+      {view && !downloadError ? (
         <div data-testid="task-artifact-content" className="rounded-md border border-line bg-surface p-3">
           {loading ? (
             <div className="flex items-center gap-2 text-xs text-fg-muted">

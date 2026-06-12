@@ -64,6 +64,11 @@ async function mockDashboard(page: Page) {
   // but whose later, poll-driven refetch fails. The buttons must drop because a
   // failed list fetch is not authoritative about presence.
   const refetchFail = baseWorkspace("ws_refetchfail", "Refetch Failure");
+  // A still-running task whose plan download fails, after which the poll-driven
+  // list refetch keeps succeeding. The successful refetch must not clear the
+  // download error, or the plan view would leak the empty "No prompt stored"
+  // placeholder once the banner is dismissed.
+  const dlFailRefetch = baseWorkspace("ws_dlfail_refetch", "Download Error Refetch");
   let overviewCalls = 0;
 
   await page.route("/api/awf/workspaces/overview*", async (route) => {
@@ -73,9 +78,20 @@ async function mockDashboard(page: Page) {
     const stamp = `2026-06-12T16:38:${String(overviewCalls).padStart(2, "0")}.000Z`;
     const liveSnapshot = { ...live, status: "running", updated_at: stamp };
     const refetchFailSnapshot = { ...refetchFail, status: "running", updated_at: stamp };
+    const dlFailRefetchSnapshot = { ...dlFailRefetch, status: "running", updated_at: stamp };
     await route.fulfill({
       json: {
-        items: [full, planOnly, none, failed, planDownloadFail, paged, liveSnapshot, refetchFailSnapshot],
+        items: [
+          full,
+          planOnly,
+          none,
+          failed,
+          planDownloadFail,
+          paged,
+          liveSnapshot,
+          refetchFailSnapshot,
+          dlFailRefetchSnapshot,
+        ],
         has_more: false,
       },
     });
@@ -176,6 +192,18 @@ async function mockDashboard(page: Page) {
     });
   });
   await page.route("/api/awf/workspaces/ws_dlfail/artifacts/download*", async (route) => {
+    await route.fulfill({ status: 500, json: { detail: { message: "boom" } } });
+  });
+
+  // Plan artifact lists successfully on every poll, but its download fails. The
+  // poll-driven list refetch (changing updated_at) keeps succeeding, which must
+  // not dismiss the standing download error nor leak the empty-prompt placeholder.
+  await page.route("/api/awf/workspaces/ws_dlfail_refetch/artifacts*", async (route) => {
+    await route.fulfill({
+      json: { items: [artifact("ws_dlfail_refetch", "plan.md")], next_cursor: null, has_more: false },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_dlfail_refetch/artifacts/download*", async (route) => {
     await route.fulfill({ status: 500, json: { detail: { message: "boom" } } });
   });
 
@@ -394,6 +422,28 @@ test("shows the download error without leaking the empty-prompt placeholder", as
   await expect(section).toContainText("Request failed with HTTP 500.");
   // ...and the content panel must not render the misleading empty-state path,
   // which would otherwise claim "No prompt stored for this workspace."
+  await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
+  await expect(section).not.toContainText("No prompt stored for this workspace.");
+});
+
+test("keeps the download error when a later list refetch succeeds", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_dlfail_refetch");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // The download fails, raising the error banner and hiding the content panel.
+  await section.getByRole("button", { name: "Plan" }).click();
+  await expect(section).toContainText("Request failed with HTTP 500.");
+
+  // Subsequent overview polls re-drive the artifact list fetch, which succeeds.
+  // That success clears only the list error — it must not dismiss the standing
+  // download failure. If it did, the now-error-free plan view would render empty
+  // content as the misleading "No prompt stored for this workspace." placeholder.
+  await page.waitForTimeout(3_000);
+  await expect(section).toContainText("Request failed with HTTP 500.");
   await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
   await expect(section).not.toContainText("No prompt stored for this workspace.");
 });
