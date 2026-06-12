@@ -235,3 +235,31 @@ async def _record_runtime_toolchain_findings(
                 },
             )
         await session.commit()
+
+
+async def _record_runtime_toolchain_findings_safe(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Any,
+    profile: Any,
+) -> None:
+    """Double-guarded call-site wrapper for the runtime toolchain probe.
+
+    The recorder already swallows probe failures internally; this wrapper adds a
+    second guard so a defect in the recorder itself (or its DB write) can never
+    abort provisioning. Strictly additive: any exception is logged and dropped.
+    """
+    try:
+        await self._record_runtime_toolchain_findings(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+        )
+    except Exception:
+        _log.exception(
+            "executor.runtime_toolchain_probe_record_failed",
+            workspace_id=workspace_id,
+        )
