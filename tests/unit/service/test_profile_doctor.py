@@ -513,6 +513,10 @@ def test_docker_images_skipped_without_images_or_dind(tmp_path: Path) -> None:
     docker_phase = _phase(report, "docker_images")
     assert docker_phase["status"] == "skipped"
     assert docker_phase["reason_code"] == PROFILE_DOCTOR_IMAGES_NONE
+    # The skip path is only reached when no agent runtime image was supplied, so the
+    # message must name that condition alongside docker.mode and service images
+    # rather than implying images would be present given a non-dind mode alone.
+    assert "agent runtime image" in docker_phase["message"]
     assert probed == []
 
 

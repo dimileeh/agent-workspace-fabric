@@ -715,8 +715,8 @@ def _docker_images_phase(
             "status": "skipped",
             "reason_code": PROFILE_DOCTOR_IMAGES_NONE,
             "message": (
-                "docker.mode is not 'dind' and no service images are declared, so "
-                "there are no images to pull."
+                "No agent runtime image was supplied, docker.mode is not 'dind', "
+                "and no service images are declared, so there are no images to pull."
             ),
             "evidence": {"docker_mode": profile.docker.mode.value},
             "action": _NO_ACTION,
