@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from builtins import open as builtins_open
 from pathlib import Path
 from typing import Any
@@ -1192,6 +1193,31 @@ class TestDepositWorkspacePlanningArtifacts:
         worktree, plan_path, report_path = self._seed_worktree(tmp_path)
         (worktree / "docs" / "awf-plans").mkdir(parents=True, exist_ok=True)
         (worktree / plan_path).symlink_to(secret)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
+    def test_hard_linked_source_is_rejected(self, tmp_path: Path) -> None:
+        # A hard link shares its inode with an arbitrary host file, so it slips
+        # past the symlink and escape guards while still copying that file's
+        # contents into the served artifact dir. The deposit step must refuse a
+        # multi-linked source, mirroring the content reader's st_nlink guard.
+        work_dir = tmp_path / "work"
+        secret = tmp_path / "host-secret.txt"
+        secret.write_text("TOP SECRET", encoding="utf-8")
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path)
+        (worktree / "docs" / "awf-plans").mkdir(parents=True, exist_ok=True)
+        os.link(secret, worktree / plan_path)
+        assert (worktree / plan_path).stat().st_nlink > 1
 
         deposit_workspace_planning_artifacts(
             work_dir=work_dir,

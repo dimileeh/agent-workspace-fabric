@@ -181,6 +181,14 @@ def _deposit_one_planning_artifact(
         if not resolved.is_relative_to(worktree_root):
             _reject_unsafe_planning_source(workspace_id, source, dest_name, "escapes_worktree")
             return
+        # A hard link shares its inode with another host file, so it passes the
+        # symlink and escape guards above while still letting ``copyfile`` pull
+        # an arbitrary host-readable file's contents into the served artifact
+        # dir. Mirror the content reader's ``st_nlink > 1`` rejection to keep
+        # both code paths fail-closed against link-based exfiltration.
+        if resolved.stat().st_nlink > 1:
+            _reject_unsafe_planning_source(workspace_id, source, dest_name, "hard_link")
+            return
         artifact_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(resolved, artifact_dir / dest_name)
     except OSError as exc:
