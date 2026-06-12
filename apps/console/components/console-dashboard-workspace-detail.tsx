@@ -286,6 +286,14 @@ export function TaskArtifactsSection({
         // is failing — the same "API failure must not imply presence" rule the
         // first-fetch path already enforces (no buttons, just the error banner).
         setItems([]);
+        // Clearing items removed the Plan/Validation buttons, but an already-open
+        // view keeps rendering its previously loaded text (the content panel only
+        // gates on view && !downloadError). With presence now invalidated and no
+        // button left to dismiss it, collapse the view so stale plan/validation
+        // text cannot linger below the list-error banner. The download error is an
+        // independent failure source and is left untouched.
+        setView(null);
+        setContent("");
         return;
       }
       setListError(null);

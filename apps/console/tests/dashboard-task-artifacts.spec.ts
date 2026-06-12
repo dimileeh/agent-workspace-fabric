@@ -64,6 +64,11 @@ async function mockDashboard(page: Page) {
   // but whose later, poll-driven refetch fails. The buttons must drop because a
   // failed list fetch is not authoritative about presence.
   const refetchFail = baseWorkspace("ws_refetchfail", "Refetch Failure");
+  // A still-running task whose plan content is opened from an authoritative first
+  // fetch, after which a poll-driven list refetch fails. The failed refetch must
+  // not only drop the buttons but also collapse the open view, so the previously
+  // loaded plan text cannot linger below the list-error banner.
+  const staleContent = baseWorkspace("ws_stalecontent", "Stale Content Refetch");
   // A still-running task whose plan download fails, after which the poll-driven
   // list refetch keeps succeeding. The successful refetch must not clear the
   // download error, or the plan view would leak the empty "No prompt stored"
@@ -78,6 +83,7 @@ async function mockDashboard(page: Page) {
     const stamp = `2026-06-12T16:38:${String(overviewCalls).padStart(2, "0")}.000Z`;
     const liveSnapshot = { ...live, status: "running", updated_at: stamp };
     const refetchFailSnapshot = { ...refetchFail, status: "running", updated_at: stamp };
+    const staleContentSnapshot = { ...staleContent, status: "running", updated_at: stamp };
     const dlFailRefetchSnapshot = { ...dlFailRefetch, status: "running", updated_at: stamp };
     await route.fulfill({
       json: {
@@ -90,6 +96,7 @@ async function mockDashboard(page: Page) {
           paged,
           liveSnapshot,
           refetchFailSnapshot,
+          staleContentSnapshot,
           dlFailRefetchSnapshot,
         ],
         has_more: false,
@@ -114,6 +121,33 @@ async function mockDashboard(page: Page) {
         next_cursor: null,
         has_more: false,
       },
+    });
+  });
+
+  // The first list fetch returns both artifacts (so the plan content can be
+  // opened), then a later poll-driven refetch fails. Gating on overviewCalls >= 3
+  // leaves a comfortable window to click Plan and load its content before the
+  // failure invalidates presence and the open view must collapse.
+  await page.route("/api/awf/workspaces/ws_stalecontent/artifacts*", async (route) => {
+    if (overviewCalls >= 3) {
+      await route.fulfill({
+        status: 500,
+        json: { detail: { message: "Unable to load artifacts." } },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        items: [artifact("ws_stalecontent", "plan.md"), artifact("ws_stalecontent", "conformance.json")],
+        next_cursor: null,
+        has_more: false,
+      },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_stalecontent/artifacts/download*", async (route) => {
+    await route.fulfill({
+      headers: { "content-type": "text/markdown" },
+      body: "# Stale Plan Body\n\n- earlier deposited step\n",
     });
   });
 
@@ -355,6 +389,29 @@ test("drops the artifact buttons when a later refetch fails", async ({ page }) =
   await expect(section).toContainText("Unable to load artifacts.", { timeout: 15_000 });
   await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
   await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+});
+
+test("collapses an open artifact view when a later refetch fails", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_stalecontent");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // First fetch is authoritative, so the buttons surface and the plan content
+  // loads on click.
+  await section.getByRole("button", { name: "Plan" }).click();
+  const content = page.getByTestId("task-artifact-content");
+  await expect(content).toContainText("Stale Plan Body");
+
+  // A later overview poll re-drives the fetch, which now fails. Presence is
+  // invalidated and the buttons drop — but the previously loaded plan text must
+  // not linger below the error banner with no button left to dismiss it.
+  await expect(section).toContainText("Unable to load artifacts.", { timeout: 15_000 });
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
+  await expect(section).not.toContainText("Stale Plan Body");
 });
 
 test("follows pagination so controls show when named artifacts are on a later page", async ({
