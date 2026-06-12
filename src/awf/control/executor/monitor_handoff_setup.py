@@ -8,6 +8,7 @@ from typing import Any
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import PR_MONITOR_SETUP_FAILED_REASON_CODE
 from awf.control.executor.helpers import _failure_reason_for_phase
 from awf.control.executor.logging_ops import (
@@ -203,6 +204,29 @@ async def _run_monitor_handoff_profile_setup(
         )
 
     if setup_result.all_passed:
+        # Mirror the ``execute`` path: probe the container for declared
+        # toolchains and record any ``RUNTIME_TOOLCHAIN_UNAVAILABLE`` warnings
+        # after a green setup. The probe is strictly additive and non-blocking,
+        # so a recorder error is swallowed and never affects the handoff — but
+        # omitting it entirely would let adopted/release-PR workspaces silently
+        # miss the toolchain-availability warnings their executed peers get.
+        try:
+            await self._record_runtime_toolchain_findings(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
+        except Exception as exc:
+            # Non-blocking probe/recorder failure: preserve the structured
+            # reason_code and a redacted error instead of a raw traceback that
+            # could carry compose-exec stderr secrets.
+            _log.warning(
+                "executor.monitor_handoff_runtime_toolchain_probe_record_failed",
+                workspace_id=workspace_id,
+                reason_code=getattr(exc, "reason_code", None),
+                error=redact_secrets(str(exc))[:1000],
+            )
         return await _run_monitor_handoff_profile_preflight(
             self,
             workspace_id=workspace_id,
