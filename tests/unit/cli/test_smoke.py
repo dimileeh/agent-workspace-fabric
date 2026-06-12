@@ -209,6 +209,50 @@ class TestSmokeRunCommand:
         output = json.loads(result.stdout)
         assert output["mocked_local_value"] is True
 
+    def test_mocked_local_pretty_shows_real_preflight_hint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Item 7: mocked-local pretty output points at the real profile preflight."""
+        _stub_smoke_collector(
+            monkeypatch,
+            mode="mocked_local",
+            phases=[
+                {
+                    "name": "service_readiness",
+                    "status": "ok",
+                    "reason_code": "SMOKE_SERVICE_READY",
+                    "message": "ready",
+                    "evidence": {},
+                    "action": "none",
+                },
+            ],
+        )
+
+        async def _collect(*args, **kwargs):
+            return {
+                "status": "ok",
+                "project": "/proj",
+                "mode": "mocked_local",
+                "phases": [],
+                "console_links": {},
+                "next_actions": [
+                    "mocked smoke passed; real profile preflight NOT run — run "
+                    "`awf profile doctor <repo>` for real readiness"
+                ],
+                "preflight_hint": (
+                    "mocked smoke passed; real profile preflight NOT run — run "
+                    "`awf profile doctor <repo>` for real readiness"
+                ),
+            }
+
+        monkeypatch.setattr("awf.service.smoke.collect_smoke_report", _collect)
+
+        result = _runner.invoke(app, ["smoke", "run", "--mocked-local", "--format", "pretty"])
+
+        assert result.exit_code == 0
+        assert "real profile preflight NOT run" in result.stdout
+        assert "awf profile doctor" in result.stdout
+
     def test_service_unreachable_exits_nonzero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _stub_smoke_collector(monkeypatch, status="fail")
         result = _runner.invoke(app, ["smoke", "run"])
