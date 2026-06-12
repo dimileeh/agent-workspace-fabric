@@ -20,6 +20,7 @@ here we resolve only the ones the monitor already recorded with a fix verdict.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -53,6 +54,27 @@ from awf.runtime.pr_monitor_runner.logging import _log
 # (``fix_committed`` / ``false_positive``) both mean "handled, thread should
 # close, no human follow-up".
 _OUTDATED_RESOLVABLE_THREAD_VERDICTS = _RESOLVABLE_THREAD_VERDICTS - frozenset({"defer"})
+
+
+def _thread_identifier_set(thread: ReviewThread) -> set[str]:
+    """All ids an outdated thread's fix could have been recorded under (#547).
+
+    A GitHub inline comment surfaces in AWF as BOTH a ``ReviewThread`` (carrying
+    ``thread_id``, e.g. ``PRRT_…``) AND — when the fix-cycle took the COMMENT
+    path rather than the thread path — a verdict keyed by the comment's
+    ``databaseId`` (``comment_id``, e.g. ``4688598838``; the commit reads
+    ``fix: address review comment issue:4688598838 — …``). The outdated-thread
+    resolution keys on ``thread_id`` only, so a comment-path fix is invisible to
+    it. The thread already carries its comment ids, so reconcile on the READ
+    side: build the full identifier set and test the verdict store / branch
+    evidence against ALL of them.
+
+    ``None`` comment ids are filtered out; the set de-dups naturally. A thread
+    with no comment ids falls back to ``{thread_id}`` (existing behavior).
+    """
+    ids = {thread.thread_id}
+    ids.update(comment.comment_id for comment in thread.comments if comment.comment_id)
+    return ids
 
 
 def _parse_commit_iso(raw: str) -> datetime | None:
@@ -154,22 +176,34 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
     worktree_path = self._worktrees_root / workspace_id
 
     async def _matching_fix_commit_time(thread: ReviewThread) -> tuple[bool, datetime | None]:
-        # ``-F --all-match`` requires BOTH literal substrings (the unique thread id
-        # AND ``fix: address``) present in one commit message — matching both AWF
-        # commit shapes while staying specific enough not to seed a thread the
-        # branch never addressed. ``%aI`` returns the newest matching commit's
-        # AUTHOR time so the caller can detect reviewer replies that postdate the
-        # fix. Author (not committer, ``%cI``) time is deliberate: AWF's rebase
-        # recovery (``control/executor/git_methods.py``) runs ``git rebase`` on a
-        # stale PR branch, which rewrites every replayed commit's COMMITTER date
-        # while preserving its author date. In the sequence fix commit → reviewer
-        # follow-up → rebase recovery → re-adoption, the rewritten committer date
-        # is newer than the follow-up, so a ``%cI`` ordering would seed
-        # ``fix_committed`` over the untriaged reply; the author date stays anchored
-        # to the original fix time and keeps the post-fix guard correct. Returns
-        # ``(matched, commit_time)``: an empty / failed read means no durable
+        # ``-E --all-match`` requires BOTH ``--grep`` patterns present in one commit
+        # message: the literal ``fix: address`` prefix AND an alternation over the
+        # thread's full identifier set (``thread_id`` plus any review-comment
+        # databaseIds — #547). Multiple ``--grep`` with ``--all-match`` is AND, so
+        # the ids cannot each be their own ``--grep`` (that would require ALL ids in
+        # one commit); they are OR-ed inside a single ``-E`` alternation instead, so
+        # a comment-path fix (``fix: address review comment issue:4688598838 — …``)
+        # matches on the raw databaseId substring even though ``thread_id`` differs.
+        # Each id is ``re.escape``-d (numeric databaseIds, alnum+``_`` node ids) and
+        # the set is sorted for a deterministic argv. The literal ``fix: address``
+        # carries no regex metacharacters so it is safe as its own pattern under
+        # ``-E``. Still requiring ``fix: address`` keeps the match specific enough
+        # not to seed a thread the branch never addressed. ``%aI`` returns the
+        # newest matching commit's AUTHOR time so the caller can detect reviewer
+        # replies that postdate the fix. Author (not committer, ``%cI``) time is
+        # deliberate: AWF's rebase recovery (``control/executor/git_methods.py``)
+        # runs ``git rebase`` on a stale PR branch, which rewrites every replayed
+        # commit's COMMITTER date while preserving its author date. In the sequence
+        # fix commit → reviewer follow-up → rebase recovery → re-adoption, the
+        # rewritten committer date is newer than the follow-up, so a ``%cI`` ordering
+        # would seed ``fix_committed`` over the untriaged reply; the author date stays
+        # anchored to the original fix time and keeps the post-fix guard correct.
+        # Returns ``(matched, commit_time)``: an empty / failed read means no durable
         # evidence (no seed); a non-empty read is a match whose time may still be
         # ``None`` if git emitted something unparseable.
+        id_alternation = (
+            "(" + "|".join(re.escape(i) for i in sorted(_thread_identifier_set(thread))) + ")"
+        )
         result = await self._deps.runner.run(
             git_worktree_command(
                 worktree_path,
@@ -177,12 +211,12 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
                 "-n",
                 "1",
                 "--format=%aI",
-                "-F",
+                "-E",
                 "--all-match",
                 "--grep",
-                thread.thread_id,
-                "--grep",
                 "fix: address",
+                "--grep",
+                id_alternation,
                 "HEAD",
             )
         )
@@ -214,6 +248,50 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
             state.mark_addressed(thread.thread_id, "needs_human")
             continue
         _mark_review_thread_addressed(state, thread, "fix_committed")
+
+
+def _reconcile_comment_keyed_outdated_verdicts(
+    status: PRStatus,
+    state: MonitorState,
+) -> None:
+    """Promote a comment-keyed resolvable verdict onto its outdated thread (#547).
+
+    The fix-cycle's COMMENT path records a verdict under the review comment's
+    ``databaseId`` (``comment_id``), not the ``thread_id``. The same inline
+    comment also surfaces as a ``ReviewThread`` whose ``comments`` carry that
+    ``comment_id``. So an outdated thread can be fully addressed in memory yet
+    invisible to the thread-keyed resolve loop (the #540 case: a continuous
+    monitor whose comment-keyed verdict was in state, but the thread-keyed
+    lookup missed it).
+
+    Reconcile in memory BEFORE the branch-evidence seed: for each outdated thread
+    with no ``thread_id`` verdict yet, if ANY of its comment ids carries a
+    resolvable verdict (``_OUTDATED_RESOLVABLE_THREAD_VERDICTS`` — still excludes
+    ``defer``), promote it onto the thread via ``_mark_review_thread_addressed``.
+    That records the ``thread_id`` verdict AND the current thread body-hash
+    snapshot, so the resolve loop's ``_review_thread_needs_attention`` guard sees
+    a matching hash and resolves — mirroring how the branch-evidence seed
+    promotes durable evidence. Because promotion sets the ``thread_id`` verdict,
+    the seed step's ``unseeded`` filter then excludes these threads, so the pure
+    in-memory case issues no git call.
+
+    A bare verdict-membership broadening (without promotion) would still be
+    blocked: ``_review_thread_needs_attention`` keys on the thread body-hash
+    snapshot, which a comment-path verdict never stored, so the hash would
+    mismatch and the resolve would be skipped. Promotion is what closes the gap.
+    ``defer`` is excluded (a deferred thread must stay open with its tracking
+    issue), and a thread the branch never addressed carries no resolvable verdict
+    under any id, so it is not falsely promoted.
+    """
+    for thread in status.outdated_unresolved_inline_threads:
+        if state.threads_addressed_ids.get(thread.thread_id) is not None:
+            continue
+        comment_ids = sorted(_thread_identifier_set(thread) - {thread.thread_id})
+        for comment_id in comment_ids:
+            verdict = state.threads_addressed_ids.get(comment_id)
+            if verdict in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+                _mark_review_thread_addressed(state, thread, verdict)
+                break
 
 
 async def _resolve_addressed_outdated_threads(
@@ -250,6 +328,10 @@ async def _resolve_addressed_outdated_threads(
     is in-memory only, matching the rest of the transient path.
     """
     del repo  # repo is recovered from the neutral thread_id by the forge client
+    # #547: reconcile comment-keyed verdicts onto their outdated thread FIRST, so
+    # the (continuous-monitor) in-memory case resolves without a git call and the
+    # branch-evidence seed below naturally skips the now-seeded threads.
+    _reconcile_comment_keyed_outdated_verdicts(status, state)
     # #484: seed verdicts for outdated threads a prior instance already addressed
     # (re-adoption / handoff) from durable branch evidence, so the resolve loop
     # below — which gates on a recorded verdict — can resolve them this iteration

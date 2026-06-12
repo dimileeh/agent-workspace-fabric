@@ -16,6 +16,7 @@ threads the monitor already recorded with a fix verdict
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,6 +49,7 @@ from awf.runtime.pr_monitor_runner.outdated_resolution import (
     _OUTDATED_RESOLVABLE_THREAD_VERDICTS,
     _latest_reviewer_comment_at,
     _parse_commit_iso,
+    _thread_identifier_set,
 )
 from tests.postgres import postgres_test_engine
 from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
@@ -130,6 +132,41 @@ def _outdated_thread_with_comment(
                 created_at=comment_at,
                 updated_at=comment_at,
                 viewer_did_author=viewer_did_author,
+            ),
+        ),
+    )
+
+
+def _outdated_thread_with_distinct_comment(
+    tid: str,
+    *,
+    comment_id: str,
+    comment_at: datetime | None = None,
+) -> ReviewThread:
+    """An outdated thread whose head comment carries a databaseId distinct from
+    ``thread_id`` — the #547 shape.
+
+    The fix-cycle COMMENT path records the verdict under ``comment_id`` (the
+    comment's GraphQL ``databaseId``, e.g. ``4688598838``) and the commit reads
+    ``fix: address review comment issue:<comment_id> — …``, while the outdated
+    thread surfaces under its node ``thread_id`` (``PRRT_…``). Reader-side
+    reconciliation must bridge the two.
+    """
+    return ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id=comment_id,
+                body="please fix this finding",
+                author="greptile",
+                created_at=comment_at,
+                updated_at=comment_at,
             ),
         ),
     )
@@ -714,8 +751,15 @@ async def test_permanent_resolve_downgrade_survives_state_reload(
     assert gh.attempts == [bb_id]  # exactly one resolve attempt across both polls
 
 
-def _grep_argv(worktree_path: Path, thread_id: str) -> list[str]:
-    """The bounded ``git log`` evidence grep the seeding helper issues (#484)."""
+def _grep_argv(worktree_path: Path, *ids: str) -> list[str]:
+    """The bounded ``git log`` evidence grep the seeding helper issues (#484/#547).
+
+    The id alternation OR-es every identifier the outdated thread could have been
+    fixed under — the ``thread_id`` plus any review-comment databaseIds (#547) —
+    each ``re.escape``-d and sorted for a deterministic argv, under ``-E``
+    AND-ed with the literal ``fix: address`` prefix via ``--all-match``.
+    """
+    alternation = "(" + "|".join(re.escape(i) for i in sorted(ids)) + ")"
     return [
         "git",
         "-c",
@@ -726,12 +770,12 @@ def _grep_argv(worktree_path: Path, thread_id: str) -> list[str]:
         "-n",
         "1",
         "--format=%aI",
-        "-F",
+        "-E",
         "--all-match",
         "--grep",
-        thread_id,
-        "--grep",
         "fix: address",
+        "--grep",
+        alternation,
         "HEAD",
     ]
 
@@ -1012,7 +1056,7 @@ async def test_outdated_thread_post_fix_guard_uses_author_date_across_rebase(
     # rebase-proof. (A regression to ``%cI`` would surface the committer date and
     # silently resolve over the reply.)
     worktree = tmp_path / "worktrees" / workspace_id
-    assert cmd.calls[0].args == _grep_argv(worktree, "PRRT_rebased")
+    assert cmd.calls[0].args == _grep_argv(worktree, "PRRT_rebased", "c1")
     assert "--format=%aI" in cmd.calls[0].args
     # Reply postdates the (author-dated) fix → not resolved, merge blocked.
     assert gh.attempts == []
@@ -1111,3 +1155,210 @@ def test_outdated_resolvable_verdicts_exclude_defer() -> None:
     # constants are documented to mirror each other (same verdicts, different
     # derivation paths), so any new verdict added to one must reach the other.
     assert _CLOSED_OUTDATED_THREAD_VERDICTS == _OUTDATED_RESOLVABLE_THREAD_VERDICTS
+
+
+@pytest.mark.unit
+def test_thread_identifier_set_unions_thread_and_comment_ids() -> None:
+    """(#547) The identifier set is ``{thread_id}`` ∪ non-``None`` comment ids,
+    de-duped. A thread with no comments / only ``None`` comment ids falls back to
+    ``{thread_id}`` (existing behavior; no crash)."""
+    thread = ReviewThread(
+        thread_id="PRRT_abc",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="finding",
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(comment_id="4688598838", body="x"),
+            ReviewThreadComment(comment_id=None, body="y"),  # filtered out
+            ReviewThreadComment(comment_id="4688598838", body="dup"),  # de-duped
+        ),
+    )
+    assert _thread_identifier_set(thread) == {"PRRT_abc", "4688598838"}
+    # No comments → thread_id only.
+    assert _thread_identifier_set(_outdated_thread("PRRT_lonely")) == {"PRRT_lonely"}
+    # Only a None-id comment → thread_id only (no crash).
+    none_only = ReviewThread(
+        thread_id="PRRT_noneonly",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="finding",
+        is_outdated=True,
+        comments=(ReviewThreadComment(comment_id=None, body="x"),),
+    )
+    assert _thread_identifier_set(none_only) == {"PRRT_noneonly"}
+
+
+@pytest.mark.unit
+async def test_comment_path_outdated_thread_resolved_via_branch_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#547 / #540 regression — branch-evidence path) A greptile-style outdated
+    thread whose head comment databaseId (``4688598838``) was addressed by a
+    COMMENT-path commit (``fix: address review comment issue:4688598838 — …``) is
+    auto-resolved even though ``thread_id`` ≠ ``comment_id``: the OR-grep matches
+    the comment databaseId substring. Pins the #540 PR scenario."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    # Empty state — the comment-path verdict never reached THIS instance; the only
+    # durable trace is the fix commit on the branch head.
+    state = MonitorState()
+    thread = _outdated_thread_with_distinct_comment(
+        "PRRT_kwDOSJAM6s6IMBmJ",
+        comment_id="4688598838",
+        comment_at=datetime(2026, 6, 10, 8, 0, tzinfo=UTC),
+    )
+    # The branch head carries ``fix: address review comment issue:4688598838 — …``;
+    # ``%aI`` emits its author time (09:00, AFTER the 08:00 finding) => fix_committed.
+    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == ["PRRT_kwDOSJAM6s6IMBmJ"]
+    assert state.threads_addressed_ids["PRRT_kwDOSJAM6s6IMBmJ"] == "fix_committed"
+    # The evidence grep OR-ed both the thread node id and the comment databaseId
+    # under ``-E`` AND-ed with ``fix: address``.
+    worktree = tmp_path / "worktrees" / workspace_id
+    assert [c.args for c in cmd.calls] == [
+        _grep_argv(worktree, "PRRT_kwDOSJAM6s6IMBmJ", "4688598838")
+    ]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        succeeded = _resolution_events(ws, outcome="succeeded")
+        assert len(succeeded) == 1
+        assert succeeded[0].reason_code == "COMMENT_REPAIR"
+
+
+@pytest.mark.unit
+async def test_comment_keyed_in_memory_verdict_resolves_outdated_thread(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#547 in-memory path — the #540 continuous-monitor case) A resolvable
+    verdict recorded under the head ``comment_id`` (no ``thread_id`` verdict) is
+    reconciled onto the outdated thread IN MEMORY and resolved — with NO git call,
+    because the reconcile promotes the verdict before the branch-evidence seed,
+    whose ``unseeded`` filter then skips the now-seeded thread."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_distinct_comment("PRRT_inmem", comment_id="4688598838")
+    # The fix-cycle COMMENT path recorded the verdict under the comment databaseId,
+    # NOT the thread node id — the exact #540 shape the thread-keyed lookup missed.
+    state.mark_addressed("4688598838", "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.resolved == ["PRRT_inmem"]
+    # Promotion recorded the thread-keyed verdict so ``decide``'s outdated gate is
+    # consistent too.
+    assert state.threads_addressed_ids["PRRT_inmem"] == "fix_committed"
+    # No git grep: the in-memory reconcile resolved it before the seed step.
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_comment_path_thread_never_addressed_is_not_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#547 specificity) An outdated thread the branch never addressed — no
+    ``fix: address <any id>`` commit and no in-memory verdict under the thread OR
+    comment id — is NOT resolved and no verdict is seeded. Broadening the id set
+    must not falsely seed/resolve a thread the branch never touched."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_distinct_comment("PRRT_untouched", comment_id="4688598838")
+    # No commit on HEAD matches both ``fix: address`` and any of the thread's ids.
+    cmd.queue_result(returncode=0, stdout="")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.attempts == []
+    assert "PRRT_untouched" not in state.threads_addressed_ids
+    assert "4688598838" not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_comment_keyed_defer_outdated_thread_stays_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#547) A ``defer`` verdict recorded under the head ``comment_id`` must NOT be
+    promoted onto the outdated thread — a deferred thread stays open with its
+    tracking issue (``defer`` is excluded from
+    ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_distinct_comment("PRRT_defer", comment_id="4688598838")
+    state.mark_addressed("4688598838", "defer")
+    # A defer posts a tracking comment, not a code fix, so there is no branch
+    # evidence either: the seed grep finds nothing.
+    cmd.queue_result(returncode=0, stdout="")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.attempts == []
+    # The comment verdict was not promoted onto the thread.
+    assert "PRRT_defer" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["4688598838"] == "defer"
