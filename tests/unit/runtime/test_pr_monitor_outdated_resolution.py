@@ -172,6 +172,42 @@ def _outdated_thread_with_distinct_comment(
     )
 
 
+def _outdated_thread_with_two_comments(
+    tid: str,
+    *,
+    comment_ids: tuple[str, str],
+) -> ReviewThread:
+    """An outdated thread carrying two distinct-databaseId comments (#548).
+
+    A reply comment can be addressed comment-by-comment via the fix-cycle COMMENT
+    path, so a single thread can hold a verdict under each ``comment_id`` — the
+    mixed-verdict shape (one resolvable, one blocking) the reconcile/seed guards
+    must not resolve over.
+    """
+    first, second = comment_ids
+    return ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id=first,
+                body="please fix this finding",
+                author="greptile",
+            ),
+            ReviewThreadComment(
+                comment_id=second,
+                body="and also consider this",
+                author="greptile",
+            ),
+        ),
+    )
+
+
 def _status_with_outdated(*outdated: ReviewThread) -> PRStatus:
     return PRStatus(
         number=42,
@@ -1362,3 +1398,86 @@ async def test_comment_keyed_defer_outdated_thread_stays_open(
     # The comment verdict was not promoted onto the thread.
     assert "PRRT_defer" not in state.threads_addressed_ids
     assert state.threads_addressed_ids["4688598838"] == "defer"
+
+
+@pytest.mark.unit
+async def test_mixed_verdict_outdated_thread_stays_open(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#548) A thread holding BOTH a resolvable comment verdict (``fix_committed``)
+    and a blocking sibling (``needs_human``) must NOT be reconciled/resolved — the
+    blocking verdict's safety gate must not be bypassed.
+
+    The resolvable comment id (``1000``) sorts BEFORE the blocking one (``9000``),
+    so the old break-on-first-resolvable loop would have promoted ``fix_committed``
+    and resolved over the ``needs_human``. The guard now keeps the thread open."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_two_comments("PRRT_mixed", comment_ids=("1000", "9000"))
+    state.mark_addressed("1000", "fix_committed")
+    state.mark_addressed("9000", "needs_human")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    # Thread neither promoted nor resolved; the blocking sibling held it open.
+    assert gh.attempts == []
+    assert "PRRT_mixed" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["9000"] == "needs_human"
+
+
+@pytest.mark.unit
+async def test_mixed_verdict_outdated_thread_not_seeded_from_branch_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(#548) The branch-evidence seed must not re-introduce the bypass: even with a
+    matching ``fix: address`` commit on HEAD for the resolved sibling, a thread that
+    holds a blocking sibling verdict is excluded from the seed (no git grep), so the
+    thread stays open instead of being seeded ``fix_committed`` and resolved."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_two_comments("PRRT_mixed_seed", comment_ids=("1000", "9000"))
+    state.mark_addressed("1000", "fix_committed")
+    state.mark_addressed("9000", "needs_human")
+    # A matching fix commit IS on HEAD — but the blocking sibling must keep the seed
+    # from ever consulting it. If the guard regressed, this queued result would be
+    # popped by the grep and the thread seeded + resolved.
+    cmd.queue_result(returncode=0, stdout="2026-06-10T09:00:00+00:00\n")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    assert gh.attempts == []
+    assert "PRRT_mixed_seed" not in state.threads_addressed_ids
+    # No git call: the seed's ``unseeded`` filter excluded the blocked thread.
+    assert cmd.calls == []

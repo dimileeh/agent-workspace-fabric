@@ -77,6 +77,35 @@ def _thread_identifier_set(thread: ReviewThread) -> set[str]:
     return ids
 
 
+def _thread_has_blocking_comment_verdict(
+    thread: ReviewThread,
+    state: MonitorState,
+) -> bool:
+    """True if any of the thread's comment ids carries a non-resolvable verdict (#548).
+
+    A single inline thread can accumulate per-comment verdicts under different
+    comment databaseIds (the fix-cycle COMMENT path keys on ``comment_id``, so a
+    thread with a reply addressed comment-by-comment can hold more than one). If
+    ONE comment resolved (``fix_committed`` / ``false_positive``) but ANOTHER
+    needs a human (``needs_human`` / ``agent_failed`` / ``defer``), the thread
+    must stay open: promoting the resolvable verdict and resolving the thread
+    would silently close — and let ``decide`` merge over — the blocking sibling.
+
+    Returns ``True`` when any comment id (excluding the ``thread_id`` itself)
+    carries a recorded verdict that is NOT in
+    ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``. Both the in-memory reconcile and the
+    branch-evidence seed consult this so neither path resolves a thread that still
+    holds an unaddressed-by-a-human sibling verdict. Threads with no recorded
+    comment verdicts (the common re-adoption case, where state is fresh) return
+    ``False`` and behave exactly as before.
+    """
+    for comment_id in _thread_identifier_set(thread) - {thread.thread_id}:
+        verdict = state.threads_addressed_ids.get(comment_id)
+        if verdict is not None and verdict not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
+            return True
+    return False
+
+
 def _parse_commit_iso(raw: str) -> datetime | None:
     """Parse a ``git log --format=%aI`` author date into a UTC-aware datetime.
 
@@ -170,6 +199,13 @@ async def _seed_outdated_thread_verdicts_from_branch_evidence(
         thread
         for thread in status.outdated_unresolved_inline_threads
         if state.threads_addressed_ids.get(thread.thread_id) is None
+        # #548: never seed ``fix_committed`` from branch evidence onto a thread
+        # that already holds a blocking sibling comment verdict (``needs_human`` /
+        # ``agent_failed`` / ``defer``). The matching ``fix: address`` commit for a
+        # resolved sibling would otherwise re-introduce the merge-gate bypass the
+        # reconcile guard above closes. A fresh re-adoption state carries no comment
+        # verdicts, so this never changes the common branch-evidence path.
+        and not _thread_has_blocking_comment_verdict(thread, state)
     ]
     if not unseeded:
         return
@@ -282,9 +318,23 @@ def _reconcile_comment_keyed_outdated_verdicts(
     ``defer`` is excluded (a deferred thread must stay open with its tracking
     issue), and a thread the branch never addressed carries no resolvable verdict
     under any id, so it is not falsely promoted.
+
+    A thread can also hold MIXED per-comment verdicts (one comment
+    ``fix_committed``, a reply ``needs_human``). Promoting the resolvable verdict
+    in that case would resolve the thread and let ``decide`` merge over the
+    blocking sibling, so ``_thread_has_blocking_comment_verdict`` gates promotion:
+    a thread with any non-resolvable comment verdict stays open (#548).
     """
     for thread in status.outdated_unresolved_inline_threads:
         if state.threads_addressed_ids.get(thread.thread_id) is not None:
+            continue
+        # #548: a thread can hold mixed per-comment verdicts — e.g. one comment
+        # ``fix_committed`` and a reply ``needs_human``. Promoting the resolvable
+        # verdict here (and resolving the thread) would silently bypass the
+        # blocking sibling's safety gate. Only promote when NO comment carries a
+        # blocking verdict, so a thread with any unaddressed-by-a-human sibling
+        # stays open and ``decide`` keeps blocking the merge.
+        if _thread_has_blocking_comment_verdict(thread, state):
             continue
         comment_ids = sorted(_thread_identifier_set(thread) - {thread.thread_id})
         for comment_id in comment_ids:
