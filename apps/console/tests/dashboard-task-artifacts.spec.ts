@@ -60,20 +60,42 @@ async function mockDashboard(page: Page) {
   // the artifact list flips from empty to populated, so the section must refetch
   // and surface the buttons without the modal being closed and reopened.
   const live = baseWorkspace("ws_live", "Live Monitoring");
+  // A still-running task whose artifacts list loads on first fetch (buttons show)
+  // but whose later, poll-driven refetch fails. The buttons must drop because a
+  // failed list fetch is not authoritative about presence.
+  const refetchFail = baseWorkspace("ws_refetchfail", "Refetch Failure");
   let overviewCalls = 0;
 
   await page.route("/api/awf/workspaces/overview*", async (route) => {
     overviewCalls += 1;
     // Each poll reports a fresh updated_at, mirroring a workspace that is still
     // advancing. That changing marker is what must re-drive the artifact fetch.
-    const liveSnapshot = {
-      ...live,
-      status: "running",
-      updated_at: `2026-06-12T16:38:${String(overviewCalls).padStart(2, "0")}.000Z`,
-    };
+    const stamp = `2026-06-12T16:38:${String(overviewCalls).padStart(2, "0")}.000Z`;
+    const liveSnapshot = { ...live, status: "running", updated_at: stamp };
+    const refetchFailSnapshot = { ...refetchFail, status: "running", updated_at: stamp };
     await route.fulfill({
       json: {
-        items: [full, planOnly, none, failed, planDownloadFail, paged, liveSnapshot],
+        items: [full, planOnly, none, failed, planDownloadFail, paged, liveSnapshot, refetchFailSnapshot],
+        has_more: false,
+      },
+    });
+  });
+
+  // First list fetch returns both artifacts; once a later overview poll re-drives
+  // the fetch, the list endpoint starts failing. The section must surface the
+  // error and stop asserting presence (no Plan/Validation buttons).
+  await page.route("/api/awf/workspaces/ws_refetchfail/artifacts*", async (route) => {
+    if (overviewCalls >= 2) {
+      await route.fulfill({
+        status: 500,
+        json: { detail: { message: "Unable to load artifacts." } },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        items: [artifact("ws_refetchfail", "plan.md"), artifact("ws_refetchfail", "conformance.json")],
+        next_cursor: null,
         has_more: false,
       },
     });
@@ -285,6 +307,26 @@ test("refetches artifacts as an open, still-running task deposits them", async (
   const section = page.getByTestId("task-artifacts");
   await expect(section.getByRole("button", { name: "Plan" })).toBeVisible({ timeout: 15_000 });
   await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+});
+
+test("drops the artifact buttons when a later refetch fails", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_refetchfail");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  // First fetch succeeds, so the buttons surface from authoritative presence.
+  await expect(section.getByRole("button", { name: "Plan" })).toBeVisible();
+  await expect(section.getByRole("button", { name: "Validation" })).toBeVisible();
+
+  // A later overview poll re-drives the fetch, which now fails. The error must
+  // surface and the buttons must drop — stale presence cannot keep them visible
+  // while the list API is failing.
+  await expect(section).toContainText("Unable to load artifacts.", { timeout: 15_000 });
+  await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
+  await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
 });
 
 test("follows pagination so controls show when named artifacts are on a later page", async ({

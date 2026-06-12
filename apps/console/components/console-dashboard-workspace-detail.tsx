@@ -274,6 +274,12 @@ export function TaskArtifactsSection({
       }
       if (collected === null) {
         setError(failure);
+        // A failed list fetch is not authoritative about presence, so drop any
+        // artifacts a prior successful fetch surfaced. Retaining them would keep
+        // the Plan/Validation buttons visible off stale data while the list API
+        // is failing — the same "API failure must not imply presence" rule the
+        // first-fetch path already enforces (no buttons, just the error banner).
+        setItems([]);
         return;
       }
       setError(null);
