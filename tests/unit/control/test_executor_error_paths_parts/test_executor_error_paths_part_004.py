@@ -33,8 +33,8 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.control.executor import execution_flow as _execution_flow
 from awf.control.executor import helpers as executor_helpers
+from awf.control.executor import pr_open_step as _pr_open_step
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
 )
@@ -853,7 +853,7 @@ class TestPullRequestUnexpectedErrorPart002:
             spy_calls.append((forge, runner))
             return spy_client
 
-        monkeypatch.setattr(_execution_flow, "make_forge_client", _spy_make_forge_client)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _spy_make_forge_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -889,7 +889,7 @@ class TestPullRequestUnexpectedErrorPart002:
             spy_calls.append((forge, runner))
             return spy_client
 
-        monkeypatch.setattr(_execution_flow, "make_forge_client", _spy_make_forge_client)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _spy_make_forge_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -946,7 +946,7 @@ class TestPullRequestUnexpectedErrorPart002:
                 reason_code="BITBUCKET_AUTH_NOT_CONFIGURED",
             )
 
-        monkeypatch.setattr(_execution_flow, "make_forge_client", _raise_make_forge_client)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _raise_make_forge_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -1060,7 +1060,7 @@ class TestPullRequestUnexpectedErrorPart002:
         def _explode_make_forge_client(forge: str, runner: object) -> object:
             raise AssertionError("make_forge_client must not run on the PR-reuse push path")
 
-        monkeypatch.setattr(_execution_flow, "make_forge_client", _explode_make_forge_client)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _explode_make_forge_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
