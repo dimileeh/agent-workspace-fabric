@@ -554,9 +554,32 @@ async def execute(
                 agent_run_reason_code = GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
                 agent_run_details = {"recovered_stage": "agent_run"}
             else:
+                # Missing-HEAD recovery failed and already marked the workspace
+                # FAILED with its worktree preserved. The agent may have written
+                # the plan + conformance report before the HEAD object went
+                # missing, so deposit them now — this returns before the post-
+                # validation deposit block, mirroring the ComposeExecCleanupError
+                # handler above. Best-effort and idempotent.
+                _planning_artifacts._deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                )
                 return
         else:
             _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
+            # An unexpected agent-run error marks the workspace FAILED and returns
+            # before the post-validation deposit block, stranding any plan +
+            # conformance report the agent already wrote into the preserved-FAILED
+            # worktree. Deposit them first, mirroring the ComposeExecCleanupError
+            # handler. Best-effort and idempotent.
+            _planning_artifacts._deposit_planning_artifacts_best_effort(
+                self,
+                profile=profile,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+            )
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
