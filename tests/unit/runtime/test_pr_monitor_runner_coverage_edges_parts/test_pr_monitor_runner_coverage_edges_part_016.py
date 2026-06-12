@@ -532,8 +532,13 @@ async def test_address_thread_stashes_agent_verdict_reasons(
         async def _invoke(**_kwargs: object) -> VerdictResult:
             return result
 
+        async def _resolve_task_tag(_workspace_id: str) -> str | None:
+            return None
+
         return SimpleNamespace(
-            _workspace_runtime_context="", _invoke_cli_for_verdict_result=_invoke
+            _workspace_runtime_context="",
+            _invoke_cli_for_verdict_result=_invoke,
+            _resolve_task_tag=_resolve_task_tag,
         )
 
     async def _call(runner: object, state: MonitorState | None) -> str:
