@@ -23,13 +23,10 @@ from awf.common.git_identity import (
 )
 from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.protected_file_diffs import (
-    git_show_text,
     protected_file_diffs_for_committed_paths,
 )
 from awf.control.quality_gates import (
-    ProtectedFileDiff,
     QualityGateViolation,
-    diff_classified_protected_paths,
     find_protected_quality_gate_changes,
     quality_gate_violation_details,
     quality_gate_violation_message,
@@ -69,7 +66,6 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_porcelain,
     _changed_paths_from_porcelain_z,
     _quality_gate_violation_paths,
-    _read_worktree_text,
     _untracked_paths_from_porcelain,
     _untracked_paths_from_porcelain_z,
 )
@@ -1156,154 +1152,6 @@ async def _protected_scope_violations_for_unpushed_commits(
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
     )
-
-
-async def _changed_paths_since_remote_branch(
-    self: Any,
-    *,
-    worktree_path: Path,
-    remote_branch: str,
-    remote_push_url: str | None = None,
-) -> tuple[str, ...]:
-    _, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
-        worktree_path=worktree_path,
-        remote_branch=remote_branch,
-        remote_push_url=remote_push_url,
-    )
-    return cast(tuple[str, ...], changed_paths)
-
-
-async def _remote_branch_diff_base_and_changed_paths(
-    self: Any,
-    *,
-    worktree_path: Path,
-    remote_branch: str,
-    remote_push_url: str | None = None,
-) -> tuple[str, tuple[str, ...]]:
-    remote = remote_push_url or "origin"
-    fetch_result = await self._deps.runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "fetch",
-            remote,
-            f"refs/heads/{remote_branch}",
-        ]
-    )
-    if not fetch_result.ok:
-        raise ProtectedScopeDiffError(
-            "Could not resolve committed diff against the remote PR branch "
-            "for protected-scope validation: "
-            f"fetch refs/heads/{remote_branch} exit={fetch_result.returncode} "
-            f"stdout={fetch_result.stdout.strip() or '<empty>'} "
-            f"stderr={fetch_result.stderr.strip() or '<empty>'}"
-        )
-    local_base = await self._merge_base_with_head(
-        worktree_path=worktree_path,
-        ref="FETCH_HEAD",
-        error_context="against the remote PR branch",
-    )
-    changed_paths = await self._changed_paths_between_ref_and_head(
-        worktree_path=worktree_path,
-        ref=local_base,
-        error_context="against the remote PR branch",
-    )
-    return local_base, changed_paths
-
-
-async def _merge_base_with_head(
-    self: Any,
-    *,
-    worktree_path: Path,
-    ref: str,
-    error_context: str,
-) -> str:
-    merge_base_result = await self._deps.runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "merge-base",
-            ref,
-            "HEAD",
-        ]
-    )
-    merge_base = merge_base_result.stdout.strip()
-    if not merge_base_result.ok or not merge_base:
-        raise ProtectedScopeDiffError(
-            f"Could not resolve committed diff {error_context} "
-            "for protected-scope validation: "
-            f"merge-base {ref} HEAD exit={merge_base_result.returncode} "
-            f"stdout={merge_base or '<empty>'} "
-            f"stderr={merge_base_result.stderr.strip() or '<empty>'}"
-        )
-    return cast(str, merge_base)
-
-
-async def _changed_paths_between_ref_and_head(
-    self: Any,
-    *,
-    worktree_path: Path,
-    ref: str,
-    error_context: str,
-) -> tuple[str, ...]:
-    diff_spec = f"{ref}..HEAD"
-    diff_result = await self._deps.runner.run(
-        [
-            "git",
-            *git_safe_directory_config_args(worktree_path),
-            "-C",
-            str(worktree_path),
-            "diff",
-            "--name-status",
-            "-z",
-            diff_spec,
-            "--",
-        ]
-    )
-    if not diff_result.ok:
-        raise ProtectedScopeDiffError(
-            f"Could not resolve committed diff {error_context} "
-            "for protected-scope validation: "
-            f"diff {diff_spec} exit={diff_result.returncode} "
-            f"stdout={diff_result.stdout.strip() or '<empty>'} "
-            f"stderr={diff_result.stderr.strip() or '<empty>'}"
-        )
-    try:
-        return _changed_paths_from_name_status_z(diff_result.stdout)
-    except ProtectedScopeDiffError as exc:
-        raise ProtectedScopeDiffError(
-            f"Could not parse committed diff {error_context} for protected-scope validation: {exc}"
-        ) from exc
-
-
-async def _protected_file_diffs_for_status_paths(
-    self: Any,
-    *,
-    worktree_path: Path,
-    changed_paths: Sequence[str],
-    owned_paths: Sequence[str] = (),
-) -> dict[str, ProtectedFileDiff]:
-    diffs: dict[str, ProtectedFileDiff] = {}
-    for path in diff_classified_protected_paths(changed_paths, owned_paths=owned_paths):
-        worktree_file = worktree_path / path
-        old_text = await git_show_text(
-            self._deps.runner, worktree_path=worktree_path, refspec=f"HEAD:{path}"
-        )
-        new_text = (
-            _read_worktree_text(worktree_file, display_path=path)
-            if worktree_file.exists()
-            else None
-        )
-        diffs[path] = ProtectedFileDiff(
-            path=path,
-            old_text=old_text,
-            new_text=new_text,
-        )
-    return diffs
 
 
 async def _protected_scope_violations_for_sync_base_push(

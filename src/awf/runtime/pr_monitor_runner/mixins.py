@@ -18,6 +18,7 @@ from awf.runtime.pr_monitor_runner import provider_ops as _provider_ops
 from awf.runtime.pr_monitor_runner import remote_ops as _remote_ops
 from awf.runtime.pr_monitor_runner import remote_prompt_ops as _remote_prompt_ops
 from awf.runtime.pr_monitor_runner import remote_repair as _remote_repair
+from awf.runtime.pr_monitor_runner import remote_repair_diffs as _remote_repair_diffs
 from awf.runtime.pr_monitor_runner import transient_ops as _transient_ops
 
 
@@ -129,13 +130,15 @@ class RunnerDelegatesMixin:
     _protected_scope_violations_for_unpushed_commits = (
         _remote_repair._protected_scope_violations_for_unpushed_commits
     )
-    _changed_paths_since_remote_branch = _remote_repair._changed_paths_since_remote_branch
+    _changed_paths_since_remote_branch = _remote_repair_diffs._changed_paths_since_remote_branch
     _remote_branch_diff_base_and_changed_paths = (
-        _remote_repair._remote_branch_diff_base_and_changed_paths
+        _remote_repair_diffs._remote_branch_diff_base_and_changed_paths
     )
-    _merge_base_with_head = _remote_repair._merge_base_with_head
-    _changed_paths_between_ref_and_head = _remote_repair._changed_paths_between_ref_and_head
-    _protected_file_diffs_for_status_paths = _remote_repair._protected_file_diffs_for_status_paths
+    _merge_base_with_head = _remote_repair_diffs._merge_base_with_head
+    _changed_paths_between_ref_and_head = _remote_repair_diffs._changed_paths_between_ref_and_head
+    _protected_file_diffs_for_status_paths = (
+        _remote_repair_diffs._protected_file_diffs_for_status_paths
+    )
     _protected_scope_violations_for_sync_base_push = (
         _remote_repair._protected_scope_violations_for_sync_base_push
     )
