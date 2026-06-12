@@ -69,12 +69,18 @@ class ToolchainDiscoveryStrategy:
 # Enumerate *all* installed JDKs, not just the default ``java -version`` reports.
 # Reading each ``/usr/lib/jvm/*/release`` yields ``JAVA_VERSION="17.0.9"`` lines;
 # ``update-alternatives --list java`` adds the registered JDK paths as a
-# fallback. The trailing ``true`` guarantees exit 0 whenever the container is
-# reachable, so a non-zero return unambiguously signals probe-infra failure.
+# fallback. Common official images (eclipse-temurin, amazoncorretto) instead
+# install the JDK under ``$JAVA_HOME`` (e.g. ``/opt/java/openjdk``) outside
+# ``/usr/lib/jvm`` and register no alternatives, so also read ``$JAVA_HOME/release``
+# and fall back to ``java -version`` (which prints to stderr, hence ``2>&1``) —
+# otherwise such an image parses empty and is wrongly reported as missing java.
+# The trailing ``true`` guarantees exit 0 whenever the container is reachable, so
+# a non-zero return unambiguously signals probe-infra failure.
 _JAVA_DISCOVERY_COMMAND = (
     "sh",
     "-c",
-    "cat /usr/lib/jvm/*/release 2>/dev/null; update-alternatives --list java 2>/dev/null; true",
+    'cat /usr/lib/jvm/*/release "$JAVA_HOME/release" 2>/dev/null; '
+    "update-alternatives --list java 2>/dev/null; java -version 2>&1; true",
 )
 
 # ``JAVA_VERSION="17.0.9"`` from release files (quotes optional).

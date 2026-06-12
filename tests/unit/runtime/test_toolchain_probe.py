@@ -18,6 +18,7 @@ from awf.profiles.models import (
     WorkspaceProfile,
 )
 from awf.runtime.toolchain_probe import (
+    _JAVA_DISCOVERY_COMMAND,
     _TOOLCHAIN_DISCOVERY,
     ProbeExecResult,
     ToolchainDiscoveryStrategy,
@@ -306,3 +307,25 @@ class TestParseJavaVersions:
 
     def test_empty_output_is_empty_set(self) -> None:
         assert _parse_java_versions("") == set()
+
+    def test_parses_java_version_stderr_style_output(self) -> None:
+        # ``java -version`` fallback (merged via ``2>&1``) for images that install
+        # the JDK under ``$JAVA_HOME`` outside ``/usr/lib/jvm`` with no alternatives.
+        output = 'openjdk version "21.0.1" 2023-10-17\nOpenJDK Runtime Environment\n'
+
+        assert _parse_java_versions(output) == {"21"}
+
+
+@pytest.mark.unit
+class TestJavaDiscoveryCommand:
+    def test_command_reads_java_home_and_falls_back_to_java_version(self) -> None:
+        # Regression: images that install the JDK under ``$JAVA_HOME`` (e.g.
+        # eclipse-temurin's ``/opt/java/openjdk``) outside ``/usr/lib/jvm`` and
+        # register no update-alternatives must still be discovered, not reported
+        # as missing java.
+        script = _JAVA_DISCOVERY_COMMAND[-1]
+        assert '"$JAVA_HOME/release"' in script
+        assert "java -version 2>&1" in script
+        # The trailing ``true`` still guarantees exit 0 when the container is
+        # reachable, preserving the probe-infra-failure contract.
+        assert script.rstrip().endswith("true")
