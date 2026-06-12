@@ -40,7 +40,14 @@ _ENV_COMMENT_KEY_IGNORE_WORDS = frozenset({"awf"})
 _BITBUCKET_TOKEN_ENV = "BITBUCKET_API_TOKEN"
 _BITBUCKET_EMAIL_ENV = "BITBUCKET_EMAIL"
 _BITBUCKET_AUTH_MODE_ENV = "BITBUCKET_AUTH_MODE"
+_BITBUCKET_BASIC_MODE = "basic"
 _BITBUCKET_BEARER_MODE = "bearer"
+# The only modes ``BitbucketAuth.from_env`` accepts; anything else is rejected with
+# ``BITBUCKET_AUTH_NOT_CONFIGURED`` at runtime, so init must flag it as an auth
+# warning rather than report ``auth_ok`` (PR #541 review).
+_BITBUCKET_VALID_AUTH_MODES: frozenset[str] = frozenset(
+    {_BITBUCKET_BASIC_MODE, _BITBUCKET_BEARER_MODE}
+)
 # All three keys are *reported* (present/absent) for diagnostics, but only the
 # token (always) and email (default ``basic`` mode only) are actually *required* —
 # see :func:`_bitbucket_required_auth_keys`.
@@ -594,9 +601,14 @@ def _detect_bitbucket_forge_auth(
     default ``basic`` auth mode, and ``BITBUCKET_AUTH_MODE`` is an optional selector
     that is never itself required — so a token+email basic-mode workspace that omits
     it is correctly reported as ``auth_ok`` rather than flagged as incomplete.
-    Presence of all three keys is still surfaced for diagnostics. Never mentions
-    gh — a bitbucket.org repo does not need the GitHub CLI. Falls back to
-    ``os.environ`` when the resolved service env is unavailable.
+    An *invalid* mode (anything outside ``basic``/``bearer``, e.g. a typo like
+    ``bearrer``) is still an auth warning even with token and email both present:
+    ``BitbucketAuth.from_env`` rejects it with ``BITBUCKET_AUTH_NOT_CONFIGURED``, so
+    reporting ``auth_ok`` would tell operators auth is ready when every PR operation
+    will fail immediately (PR #541 review). Presence of all three keys is still
+    surfaced for diagnostics. Never mentions gh — a bitbucket.org repo does not need
+    the GitHub CLI. Falls back to ``os.environ`` when the resolved service env is
+    unavailable.
     """
     env = service_env if service_env is not None else os.environ
     # Strip before the presence check so a whitespace-only value is treated as
@@ -604,10 +616,16 @@ def _detect_bitbucket_forge_auth(
     # email before testing). Otherwise a whitespace-only ``BITBUCKET_*`` value would
     # report ``auth_ok`` with no missing keys while runtime auth still fails.
     present = {key: bool((env.get(key) or "").strip()) for key in _BITBUCKET_AUTH_ENV_KEYS}
+    mode = (env.get(_BITBUCKET_AUTH_MODE_ENV) or _BITBUCKET_BASIC_MODE).strip().lower()
+    invalid_mode = mode not in _BITBUCKET_VALID_AUTH_MODES
     required = _bitbucket_required_auth_keys(env)
     missing = [key for key in required if not present[key]]
-    auth: dict[str, object] = {"bitbucket_keys": present, "missing": missing}
-    return auth, not missing
+    auth: dict[str, object] = {
+        "bitbucket_keys": present,
+        "missing": missing,
+        "invalid_mode": invalid_mode,
+    }
+    return auth, not missing and not invalid_mode
 
 
 def _explicit_project_forge(repository: Path) -> str:
@@ -723,11 +741,17 @@ def _forge_guidance_lines(forge_block: Mapping[str, object]) -> list[str]:
     auth = _mapping_value(forge_block.get("auth"))
     if forge == "bitbucket":
         bitbucket_lines = ["Detected forge: bitbucket."]
+        invalid_mode = bool(auth.get("invalid_mode"))
+        if invalid_mode:
+            bitbucket_lines.append(
+                "  - BITBUCKET_AUTH_MODE is not 'basic' or 'bearer'; set a valid mode "
+                "in .env before Bitbucket PR operations (auth fails otherwise)."
+            )
         missing = _list_value(auth.get("missing"))
         if missing:
             names = ", ".join(str(key) for key in missing)
             bitbucket_lines.append(f"  - Set the missing Bitbucket auth env in .env: {names}.")
-        else:
+        elif not invalid_mode:
             present_keys = _mapping_value(auth.get("bitbucket_keys"))
             names = ", ".join(key for key in _BITBUCKET_AUTH_ENV_KEYS if present_keys.get(key))
             bitbucket_lines.append(f"  - Bitbucket auth env present: {names}.")

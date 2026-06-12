@@ -197,6 +197,49 @@ def test_detect_bitbucket_forge_auth_unknown_mode_requires_email() -> None:
 
 
 @pytest.mark.unit
+def test_detect_bitbucket_forge_auth_invalid_mode_with_full_creds_is_not_ok() -> None:
+    """A misspelled auth mode is a warning even when token + email are both present.
+
+    ``BitbucketAuth.from_env`` rejects any mode outside ``basic``/``bearer`` with
+    ``BITBUCKET_AUTH_NOT_CONFIGURED``, so init must not report ``auth_ok`` for a
+    config the runtime client will refuse (PR #541 review).
+    """
+    auth, auth_ok = init_ops._detect_bitbucket_forge_auth(  # noqa: SLF001
+        {
+            "BITBUCKET_API_TOKEN": "tok",
+            "BITBUCKET_EMAIL": "e@x.com",
+            "BITBUCKET_AUTH_MODE": "bearrer",
+        }
+    )
+
+    assert auth["missing"] == []
+    assert auth["invalid_mode"] is True
+    assert auth_ok is False
+
+
+@pytest.mark.unit
+def test_forge_guidance_lines_bitbucket_invalid_mode_warns() -> None:
+    """Invalid Bitbucket auth mode surfaces a fix hint, not an auth-present line."""
+    lines = init_ops._forge_guidance_lines(  # noqa: SLF001
+        {
+            "forge": "bitbucket",
+            "auth": {
+                "bitbucket_keys": {
+                    "BITBUCKET_API_TOKEN": True,
+                    "BITBUCKET_EMAIL": True,
+                    "BITBUCKET_AUTH_MODE": True,
+                },
+                "missing": [],
+                "invalid_mode": True,
+            },
+        }
+    )
+
+    assert any("BITBUCKET_AUTH_MODE" in line and "basic" in line for line in lines)
+    assert not any("Bitbucket auth env present" in line for line in lines)
+
+
+@pytest.mark.unit
 def test_detect_bitbucket_forge_auth_whitespace_only_values_are_missing() -> None:
     """Whitespace-only ``BITBUCKET_*`` values are treated as absent.
 
