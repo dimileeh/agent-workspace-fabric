@@ -214,7 +214,7 @@ def _recovery_needs_existing_pr_push(
             return False
         if rebase_recovery_result.requires_pr_update:
             return True
-        # Otherwise push only when AWF-owned work, such as validation fixes or a
-        # conformance report commit, advanced HEAD past the recorded recovery head.
+        # Otherwise push only when AWF-owned work, such as validation fixes,
+        # advanced HEAD past the recorded recovery head.
         return validated_head != rebase_recovery_result.head_sha
     return False

@@ -58,14 +58,6 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
-def _queue_post_validation_conformance_report_commit(
-    fake: FakeCommandRunner, report_path: str
-) -> None:
-    fake.queue_result(returncode=0)  # git add report
-    fake.queue_result(returncode=0, stdout=f"{report_path}\n")  # cached report diff
-    fake.queue_result(returncode=0)  # commit refreshed report
-
-
 async def _force_workspace_status(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -1047,7 +1039,7 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
 
 
 @pytest.mark.unit
-async def test_validate_only_recovery_with_conformance_handoff_pushes_report_commit(
+async def test_validate_only_recovery_with_conformance_handoff_skips_report_commit(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1075,7 +1067,6 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
 
     report_path = f"docs/awf-plans/{ws_id}.conformance.json"
     source_head = "d" * 40
-    report_head = "f" * 40
     _queue_validation_head(fake, head=source_head)
     fake.queue_result(returncode=0, stdout="tests ok")
     fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
@@ -1089,9 +1080,10 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
         stdout=f"?? {report_path}\n",
     )
     fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-    _queue_post_validation_conformance_report_commit(fake, report_path)
-    fake.queue_result(returncode=0, stdout=f"{report_head}\n")  # post-report HEAD
-    _queue_existing_pr_push(fake, head=report_head)
+    # #544: the satisfied report is written but NOT committed (its path is
+    # gitignored). HEAD therefore does not advance past the recovery source
+    # head, so recovery declines to push a phantom report commit.
+    fake.queue_result(returncode=0, stdout=f"{source_head}\n")  # post-conformance HEAD (unchanged)
 
     await executor.execute(ws_id)
 
@@ -1106,14 +1098,13 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
     assert "validation.01_validate.stdout" in prompt
 
     git_calls = [call.args for call in fake.calls if call.args and call.args[0] == "git"]
-    assert any(call[-3:] == ["add", "--", report_path] for call in git_calls)
-    assert any(
-        "commit" in call
-        and "awf: post-validation conformance report" in call
-        and call[-1] == report_path
-        for call in git_calls
+    # The report is never staged or committed...
+    assert not any(call[-3:] == ["add", "--", report_path] for call in git_calls)
+    assert not any(
+        "commit" in call and "awf: post-validation conformance report" in call for call in git_calls
     )
-    assert any(call[0] == "git" and "push" in call for call in git_calls)
+    # ...and with HEAD unchanged there is no phantom report-commit push.
+    assert not any(call[0] == "git" and "push" in call for call in git_calls)
     assert not any(
         call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake)
     )
@@ -1125,10 +1116,10 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
         events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
     assert ws is not None
     assert ws.status == WorkspaceStatus.completed.value
-    assert ws.monitor_last_commit_sha == report_head
+    assert ws.monitor_last_commit_sha == source_head
     assert runs[-1].workspace_head_sha == source_head
-    assert runs[-1].target_head_sha == report_head
-    assert any(
+    assert runs[-1].target_head_sha == source_head
+    assert not any(
         event.event_type == "workspace.audit.git_push" and event.reason_code == "PR_UPDATED"
         for event in events
     )
@@ -1145,7 +1136,7 @@ async def test_validate_only_recovery_with_conformance_handoff_pushes_report_com
 
 
 @pytest.mark.unit
-async def test_rebase_only_recovery_with_conformance_handoff_pushes_report_commit(
+async def test_rebase_only_recovery_with_conformance_handoff_skips_report_commit(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1174,7 +1165,6 @@ async def test_rebase_only_recovery_with_conformance_handoff_pushes_report_commi
 
     report_path = f"docs/awf-plans/{ws_id}.conformance.json"
     rebased_head = "c" * 40
-    report_head = "f" * 40
     _queue_rebase_recovery(fake)
     _queue_validation_head(fake, head=rebased_head)
     fake.queue_result(returncode=0, stdout="tests ok")
@@ -1186,19 +1176,23 @@ async def test_rebase_only_recovery_with_conformance_handoff_pushes_report_commi
     )
     fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
     fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-    _queue_post_validation_conformance_report_commit(fake, report_path)
-    fake.queue_result(returncode=0, stdout=f"{report_head}\n")  # post-report HEAD
-    _queue_existing_pr_push(fake, head=report_head)
+    # #544: the satisfied report is written but NOT committed. HEAD stays at the
+    # rebased head, so recovery only retains the rebase force-push and does not
+    # add a second phantom report-commit push.
+    fake.queue_result(returncode=0, stdout=f"{rebased_head}\n")  # post-conformance HEAD (unchanged)
 
     await executor.execute(ws_id)
 
-    git_push_calls = [
-        call.args
-        for call in fake.calls
-        if call.args and call.args[0] == "git" and "push" in call.args
-    ]
+    git_calls = [call.args for call in fake.calls if call.args and call.args[0] == "git"]
+    git_push_calls = [call for call in git_calls if "push" in call]
+    # The report is never staged or committed...
+    assert not any(call[-3:] == ["add", "--", report_path] for call in git_calls)
+    assert not any(
+        "commit" in call and "awf: post-validation conformance report" in call for call in git_calls
+    )
+    # ...the only push is the rebase force-push (no non-force report push).
     assert any("--force-with-lease" in call for call in git_push_calls)
-    assert any("--force-with-lease" not in call for call in git_push_calls)
+    assert not any("--force-with-lease" not in call for call in git_push_calls)
     assert not any(
         call[:3] == ["gh", "pr", "create"] for call in _all_push_and_pr_create_calls(fake)
     )
@@ -1209,14 +1203,14 @@ async def test_rebase_only_recovery_with_conformance_handoff_pushes_report_commi
         events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
     assert ws is not None
     assert ws.status == WorkspaceStatus.completed.value
-    assert ws.monitor_last_commit_sha == report_head
+    assert ws.monitor_last_commit_sha == rebased_head
     assert runs[-1].workspace_head_sha == rebased_head
-    assert runs[-1].target_head_sha == report_head
+    assert runs[-1].target_head_sha == rebased_head
     assert any(
         event.event_type == "workspace.audit.git_push" and event.reason_code == "REBASE_OK"
         for event in events
     )
-    assert any(
+    assert not any(
         event.event_type == "workspace.audit.git_push" and event.reason_code == "PR_UPDATED"
         for event in events
     )

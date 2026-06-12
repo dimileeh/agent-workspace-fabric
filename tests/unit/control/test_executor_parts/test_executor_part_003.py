@@ -24,10 +24,6 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.control.executor.constants import (
-    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
-)
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
@@ -122,14 +118,6 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner, *, head: str = "deadbee
 
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
-
-
-def _queue_post_validation_conformance_report_commit(
-    fake: FakeCommandRunner, report_path: str
-) -> None:
-    fake.queue_result(returncode=0)  # git add report
-    fake.queue_result(returncode=0, stdout=f"{report_path}\n")  # cached report diff
-    fake.queue_result(returncode=0)  # commit refreshed report
 
 
 def _created_pr_body(fake: FakeCommandRunner) -> str:
@@ -322,270 +310,6 @@ async def _seed_running_worker_restart_recovery(
 
 class TestHappyPathPart002:
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "failing_git_operation",
-        ["add", "diff", "diff_reset", "commit"],
-    )
-    async def test_planning_validation_handoff_report_commit_failure_finishes_validate_operation(
-        self,
-        executor: WorkspaceExecutor,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        failing_git_operation: str,
-    ) -> None:
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "planned-recovery",
-                "planning": {
-                    "required": True,
-                    "plan_path": "docs/awf-plans/{workspace_id}.md",
-                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
-                    "max_iterations": 2,
-                },
-                "phases": {"validate": ["pytest -q"]},
-            },
-        )
-        operation_id = f"op_pv_{failing_git_operation}_failed"
-        await _insert_validate_handoff_recovery_operation(
-            factory,
-            workspace_id=ws_id,
-            operation_id=operation_id,
-        )
-
-        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
-        satisfied_report = json.dumps(
-            {
-                "status": "satisfied",
-                "summary": "implementation and validation evidence satisfy the plan",
-                "gaps": [],
-            }
-        )
-        failure_message = f"{failing_git_operation} failed"
-
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
-        fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        if failing_git_operation == "add":
-            fake.queue_result(returncode=1, stderr=failure_message)
-        elif failing_git_operation in {"diff", "diff_reset"}:
-            fake.queue_result(returncode=0)  # git add report
-            fake.queue_result(returncode=1, stderr=failure_message)
-            if failing_git_operation == "diff_reset":
-                fake.queue_result(
-                    returncode=129,
-                    stderr="reset failed",
-                    reason_code="GIT_RESET_FAILED",
-                )
-        else:
-            fake.queue_result(returncode=0)  # git add report
-            fake.queue_result(returncode=0, stdout=f"{report_path}\n")  # cached report diff
-            fake.queue_result(returncode=1, stderr=failure_message)
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            run = (
-                (
-                    await s.execute(
-                        text(
-                            """
-                            SELECT status, reason_code
-                            FROM validation_runs
-                            WHERE workspace_id = :workspace_id
-                            """
-                        ),
-                        {"workspace_id": ws_id},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            operation = (
-                (
-                    await s.execute(
-                        text(
-                            """
-                            SELECT status, error_code, error_message, result, finished_at
-                            FROM operations
-                            WHERE id = :operation_id
-                        """
-                        ),
-                        {"operation_id": operation_id},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            failure_event = next(
-                event
-                for event in await WorkspaceEventRepository(s).list(
-                    workspace_id=ws_id,
-                    event_type="workspace.state_changed",
-                    limit=10,
-                )
-                if event.new_state == WorkspaceStatus.failed.value
-            )
-
-        assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert ws.failure_reason == "infrastructure_failure"
-        assert "post-validation conformance report" in (ws.failure_message or "")
-        assert failure_message in (ws.failure_message or "")
-        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
-        assert operation["status"] == "failed"
-        assert operation["error_code"] == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
-        assert operation["finished_at"] is not None
-        assert failure_message in operation["error_message"]
-        result = _json_value(operation["result"])
-        assert result["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
-        assert result["validation_run_id"]
-        failure_payload = _json_value(failure_event.payload)
-        expected_operation = (
-            "diff" if failing_git_operation == "diff_reset" else failing_git_operation
-        )
-        assert failure_payload["details"]["operation"] == expected_operation
-        if failing_git_operation == "diff_reset":
-            assert failure_payload["details"]["cleanup_operation"] == "reset"
-            assert failure_payload["details"]["cleanup_returncode"] == 129
-            assert failure_payload["details"]["cleanup_command_reason_code"] == "GIT_RESET_FAILED"
-            assert failure_payload["details"]["report_left_staged"] is True
-        else:
-            assert "cleanup_operation" not in failure_payload["details"]
-
-    @pytest.mark.unit
-    async def test_planning_validation_handoff_report_write_failure_finishes_validate_operation(
-        self,
-        executor: WorkspaceExecutor,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        ws_id = await _seed_ready_workspace(
-            factory,
-            resolved_profile={
-                "name": "planned-recovery",
-                "planning": {
-                    "required": True,
-                    "plan_path": "docs/awf-plans/{workspace_id}.md",
-                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
-                    "max_iterations": 2,
-                },
-                "phases": {"validate": ["pytest -q"]},
-            },
-        )
-        operation_id = "op_pv_report_write_failed"
-        await _insert_validate_handoff_recovery_operation(
-            factory,
-            workspace_id=ws_id,
-            operation_id=operation_id,
-        )
-
-        def fail_write(**_: object) -> None:
-            raise OSError("disk full")
-
-        executor._write_satisfied_post_validation_conformance_report = fail_write  # type: ignore[method-assign]
-
-        report_path = f"docs/awf-plans/{ws_id}.conformance.json"
-        satisfied_report = json.dumps(
-            {
-                "status": "satisfied",
-                "summary": "implementation and validation evidence satisfy the plan",
-                "gaps": [],
-            }
-        )
-
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
-        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
-        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
-        fake.queue_result(returncode=0, stdout="")  # post-validation conformance after status
-        fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-
-        await executor.execute(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            run = (
-                (
-                    await s.execute(
-                        text(
-                            """
-                            SELECT status, reason_code
-                            FROM validation_runs
-                            WHERE workspace_id = :workspace_id
-                            """
-                        ),
-                        {"workspace_id": ws_id},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            operation = (
-                (
-                    await s.execute(
-                        text(
-                            """
-                            SELECT status, error_code, error_message, result, finished_at
-                            FROM operations
-                            WHERE id = :operation_id
-                            """
-                        ),
-                        {"operation_id": operation_id},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            event = (
-                (
-                    await s.execute(
-                        text(
-                            """
-                            SELECT reason_code, payload
-                            FROM workspace_events
-                            WHERE workspace_id = :workspace_id
-                              AND event_type = 'workspace.state_changed'
-                              AND new_state = 'failed'
-                            ORDER BY occurred_at DESC
-                            LIMIT 1
-                            """
-                        ),
-                        {"workspace_id": ws_id},
-                    )
-                )
-                .mappings()
-                .one()
-            )
-
-        assert ws is not None
-        assert ws.status == WorkspaceStatus.failed.value
-        assert ws.failure_reason == "infrastructure_failure"
-        assert "post-validation conformance report write failed" in (ws.failure_message or "")
-        assert "disk full" in (ws.failure_message or "")
-        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
-        assert operation["status"] == "failed"
-        assert (
-            operation["error_code"] == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
-        )
-        assert operation["finished_at"] is not None
-        assert "disk full" in operation["error_message"]
-        result = _json_value(operation["result"])
-        assert result["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
-        assert result["validation_run_id"]
-        assert event["reason_code"] == POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
-        event_payload = _json_value(event["payload"])
-        assert event_payload["details"]["operation"] == "write"
-        assert event_payload["details"]["error_type"] == "OSError"
-        assert event_payload["details"]["report_path"] == report_path
-
-    @pytest.mark.unit
     async def test_planning_validation_handoff_unexpected_post_validation_error_finishes_validate_operation(
         self,
         executor: WorkspaceExecutor,
@@ -633,7 +357,6 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        _queue_post_validation_conformance_report_commit(fake, report_path)
 
         await executor.execute(ws_id)
 
@@ -770,9 +493,6 @@ class TestHappyPathPart002:
             stdout=f"?? docs/awf-plans/{ws_id}.conformance.json\n",
         )
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        _queue_post_validation_conformance_report_commit(
-            fake, f"docs/awf-plans/{ws_id}.conformance.json"
-        )
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -905,7 +625,6 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=satisfied_report)
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        _queue_post_validation_conformance_report_commit(fake, report_path)
         _queue_pre_push_diagnostics(fake, head="c" * 40)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -1055,7 +774,6 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance-only rerun
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
-        _queue_post_validation_conformance_report_commit(fake, report_path)
         _queue_pre_push_diagnostics(fake, head="d" * 40)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")

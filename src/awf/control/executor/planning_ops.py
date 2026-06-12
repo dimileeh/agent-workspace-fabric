@@ -26,14 +26,9 @@ from awf.common.command_evidence import (
     append_command_evidence,
 )
 from awf.common.git_identity import (
-    git_identity_config_args,
     git_safe_directory_config_args,
 )
-from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.executor.constants import _FILE_DIGEST_CHUNK_SIZE, PLAN_CONFORMANCE_UNSATISFIED
-from awf.control.executor.git_ops import (
-    _git_name_lines,
-)
 from awf.control.executor.helpers import (
     _digest_file_if_present,
     _digest_text,
@@ -49,8 +44,6 @@ from awf.control.executor.types import (
     _ConformanceSalvageExecutionResult,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
-    _PostValidationConformanceReportGitError,
-    _PostValidationConformanceReportWriteError,
 )
 from awf.db.enums import (
     FailureReason,
@@ -355,17 +348,21 @@ async def _run_post_validation_conformance_check(
                     report=report,
                 )
             except OSError as exc:
-                raise _PostValidationConformanceReportWriteError(
-                    report_path=handoff.report_path,
-                    error=exc,
-                ) from exc
-        await self._commit_post_validation_conformance_report(
-            workspace_id=workspace.id,
-            worktree_path=worktree_path,
-            report_path=handoff.report_path,
-            validation_run_id=validation_run_id,
-            task_tag=workspace.task_tag,
-        )
+                # The report is written to ``docs/awf-plans/`` purely as an
+                # inspectable on-worktree copy (the path is gitignored and the
+                # file is deliberately not committed). The conformance outcome
+                # is already durably captured by the event recorded below plus
+                # the validation-run artifacts, so a write failure (e.g. a
+                # read-only worktree or a full disk) must never discard the
+                # agent's completed work. Log and proceed instead of failing.
+                _log.warning(
+                    "executor.post_validation_conformance_report_write_failed",
+                    workspace_id=workspace.id,
+                    validation_run_id=validation_run_id,
+                    report_path=handoff.report_path.as_posix(),
+                    error_type=type(exc).__name__,
+                    errno=exc.errno,
+                )
         await self._record_post_validation_conformance_event(
             workspace_id=workspace.id,
             handoff=handoff,
@@ -412,93 +409,6 @@ def _write_satisfied_post_validation_conformance_report(
         + "\n",
         encoding="utf-8",
     )
-
-
-async def _commit_post_validation_conformance_report(
-    self: Any,
-    *,
-    workspace_id: str,
-    worktree_path: Path,
-    report_path: Path,
-    validation_run_id: str,
-    task_tag: str | None = None,
-) -> bool:
-    report_path_text = report_path.as_posix()
-    git_base = [
-        "git",
-        *git_safe_directory_config_args(worktree_path),
-        "-C",
-        str(worktree_path),
-    ]
-    await self._repair_agent_git_ownership(
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        reason="post_validation_conformance_report_git_add",
-    )
-    add_result = await self._runner.run([*git_base, "add", "--", report_path_text])
-    if not add_result.ok:
-        raise _PostValidationConformanceReportGitError(
-            operation="add",
-            result=add_result,
-        )
-
-    cached = await self._runner.run(
-        [*git_base, "diff", "--cached", "--name-only", "--", report_path_text]
-    )
-    if not cached.ok:
-        reset_result = await self._runner.run([*git_base, "reset", "-q", "--", report_path_text])
-        if not reset_result.ok:
-            _log.warning(
-                "executor.post_validation_conformance_report_unstage_failed",
-                workspace_id=workspace_id,
-                report_path=report_path_text,
-                triggering_operation="diff",
-                returncode=reset_result.returncode,
-                command_reason_code=reset_result.reason_code,
-            )
-        raise _PostValidationConformanceReportGitError(
-            operation="diff",
-            result=cached,
-            cleanup_operation="reset" if not reset_result.ok else None,
-            cleanup_result=reset_result if not reset_result.ok else None,
-        )
-    staged_paths = _git_name_lines(cached.stdout) if cached.stdout.strip() else []
-    if report_path_text not in staged_paths:
-        _log.info(
-            "executor.post_validation_conformance_report_no_commit_needed",
-            workspace_id=workspace_id,
-            report_path=report_path_text,
-            validation_run_id=validation_run_id,
-        )
-        return False
-
-    commit_result = await self._runner.run(
-        [
-            *git_base,
-            *git_identity_config_args(),
-            "commit",
-            "-m",
-            commit_message_with_task_tag("awf: post-validation conformance report", task_tag)[:72],
-            "-m",
-            (
-                "Persist satisfied post-validation conformance report "
-                f"for validation run {validation_run_id}."
-            ),
-            "--",
-            report_path_text,
-        ],
-    )
-    await self._repair_agent_git_ownership(
-        workspace_id=workspace_id,
-        worktree_path=worktree_path,
-        reason="post_validation_conformance_report_git_commit",
-    )
-    if not commit_result.ok:
-        raise _PostValidationConformanceReportGitError(
-            operation="commit",
-            result=commit_result,
-        )
-    return True
 
 
 async def _record_post_validation_conformance_event(
