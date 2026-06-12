@@ -14,6 +14,7 @@ from awf.common.command_evidence import append_command_evidence
 from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.common.task_tag import commit_message_with_task_tag
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
@@ -690,13 +691,30 @@ async def _run_sync_base(
         r = await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
         return r.returncode, r.stdout, r.stderr
 
+    task_tag = await runner._resolve_task_tag(workspace_id)
     await _git("merge", "--abort")
     await runner._fetch_base(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
         base_branch=base_branch,
     )
-    rc, _stdout, stderr = await _git("merge", "--no-edit", f"origin/{base_branch}")
+    merge_args: tuple[str, ...] = ("merge", "--no-edit", f"origin/{base_branch}")
+    if task_tag:
+        # A clean (conflict-free) base sync produces an AWF-authored merge commit;
+        # tag its subject so it carries the Jira key like every other AWF commit
+        # (the conflict path is tagged later via ``_commit_dirty_worktree``). On a
+        # conflict git stashes this in ``MERGE_MSG`` and the conflict-resolution
+        # commit overrides it, so ``-m`` only shapes the clean-merge commit.
+        merge_args = (
+            "merge",
+            "--no-edit",
+            f"origin/{base_branch}",
+            "-m",
+            commit_message_with_task_tag(
+                f"Merge remote-tracking branch 'origin/{base_branch}'", task_tag
+            ),
+        )
+    rc, _stdout, stderr = await _git(*merge_args)
     if rc != 0:
         _rc_status, status_out, _ = await _git("status", "--porcelain")
         conflicting_files = tuple(
@@ -710,7 +728,7 @@ async def _run_sync_base(
             base_branch=base_branch,
             conflicting_files=conflicting_files,
             workspace_runtime_context=runner._workspace_runtime_context,
-            task_tag=await runner._resolve_task_tag(workspace_id),
+            task_tag=task_tag,
         )
         agent_run_err = None
         command_evidence: list[str] = []

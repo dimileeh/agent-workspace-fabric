@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     CheckFailure,
@@ -332,3 +333,117 @@ async def test_sync_base_uses_validated_push(
 
     assert result.failed is False
     assert calls == ["validated"]
+
+
+@pytest.mark.unit
+async def test_sync_base_clean_merge_tags_commit_for_task_tagged_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conflict-free base sync of a task-tagged workspace tags the merge commit."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.task_tag = "PROJ-123"
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # merge --no-edit origin/development -m <tagged>
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        """Mock base sync fetching for sync-base repair."""
+
+    async def _no_block(**_kwargs: object) -> None:
+        """Allow the sync-base flow to skip protected-scope checks."""
+
+    async def _validated(**_kwargs: object) -> _GitPushResult:
+        """Simulate validated push success."""
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_fetch_base", _fetch_base)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+
+    result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        state=MonitorState(),
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    merge_calls = [
+        call.args for call in cmd.calls if "merge" in call.args and "--abort" not in call.args
+    ]
+    assert len(merge_calls) == 1
+    merge_argv = merge_calls[0]
+    assert "-m" in merge_argv
+    assert merge_argv[merge_argv.index("-m") + 1] == (
+        "PROJ-123 Merge remote-tracking branch 'origin/development'"
+    )
+
+
+@pytest.mark.unit
+async def test_sync_base_clean_merge_untagged_when_no_task_tag(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workspace without a task tag keeps git's default merge message (no ``-m``)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # merge --no-edit origin/development
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _fetch_base(**_kwargs: object) -> None:
+        """Mock base sync fetching for sync-base repair."""
+
+    async def _no_block(**_kwargs: object) -> None:
+        """Allow the sync-base flow to skip protected-scope checks."""
+
+    async def _validated(**_kwargs: object) -> _GitPushResult:
+        """Simulate validated push success."""
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    monkeypatch.setattr(runner, "_fetch_base", _fetch_base)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated)
+
+    result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        state=MonitorState(),
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    merge_calls = [
+        call.args for call in cmd.calls if "merge" in call.args and "--abort" not in call.args
+    ]
+    assert len(merge_calls) == 1
+    assert "-m" not in merge_calls[0]
