@@ -115,6 +115,18 @@ def test_strip_then_commit_tag_yields_single_leading_key() -> None:
     assert subject == "PROJ-123 awf: Fix the bug"
 
 
+def test_branch_is_idempotent() -> None:
+    once = branch_with_task_tag("awf/ws_123", "PROJ-123")
+    twice = branch_with_task_tag(once, "PROJ-123")
+    assert once == twice == "PROJ-123-awf/ws_123"
+
+
+def test_branch_idempotency_only_triggers_on_exact_prefix() -> None:
+    # A different leading key (sharing a prefix but not the exact "{tag}-" guard)
+    # still gets prefixed rather than being mistaken for an already-tagged branch.
+    assert branch_with_task_tag("PROJ-1234-awf/ws_1", "PROJ-123") == ("PROJ-123-PROJ-1234-awf/ws_1")
+
+
 def test_title_is_idempotent() -> None:
     once = title_with_task_tag("Fix the bug", "PROJ-123")
     twice = title_with_task_tag(once, "PROJ-123")

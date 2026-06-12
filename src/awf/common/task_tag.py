@@ -56,10 +56,19 @@ def validate_task_tag(value: str | None) -> str | None:
 
 
 def branch_with_task_tag(branch: str, tag: str | None) -> str:
-    """Prepend ``tag`` to ``branch`` with the branch separator; no-op if falsy."""
+    """Prepend ``tag`` to ``branch`` with the branch separator; no-op if falsy.
+
+    Idempotent: if ``branch`` already starts with ``"{tag}-"`` it is returned
+    unchanged, consistent with :func:`title_with_task_tag` and
+    :func:`commit_message_with_task_tag`, so a caller that passes an
+    already-tagged branch never accumulates a double prefix.
+    """
     if not tag:
         return branch
-    return f"{tag}{BRANCH_SEP}{branch}"
+    prefix = f"{tag}{BRANCH_SEP}"
+    if branch.startswith(prefix):
+        return branch
+    return f"{prefix}{branch}"
 
 
 def title_with_task_tag(title: str, tag: str | None) -> str:
