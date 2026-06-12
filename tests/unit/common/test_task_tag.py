@@ -139,6 +139,24 @@ def test_title_idempotency_only_triggers_on_exact_prefix() -> None:
     assert title_with_task_tag(title, "PROJ-123") == "PROJ-123 see PROJ-123 for details"
 
 
+def test_title_idempotent_on_colon_form_leading_key() -> None:
+    # Regression: an operator-supplied Jira title that already leads with the key
+    # in the common "PROJ-123: …" colon form must not become a duplicated
+    # "PROJ-123 PROJ-123: …" prefix that weakens auto-linking.
+    assert title_with_task_tag("PROJ-123: Fix the bug", "PROJ-123") == "PROJ-123: Fix the bug"
+
+
+def test_title_idempotent_when_title_is_exactly_the_key() -> None:
+    # A title that is exactly the key (no trailing text) is already tagged.
+    assert title_with_task_tag("PROJ-123", "PROJ-123") == "PROJ-123"
+
+
+def test_title_prefixes_when_leading_token_is_a_longer_key() -> None:
+    # A longer key sharing the prefix is a *different* issue, so the boundary
+    # check still prepends rather than treating it as already-tagged.
+    assert title_with_task_tag("PROJ-1234: Fix", "PROJ-123") == "PROJ-123 PROJ-1234: Fix"
+
+
 def test_commit_message_is_idempotent() -> None:
     once = commit_message_with_task_tag("awf: do work", "PROJ-123")
     twice = commit_message_with_task_tag(once, "PROJ-123")
@@ -149,3 +167,9 @@ def test_commit_message_idempotency_only_triggers_on_exact_prefix() -> None:
     # A message that merely contains the tag mid-text still gets prefixed.
     msg = "see PROJ-123 for details"
     assert commit_message_with_task_tag(msg, "PROJ-123") == "PROJ-123 see PROJ-123 for details"
+
+
+def test_commit_message_idempotent_on_colon_form_leading_key() -> None:
+    # Same colon-form leading-key guard as title_with_task_tag — the helpers are
+    # documented as mutually consistent.
+    assert commit_message_with_task_tag("PROJ-123: do work", "PROJ-123") == "PROJ-123: do work"

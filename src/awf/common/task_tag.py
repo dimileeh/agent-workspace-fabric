@@ -71,19 +71,36 @@ def branch_with_task_tag(branch: str, tag: str | None) -> str:
     return f"{prefix}{branch}"
 
 
+def _leads_with_task_key(text: str, tag: str) -> bool:
+    """True when ``text`` already begins with ``tag`` as a delimited leading token.
+
+    "Delimited" means the tag is followed by end-of-string or a non-alphanumeric
+    boundary — a space (``"PROJ-123 …"``) or a punctuation form such as a colon
+    (``"PROJ-123: …"``, a common Jira title shape). The boundary check is what
+    stops a *longer* key (``PROJ-1234`` when ``tag`` is ``PROJ-123``) from being
+    mistaken for an already-tagged leading key.
+    """
+    if not text.startswith(tag):
+        return False
+    rest = text[len(tag) :]
+    return not rest or not rest[0].isalnum()
+
+
 def title_with_task_tag(title: str, tag: str | None) -> str:
     """Prepend ``tag`` to a PR ``title`` with the message separator; no-op if falsy.
 
-    Idempotent: if ``title`` already starts with ``"{tag} "`` it is returned
-    unchanged, consistent with :func:`commit_message_with_task_tag`, so a
-    caller that passes an already-tagged title never accumulates a double prefix.
+    Idempotent on any already-tagged title: if ``title`` already begins with the
+    key as a delimited leading token — the ``"{tag} "`` form *or* a punctuation
+    form such as ``"{tag}: …"`` (a common Jira title shape) — it is returned
+    unchanged, so a caller never accumulates a duplicated ``"{tag} {tag}: …"``
+    prefix that weakens Jira auto-linking. Consistent with
+    :func:`commit_message_with_task_tag`.
     """
     if not tag:
         return title
-    prefix = f"{tag}{MESSAGE_SEP}"
-    if title.startswith(prefix):
+    if _leads_with_task_key(title, tag):
         return title
-    return f"{prefix}{title}"
+    return f"{tag}{MESSAGE_SEP}{title}"
 
 
 def strip_leading_task_tag(text: str, tag: str | None) -> str:
@@ -106,13 +123,14 @@ def strip_leading_task_tag(text: str, tag: str | None) -> str:
 def commit_message_with_task_tag(message: str, tag: str | None) -> str:
     """Prepend ``tag`` to a commit ``message``; no-op if falsy.
 
-    Idempotent: if ``message`` already starts with ``"{tag} "`` it is returned
-    unchanged, so monitor re-runs and ``%B``-reusing reparents never accumulate
-    a double prefix.
+    Idempotent on any already-tagged message: if ``message`` already begins with
+    the key as a delimited leading token — the ``"{tag} "`` form or a punctuation
+    form such as ``"{tag}: …"`` — it is returned unchanged, so monitor re-runs and
+    ``%B``-reusing reparents never accumulate a double prefix. Consistent with
+    :func:`title_with_task_tag`.
     """
     if not tag:
         return message
-    prefix = f"{tag}{MESSAGE_SEP}"
-    if message.startswith(prefix):
+    if _leads_with_task_key(message, tag):
         return message
-    return f"{prefix}{message}"
+    return f"{tag}{MESSAGE_SEP}{message}"
