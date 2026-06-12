@@ -796,6 +796,84 @@ class TestHandoffProfilePreflightAndSetupReraise:
         assert exc_info.value is escaping
 
 
+class TestHandoffSetupRunsToolchainProbe:
+    @pytest.mark.unit
+    async def test_setup_records_toolchain_findings_after_green_setup(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The monitor-handoff setup path must mirror ``execute`` and probe the
+        # container for declared toolchains after a green setup, so adopted /
+        # release-PR workspaces still surface RUNTIME_TOOLCHAIN_UNAVAILABLE
+        # warnings. The probe runs before the profile preflight returns.
+        toolchain_calls: list[tuple[str, str]] = []
+        validation = _OkSetupValidation()
+
+        class _Executor:
+            _validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                return None
+
+            async def _record_runtime_toolchain_findings(
+                self, *, workspace_id: str, compose_project: str, **_kwargs: Any
+            ) -> None:
+                toolchain_calls.append((workspace_id, compose_project))
+
+        ok = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-toolchain",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert ok is True
+        assert validation.calls == [("setup", "pre_agent")]
+        assert toolchain_calls == [("ws-toolchain", "awf_x")]
+
+    @pytest.mark.unit
+    async def test_setup_swallows_toolchain_recorder_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The toolchain probe is strictly additive: a recorder error is logged
+        # and swallowed so the handoff still proceeds to the profile preflight
+        # and returns success.
+        log_events: list[str] = []
+
+        class _Logger:
+            def exception(self, event: str, **_kwargs: Any) -> None:
+                log_events.append(event)
+
+        monkeypatch.setattr(monitor_handoff_setup_module, "_log", _Logger())
+
+        validation = _OkSetupValidation()
+
+        class _Executor:
+            _validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                return None
+
+            async def _record_runtime_toolchain_findings(self, **_kwargs: Any) -> None:
+                raise RuntimeError("recorder unavailable")
+
+        ok = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-toolchain-boom",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert ok is True
+        assert log_events == ["executor.monitor_handoff_runtime_toolchain_probe_record_failed"]
+
+
 class TestSyncReleasePrHandoffRemainingBranches:
     @pytest.mark.unit
     async def test_release_handoff_skips_when_worktree_missing(

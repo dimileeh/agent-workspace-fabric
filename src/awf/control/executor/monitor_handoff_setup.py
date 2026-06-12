@@ -203,6 +203,24 @@ async def _run_monitor_handoff_profile_setup(
         )
 
     if setup_result.all_passed:
+        # Mirror the ``execute`` path: probe the container for declared
+        # toolchains and record any ``RUNTIME_TOOLCHAIN_UNAVAILABLE`` warnings
+        # after a green setup. The probe is strictly additive and non-blocking,
+        # so a recorder error is swallowed and never affects the handoff — but
+        # omitting it entirely would let adopted/release-PR workspaces silently
+        # miss the toolchain-availability warnings their executed peers get.
+        try:
+            await self._record_runtime_toolchain_findings(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
+        except Exception:
+            _log.exception(
+                "executor.monitor_handoff_runtime_toolchain_probe_record_failed",
+                workspace_id=workspace_id,
+            )
         return await _run_monitor_handoff_profile_preflight(
             self,
             workspace_id=workspace_id,
