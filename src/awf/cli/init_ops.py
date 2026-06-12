@@ -230,11 +230,18 @@ def _run_init_project_onboarding(
             typer.echo(f"error: {exc}", err=True)
             raise typer.Exit(code=1) from None
 
-    forge_block = _detect_project_forge_auth(
-        repository,
-        settings=settings,
-        service_env=service_env,
-    )
+    try:
+        forge_block = _detect_project_forge_auth(
+            repository,
+            settings=settings,
+            service_env=service_env,
+        )
+    except Exception:
+        # Forge auth is a diagnostic, never a gate: an unexpected error reading
+        # provider settings or an unusual git setup must downgrade to a neutral
+        # block rather than abort `awf init`. Preserves the "NEVER block"
+        # onboarding invariant unconditionally.
+        forge_block = _neutral_forge_block()
 
     mode = "guided" if effective_guided else "write" if should_write else "preview"
     payload = _init_project_onboarding_payload(

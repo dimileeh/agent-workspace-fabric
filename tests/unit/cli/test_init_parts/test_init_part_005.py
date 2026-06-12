@@ -227,6 +227,42 @@ def test_init_no_origin_remote_stays_neutral_and_never_blocks(
 
 
 @pytest.mark.unit
+def test_init_forge_detection_error_downgrades_to_neutral_and_never_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected error during forge auth detection must not abort onboarding.
+
+    The invariant is that forge auth issues never block project onboarding. If
+    the underlying detection raises (e.g. an IO/config error reading provider
+    settings, or an unusual git setup), ``awf init`` must downgrade to a neutral
+    forge block instead of propagating an unhandled exception.
+    """
+    _stub_prereqs(monkeypatch)
+
+    def _boom(_path: object) -> str:
+        raise RuntimeError("unexpected git failure")
+
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        _boom,
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path), "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    forge = json.loads(result.output)["forge"]
+    assert forge["forge"] is None
+    assert forge["host"] is None
+    assert forge["host_detected"] is False
+    assert forge["auth"] is None
+    assert forge["auth_ok"] is True
+    assert forge["level"] == "neutral"
+
+    pretty = _runner.invoke(app, ["init", str(tmp_path)])
+    assert pretty.exit_code == 0, pretty.output
+
+
+@pytest.mark.unit
 def test_init_explicit_forge_override_wins_over_url_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
