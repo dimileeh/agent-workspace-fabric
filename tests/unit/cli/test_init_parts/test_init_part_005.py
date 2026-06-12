@@ -326,9 +326,16 @@ def test_init_forge_detection_error_downgrades_to_neutral_and_never_blocks(
     assert forge["auth"] is None
     assert forge["auth_ok"] is True
     assert forge["level"] == "neutral"
+    # The detection-error block is flagged distinctly from the no-origin case so
+    # guidance never claims a missing remote when probing merely failed.
+    assert forge["detection_error"] is True
 
     pretty = _runner.invoke(app, ["init", str(tmp_path)])
     assert pretty.exit_code == 0, pretty.output
+    # A detection failure must NOT tell the user to add a remote (the remote may
+    # well exist); it surfaces a generic retry hint instead.
+    assert "No `origin` remote detected" not in pretty.output
+    assert "Forge auth check could not run" in pretty.output
 
 
 @pytest.mark.unit

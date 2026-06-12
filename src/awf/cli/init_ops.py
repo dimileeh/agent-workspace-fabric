@@ -247,8 +247,10 @@ def _run_init_project_onboarding(
         # Forge auth is a diagnostic, never a gate: an unexpected error reading
         # provider settings or an unusual git setup must downgrade to a neutral
         # block rather than abort `awf init`. Preserves the "NEVER block"
-        # onboarding invariant unconditionally.
-        forge_block = _neutral_forge_block()
+        # onboarding invariant unconditionally. Use the detection-error block (not
+        # the no-origin neutral block) so guidance never claims the remote is
+        # missing when probing merely failed.
+        forge_block = _forge_detection_error_block()
 
     mode = "guided" if effective_guided else "write" if should_write else "preview"
     payload = _init_project_onboarding_payload(
@@ -521,6 +523,20 @@ def _neutral_forge_block() -> dict[str, object]:
     }
 
 
+def _forge_detection_error_block() -> dict[str, object]:
+    """Return the forge block used when forge detection raised unexpectedly.
+
+    Distinct from :func:`_neutral_forge_block` (the deliberate no-``origin``-remote
+    case): here an ``origin`` remote may well exist but probing failed for another
+    reason (an IO/config error reading provider settings, an unusual git setup).
+    Carries the same never-blocking shape but flags ``detection_error`` so the
+    guidance does not wrongly tell the user to add a remote that already exists.
+    """
+    block = _neutral_forge_block()
+    block["detection_error"] = True
+    return block
+
+
 def _detect_github_forge_auth(
     *, settings: Any, service_env: Mapping[str, str] | None
 ) -> tuple[dict[str, object], bool]:
@@ -675,6 +691,11 @@ def _forge_guidance_lines(forge_block: Mapping[str, object]) -> list[str]:
     """Return forge-scoped Next-step guidance lines (WARNING text never blocks)."""
     forge = forge_block.get("forge")
     if forge is None:
+        if forge_block.get("detection_error"):
+            return [
+                "Forge auth check could not run (an unexpected error occurred); this "
+                "never blocks onboarding. Re-run `awf init <path>` to retry.",
+            ]
         return [
             "No `origin` remote detected; forge auth check skipped. Add a git "
             "remote, then re-run `awf init <path>` to verify forge auth.",

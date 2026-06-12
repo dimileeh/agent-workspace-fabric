@@ -281,6 +281,28 @@ def test_forge_guidance_lines_cover_github_missing_gh_and_unknown_auth() -> None
 
 
 @pytest.mark.unit
+def test_forge_guidance_lines_detection_error_does_not_claim_missing_remote() -> None:
+    """A detection-error block surfaces a retry hint, not the add-a-remote advice."""
+    lines = init_ops._forge_guidance_lines(  # noqa: SLF001
+        init_ops._forge_detection_error_block()  # noqa: SLF001
+    )
+
+    assert any("Forge auth check could not run" in line for line in lines)
+    assert not any("No `origin` remote detected" in line for line in lines)
+
+
+@pytest.mark.unit
+def test_forge_guidance_lines_no_origin_advises_adding_remote() -> None:
+    """The genuine no-origin neutral block still advises adding a git remote."""
+    lines = init_ops._forge_guidance_lines(  # noqa: SLF001
+        init_ops._neutral_forge_block()  # noqa: SLF001
+    )
+
+    assert any("No `origin` remote detected" in line for line in lines)
+    assert not any("Forge auth check could not run" in line for line in lines)
+
+
+@pytest.mark.unit
 def test_guided_project_onboarding_rejects_unknown_template(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
