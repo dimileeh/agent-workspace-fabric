@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
@@ -166,22 +167,36 @@ class TestRecordRuntimeToolchainFindings:
     ) -> None:
         ws_id = await _seed_ready_workspace(factory)
 
+        class _ProbeError(RuntimeError):
+            reason_code = "RUNTIME_TOOLCHAIN_PROBE_BROKE"
+
         class _ExplodingValidation:
             async def probe_runtime_toolchain_findings(self, **_kwargs: Any) -> Any:
-                raise RuntimeError("probe blew up ghp_FAKESECRET0000000")
+                raise _ProbeError("probe blew up ghp_FAKESECRET0000000")
 
         class _Executor:
             _session_factory = factory
             _validation = _ExplodingValidation()
 
         # Must not raise.
-        await _record_runtime_toolchain_findings(
-            _Executor(),
-            workspace_id=ws_id,
-            compose_project="awf_x",
-            compose_file=Path("/tmp/compose.yml"),
-            profile=object(),
-        )
+        with structlog.testing.capture_logs() as captured:
+            await _record_runtime_toolchain_findings(
+                _Executor(),
+                workspace_id=ws_id,
+                compose_project="awf_x",
+                compose_file=Path("/tmp/compose.yml"),
+                profile=object(),
+            )
+
+        # The swallowed failure is the only operator signal: it must preserve the
+        # structured reason_code and never leak the compose-exec stderr secret as
+        # a raw traceback.
+        entry = next(e for e in captured if e["event"] == "executor.runtime_toolchain_probe_failed")
+        assert entry["log_level"] == "warning"
+        assert entry["reason_code"] == "RUNTIME_TOOLCHAIN_PROBE_BROKE"
+        assert "ghp_FAKESECRET0000000" not in entry["error"]
+        assert "<redacted>" in entry["error"]
+        assert "exc_info" not in entry
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)

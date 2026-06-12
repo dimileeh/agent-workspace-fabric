@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
     RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
@@ -206,10 +207,15 @@ async def _record_runtime_toolchain_findings(
             compose_file=compose_file,
             profile=profile,
         )
-    except Exception:
-        _log.exception(
+    except Exception as exc:
+        # Non-blocking: this log entry is the only operator signal, so preserve
+        # the structured ``reason_code`` and emit a redacted error string rather
+        # than a raw traceback that could carry compose-exec stderr secrets.
+        _log.warning(
             "executor.runtime_toolchain_probe_failed",
             workspace_id=workspace_id,
+            reason_code=getattr(exc, "reason_code", None),
+            error=redact_secrets(str(exc))[:1000],
         )
         return
     if not findings:
@@ -258,8 +264,13 @@ async def _record_runtime_toolchain_findings_safe(
             compose_file=compose_file,
             profile=profile,
         )
-    except Exception:
-        _log.exception(
+    except Exception as exc:
+        # See ``_record_runtime_toolchain_findings``: keep the reason_code and a
+        # redacted error so the swallowed recorder defect stays diagnosable
+        # without leaking a raw traceback.
+        _log.warning(
             "executor.runtime_toolchain_probe_record_failed",
             workspace_id=workspace_id,
+            reason_code=getattr(exc, "reason_code", None),
+            error=redact_secrets(str(exc))[:1000],
         )

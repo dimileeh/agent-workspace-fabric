@@ -841,16 +841,20 @@ class TestHandoffSetupRunsToolchainProbe:
     ) -> None:
         # The toolchain probe is strictly additive: a recorder error is logged
         # and swallowed so the handoff still proceeds to the profile preflight
-        # and returns success.
-        log_events: list[str] = []
+        # and returns success. The swallowed failure must preserve the structured
+        # reason_code and redact secrets instead of dumping a raw traceback.
+        log_calls: list[tuple[str, dict[str, Any]]] = []
 
         class _Logger:
-            def exception(self, event: str, **_kwargs: Any) -> None:
-                log_events.append(event)
+            def warning(self, event: str, **kwargs: Any) -> None:
+                log_calls.append((event, kwargs))
 
         monkeypatch.setattr(monitor_handoff_setup_module, "_log", _Logger())
 
         validation = _OkSetupValidation()
+
+        class _RecorderError(RuntimeError):
+            reason_code = "TOOLCHAIN_RECORDER_BROKE"
 
         class _Executor:
             _validation = validation
@@ -859,7 +863,7 @@ class TestHandoffSetupRunsToolchainProbe:
                 return None
 
             async def _record_runtime_toolchain_findings(self, **_kwargs: Any) -> None:
-                raise RuntimeError("recorder unavailable")
+                raise _RecorderError("recorder unavailable ghp_FAKESECRET0000000")
 
         ok = await _run_monitor_handoff_profile_setup(
             _Executor(),
@@ -871,7 +875,13 @@ class TestHandoffSetupRunsToolchainProbe:
         )
 
         assert ok is True
-        assert log_events == ["executor.monitor_handoff_runtime_toolchain_probe_record_failed"]
+        assert [event for event, _ in log_calls] == [
+            "executor.monitor_handoff_runtime_toolchain_probe_record_failed"
+        ]
+        _, kwargs = log_calls[0]
+        assert kwargs["reason_code"] == "TOOLCHAIN_RECORDER_BROKE"
+        assert "ghp_FAKESECRET0000000" not in kwargs["error"]
+        assert "<redacted>" in kwargs["error"]
 
 
 class TestSyncReleasePrHandoffRemainingBranches:
