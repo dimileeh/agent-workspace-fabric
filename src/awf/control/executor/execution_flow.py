@@ -929,6 +929,18 @@ async def execute(
             agent_exit_note=agent_exit_note,
             upstream_failure_reason=agent_run_failure_reason,
         )
+        # Planning ran before the commit step, so the worktree (preserved on
+        # the FAILED workspace) can already hold the plan + conformance report.
+        # This branch returns before the post-validation deposit block, so
+        # deposit them now — otherwise a commit-step failure (e.g. a pre-commit
+        # hook rejecting the staged changes) strands the artifacts in the
+        # worktree and the console can never surface them.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
         return
     except Exception as exc:  # unexpected — mark infrastructure
         if _git_error_indicates_missing_head_object(str(exc)):
