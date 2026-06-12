@@ -16,7 +16,6 @@ from awf.control.executor import (
 )
 from awf.control.executor import helpers as executor_helpers
 from awf.control.executor import logging_ops as executor_logging_ops
-from awf.control.executor import planning_ops as executor_planning_ops
 from awf.control.executor import quality_gates as executor_quality_gates
 from awf.control.executor import recovery_payloads as executor_recovery_payloads
 from awf.control.executor.git_ops import (
@@ -570,203 +569,67 @@ def test_recovery_conformance_handoff_falls_back_when_payload_path_escapes_works
 
 
 @pytest.mark.unit
-async def test_post_validation_report_repairs_git_ownership_before_add(
+async def test_satisfied_post_validation_conformance_report_write_failure_proceeds(
     tmp_path: Path,
 ) -> None:
+    """#544 resilience: a failure to persist the (gitignored) conformance
+    report must NEVER discard completed agent work. When the file write raises
+    OSError, the check logs a warning, still records the conformance event, and
+    returns success rather than failing the workspace."""
     runner = FakeCommandRunner()
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
-    runner.queue_result(returncode=0)  # git add report
-    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
-    runner.queue_result(returncode=0)  # git commit report
+    worktree_path = tmp_path / "worktree"
+    runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
     executor = _executor_with_runner(runner, tmp_path)
-    repair_events: list[tuple[str, int]] = []
-
-    async def record_repair(**kwargs: object) -> bool:
-        reason = kwargs["reason"]
-        assert isinstance(reason, str)
-        repair_events.append((reason, len(runner.calls)))
-        return True
-
-    executor._repair_agent_git_ownership = record_repair  # type: ignore[method-assign]
-
-    committed = await executor._commit_post_validation_conformance_report(
-        workspace_id="ws_post",
-        worktree_path=tmp_path / "worktree",
-        report_path=report_path,
-        validation_run_id="validation-run-1",
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
     )
 
-    add_call_index = next(
-        index
-        for index, call in enumerate(runner.calls)
-        if call.args[-3:] == ["add", "--", report_path.as_posix()]
-    )
-    assert committed is True
-    assert repair_events[0] == (
-        "post_validation_conformance_report_git_add",
-        add_call_index,
-    )
+    def fail_write(**_kwargs: object) -> None:
+        raise OSError("disk full")
 
+    executor._write_satisfied_post_validation_conformance_report = fail_write  # type: ignore[method-assign]
+    recorded: list[str] = []
 
-@pytest.mark.unit
-async def test_post_validation_report_commit_prepends_task_tag(
-    tmp_path: Path,
-) -> None:
-    """The conformance-report commit subject carries the task tag so the
-    report push still auto-links to the Jira issue."""
-    runner = FakeCommandRunner()
-    report_path = Path("docs/awf-plans/ws_post.conformance.json")
-    runner.queue_result(returncode=0)  # git add report
-    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
-    runner.queue_result(returncode=0)  # git commit report
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    async def record_event(**kwargs: object) -> None:
+        recorded.append(str(kwargs.get("validation_run_id")))
 
-    committed = await executor._commit_post_validation_conformance_report(
-        workspace_id="ws_post",
-        worktree_path=tmp_path / "worktree",
-        report_path=report_path,
-        validation_run_id="validation-run-1",
-        task_tag="PROJ-3",
-    )
-
-    assert committed is True
-    commit_call = next(call for call in runner.calls if "commit" in call.args)
-    subject = commit_call.args[commit_call.args.index("-m") + 1]
-    assert subject == "PROJ-3 awf: post-validation conformance report"
-
-
-@pytest.mark.unit
-async def test_post_validation_report_unstages_report_when_cached_diff_fails(
-    tmp_path: Path,
-) -> None:
-    runner = FakeCommandRunner()
-    report_path = Path("docs/awf-plans/ws_post.conformance.json")
-    runner.queue_result(returncode=0)  # git add report
-    runner.queue_result(returncode=128, stderr="fatal: index.lock exists")
-    runner.queue_result(returncode=0)  # git reset report
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
-
-    with pytest.raises(executor_planning_ops._PostValidationConformanceReportGitError) as exc_info:
-        await executor._commit_post_validation_conformance_report(
-            workspace_id="ws_post",
-            worktree_path=tmp_path / "worktree",
-            report_path=report_path,
-            validation_run_id="validation-run-1",
-        )
-
-    assert exc_info.value.operation == "diff"
-    assert runner.calls[-1].args[-4:] == [
-        "reset",
-        "-q",
-        "--",
-        report_path.as_posix(),
-    ]
-
-
-@pytest.mark.unit
-async def test_post_validation_report_git_error_preserves_unstage_failure_metadata(
-    tmp_path: Path,
-) -> None:
-    runner = FakeCommandRunner()
-    report_path = Path("docs/awf-plans/ws_post.conformance.json")
-    runner.queue_result(returncode=0)  # git add report
-    runner.queue_result(
-        returncode=128,
-        stderr="fatal: index.lock exists",
-        reason_code="GIT_DIFF_FAILED",
-    )
-    runner.queue_result(
-        returncode=129,
-        stderr="fatal: could not reset",
-        reason_code="GIT_RESET_FAILED",
-    )
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
-
-    with pytest.raises(executor_planning_ops._PostValidationConformanceReportGitError) as exc_info:
-        await executor._commit_post_validation_conformance_report(
-            workspace_id="ws_post",
-            worktree_path=tmp_path / "worktree",
-            report_path=report_path,
-            validation_run_id="validation-run-1",
-        )
-
-    assert exc_info.value.operation == "diff"
-    assert exc_info.value.command_reason_code == "GIT_DIFF_FAILED"
-    assert exc_info.value.cleanup_operation == "reset"
-    assert exc_info.value.cleanup_returncode == 129
-    assert exc_info.value.cleanup_command_reason_code == "GIT_RESET_FAILED"
-    assert "git reset failed" in str(exc_info.value)
-    assert runner.calls[-1].args[-4:] == [
-        "reset",
-        "-q",
-        "--",
-        report_path.as_posix(),
-    ]
-
-
-@pytest.mark.unit
-async def test_post_validation_report_git_error_redacts_sensitive_output(tmp_path: Path) -> None:
-    runner = FakeCommandRunner()
-    report_path = Path("docs/awf-plans/ws_post.conformance.json")
-    runner.queue_result(returncode=0)  # git add report
-    runner.queue_result(
-        returncode=128,
-        stderr=(
-            "fatal: could not diff with remote "
-            "https://alice:ghp_1234567890abcdef1234@github.com/org/repo.git "
-            "Authorization: Bearer s3cr3t-token"
+    executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
         ),
-        reason_code="GIT_DIFF_FAILED",
-    )
-    runner.queue_result(
-        returncode=129,
-        stderr=(
-            "fatal: cleanup failed for https://git:gho_1234567890abcdef1234@github.com/org/repo.git"
-        ),
-        reason_code="GIT_RESET_FAILED",
-    )
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
-
-    with pytest.raises(executor_planning_ops._PostValidationConformanceReportGitError) as exc_info:
-        await executor._commit_post_validation_conformance_report(
-            workspace_id="ws_post",
-            worktree_path=tmp_path / "worktree",
-            report_path=report_path,
-            validation_run_id="validation-run-1",
-        )
-
-    message = str(exc_info.value)
-    assert "[redacted]" in message
-    assert "ghp_1234567890abcdef1234" not in message
-    assert "gho_1234567890abcdef1234" not in message
-    assert "s3cr3t-token" not in message
-    assert "alice" not in message
-    assert "git reset failed" in message
-
-
-@pytest.mark.unit
-async def test_post_validation_report_skips_commit_when_report_is_not_staged(
-    tmp_path: Path,
-) -> None:
-    runner = FakeCommandRunner()
-    report_path = Path("docs/awf-plans/ws_post.conformance.json")
-    runner.queue_result(returncode=0)  # git add report
-    runner.queue_result(returncode=0, stdout="docs/awf-plans/other.conformance.json\n")
-    executor = _executor_with_runner(runner, tmp_path)
-    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
-
-    committed = await executor._commit_post_validation_conformance_report(
-        workspace_id="ws_post",
-        worktree_path=tmp_path / "worktree",
+        plan_path=Path("docs/awf-plans/ws_post.md"),
         report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
         validation_run_id="validation-run-1",
     )
 
-    assert committed is False
+    # Write failure is non-fatal: success returned, event still recorded, and
+    # nothing is staged or committed.
+    assert failure is None
+    assert recorded == ["validation-run-1"]
     assert all("commit" not in call.args for call in runner.calls)
 
 
@@ -1061,9 +924,13 @@ def test_existing_pr_remote_push_url_ignores_non_sync_or_invalid_repo_urls() -> 
 
 
 @pytest.mark.unit
-async def test_satisfied_post_validation_conformance_report_is_committed(
+async def test_satisfied_post_validation_conformance_report_is_written_not_committed(
     tmp_path: Path,
 ) -> None:
+    """The satisfied report is written to the gitignored ``docs/awf-plans/``
+    path for inspection and the conformance event is recorded, but the report
+    is never ``git add``-ed or committed (#544: the path is gitignored, so
+    committing it crashed the workspace and discarded completed agent work)."""
     runner = FakeCommandRunner()
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
     worktree_path = tmp_path / "worktree"
@@ -1077,18 +944,14 @@ async def test_satisfied_post_validation_conformance_report_is_committed(
     runner.queue_result(returncode=0, stdout="validated-head\n")
     runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
-    runner.queue_result(returncode=0)  # git add report
-    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
-    runner.queue_result(returncode=0)  # git commit report
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
     )
-    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
-    event_markers: list[tuple[str, int]] = []
+    event_markers: list[str] = []
 
     async def record_event(**_kwargs: object) -> None:
-        event_markers.append(("record", len(runner.calls)))
+        event_markers.append("record")
 
     executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
     profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
@@ -1120,15 +983,13 @@ async def test_satisfied_post_validation_conformance_report_is_committed(
     )
 
     assert failure is None
-    add_index = next(
-        index
-        for index, call in enumerate(runner.calls)
-        if call.args[-3:] == ["add", "--", report_path.as_posix()]
-    )
-    commit_index = next(index for index, call in enumerate(runner.calls) if "commit" in call.args)
-    assert add_index < commit_index
-    assert event_markers == [("record", len(runner.calls))]
-    assert commit_index < event_markers[0][1]
+    # Report stays written to the inspectable (gitignored) worktree path...
+    assert "validated evidence satisfies plan" in report_file.read_text(encoding="utf-8")
+    # ...and the conformance outcome is recorded as an event...
+    assert event_markers == ["record"]
+    # ...but it is never staged or committed.
+    assert all("add" not in call.args for call in runner.calls)
+    assert all("commit" not in call.args for call in runner.calls)
 
 
 @pytest.mark.unit
@@ -1155,14 +1016,10 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
     runner.queue_result(returncode=0, stdout="validated-head\n")
     runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
     runner.queue_result(returncode=0, stdout="")
-    runner.queue_result(returncode=0)
-    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
-    runner.queue_result(returncode=0)
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
     )
-    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
     executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
     profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
     handoff = _PlanningValidationHandoff(
@@ -1216,9 +1073,6 @@ async def test_post_validation_conformance_ignores_stale_report_without_stdout(
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
     )
-    executor._commit_post_validation_conformance_report = AsyncMock(  # type: ignore[method-assign]
-        return_value=True
-    )
     executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
     profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
     handoff = _PlanningValidationHandoff(
@@ -1249,7 +1103,6 @@ async def test_post_validation_conformance_ignores_stale_report_without_stdout(
     assert failure is not None
     assert failure.reason_code == PLAN_CONFORMANCE_UNSATISFIED
     assert "Produce a valid plan-conformance JSON report." in failure.message
-    executor._commit_post_validation_conformance_report.assert_not_awaited()  # type: ignore[attr-defined]
     executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
 
 
@@ -1381,9 +1234,6 @@ async def test_post_validation_conformance_rejects_pre_dirty_committed_paths(
     executor._committed_paths_since = AsyncMock(  # type: ignore[method-assign]
         return_value={Path("src/unvalidated.py")}
     )
-    executor._commit_post_validation_conformance_report = AsyncMock(  # type: ignore[method-assign]
-        return_value=True
-    )
     executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
     executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
     profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
@@ -1419,7 +1269,6 @@ async def test_post_validation_conformance_rejects_pre_dirty_committed_paths(
     assert failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
     assert failure.details is not None
     assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
-    executor._commit_post_validation_conformance_report.assert_not_awaited()  # type: ignore[attr-defined]
     executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
 
 
@@ -1446,9 +1295,6 @@ async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
     )
     executor._git_rev_parse_head = AsyncMock(return_value="validated-head")  # type: ignore[method-assign]
     executor._committed_paths_since = AsyncMock(return_value=set())  # type: ignore[method-assign]
-    executor._commit_post_validation_conformance_report = AsyncMock(  # type: ignore[method-assign]
-        return_value=True
-    )
     executor._record_post_validation_conformance_event = AsyncMock()  # type: ignore[method-assign]
     profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
@@ -1488,5 +1334,4 @@ async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
     assert failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
     assert failure.details is not None
     assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
-    executor._commit_post_validation_conformance_report.assert_not_awaited()  # type: ignore[attr-defined]
     executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]

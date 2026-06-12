@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
@@ -33,8 +34,8 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
-from awf.control.executor import execution_flow as _execution_flow
 from awf.control.executor import helpers as executor_helpers
+from awf.control.executor import pr_open_step as _pr_open_step
 from awf.control.executor.helpers import (
     _call_pr_monitor_factory,
 )
@@ -853,7 +854,7 @@ class TestPullRequestUnexpectedErrorPart002:
             spy_calls.append((forge, runner))
             return spy_client
 
-        monkeypatch.setattr(_execution_flow, "make_forge_client", _spy_make_forge_client)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _spy_make_forge_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -889,7 +890,7 @@ class TestPullRequestUnexpectedErrorPart002:
             spy_calls.append((forge, runner))
             return spy_client
 
-        monkeypatch.setattr(_execution_flow, "make_forge_client", _spy_make_forge_client)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _spy_make_forge_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -946,7 +947,7 @@ class TestPullRequestUnexpectedErrorPart002:
                 reason_code="BITBUCKET_AUTH_NOT_CONFIGURED",
             )
 
-        monkeypatch.setattr(_execution_flow, "make_forge_client", _raise_make_forge_client)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _raise_make_forge_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)
@@ -960,7 +961,17 @@ class TestPullRequestUnexpectedErrorPart002:
         _queue_full_happy_path(fake)
 
         executor = _make_executor(fake, factory, tmp_path, pr_creator=pr_creator)
-        await executor.execute(ws_id)
+        with structlog.testing.capture_logs() as captured:
+            await executor.execute(ws_id)
+
+        # The structured executor.pr_failed log carries the forge-specific
+        # reason_code so auth/rate-limit guidance flows exception → log → event,
+        # not just onto the failed workspace transition.
+        assert any(
+            event.get("event") == "executor.pr_failed"
+            and event.get("reason_code") == BITBUCKET_AUTH_NOT_CONFIGURED
+            for event in captured
+        )
 
         # push_and_open is never reached because the client construction fails first.
         assert pr_creator.forge_client is None
@@ -1028,7 +1039,16 @@ class TestPullRequestUnexpectedErrorPart002:
         _queue_full_happy_path(fake)
 
         executor = _make_executor(fake, factory, tmp_path, pr_creator=_RaisingPrCreator())
-        await executor.execute(ws_id)
+        with structlog.testing.capture_logs() as captured:
+            await executor.execute(ws_id)
+
+        # The structured executor.pr_failed log carries the forge-specific
+        # reason_code so auth/rate-limit guidance flows exception → log → event.
+        assert any(
+            event.get("event") == "executor.pr_failed"
+            and event.get("reason_code") == BITBUCKET_AUTH_NOT_CONFIGURED
+            for event in captured
+        )
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
@@ -1060,7 +1080,7 @@ class TestPullRequestUnexpectedErrorPart002:
         def _explode_make_forge_client(forge: str, runner: object) -> object:
             raise AssertionError("make_forge_client must not run on the PR-reuse push path")
 
-        monkeypatch.setattr(_execution_flow, "make_forge_client", _explode_make_forge_client)
+        monkeypatch.setattr(_pr_open_step, "make_forge_client", _explode_make_forge_client)
 
         pr_creator = _ForgeRecordingPrCreator()
         ws_id = await _seed_ready(factory)

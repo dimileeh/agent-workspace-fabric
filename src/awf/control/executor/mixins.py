@@ -52,6 +52,10 @@ class ExecutorDelegatesMixin:
     _record_setup_dependency_network_events = (
         _monitor_handoff._record_setup_dependency_network_events
     )
+    _record_runtime_toolchain_findings = _monitor_handoff._record_runtime_toolchain_findings
+    _record_runtime_toolchain_findings_safe = (
+        _monitor_handoff._record_runtime_toolchain_findings_safe
+    )
     _reject_unsupported_task_kind = _monitor_handoff._reject_unsupported_task_kind
     _dispatch_non_feature_task_kind = _monitor_handoff._dispatch_non_feature_task_kind
     _run_monitor_handoff_profile_setup = _monitor_handoff_setup._run_monitor_handoff_profile_setup
@@ -74,9 +78,6 @@ class ExecutorDelegatesMixin:
     _run_post_validation_conformance_check = _planning_ops._run_post_validation_conformance_check
     _write_satisfied_post_validation_conformance_report = staticmethod(
         _planning_ops._write_satisfied_post_validation_conformance_report
-    )
-    _commit_post_validation_conformance_report = (
-        _planning_ops._commit_post_validation_conformance_report
     )
     _record_post_validation_conformance_event = (
         _planning_ops._record_post_validation_conformance_event

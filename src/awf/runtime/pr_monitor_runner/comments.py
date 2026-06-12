@@ -17,6 +17,7 @@ from awf.runtime.monitor_prompts import (
     address_thread_prompt,
     ready_to_merge_comment,
 )
+from awf.runtime.pr_monitor_runner.constants import _TASK_TAG_UNSET, _TaskTagUnset
 from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
@@ -49,6 +50,7 @@ async def _address_thread(
     compose_file: Path,
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> Verdict:
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
@@ -60,13 +62,23 @@ async def _address_thread(
         if owned_paths is not None
         else await _owned_paths_for_prompt(runner, workspace_id)
     )
+    # The workspace's optional Jira issue key is immutable, so resolve it once per
+    # repair cycle and thread it (alongside ``owned_paths``) into every item in the
+    # fix-cycle loops. Self-resolve only as a fallback for callers that pass nothing
+    # (the sentinel default), so a single comment-repair cycle with many threads
+    # opens one workspace lookup instead of one per item (#537).
+    resolved_task_tag = (
+        await runner._resolve_task_tag(workspace_id)
+        if isinstance(task_tag, _TaskTagUnset)
+        else task_tag
+    )
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         thread=thread,
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
-        task_tag=await runner._resolve_task_tag(workspace_id),
+        task_tag=resolved_task_tag,
     )
     result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -75,6 +87,7 @@ async def _address_thread(
         compose_project=compose_project,
         compose_file=compose_file,
         state=state,
+        task_tag=resolved_task_tag,
     )
     # Stash the agent's defer reason so the deferred-capture path can preserve it
     # in the filed tracking issue (the verdict alone loses that follow-up detail).
@@ -102,6 +115,7 @@ async def _address_review_comment(
     compose_file: Path,
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> Verdict:
     result = await runner._address_review_comment_result(
         workspace_id=workspace_id,
@@ -112,6 +126,7 @@ async def _address_review_comment(
         compose_file=compose_file,
         state=state,
         owned_paths=owned_paths,
+        task_tag=task_tag,
     )
     return result.verdict
 
@@ -127,11 +142,22 @@ async def _address_review_comment_result(
     compose_file: Path,
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> VerdictResult:
     prompt_owned_paths = (
         owned_paths
         if owned_paths is not None
         else await _owned_paths_for_prompt(runner, workspace_id)
+    )
+    # The workspace's optional Jira issue key is immutable, so resolve it once per
+    # repair cycle and thread it (alongside ``owned_paths``) into every item in the
+    # fix-cycle loops. Self-resolve only as a fallback for callers that pass nothing
+    # (the sentinel default), so a single comment-repair cycle with many comments
+    # opens one workspace lookup instead of one per item (#537).
+    resolved_task_tag = (
+        await runner._resolve_task_tag(workspace_id)
+        if isinstance(task_tag, _TaskTagUnset)
+        else task_tag
     )
     prompt = address_review_comment_prompt(
         pr_number=pr_number,
@@ -139,7 +165,7 @@ async def _address_review_comment_result(
         comment=comment,
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
-        task_tag=await runner._resolve_task_tag(workspace_id),
+        task_tag=resolved_task_tag,
     )
     return await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -148,6 +174,7 @@ async def _address_review_comment_result(
         compose_project=compose_project,
         compose_file=compose_file,
         state=state,
+        task_tag=resolved_task_tag,
     )
 
 
@@ -187,6 +214,7 @@ async def _invoke_cli_for_verdict(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> Verdict:
     return (
         await runner._invoke_cli_for_verdict_result(
@@ -196,6 +224,7 @@ async def _invoke_cli_for_verdict(
             compose_project=compose_project,
             compose_file=compose_file,
             state=state,
+            task_tag=task_tag,
         )
     ).verdict
 
@@ -209,6 +238,7 @@ async def _invoke_cli_for_verdict_result(
     compose_project: str,
     compose_file: Path,
     state: MonitorState | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> VerdictResult:
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -249,6 +279,7 @@ async def _invoke_cli_for_verdict_result(
         compose_file=compose_file,
         state=state,
         command_evidence=command_evidence,
+        task_tag=task_tag,
     )
 
     if agent_run_err is not None:

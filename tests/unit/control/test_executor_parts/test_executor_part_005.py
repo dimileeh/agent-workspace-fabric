@@ -18,7 +18,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import COMMAND_IDLE_TIMEOUT_REASON, FakeCommandRunner
+from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -1010,6 +1011,73 @@ class TestFailurePaths:
             assert "history" in (ws.failure_message or "").lower()
             assert ws.pr_url is None
 
+    @pytest.mark.unit
+    async def test_orphan_history_recovery_failure_deposits_planning_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # An agent that severs git history (orphan branch) where automatic
+        # recovery also fails marks the workspace FAILED and returns from inside
+        # the post-agent ``try`` BEFORE the post-validation deposit block. The
+        # plan + conformance report the agent already wrote into the preserved
+        # worktree must still reach the served artifact dir, mirroring the other
+        # post-planning failure returns.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "max_iterations": 1},
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "gaps": []}',
+            encoding="utf-8",
+        )
+
+        async def _agent_run_ok(**_kwargs: Any) -> None:
+            # Successful agent/planning run (no failure) so execution reaches
+            # the post-agent commit step. The agent already wrote the plan +
+            # conformance report into the worktree (seeded above).
+            return None
+
+        monkeypatch.setattr(
+            executor,
+            "_run_agent_task_with_optional_planning",
+            _agent_run_ok,
+        )
+
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # drift: abbrev-ref HEAD
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="")  # diff --cached (already committed)
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(
+            returncode=128, stderr="fatal: unknown revision"
+        )  # git reset --soft: FAIL
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert "history" in (ws.failure_message or "").lower()
+
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "satisfied", "gaps": []}'
+        )
+
 
 class TestMonitorHandoff:
     """When a PR monitor is wired, the executor transitions ``pushing →
@@ -1179,3 +1247,91 @@ class TestIdempotency:
     ) -> None:
         await executor.execute("ws_never_existed")
         assert fake.calls == []
+
+
+class TestPlanningValidationHandoffCleanup:
+    @pytest.mark.unit
+    async def test_planning_validation_handoff_cleanup_failure_finishes_validate_operation(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned-recovery",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 2,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+        await _insert_validate_handoff_recovery_operation(
+            factory,
+            workspace_id=ws_id,
+            operation_id="op_validate_handoff_cleanup_failed",
+        )
+
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="")  # post-validation conformance before status
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # conformance scope HEAD
+        fake.queue_result(
+            returncode=124,
+            stderr="idle timeout exceeded",
+            reason_code=COMMAND_IDLE_TIMEOUT_REASON,
+        )
+        fake.queue_result(returncode=1, stderr="cleanup still saw tagged processes")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            run = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, reason_code
+                            FROM validation_runs
+                            WHERE workspace_id = :workspace_id
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            operation = (
+                (
+                    await s.execute(
+                        text(
+                            """
+                            SELECT status, error_code, error_message, result, finished_at
+                            FROM operations
+                            WHERE id = 'op_validate_handoff_cleanup_failed'
+                            """
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert EXEC_PROCESS_CLEANUP_FAILED in (ws.failure_message or "")
+        assert run == {"status": "succeeded", "reason_code": "VALIDATION_OK"}
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert operation["finished_at"] is not None
+        assert EXEC_PROCESS_CLEANUP_FAILED in operation["error_message"]
+        result = _json_value(operation["result"])
+        assert result["reason_code"] == EXEC_PROCESS_CLEANUP_FAILED
+        assert result["validation_run_id"]

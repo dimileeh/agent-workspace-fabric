@@ -20,11 +20,10 @@ from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag, strip_leading_task_tag
+from awf.control.executor import planning_artifacts as _planning_artifacts
 from awf.control.executor.constants import (
     PLAN_CONFORMANCE_UNSATISFIED,
     POST_VALIDATION_CONFORMANCE_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE,
-    POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE,
 )
 from awf.control.executor.git_ops import _git_name_lines
 from awf.control.executor.helpers import (
@@ -49,8 +48,6 @@ from awf.control.executor.types import (
     _CoverageEvidenceResult,
     _PlanningRunFailure,
     _PlanningValidationHandoff,
-    _PostValidationConformanceReportGitError,
-    _PostValidationConformanceReportWriteError,
     _RebaseRecoveryResult,
 )
 from awf.control.executor.validation_cleanup_guards import (
@@ -198,6 +195,27 @@ async def run_validation_and_fix_cycle(
         profile=profile,
         planning_max_iterations_default=self._config.planning_max_iterations_default,
     )
+
+    async def _mark_failed_preserving_planning_artifacts(**mark_kwargs: Any) -> None:
+        # Deposit the worktree plan + conformance report into the served
+        # artifact dir BEFORE publishing the terminal FAILED status. The console
+        # keys its artifact refetch on the workspace ``updated_at``
+        # (TaskArtifactsSection ``refreshKey``); ``_mark_failed`` bumps
+        # ``updated_at`` when it publishes FAILED, but the filesystem deposit
+        # does not touch the row. Marking FAILED first would let a poll observe
+        # the terminal status in the window before the post-cycle deposit (in
+        # ``execution_flow``), record an empty artifact list, then never refetch
+        # — hiding the Plan/Validation controls on the preserved-FAILED
+        # workspace. Depositing here orders artifact availability ahead of the
+        # polling signal. Best-effort, idempotent, gated on ``planning.required``.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+        await self._mark_failed(**mark_kwargs)
+
     validation_commands = [
         step.command.command
         for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
@@ -269,6 +287,8 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
+                profile=profile,
+                worktree_path=worktree_path,
             )
         if validation_workspace_head_sha is None:
             return await _fail_validation_worktree_guard(
@@ -278,6 +298,8 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
                 message="could not capture workspace HEAD before AWF validation",
+                profile=profile,
+                worktree_path=worktree_path,
             )
         run_local_coverage = _should_run_local_coverage(profile)
         coverage_evidence = _CoverageEvidenceResult(coverage=None)
@@ -334,6 +356,8 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
+                    profile=profile,
+                    worktree_path=worktree_path,
                     check_callback_after_cleanup=True,
                 )
             ) is not None:
@@ -351,7 +375,7 @@ async def run_validation_and_fix_cycle(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 error_message=message,
             )
-            await self._mark_failed(
+            await _mark_failed_preserving_planning_artifacts(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
@@ -390,6 +414,8 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
+                    profile=profile,
+                    worktree_path=worktree_path,
                     check_callback_after_cleanup=True,
                 )
             ) is not None:
@@ -407,7 +433,7 @@ async def run_validation_and_fix_cycle(
                 reason_code=VALIDATION_INFRASTRUCTURE_ERROR,
                 error_message=message,
             )
-            await self._mark_failed(
+            await _mark_failed_preserving_planning_artifacts(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
@@ -444,6 +470,8 @@ async def run_validation_and_fix_cycle(
                     successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
                     callback_ignored=callback_ignored,
                     cleanup_result=cleanup_result,
+                    profile=profile,
+                    worktree_path=worktree_path,
                     check_callback_after_cleanup=True,
                 )
             ) is not None:
@@ -544,7 +572,7 @@ async def run_validation_and_fix_cycle(
                         coverage=validation_coverage,
                         error_message=message,
                     )
-                    await self._mark_failed(
+                    await _mark_failed_preserving_planning_artifacts(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.validating,
                         failure_reason=FailureReason.infrastructure_failure,
@@ -575,7 +603,7 @@ async def run_validation_and_fix_cycle(
                         coverage=validation_coverage,
                         error_message=message,
                     )
-                    await self._mark_failed(
+                    await _mark_failed_preserving_planning_artifacts(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.validating,
                         failure_reason=FailureReason.agent_failure,
@@ -585,98 +613,6 @@ async def run_validation_and_fix_cycle(
                             exc,
                             validation_run_id=validation_run_id,
                         ),
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    )
-                except _PostValidationConformanceReportGitError as exc:
-                    reason_code = POST_VALIDATION_CONFORMANCE_REPORT_GIT_FAILED_REASON_CODE
-                    message = str(exc)
-                    _log.error(
-                        "executor.post_validation_conformance_report_git_failed",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        operation=exc.operation,
-                        returncode=exc.returncode,
-                        command_reason_code=exc.command_reason_code,
-                        reason_code=reason_code,
-                    )
-                    await self._finish_pending_validate_operations(
-                        workspace_id=workspace_id,
-                        status=OperationStatus.failed,
-                        validation_run_id=validation_run_id,
-                        requested_tier=validation_tier,
-                        reason_code=reason_code,
-                        coverage=validation_coverage,
-                        error_message=message,
-                    )
-                    failure_details: dict[str, Any] = {
-                        "validation_run_id": validation_run_id,
-                        "report_path": conformance_handoff.report_path.as_posix(),
-                        "operation": exc.operation,
-                        "returncode": exc.returncode,
-                    }
-                    if exc.command_reason_code is not None:
-                        failure_details["command_reason_code"] = exc.command_reason_code
-                    if exc.cleanup_operation is not None:
-                        failure_details["cleanup_operation"] = exc.cleanup_operation
-                        failure_details["cleanup_returncode"] = exc.cleanup_returncode
-                        failure_details["report_left_staged"] = True
-                    if exc.cleanup_command_reason_code is not None:
-                        failure_details["cleanup_command_reason_code"] = (
-                            exc.cleanup_command_reason_code
-                        )
-                    await self._mark_failed(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.validating,
-                        failure_reason=FailureReason.infrastructure_failure,
-                        message=message,
-                        reason_code=reason_code,
-                        details=failure_details,
-                    )
-                    return ExecutionValidationResult(
-                        stop=True,
-                        successful_validation_run_id=successful_validation_run_id,
-                        successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-                    )
-                except _PostValidationConformanceReportWriteError as exc:
-                    reason_code = POST_VALIDATION_CONFORMANCE_REPORT_WRITE_FAILED_REASON_CODE
-                    message = str(exc)
-                    _log.error(
-                        "executor.post_validation_conformance_report_write_failed",
-                        workspace_id=workspace_id,
-                        validation_run_id=validation_run_id,
-                        report_path=exc.report_path.as_posix(),
-                        error_type=exc.error_type,
-                        errno=exc.errno,
-                        reason_code=reason_code,
-                    )
-                    await self._finish_pending_validate_operations(
-                        workspace_id=workspace_id,
-                        status=OperationStatus.failed,
-                        validation_run_id=validation_run_id,
-                        requested_tier=validation_tier,
-                        reason_code=reason_code,
-                        coverage=validation_coverage,
-                        error_message=message,
-                    )
-                    write_failure_details: dict[str, Any] = {
-                        "validation_run_id": validation_run_id,
-                        "report_path": exc.report_path.as_posix(),
-                        "operation": "write",
-                        "error_type": exc.error_type,
-                    }
-                    if exc.errno is not None:
-                        write_failure_details["errno"] = exc.errno
-                    await self._mark_failed(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.validating,
-                        failure_reason=FailureReason.infrastructure_failure,
-                        message=message,
-                        reason_code=reason_code,
-                        details=write_failure_details,
                     )
                     return ExecutionValidationResult(
                         stop=True,
@@ -701,7 +637,7 @@ async def run_validation_and_fix_cycle(
                         coverage=validation_coverage,
                         error_message=message,
                     )
-                    await self._mark_failed(
+                    await _mark_failed_preserving_planning_artifacts(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.validating,
                         failure_reason=FailureReason.infrastructure_failure,
@@ -731,7 +667,7 @@ async def run_validation_and_fix_cycle(
                             coverage=validation_coverage,
                             error_message=conformance_failure.message,
                         )
-                        await self._mark_failed(
+                        await _mark_failed_preserving_planning_artifacts(
                             workspace_id=workspace_id,
                             from_status=WorkspaceStatus.validating,
                             failure_reason=FailureReason.agent_failure,
@@ -838,7 +774,7 @@ async def run_validation_and_fix_cycle(
                     workspace_id=workspace_id,
                     failure=first_fail,
                 )
-            await self._mark_failed(
+            await _mark_failed_preserving_planning_artifacts(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=_failure_reason_for_phase(first_fail),
@@ -962,7 +898,7 @@ async def run_validation_and_fix_cycle(
                 ),
                 error_message=message,
             )
-            await self._mark_failed(
+            await _mark_failed_preserving_planning_artifacts(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
@@ -1054,7 +990,7 @@ async def run_validation_and_fix_cycle(
                 coverage=current_validation_coverage,
                 error_message=message,
             )
-            await self._mark_failed(
+            await _mark_failed_preserving_planning_artifacts(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.infrastructure_failure,
@@ -1143,7 +1079,7 @@ async def run_validation_and_fix_cycle(
                 ),
                 error_message=message,
             )
-            await self._mark_failed(
+            await _mark_failed_preserving_planning_artifacts(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.validating,
                 failure_reason=FailureReason.policy_failure,
@@ -1160,11 +1096,37 @@ async def run_validation_and_fix_cycle(
                 worktree_path=worktree_path,
                 base_commit=base_commit,
                 staged_paths=fix_staged_paths,
-            ) and await self._fail_if_plan_only_paths(
-                workspace_id=workspace_id,
-                changed_paths=fix_staged_paths,
-                expected_status=WorkspaceStatus.validating,
             ):
+                # Plan-only fix-pass output marks the workspace FAILED. Deposit
+                # the worktree plan + conformance report BEFORE
+                # ``_fail_if_plan_only_paths`` publishes the terminal status —
+                # mirroring the post-agent plan-only gate in ``execution_flow``
+                # and the ``_mark_failed_preserving_planning_artifacts`` helper
+                # every other terminal path in this cycle uses. The console keys
+                # its artifact refetch on the workspace ``updated_at``
+                # (TaskArtifactsSection ``refreshKey``), and
+                # ``_fail_if_plan_only_paths`` routes through bare
+                # ``_mark_failed`` (not the preserving helper), so marking FAILED
+                # first would bump ``updated_at`` and let a poll observe it in
+                # the window before the post-cycle deposit (in
+                # ``execution_flow``), record an empty artifact list, then never
+                # refetch — hiding the Plan/Validation controls on the
+                # preserved-FAILED workspace. Best-effort, idempotent, gated on
+                # ``planning.required``.
+                _planning_artifacts._deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                )
+                # The plan-only gate above already confirmed the staged delta is
+                # entirely internal plan artifacts, so this marks the workspace
+                # FAILED (PLAN_ONLY_OUTPUT) and returns True.
+                await self._fail_if_plan_only_paths(
+                    workspace_id=workspace_id,
+                    changed_paths=fix_staged_paths,
+                    expected_status=WorkspaceStatus.validating,
+                )
                 await self._finish_pending_validate_operations(
                     workspace_id=workspace_id,
                     status=OperationStatus.failed,
@@ -1207,7 +1169,7 @@ async def run_validation_and_fix_cycle(
                     ),
                     error_message=message,
                 )
-                await self._mark_failed(
+                await _mark_failed_preserving_planning_artifacts(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.validating,
                     failure_reason=FailureReason.policy_failure,
@@ -1302,6 +1264,8 @@ async def run_validation_and_fix_cycle(
                 validation_tier=validation_tier,
                 reason_code=reason_code,
                 message=message,
+                profile=profile,
+                worktree_path=worktree_path,
             )
 
         # Loop back to re-validate.

@@ -5,19 +5,32 @@ Activity,
 AlertCircle,
 Ban,
 CheckCircle2,
+ClipboardCheck,
 FileText,
 Loader2,
 Radio,
 RefreshCw,
+ScrollText,
 X
 } from "lucide-react";
 import {
 useEffect,
 useLayoutEffect,
+useRef,
 useState
 } from "react";
 
 import { formatAgentEffort,formatAgentLabel } from "@/lib/agent-format";
+import {
+artifactDownloadPath,
+artifactListPath,
+collectArtifactsForPresence,
+CONFORMANCE_ARTIFACT_NAME,
+formatConformanceJson,
+hasConformanceArtifact,
+hasPlanArtifact,
+PLAN_ARTIFACT_NAME
+} from "@/lib/artifact-format";
 import { summarizeVisibleCoordinationWarnings } from "@/lib/coordination-format";
 import {
 compactId,
@@ -43,6 +56,8 @@ MergeQueueItem,
 PricingMetadata,
 ProviderReadinessPreflight,
 Workspace,
+WorkspaceArtifact,
+WorkspaceArtifactList,
 WorkspaceOperatorAction,
 WorkspaceOverview,
 WorkspaceStatus
@@ -53,9 +68,11 @@ import {
 Badge,
 ExternalAnchor,
 Fact,
+MutedLine,
 OperatorActionState,
 Panel,
 RetryActionState,
+apiGet,
 formatPrLinkLabel,
 formatTokenCount
 } from "./console-dashboard-shared";
@@ -135,6 +152,11 @@ export function TaskDetailsModal({
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
           <CoordinationWarningBlock warnings={workspace.coordination_warnings} status={workspace.status} />
+          <TaskArtifactsSection
+            key={workspace.workspace_id}
+            workspaceId={workspace.workspace_id}
+            refreshKey={workspace.updated_at}
+          />
           <section className="grid gap-2 rounded-md border border-line bg-surface-2 p-3">
             <div className="text-xs font-semibold text-fg-muted">Prompt sent to AWF</div>
             <TaskPromptBody prompt={workspace.task_prompt} />
@@ -208,6 +230,201 @@ export function TaskPromptBody({ prompt }: { prompt: string }) {
         );
       })}
     </div>
+  );
+}
+
+type TaskArtifactView = "plan" | "validation";
+
+export function TaskArtifactsSection({
+  workspaceId,
+  refreshKey,
+}: {
+  workspaceId: string;
+  refreshKey?: string;
+}) {
+  const [items, setItems] = useState<WorkspaceArtifact[]>([]);
+  const [view, setView] = useState<TaskArtifactView | null>(null);
+  const [content, setContent] = useState("");
+  const [loading, setLoading] = useState(false);
+  // The list refetch and an artifact download are independent failure sources
+  // that must not share one error slot: a poll-driven list refetch succeeds and
+  // clears its own error, but it must NOT dismiss a download failure raised by an
+  // earlier button click. If it did, the now-error-free plan view would render
+  // empty content as the misleading "No prompt stored for this workspace."
+  const [listError, setListError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  // Monotonic token so a slow download from an earlier click cannot overwrite
+  // the content of the artifact the user has since switched to.
+  const requestSeq = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      let failure: string | null = null;
+      // The list endpoint is cursor-paginated (default 50) and sorted by
+      // relative_path, so plan.md / conformance.json can sit on a later page for
+      // an artifact-heavy workspace. Follow next_cursor before deciding presence
+      // so the Plan/Validation controls are not hidden when the files do exist.
+      const collected = await collectArtifactsForPresence(async (cursor) => {
+        // Stop paginating the moment the effect is cancelled (unmount or
+        // refreshKey change): the post-loop guard already discards the result,
+        // but bailing here also avoids firing the remaining page requests whose
+        // responses would just be thrown away.
+        if (cancelled) {
+          return null;
+        }
+        const result = await apiGet<WorkspaceArtifactList>(
+          artifactListPath(workspaceId, cursor),
+        );
+        if (!result.ok) {
+          failure = result.message;
+          return null;
+        }
+        return result.data;
+      });
+      if (cancelled) {
+        return;
+      }
+      if (collected === null) {
+        setListError(failure);
+        // A failed list fetch is not authoritative about presence, so drop any
+        // artifacts a prior successful fetch surfaced. Retaining them would keep
+        // the Plan/Validation buttons visible off stale data while the list API
+        // is failing — the same "API failure must not imply presence" rule the
+        // first-fetch path already enforces (no buttons, just the error banner).
+        setItems([]);
+        // Clearing items removed the Plan/Validation buttons, but an already-open
+        // view keeps rendering its previously loaded text (the content panel only
+        // gates on view && !downloadError). With presence now invalidated and no
+        // button left to dismiss it, collapse the view so stale plan/validation
+        // text cannot linger below the list-error banner. The download error is an
+        // independent failure source and is left untouched.
+        setView(null);
+        setContent("");
+        return;
+      }
+      setListError(null);
+      setItems(collected);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // refreshKey tracks the workspace's last-updated marker so the surrounding
+    // overview poll re-runs this fetch as a live task progresses. Without it the
+    // list is fetched once on mount: opening details mid-run (no artifacts yet)
+    // would leave the Plan/Validation buttons hidden until the modal is closed
+    // and reopened, even after the executor deposits the files.
+  }, [workspaceId, refreshKey]);
+
+  const showPlan = hasPlanArtifact(items);
+  const showValidation = hasConformanceArtifact(items);
+
+  // Conditional on presence — render nothing (no empty buttons) until at least
+  // one of the named artifacts has been deposited for this workspace. Keep
+  // rendering when the list request failed so the error banner can surface;
+  // otherwise an API failure is indistinguishable from "no artifacts".
+  if (!showPlan && !showValidation && !listError) {
+    return null;
+  }
+
+  const openArtifact = async (target: TaskArtifactView) => {
+    const name = target === "plan" ? PLAN_ARTIFACT_NAME : CONFORMANCE_ARTIFACT_NAME;
+    const seq = (requestSeq.current += 1);
+    setView(target);
+    setLoading(true);
+    setDownloadError(null);
+    setContent("");
+    try {
+      const response = await fetch(artifactDownloadPath(workspaceId, name), { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Request failed with HTTP ${response.status}.`);
+      }
+      const text = await response.text();
+      // A newer click superseded this download; drop the stale response so it
+      // cannot replace the content of the currently-selected artifact.
+      if (seq !== requestSeq.current) {
+        return;
+      }
+      setContent(target === "validation" ? formatConformanceJson(text) : text);
+    } catch (cause) {
+      if (seq !== requestSeq.current) {
+        return;
+      }
+      setDownloadError(cause instanceof Error ? cause.message : "Unable to load artifact.");
+    } finally {
+      if (seq === requestSeq.current) {
+        setLoading(false);
+      }
+    }
+  };
+
+  const buttonClass = (active: boolean) =>
+    `inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs transition ${
+      active
+        ? "border-line-strong bg-surface-2 text-fg-strong"
+        : "border-line bg-surface text-fg hover:bg-surface-2"
+    }`;
+
+  return (
+    <section
+      data-testid="task-artifacts"
+      className="grid gap-2 rounded-md border border-line bg-surface-2 p-3"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-fg-muted">Artifacts</div>
+        <div className="flex items-center gap-2">
+          {showPlan ? (
+            <button
+              type="button"
+              onClick={() => void openArtifact("plan")}
+              aria-pressed={view === "plan"}
+              className={buttonClass(view === "plan")}
+            >
+              <ScrollText size={13} aria-hidden />
+              Plan
+            </button>
+          ) : null}
+          {showValidation ? (
+            <button
+              type="button"
+              onClick={() => void openArtifact("validation")}
+              aria-pressed={view === "validation"}
+              className={buttonClass(view === "validation")}
+            >
+              <ClipboardCheck size={13} aria-hidden />
+              Validation
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {(downloadError ?? listError) ? (
+        <div className="rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-xs text-danger-text">
+          {downloadError ?? listError}
+        </div>
+      ) : null}
+      {view && !downloadError ? (
+        <div data-testid="task-artifact-content" className="rounded-md border border-line bg-surface p-3">
+          {loading ? (
+            <div className="flex items-center gap-2 text-xs text-fg-muted">
+              <Loader2 size={13} className="animate-spin" aria-hidden />
+              Loading {view === "plan" ? "plan" : "validation report"}…
+            </div>
+          ) : view === "plan" ? (
+            content.trim() ? (
+              <TaskPromptBody prompt={content} />
+            ) : (
+              <MutedLine>No plan content.</MutedLine>
+            )
+          ) : content ? (
+            <pre className="mono max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--terminal)] p-3 text-[11px] leading-relaxed text-[var(--terminal-foreground)]">
+              {content}
+            </pre>
+          ) : (
+            <MutedLine>No validation report content.</MutedLine>
+          )}
+        </div>
+      ) : null}
+    </section>
   );
 }
 

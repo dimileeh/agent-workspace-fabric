@@ -163,8 +163,11 @@ your project's path):
 Set up Agent Workspace Fabric (AWF) on this machine and onboard my repo.
 1. Clone https://github.com/dimileeh/agent-workspace-fabric and READ
    skills/awf-scheduler/SKILL.md and docs/QUICKSTART.md before doing anything.
-2. Check prerequisites (Docker running, uv, git, and gh authenticated if I want PR
-   automation). If any are missing, STOP and tell me — do not guess.
+2. Check prerequisites (Docker running, uv, git). For PR automation, configure only
+   the auth my repo's forge needs: GitHub (github.com) needs gh authenticated;
+   Bitbucket (bitbucket.org) needs BITBUCKET_API_TOKEN (and either BITBUCKET_EMAIL
+   or BITBUCKET_AUTH_MODE=bearer) in .env and no gh. If any are missing, STOP and
+   tell me — do not guess.
 3. Install via the source lane: uv tool install . --force, then awf setup, awf start,
    and awf service status --format pretty.
 4. Onboard my project at <PATH>: awf init <PATH> --write-profile --yes, then

@@ -56,6 +56,8 @@ from awf.runtime.pr_monitor_runner.constants import (
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_START_HEAD_UNAVAILABLE_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
+    _TASK_TAG_UNSET,
+    _TaskTagUnset,
 )
 from awf.runtime.pr_monitor_runner.git_utils import (
     git_worktree_command,
@@ -228,6 +230,7 @@ async def _commit_dirty_worktree(
     command_evidence: Sequence[str] = (),
     protected_scope_revert_remote_branch: str | None = None,
     remote_push_url: str | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> bool:
     """Commit dirty monitor-agent edits so PR feedback is not stranded.
 
@@ -308,9 +311,15 @@ async def _commit_dirty_worktree(
     # CI-fix commits link to the issue. Idempotent: a re-run never double-prefixes.
     # Truncate to [:72] after tagging for parity with every other AWF-authored
     # commit subject (executor agent/recovery commits, post-validation conformance).
-    message = commit_message_with_task_tag(message, await _resolve_task_tag(self, workspace_id))[
-        :72
-    ]
+    # The caller (a repair path) resolves ``task_tag`` once per monitor cycle and
+    # threads it in; fall back to a self-resolve only when nothing was threaded
+    # (the sentinel default), preserving behavior for callers that do not pass it.
+    resolved_task_tag = (
+        await _resolve_task_tag(self, workspace_id)
+        if isinstance(task_tag, _TaskTagUnset)
+        else task_tag
+    )
+    message = commit_message_with_task_tag(message, resolved_task_tag)[:72]
 
     commit = await self._deps.runner.run(
         git_worktree_command(worktree_path, "commit", "-m", message)

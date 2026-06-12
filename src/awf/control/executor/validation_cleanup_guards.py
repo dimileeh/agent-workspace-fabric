@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from awf.common.audit import redact_audit_text, redact_audit_value
+from awf.control.executor.planning_artifacts import _deposit_planning_artifacts_best_effort
 from awf.control.executor.quality_gates import _log
 from awf.control.executor.status_helpers import _is_callback_terminal_status
 from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
@@ -43,6 +45,8 @@ async def fail_validation_worktree_guard(
     validation_tier: int,
     reason_code: str,
     message: str,
+    profile: Any,
+    worktree_path: Path,
 ) -> ExecutionValidationResult:
     """Record and surface a fatal validation-worktree guard failure."""
     failure_message = f"{reason_code}: {message}"
@@ -59,6 +63,23 @@ async def fail_validation_worktree_guard(
         requested_tier=validation_tier,
         reason_code=reason_code,
         error_message=failure_message,
+    )
+    # Deposit the worktree plan + conformance report into the served artifact
+    # dir BEFORE publishing the terminal FAILED status. The console keys its
+    # artifact refetch on the workspace ``updated_at`` (TaskArtifactsSection
+    # ``refreshKey``); ``_mark_failed`` bumps ``updated_at`` when it publishes
+    # FAILED, but the filesystem deposit does not touch the row. Marking FAILED
+    # first would let a poll observe the terminal status in the window before
+    # the post-cycle deposit (in ``execution_flow``), record an empty artifact
+    # list, then never refetch — hiding the Plan/Validation controls on the
+    # preserved-FAILED workspace. Depositing here orders artifact availability
+    # ahead of the polling signal. Best-effort, idempotent, gated on
+    # ``planning.required``.
+    _deposit_planning_artifacts_best_effort(
+        self,
+        profile=profile,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
     )
     await self._mark_failed(
         workspace_id=workspace_id,
@@ -163,6 +184,8 @@ async def handle_validation_cleanup_guard(
     successful_validation_workspace_head_sha: str | None,
     callback_ignored: bool,
     cleanup_result: ValidationWorktreeCleanup,
+    profile: Any,
+    worktree_path: Path,
     check_callback_after_cleanup: bool = False,
 ) -> ExecutionValidationResult | None:
     """Handle post-validation cleanup failures consistently across handler types."""
@@ -230,4 +253,6 @@ async def handle_validation_cleanup_guard(
         validation_tier=validation_tier,
         reason_code=reason_code,
         message=cleanup_message,
+        profile=profile,
+        worktree_path=worktree_path,
     )

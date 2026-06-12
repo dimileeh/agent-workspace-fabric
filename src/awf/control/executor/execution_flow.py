@@ -25,7 +25,6 @@ from awf.common.compose_exec import (
     ComposeExecCleanupError,
     cleanup_failure_message,
 )
-from awf.common.forge import concrete_forge_for_repo, make_forge_client
 from awf.common.git_identity import (
     git_identity_config_args,
     git_safe_directory_config_args,
@@ -33,14 +32,13 @@ from awf.common.git_identity import (
 from awf.common.task_tag import (
     commit_message_with_task_tag,
     strip_leading_task_tag,
-    title_with_task_tag,
 )
 from awf.control.executor import execution_validation as _execution_validation
+from awf.control.executor import planning_artifacts as _planning_artifacts
+from awf.control.executor import pr_open_step as _pr_open_step
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _AUDIT_PR_CREATED_EVENT,
-    _GIT_PUSH_FAILED_REASON_CODE,
-    _PR_CREATE_FAILED_REASON_CODE,
     GIT_OBJECT_MISSING_RECOVERED_REASON_CODE,
 )
 from awf.control.executor.forge_gate import (
@@ -54,12 +52,9 @@ from awf.control.executor.git_ops import (
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
     _agent_run_model_for_workspace,
-    _build_pr_body,
     _call_pr_monitor_factory,
-    _existing_pr_remote_push_url,
     _extract_pr_number,
     _failure_reason_for_phase,
-    _failure_salvage_payload,
     _profile_for_workspace,
     _provider_recovery_default_model_for_monitor_handoff,
 )
@@ -84,7 +79,6 @@ from awf.control.executor.state_ops import _sync_resolved_profile
 from awf.control.executor.supply_chain_messages import _supply_chain_block_message
 from awf.control.executor.types import (
     _MonitorRebaseRecoveryError,
-    _PlanningRunFailure,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
@@ -106,8 +100,6 @@ from awf.runtime.ownership import (
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
-from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION
-from awf.runtime.pr_creator import PullRequestError
 from awf.runtime.validation import (
     ValidationCoverageResult,
     ValidationResult,
@@ -148,6 +140,19 @@ async def execute(
     )
     compose_project = ws.compose_project_name or f"awf_{workspace_id}"
     worktree_path = self._config.worktrees_root / workspace_id
+
+    def _deposit_planning_artifacts() -> None:
+        # Best-effort, idempotent deposit of the plan + conformance report the
+        # agent may have written into the (preserved-FAILED) worktree, for the
+        # many handlers that mark the workspace FAILED and return before the
+        # post-validation deposit block. ``profile`` is bound by the time any of
+        # those handlers run, matching the inline call sites this replaces.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
 
     # Deprecated/unsupported task kinds must fail fast unconditionally,
     # BEFORE branching on recovery. The recovery branch below skips
@@ -373,6 +378,12 @@ async def execute(
                 details=setup_dependency_details,
             )
             return
+        await self._record_runtime_toolchain_findings_safe(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+        )
         profile_preflight = getattr(self._validation, "run_profile_tool_preflight", None)
         profile_preflight_result = (
             await profile_preflight(workspace_id=workspace_id, profile=profile)
@@ -433,39 +444,18 @@ async def execute(
                 model=run_model,
                 command_evidence=agent_command_evidence,
             )
-            if isinstance(planning_failure, _PlanningValidationHandoff):
-                planning_validation_handoff = planning_failure
-                await self._record_planning_validation_handoff_event(
-                    workspace_id=workspace_id,
-                    handoff=planning_failure,
-                )
-            elif planning_failure is not None:
-                failure_message = (
-                    planning_failure
-                    if isinstance(planning_failure, str)
-                    else planning_failure.message
-                )
-                reason_code = (
-                    None if isinstance(planning_failure, str) else planning_failure.reason_code
-                )
-                details = None if isinstance(planning_failure, str) else planning_failure.details
-                await self._mark_failed(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.agent_failure,
-                    message=failure_message[:2000],
-                    reason_code=reason_code,
-                    details=details,
-                    salvage=_failure_salvage_payload(ws, worktree_path=worktree_path),
-                )
-                if (
-                    isinstance(planning_failure, _PlanningRunFailure)
-                    and planning_failure.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
-                ):
-                    await self._auto_retry_planning_scope_failure(
-                        workspace_id=workspace_id,
-                        failure=planning_failure,
-                    )
+            (
+                planning_validation_handoff,
+                planning_should_return,
+            ) = await _planning_artifacts.handle_agent_planning_result(
+                self,
+                workspace_id=workspace_id,
+                ws=ws,
+                worktree_path=worktree_path,
+                profile=profile,
+                planning_failure=planning_failure,
+            )
+            if planning_should_return:
                 return
         else:
             # Recovery dispatch created the validate Operation in ``pending``;
@@ -497,6 +487,14 @@ async def execute(
             invocation_id=exc.invocation_id,
             reason_code=exc.reason_code,
         )
+        # A cleanup failure during the agent/planning run leaves the worktree
+        # (preserved on the FAILED workspace) potentially holding the plan +
+        # conformance report the agent already wrote. This handler marks the
+        # workspace FAILED and returns before the post-validation deposit
+        # block, so deposit them now — otherwise the artifacts are stranded in
+        # the worktree and the console can never surface them. Best-effort and
+        # idempotent, mirroring the generic agent-phase failure paths.
+        _deposit_planning_artifacts()
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
@@ -564,9 +562,22 @@ async def execute(
                 agent_run_reason_code = GIT_OBJECT_MISSING_RECOVERED_REASON_CODE
                 agent_run_details = {"recovered_stage": "agent_run"}
             else:
+                # Missing-HEAD recovery failed and already marked the workspace
+                # FAILED with its worktree preserved. The agent may have written
+                # the plan + conformance report before the HEAD object went
+                # missing, so deposit them now — this returns before the post-
+                # validation deposit block, mirroring the ComposeExecCleanupError
+                # handler above. Best-effort and idempotent.
+                _deposit_planning_artifacts()
                 return
         else:
             _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
+            # An unexpected agent-run error marks the workspace FAILED and returns
+            # before the post-validation deposit block, stranding any plan +
+            # conformance report the agent already wrote into the preserved-FAILED
+            # worktree. Deposit them first, mirroring the ComposeExecCleanupError
+            # handler. Best-effort and idempotent.
+            _deposit_planning_artifacts()
             await self._mark_failed(
                 workspace_id=workspace_id,
                 from_status=WorkspaceStatus.running,
@@ -589,6 +600,13 @@ async def execute(
         expected=WorkspaceStatus.running,
         action="post_agent_commit",
     ):
+        # The workspace transitioned out of ``running`` concurrently (e.g. a
+        # cancel that preserves the worktree). Planning may already have
+        # finished and written the plan + conformance report into the worktree,
+        # but this skip returns before the post-validation deposit block.
+        # Deposit them first, mirroring the agent-phase failure handlers above,
+        # so the console can still surface them. Best-effort and idempotent.
+        _deposit_planning_artifacts()
         return
 
     # Coding CLIs make file edits reliably but are inconsistent about git:
@@ -611,6 +629,12 @@ async def execute(
     # inject the literal string "None" into a git command. Fail
     # cleanly instead of passing "None..HEAD" to git.
     if ws.base_commit is None:
+        # This invariant violation marks the workspace FAILED and returns
+        # before the post-validation deposit block, stranding any plan +
+        # conformance report the agent already wrote into the preserved-
+        # FAILED worktree. Deposit them first, mirroring the agent-phase
+        # failure handlers above. Best-effort and idempotent.
+        _deposit_planning_artifacts()
         await self._mark_failed(
             workspace_id=workspace_id,
             from_status=WorkspaceStatus.running,
@@ -676,6 +700,17 @@ async def execute(
                 changed_paths=staged_paths,
             )
             if supply_chain_result.policy_blocked:
+                # Planning ran before this post-agent policy gate, so the
+                # preserved FAILED worktree can already hold the plan +
+                # conformance report. Deposit them BEFORE ``_mark_failed``
+                # publishes the terminal status: the console keys its artifact
+                # refetch on the workspace ``updated_at`` (TaskArtifactsSection
+                # ``refreshKey``), and marking FAILED first would bump
+                # ``updated_at`` and let a poll observe it in the window before
+                # the deposit, record an empty artifact list, then never refetch
+                # — hiding the Plan/Validation controls. Best-effort and
+                # idempotent.
+                _deposit_planning_artifacts()
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
@@ -689,11 +724,27 @@ async def execute(
                     worktree_path=worktree_path,
                     base_commit=base_commit,
                     staged_paths=staged_paths,
-                ) and await self._fail_if_plan_only_paths(
-                    workspace_id=workspace_id,
-                    changed_paths=staged_paths,
-                    expected_status=WorkspaceStatus.running,
                 ):
+                    # Plan-only output will mark the workspace FAILED. Planning
+                    # ran before this gate, so the preserved worktree holds the
+                    # plan + conformance report. Deposit them BEFORE
+                    # ``_fail_if_plan_only_paths`` publishes the terminal status:
+                    # the console keys its artifact refetch on the workspace
+                    # ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
+                    # marking FAILED first would bump ``updated_at`` and let a
+                    # poll observe it in the window before the deposit, record an
+                    # empty artifact list, then never refetch — hiding the
+                    # Plan/Validation controls. This branch returns before the
+                    # post-validation deposit block. Best-effort and idempotent.
+                    _deposit_planning_artifacts()
+                    # The plan-only gate above already confirmed the staged
+                    # delta is entirely internal plan artifacts, so this marks
+                    # the workspace FAILED (PLAN_ONLY_OUTPUT) and returns True.
+                    await self._fail_if_plan_only_paths(
+                        workspace_id=workspace_id,
+                        changed_paths=staged_paths,
+                        expected_status=WorkspaceStatus.running,
+                    )
                     return
                 protected_file_diffs = await self._protected_file_diffs_for_staged_paths(
                     worktree_path=worktree_path,
@@ -707,6 +758,18 @@ async def execute(
                     protected_file_diffs=protected_file_diffs,
                 )
                 if violations:
+                    # Planning ran before this gate, so the preserved FAILED
+                    # worktree can already hold the plan + conformance report.
+                    # Deposit them BEFORE ``_mark_failed`` publishes the
+                    # terminal status: the console keys its artifact refetch on
+                    # the workspace ``updated_at`` (TaskArtifactsSection
+                    # ``refreshKey``), and marking FAILED first would bump
+                    # ``updated_at`` and let a poll observe it in the window
+                    # before the deposit, record an empty artifact list, then
+                    # never refetch — hiding the Plan/Validation controls. This
+                    # branch returns before the post-validation deposit block.
+                    # Best-effort and idempotent.
+                    _deposit_planning_artifacts()
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -799,6 +862,18 @@ async def execute(
                 if agent_exit_note is not None:
                     message = f"{message}; {agent_exit_note}"
 
+                # Planning ran before this no-work check, so the preserved
+                # FAILED worktree can already hold the plan + conformance
+                # report even though the implementation produced no commits.
+                # Deposit them BEFORE ``_mark_failed`` publishes the terminal
+                # status: the console keys its artifact refetch on the
+                # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``),
+                # and marking FAILED first would bump ``updated_at`` and let a
+                # poll observe it in the window before the deposit, record an
+                # empty artifact list, then never refetch — hiding the
+                # Plan/Validation controls. This branch returns before the
+                # post-validation deposit block. Best-effort and idempotent.
+                _deposit_planning_artifacts()
                 # Provider recovery reads the failed state event, so
                 # persist the structured reason/details first. The
                 # recovery service creates an authorized delayed retry
@@ -891,6 +966,20 @@ async def execute(
                             ["merge-base", "--is-ancestor", base_commit, "HEAD"]
                         )
                 if not ancestor.ok:
+                    # Planning ran before this commit step, so the preserved
+                    # FAILED worktree can already hold the plan + conformance
+                    # report. Deposit them BEFORE ``_mark_failed`` publishes the
+                    # terminal status: the console keys its artifact refetch on
+                    # the workspace ``updated_at`` (TaskArtifactsSection
+                    # ``refreshKey``), and marking FAILED first would bump
+                    # ``updated_at`` and let a poll observe it in the window
+                    # before the deposit, record an empty artifact list, then
+                    # never refetch — hiding the Plan/Validation controls. This
+                    # branch returns from inside the ``try`` before the
+                    # post-validation deposit block, and a plain ``return``
+                    # bypasses the ``except`` deposit handlers below.
+                    # Best-effort and idempotent.
+                    _deposit_planning_artifacts()
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -929,6 +1018,19 @@ async def execute(
                     reason_code="MONITOR_RECOVERY_REBASE_FAILED",
                     error_message=message,
                 )
+                # Planning may have run before this monitor-rebase recovery, so
+                # the preserved FAILED worktree can already hold the plan +
+                # conformance report. Deposit them BEFORE ``_mark_failed``
+                # publishes the terminal status: the console keys its artifact
+                # refetch on the workspace ``updated_at`` (TaskArtifactsSection
+                # ``refreshKey``), and marking FAILED first would bump
+                # ``updated_at`` and let a poll observe it in the window before
+                # the deposit, record an empty artifact list, then never refetch
+                # — hiding the Plan/Validation controls. This branch returns from
+                # inside the ``try`` before the post-validation deposit block,
+                # and a plain ``return`` bypasses the ``except`` deposit handlers
+                # below. Best-effort and idempotent.
+                _deposit_planning_artifacts()
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
@@ -938,6 +1040,18 @@ async def execute(
                 )
                 return
     except _PostAgentCommitStepError as exc:
+        # Planning ran before the commit step, so the worktree (preserved on
+        # the FAILED workspace) can already hold the plan + conformance report.
+        # Deposit them BEFORE ``_mark_post_agent_commit_failed`` publishes the
+        # terminal status: the console keys its artifact refetch on the
+        # workspace ``updated_at`` (TaskArtifactsSection ``refreshKey``), and
+        # marking FAILED first would bump ``updated_at`` and let a poll observe
+        # it in the window before the deposit, record an empty artifact list,
+        # then never refetch — hiding the Plan/Validation controls. Otherwise a
+        # commit-step failure (e.g. a pre-commit hook rejecting the staged
+        # changes) strands the artifacts in the worktree. Best-effort and
+        # idempotent.
+        _deposit_planning_artifacts()
         await self._mark_post_agent_commit_failed(
             workspace_id=workspace_id,
             error=exc,
@@ -948,6 +1062,15 @@ async def execute(
         )
         return
     except Exception as exc:  # unexpected — mark infrastructure
+        # Planning ran before the commit step, so the worktree (preserved on the
+        # FAILED workspace) can already hold the plan + conformance report. Every
+        # failure-return path below marks the workspace FAILED and returns before
+        # the post-validation deposit block, so deposit them now — otherwise an
+        # unexpected commit-step error (e.g. a failed ``git rev-list`` or an
+        # unrecoverable missing-HEAD) strands the artifacts in the worktree and
+        # the console can never surface them. Best-effort and idempotent: the
+        # recovery fall-through redeposits at the post-validation block.
+        _deposit_planning_artifacts()
         if _git_error_indicates_missing_head_object(str(exc)):
             if await self._recover_missing_git_head_or_mark_failed(
                 workspace_id=workspace_id,
@@ -1000,6 +1123,11 @@ async def execute(
         rebase_recovery_result=rebase_recovery_result,
         git_in_worktree=_git_in_worktree,
     )
+    # Deposit the worktree plan + conformance report into the served artifact
+    # dir before teardown so the console can surface them (best-effort; see the
+    # helper). Runs on the success path and the validation/conformance stop
+    # paths (preserved FAILED workspaces) while the worktree still exists.
+    _deposit_planning_artifacts()
     if validation_result.stop:
         return
     assert profile is not None
@@ -1196,170 +1324,15 @@ async def execute(
     ):
         return
 
-    pr_title = title_with_task_tag(ws.task_title, ws.task_tag)
-    pr_body = _build_pr_body(ws, defaults=defaults)
-    push_branch_name = ws.branch_name or f"awf/{workspace_id}"
-    existing_pr_remote_branch = ws.remote_push_branch if ws.pr_url else None
-    existing_pr_remote_url = _existing_pr_remote_push_url(ws) if ws.pr_url else None
-    audit_remote_branch = existing_pr_remote_branch or push_branch_name
-
-    try:
-        if ws.pr_url:
-            # Reuse path: ``push_and_open`` only does a plain ``git push`` and
-            # reuses the existing PR — it never touches the forge client. Skip
-            # resolving one so a Bitbucket reuse push is not gated on forge API
-            # env: ``make_forge_client`` builds ``BitbucketClient`` eagerly via
-            # ``from_env()``, which would fail the run on missing/invalid
-            # Bitbucket API env before the push, even though reuse makes no forge
-            # API call. (This mirrors the pre-forge-client flow, where reuse
-            # never resolved a forge client.)
-            pr = await self._pr_creator.push_and_open(
-                worktree_path=worktree_path,
-                branch_name=push_branch_name,
-                base_branch=ws.branch_base,
-                title=pr_title,
-                body=pr_body,
-                forge_client=None,
-                repo_url=ws.repo_url,
-                existing_pr_url=ws.pr_url,
-                remote_branch_name=existing_pr_remote_branch,
-                remote_url=existing_pr_remote_url,
-            )
-        else:
-            # New PR: ``make_forge_client`` builds the Bitbucket client eagerly
-            # via ``from_env()``, so a missing/invalid Bitbucket API env raises
-            # ``BitbucketClientError`` here — before ``push_and_open`` runs the
-            # git push or the create-PR call, so it cannot be wrapped as a
-            # ``PullRequestError`` downstream. Map it onto the same
-            # PR_CREATE_FAILED audit event + evidence that a ``create_pull_request``
-            # failure records (instead of falling through to the opaque
-            # "unexpected error" handler that emits no PR audit event), then fail
-            # the run. No git_push-succeeded event is recorded because the push
-            # never ran. ``BitbucketClientError`` is imported lazily so the
-            # GitHub-only hot path never pays for the httpx import it drags in
-            # (mirrors forge.make_forge_client / pr_creator). ``async with``
-            # releases the Bitbucket httpx pool deterministically (GitHub aclose
-            # is a no-op).
-            from awf.common.bitbucket_client import BitbucketClientError
-
-            try:
-                forge_client = make_forge_client(
-                    concrete_forge_for_repo(profile.forge, ws.repo_url),
-                    self._runner,
-                )
-            except BitbucketClientError as exc:
-                _log.error(
-                    "executor.pr_failed",
-                    workspace_id=workspace_id,
-                    operation=exc.operation,
-                    returncode=exc.status if exc.status is not None else 0,
-                )
-                await self._record_executor_pr_audit_event(
-                    workspace_id,
-                    event_type=_AUDIT_PR_CREATED_EVENT,
-                    action="pr_create",
-                    outcome="failed",
-                    reason_code=_PR_CREATE_FAILED_REASON_CODE,
-                    branch_name=push_branch_name,
-                    remote_branch=audit_remote_branch,
-                    pr_number=None,
-                    pr_url=None,
-                    source_head_sha=None,
-                    evidence={
-                        "operation": exc.operation,
-                        "returncode": exc.status if exc.status is not None else 0,
-                        "error_message": exc.body.strip() or "<no output>",
-                    },
-                )
-                await self._mark_failed(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.pushing,
-                    failure_reason=FailureReason.infrastructure_failure,
-                    message=str(exc)[:2000],
-                    # Preserve the forge-specific reason code (e.g.
-                    # BITBUCKET_AUTH_NOT_CONFIGURED) so the failed workspace
-                    # carries actionable doctor guidance, matching the
-                    # PullRequestError path below instead of falling back to
-                    # the generic INFRASTRUCTURE_FAILURE.
-                    reason_code=exc.reason_code,
-                )
-                return
-            async with forge_client:
-                pr = await self._pr_creator.push_and_open(
-                    worktree_path=worktree_path,
-                    branch_name=push_branch_name,
-                    base_branch=ws.branch_base,
-                    title=pr_title,
-                    body=pr_body,
-                    forge_client=forge_client,
-                    repo_url=ws.repo_url,
-                    existing_pr_url=None,
-                    remote_branch_name=existing_pr_remote_branch,
-                    remote_url=existing_pr_remote_url,
-                )
-    except PullRequestError as exc:
-        _log.error(
-            "executor.pr_failed",
-            workspace_id=workspace_id,
-            operation=exc.operation,
-            returncode=exc.returncode,
-        )
-        if exc.operation != "git push":
-            await self._record_executor_pr_audit_event(
-                workspace_id,
-                event_type=_AUDIT_GIT_PUSH_EVENT,
-                action="git_push",
-                outcome="succeeded",
-                reason_code="PR_UPDATED" if ws.pr_url else "PR_OPENED",
-                branch_name=push_branch_name,
-                remote_branch=audit_remote_branch,
-                pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
-                pr_url=ws.pr_url,
-                source_head_sha=exc.head_sha,
-            )
-        await self._record_executor_pr_audit_event(
-            workspace_id,
-            event_type=(
-                _AUDIT_GIT_PUSH_EVENT if exc.operation == "git push" else _AUDIT_PR_CREATED_EVENT
-            ),
-            action="git_push" if exc.operation == "git push" else "pr_create",
-            outcome="failed",
-            reason_code=(
-                _GIT_PUSH_FAILED_REASON_CODE
-                if exc.operation == "git push"
-                else _PR_CREATE_FAILED_REASON_CODE
-            ),
-            branch_name=push_branch_name,
-            remote_branch=audit_remote_branch,
-            pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
-            pr_url=ws.pr_url,
-            source_head_sha=exc.head_sha,
-            evidence={
-                "operation": exc.operation,
-                "returncode": exc.returncode,
-                "error_message": exc.stderr.strip() or "<no output>",
-            },
-        )
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=WorkspaceStatus.pushing,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=str(exc)[:2000],
-            # Preserve a forge-specific reason code (e.g. Bitbucket auth /
-            # rate-limit / transport) so the failed workspace carries the
-            # actionable doctor guidance; ``None`` (git push, GitHub, no-URL)
-            # falls back to ``INFRASTRUCTURE_FAILURE``.
-            reason_code=exc.reason_code,
-        )
-        return
-    except Exception as exc:
-        _log.exception("executor.pr_unexpected_failed", workspace_id=workspace_id)
-        await self._mark_failed(
-            workspace_id=workspace_id,
-            from_status=WorkspaceStatus.pushing,
-            failure_reason=FailureReason.infrastructure_failure,
-            message=f"unexpected error during PR creation: {exc!r}"[:2000],
-        )
+    pr = await _pr_open_step.push_and_open_pr(
+        self,
+        ws=ws,
+        profile=profile,
+        defaults=defaults,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+    )
+    if pr is None:
         return
 
     # ── Step 4: persist PR URL + (optionally) hand off to monitor ──────

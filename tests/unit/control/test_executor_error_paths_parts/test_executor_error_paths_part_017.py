@@ -105,8 +105,9 @@ def _allow_monitor_handoff_runtime_ownership_repair(monkeypatch: pytest.MonkeyPa
 class _OkSetupValidation:
     """Validation runner whose setup/pre_agent phase always passes."""
 
-    def __init__(self) -> None:
+    def __init__(self, trace: list[str] | None = None) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self._trace = trace
 
     async def run_profile_phases(
         self,
@@ -115,6 +116,8 @@ class _OkSetupValidation:
         **_kwargs: Any,
     ) -> ValidationResult:
         self.calls.append(phase_names)
+        if self._trace is not None:
+            self._trace.append("run_profile_phases")
         return ValidationResult()
 
 
@@ -794,6 +797,116 @@ class TestHandoffProfilePreflightAndSetupReraise:
             )
 
         assert exc_info.value is escaping
+
+
+class TestHandoffSetupRunsToolchainProbe:
+    @pytest.mark.unit
+    async def test_setup_records_toolchain_findings_after_green_setup(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # The monitor-handoff setup path must mirror ``execute`` and probe the
+        # container for declared toolchains after a green setup, so adopted /
+        # release-PR workspaces still surface RUNTIME_TOOLCHAIN_UNAVAILABLE
+        # warnings. The probe runs after a green setup (run_profile_phases plus
+        # the dependency-network recorder) and before the profile preflight
+        # returns; the ordered trace below pins that sequence so the probe can
+        # never silently move ahead of profile setup.
+        toolchain_calls: list[tuple[str, str]] = []
+        trace: list[str] = []
+        validation = _OkSetupValidation(trace=trace)
+
+        class _Executor:
+            _validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("record_setup_dependency_network_events")
+
+            async def _record_runtime_toolchain_findings(
+                self, *, workspace_id: str, compose_project: str, **_kwargs: Any
+            ) -> None:
+                trace.append("record_runtime_toolchain_findings")
+                toolchain_calls.append((workspace_id, compose_project))
+
+        ok = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-toolchain",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert ok is True
+        assert validation.calls == [("setup", "pre_agent")]
+        assert toolchain_calls == [("ws-toolchain", "awf_x")]
+        # The probe must run strictly after the green setup completes, not just
+        # "eventually": run_profile_phases first, then the dependency-network
+        # recorder, then the toolchain recorder.
+        assert trace == [
+            "run_profile_phases",
+            "record_setup_dependency_network_events",
+            "record_runtime_toolchain_findings",
+        ]
+
+    @pytest.mark.unit
+    async def test_setup_swallows_toolchain_recorder_error(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The toolchain probe is strictly additive: a recorder error is logged
+        # and swallowed so the handoff still proceeds to the profile preflight
+        # and returns success. The swallowed failure must preserve the structured
+        # reason_code and redact secrets instead of dumping a raw traceback.
+        log_calls: list[tuple[str, dict[str, Any]]] = []
+
+        class _Logger:
+            def warning(self, event: str, **kwargs: Any) -> None:
+                log_calls.append((event, kwargs))
+
+        monkeypatch.setattr(monitor_handoff_setup_module, "_log", _Logger())
+
+        trace: list[str] = []
+        validation = _OkSetupValidation(trace=trace)
+
+        class _RecorderError(RuntimeError):
+            reason_code = "TOOLCHAIN_RECORDER_BROKE"
+
+        class _Executor:
+            _validation = validation
+
+            async def _record_setup_dependency_network_events(self, **_kwargs: Any) -> None:
+                trace.append("record_setup_dependency_network_events")
+
+            async def _record_runtime_toolchain_findings(self, **_kwargs: Any) -> None:
+                trace.append("record_runtime_toolchain_findings")
+                raise _RecorderError("recorder unavailable ghp_FAKESECRET0000000")
+
+        ok = await _run_monitor_handoff_profile_setup(
+            _Executor(),
+            workspace_id="ws-toolchain-boom",
+            profile=object(),
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=tmp_path,
+        )
+
+        assert ok is True
+        # Even on the swallowed-error path the probe must fire only after the
+        # green setup completes, never ahead of run_profile_phases.
+        assert trace == [
+            "run_profile_phases",
+            "record_setup_dependency_network_events",
+            "record_runtime_toolchain_findings",
+        ]
+        assert [event for event, _ in log_calls] == [
+            "executor.monitor_handoff_runtime_toolchain_probe_record_failed"
+        ]
+        _, kwargs = log_calls[0]
+        assert kwargs["reason_code"] == "TOOLCHAIN_RECORDER_BROKE"
+        assert "ghp_FAKESECRET0000000" not in kwargs["error"]
+        assert "<redacted>" in kwargs["error"]
 
 
 class TestSyncReleasePrHandoffRemainingBranches:

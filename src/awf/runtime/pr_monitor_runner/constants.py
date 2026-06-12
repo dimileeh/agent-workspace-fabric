@@ -17,6 +17,24 @@ from awf.service.staleness import (
 
 _RETRYABLE_RECOVERY_TERMINAL_OPERATION_STATUSES = RETRYABLE_MONITOR_OPERATION_STATUSES
 
+
+class _TaskTagUnset:
+    """Sentinel type meaning "no ``task_tag`` was threaded by the caller".
+
+    ``task_tag`` is legitimately ``None`` when the workspace carries no Jira
+    issue key, so ``None`` cannot double as "not provided". A repair sink that
+    accepts a threaded tag uses an instance of this class as its default: when
+    the argument is still the sentinel the sink self-resolves the tag from the
+    DB (today's behavior); any other value (including ``None``) is used as-is.
+    """
+
+    __slots__ = ()
+
+
+# Module-level singleton used as the "not threaded" default. Compared by
+# ``isinstance(...)`` so the threaded path never depends on object identity.
+_TASK_TAG_UNSET = _TaskTagUnset()
+
 # Strong, unambiguous permanent markers. A fault carrying any of these is a
 # genuine credential/identity/repository failure that no amount of retrying can
 # fix, so the monitor fails fast. Deliberately does NOT include the broad

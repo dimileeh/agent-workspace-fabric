@@ -426,6 +426,49 @@ def test_check_gh_warns_when_missing_and_ok_when_present() -> None:
     assert "BITBUCKET_AUTH_MODE" in missing.fix
 
 
+@pytest.mark.unit
+def test_run_system_checks_emits_no_gh_check_for_bitbucket_only_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Bitbucket-only host sees zero ``gh`` noise at ``awf setup`` (issue #539).
+
+    Forge presence moved to ``awf init <PATH>``; ``run_system_checks`` is the
+    repo-agnostic host/service readiness probe and must not enumerate a ``gh``
+    check even when ``check_gh`` would warn (no gh installed, Bitbucket auth in
+    the environment). The probe is asserted unstubbed so a regression that
+    re-adds ``check_gh`` to the ordered list is caught.
+    """
+    monkeypatch.setattr(
+        system_checks,
+        "check_docker",
+        lambda **_kwargs: SetupCheckResult(
+            name="docker",
+            level=SetupCheckLevel.OK,
+            summary="ok",
+            detail="ok",
+            data={"available": True},
+        ),
+    )
+    monkeypatch.setattr(
+        system_checks,
+        "check_compose",
+        lambda **_kwargs: SetupCheckResult(
+            name="compose", level=SetupCheckLevel.OK, summary="ok", detail="ok"
+        ),
+    )
+    _stub_non_docker_checks_ok(monkeypatch)
+
+    results = run_system_checks(
+        environ={
+            "BITBUCKET_API_TOKEN": "x",
+            "BITBUCKET_EMAIL": "dev@example.com",
+            "BITBUCKET_AUTH_MODE": "basic",
+        },
+    )
+
+    assert "gh" not in [r.name for r in results]
+
+
 # --- Python runtime -------------------------------------------------------
 
 
@@ -834,7 +877,6 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
     )
     monkeypatch.setattr(system_checks, "check_compose", lambda **_kwargs: fake_ok("compose"))
     monkeypatch.setattr(system_checks, "check_git", lambda: fake_ok("git"))
-    monkeypatch.setattr(system_checks, "check_gh", lambda: fake_ok("gh"))
     monkeypatch.setattr(system_checks, "check_python_runtime", lambda: fake_ok("python"))
 
     def fake_ports(port: int) -> SetupCheckResult:
@@ -859,7 +901,6 @@ def test_run_system_checks_orders_and_wires_config(monkeypatch: pytest.MonkeyPat
         "docker",
         "compose",
         "git",
-        "gh",
         "python",
         "ports",
         "postgres_port",
@@ -912,7 +953,6 @@ def test_run_system_checks_omits_compose_when_docker_binary_absent(
     assert names == [
         "docker",
         "git",
-        "gh",
         "python",
         "ports",
         "postgres_port",
@@ -985,7 +1025,6 @@ def test_run_system_checks_blocks_unresolvable_work_dir_user(
         "check_docker",
         "check_compose",
         "check_git",
-        "check_gh",
         "check_python_runtime",
         "check_shell_path",
         "check_local_capacity",

@@ -126,6 +126,12 @@ async def _run_fix_cycle(
     if head_result is not None:
         return cast(_GitPushResult, head_result)
     owned_paths = await _owned_paths_for_prompt_or_empty(self, workspace_id)
+    # The workspace's Jira issue key is immutable, so resolve it once for the whole
+    # repair cycle (alongside ``owned_paths``) and thread it into every per-item
+    # ``_address_thread`` / ``_address_review_comment_result`` call below. Without
+    # this each thread/comment — and each settle pass — would re-open a workspace
+    # lookup for the same value, the #537 regression in the busiest repair path.
+    task_tag = await self._resolve_task_tag(workspace_id)
 
     def _drop_pending_publish_state(item_id: str) -> None:
         publish_dependent_ids[:] = [
@@ -156,6 +162,7 @@ async def _run_fix_cycle(
                     compose_file=compose_file,
                     state=state,
                     owned_paths=owned_paths,
+                    task_tag=task_tag,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -257,6 +264,7 @@ async def _run_fix_cycle(
                     compose_file=compose_file,
                     state=state,
                     owned_paths=owned_paths,
+                    task_tag=task_tag,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
