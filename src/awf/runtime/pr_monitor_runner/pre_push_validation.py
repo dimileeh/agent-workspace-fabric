@@ -800,6 +800,7 @@ async def _run_pre_push_validation_fix_pass(
             if validation_result.coverage is not None
             else ()
         ),
+        task_tag=await self._resolve_task_tag(workspace_id),
     )
     command_evidence: list[str] = []
     try:

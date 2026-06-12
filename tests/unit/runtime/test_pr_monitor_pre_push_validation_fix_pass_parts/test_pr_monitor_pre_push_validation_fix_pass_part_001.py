@@ -347,6 +347,96 @@ async def test_pre_push_validation_fix_pass_detects_agent_self_commit(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_prompt_carries_task_tag(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tagged workspace's pre-push fix prompt must instruct the agent to tag self-commits.
+
+    Regression for PRRT_kwDOSJAM6s6I_fvp: the monitor pre-push validation-fix path built
+    ``ValidationFixContext`` without ``task_tag``, so a fix agent that self-committed its repair
+    left a commit pushed without the Jira key.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    from awf.db.repositories import WorkspaceRepository
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.task_tag = "PROJ-123"
+        await s.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="self-committed fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    fix_start_head = "1" * 40
+    advanced_head = "2" * 40
+    rev_parse_results: list[str | None] = [fix_start_head, advanced_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Clean worktree after the agent self-committed: nothing left to commit."""
+        return False
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=cast(str, kwargs["restore_ref"]),
+        )
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason is None
+    assert adapter.calls
+    assert "PROJ-123" in adapter.calls[0]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("post_commit_head", ["fix_start", None])
 async def test_pre_push_validation_fix_pass_genuine_no_commit_still_rolls_back(
     factory: async_sessionmaker[AsyncSession],
