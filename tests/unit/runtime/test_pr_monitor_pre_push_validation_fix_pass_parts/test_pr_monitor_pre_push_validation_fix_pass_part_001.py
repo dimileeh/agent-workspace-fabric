@@ -527,6 +527,114 @@ async def test_pre_push_validation_fix_pass_genuine_no_commit_still_rolls_back(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_fix_pass_reparent_commit_carries_task_tag(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tagged workspace's reparented fix commit must carry the Jira key.
+
+    Regression for PRRT_kwDOSJAM6s6I_mIS: ``_reparent_fix_pass_commit`` rebuilt the
+    AWF commit using the agent's ``%B`` body (or the ``awf: pre-push validation fix``
+    fallback) without applying ``commit_message_with_task_tag``, unlike
+    ``_commit_dirty_worktree`` in the same flow, so a tagged workspace could push a
+    reparented fix commit with no Jira key.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    from awf.db.repositories import WorkspaceRepository
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.task_tag = "PROJ-123"
+        await s.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    adapter = FakeAdapter()
+    adapter.queue(stdout="agent reset HEAD backward\n")
+    cmd = FakeCommandRunner()
+    fix_start_head = "1" * 40
+    divergent_head = "3" * 40
+    current_tree = "b" * 40
+    start_tree = "c" * 40
+    reparented_head = "4" * 40
+    # merge-base --is-ancestor reports non-descendant (exit 1); always re-parent.
+    cmd.queue_result(returncode=1)
+    cmd.queue_result(returncode=0, stdout=f"{current_tree}\n")
+    cmd.queue_result(returncode=0, stdout=f"{start_tree}\n")
+    cmd.queue_result(returncode=0, stdout="agent fix message\n")
+    cmd.queue_result(returncode=0, stdout=f"{reparented_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {reparented_head[:8]}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    rev_parse_results: list[str | None] = [fix_start_head, divergent_head]
+
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return rev_parse_results.pop(0)
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Clean worktree after the agent moved HEAD: nothing left to commit."""
+        return False
+
+    async def _pre_push_validation_cleanup(
+        _runner: object,
+        **kwargs: object,
+    ) -> ValidationWorktreeCleanup:
+        return ValidationWorktreeCleanup(
+            cleaned=True,
+            check=ValidationWorktreeCheck(clean=True),
+            restore_ref=cast(str, kwargs["restore_ref"]),
+        )
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _rev_parse_head)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_pre_push_validation_cleanup",
+        _pre_push_validation_cleanup,
+    )
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    committed, cleanup_failure_reason = await pre_push_validation._run_pre_push_validation_fix_pass(
+        runner,
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        remote_branch="codex/pr",
+        remote_url=None,
+        state=None,
+        validation_result=validation_result,
+        pass_number=1,
+        total_passes=1,
+        validation_commands=("pytest -q",),
+    )
+
+    assert committed is True
+    assert cleanup_failure_reason is None
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    # The reparented commit-tree message prepends the Jira key to the agent's %B body.
+    assert any(
+        f"commit-tree {current_tree} -p {fix_start_head} -m PROJ-123 agent fix message" in call
+        for call in joined_calls
+    )
+    assert rev_parse_results == []
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_non_descendant_head_is_reparented(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

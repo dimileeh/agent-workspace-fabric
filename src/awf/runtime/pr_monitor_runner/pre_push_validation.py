@@ -14,6 +14,7 @@ from awf.common.command_evidence import append_command_evidence
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.git_identity import git_identity_config_args
 from awf.common.logging import get_logger
+from awf.common.task_tag import commit_message_with_task_tag
 from awf.control.executor.helpers import (
     _profile_for_workspace,
     _should_run_local_coverage,
@@ -646,6 +647,14 @@ async def _reparent_fix_pass_commit(
     message = message_result.stdout.strip() if message_result.ok else ""
     if not message:
         message = f"awf: pre-push validation fix for {workspace_id}"
+
+    # Prepend the workspace's Jira issue key (if any) so the reparented fix commit
+    # links to the issue, matching ``_commit_dirty_worktree`` in this same flow.
+    # Idempotent: a ``%B`` body that already carries the tag is left unchanged.
+    # Unlike the single-line dirty-worktree subject, the reparented message reuses
+    # the agent's full ``%B`` body, so it is NOT truncated to [:72] (that would drop
+    # the commit body); the tag only prefixes the subject line.
+    message = commit_message_with_task_tag(message, await self._resolve_task_tag(workspace_id))
 
     commit_result = await self._deps.runner.run(
         git_worktree_command(
