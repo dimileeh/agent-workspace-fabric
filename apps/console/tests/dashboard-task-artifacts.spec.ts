@@ -52,9 +52,12 @@ async function mockDashboard(page: Page) {
   const planOnly = baseWorkspace("ws_plan", "Plan Only");
   const none = baseWorkspace("ws_none", "No Artifacts");
   const failed = baseWorkspace("ws_fail", "List Error");
+  const planDownloadFail = baseWorkspace("ws_dlfail", "Plan Download Error");
 
   await page.route("/api/awf/workspaces/overview*", async (route) => {
-    await route.fulfill({ json: { items: [full, planOnly, none, failed], has_more: false } });
+    await route.fulfill({
+      json: { items: [full, planOnly, none, failed, planDownloadFail], has_more: false },
+    });
   });
 
   // Plan + conformance present.
@@ -103,6 +106,17 @@ async function mockDashboard(page: Page) {
   // Artifact list request fails — the error must be surfaced, not swallowed.
   await page.route("/api/awf/workspaces/ws_fail/artifacts", async (route) => {
     await route.fulfill({ status: 500, json: { detail: { message: "Unable to load artifacts." } } });
+  });
+
+  // Plan artifact is listed, but its download fails — the error banner must show
+  // without the empty-state "No prompt stored" text leaking through.
+  await page.route("/api/awf/workspaces/ws_dlfail/artifacts", async (route) => {
+    await route.fulfill({
+      json: { items: [artifact("ws_dlfail", "plan.md")], next_cursor: null, has_more: false },
+    });
+  });
+  await page.route("/api/awf/workspaces/ws_dlfail/artifacts/download*", async (route) => {
+    await route.fulfill({ status: 500, json: { detail: { message: "boom" } } });
   });
 }
 
@@ -214,4 +228,22 @@ test("surfaces an error banner when the artifact list request fails", async ({ p
   await expect(section).toContainText("Unable to load artifacts.");
   await expect(section.getByRole("button", { name: "Plan" })).toHaveCount(0);
   await expect(section.getByRole("button", { name: "Validation" })).toHaveCount(0);
+});
+
+test("shows the download error without leaking the empty-prompt placeholder", async ({ page }) => {
+  await mockDashboard(page);
+  await page.goto("/");
+
+  await openDetails(page, "ws_dlfail");
+  const section = page.getByTestId("task-artifacts");
+  await expect(section).toBeVisible();
+
+  await section.getByRole("button", { name: "Plan" }).click();
+
+  // The download failure surfaces as an error banner...
+  await expect(section).toContainText("Request failed with HTTP 500.");
+  // ...and the content panel must not render the misleading empty-state path,
+  // which would otherwise claim "No prompt stored for this workspace."
+  await expect(page.getByTestId("task-artifact-content")).toHaveCount(0);
+  await expect(section).not.toContainText("No prompt stored for this workspace.");
 });

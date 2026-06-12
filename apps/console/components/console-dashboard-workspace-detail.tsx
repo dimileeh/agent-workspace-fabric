@@ -346,7 +346,7 @@ export function TaskArtifactsSection({ workspaceId }: { workspaceId: string }) {
           {error}
         </div>
       ) : null}
-      {view ? (
+      {view && !error ? (
         <div data-testid="task-artifact-content" className="rounded-md border border-line bg-surface p-3">
           {loading ? (
             <div className="flex items-center gap-2 text-xs text-fg-muted">
