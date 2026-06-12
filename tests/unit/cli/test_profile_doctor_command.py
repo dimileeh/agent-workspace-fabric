@@ -1096,6 +1096,74 @@ def test_doctor_mirrors_worker_git_env_into_host_env(
     assert host_env["ANTHROPIC_API_KEY"] == "y"
 
 
+def test_doctor_mirrors_worker_injected_bitbucket_git_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Bitbucket-conditional git env is mirrored from the worker's forwarded env.
+
+    ``_service_git_environment`` adds ``GIT_TERMINAL_PROMPT`` and the bitbucket
+    ``GIT_CONFIG_*`` helper only when Bitbucket creds are visible in its
+    ``source_env``. The real worker reads its Compose-forwarded container env --
+    where ``BITBUCKET_API_TOKEN``/``BITBUCKET_EMAIL`` (both on the worker
+    ``environment:`` allowlist) arrive from ``docker/compose/.env`` -- so it injects
+    those keys. When the creds live ONLY in that env file and not the caller shell,
+    the doctor must feed the function the same allowlisted view (not the caller
+    os.environ) so the mirror includes the Bitbucket additions; otherwise a lease
+    satisfiable by those worker-injected keys is still falsely surfaced as
+    ``SECRET_LEASE_SOURCE_MISSING``.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # Creds absent from the caller shell; present only in the merged Compose view.
+    monkeypatch.delenv("BITBUCKET_API_TOKEN", raising=False)
+    monkeypatch.delenv("BITBUCKET_EMAIL", raising=False)
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"BITBUCKET_API_TOKEN": "bb_token", "BITBUCKET_EMAIL": "dev@example.com"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment_keys",
+        lambda: frozenset({"BITBUCKET_API_TOKEN", "BITBUCKET_EMAIL"}),
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # The worker would inject GIT_TERMINAL_PROMPT + the bitbucket helper from the
+    # forwarded creds; the mirror now reflects them despite the caller shell lacking
+    # the creds. The token never lands in any rendered git-config value (it stays in
+    # the BITBUCKET_API_TOKEN env entry the credential helper reads on demand).
+    assert host_env["GIT_TERMINAL_PROMPT"] == "0"
+    count = int(host_env["GIT_CONFIG_COUNT"])
+    config_keys = {host_env[f"GIT_CONFIG_KEY_{index}"] for index in range(count)}
+    config_values = {host_env[f"GIT_CONFIG_VALUE_{index}"] for index in range(count)}
+    assert "credential.https://bitbucket.org.helper" in config_keys
+    assert all("bb_token" not in value for value in config_values)
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0

@@ -134,7 +134,22 @@ def profile_doctor(
     # falsely surfaced as SECRET_LEASE_SOURCE_MISSING. This also forwards a github
     # token that resolves only through service settings (not the env file), since
     # git_env carries GH_TOKEN/GITHUB_TOKEN when settings.github_token is set.
-    lease_host_env.update(_service_git_environment(host_home, github_token=settings.github_token))
+    # Feed _service_git_environment the allowlisted lease_host_env as its source_env
+    # (NOT the caller os.environ it defaults to): its Bitbucket/SSH wiring inspects
+    # that env for credentials, and the real worker reads its Compose-forwarded
+    # container env -- modelled by the allowlisted view -- there. Bitbucket creds
+    # present only in docker/compose/.env (BITBUCKET_API_TOKEN/BITBUCKET_EMAIL are on
+    # the worker environment: allowlist) make the worker add GIT_TERMINAL_PROMPT and
+    # the bitbucket GIT_CONFIG_* helper; passing the caller os.environ would omit
+    # those keys (the operator shell lacks the .env-only creds) and still surface
+    # SECRET_LEASE_SOURCE_MISSING for a lease the worker-injected keys satisfy.
+    lease_host_env.update(
+        _service_git_environment(
+            host_home,
+            github_token=settings.github_token,
+            source_env=lease_host_env,
+        )
+    )
     # Run the image probes against the SAME Docker daemon/config the worker's
     # compose pulls target. The worker selects its daemon from the resolved service
     # environment (AWF_DOCKER_HOST, materialised as DOCKER_HOST -- settings.docker_host
