@@ -494,14 +494,15 @@ def test_doctor_threads_service_docker_environ_to_image_probes(
 def test_doctor_scrubs_docker_context_when_forcing_daemon(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A stray DOCKER_CONTEXT must not survive into the probe environment.
+    """A stray DOCKER_CONTEXT must not survive when an env host pins the daemon.
 
     Docker's CLI treats ``DOCKER_CONTEXT`` as overriding ``DOCKER_HOST``, so a
     context inherited from the caller shell or the Compose env file would
-    redirect the image probes to a different daemon than ``settings.docker_host``
-    even though this block pins ``DOCKER_HOST``. Drop ``DOCKER_CONTEXT`` (matching
-    the service Docker helpers' scrub) so the probe cannot inspect the wrong
-    daemon.
+    redirect the image probes to a different daemon than the env-selected
+    ``DOCKER_HOST`` this block pins. When the service env names an
+    ``AWF_DOCKER_HOST``/``DOCKER_HOST``, ``bootstrap._docker_cli_environ`` scrubs
+    ``DOCKER_CONTEXT`` so the pinned daemon wins; the doctor must mirror that or a
+    stale context would redirect the probe to the wrong daemon.
     """
     captured: dict[str, object] = {}
 
@@ -517,10 +518,15 @@ def test_doctor_scrubs_docker_context_when_forcing_daemon(
         "awf.common.git_remote.detect_repo_url_from_checkout",
         lambda _path: None,
     )
-    # The merged service env carries a stale DOCKER_CONTEXT alongside config.
+    # The merged service env selects a daemon via DOCKER_HOST and carries a stale
+    # DOCKER_CONTEXT alongside config -- exactly the case the worker scrubs.
     monkeypatch.setattr(
         "awf.service.config.local_service_environ",
-        lambda: {"DOCKER_CONTEXT": "desktop-linux", "DOCKER_CONFIG": "/svc/.docker"},
+        lambda: {
+            "DOCKER_HOST": "tcp://remote:2375",
+            "DOCKER_CONTEXT": "desktop-linux",
+            "DOCKER_CONFIG": "/svc/.docker",
+        },
     )
     monkeypatch.setattr(
         "awf.service.config.resolve_service_settings",
@@ -528,7 +534,7 @@ def test_doctor_scrubs_docker_context_when_forcing_daemon(
             host_home=str(tmp_path),
             github_token=None,
             agent_runtime_image="awf-agent-runtime:latest",
-            docker_host="tcp://remote:2375",
+            docker_host="unix:///var/run/docker.sock",
         ),
     )
 
@@ -540,6 +546,62 @@ def test_doctor_scrubs_docker_context_when_forcing_daemon(
     assert docker_environ["DOCKER_HOST"] == "tcp://remote:2375"
     # DOCKER_CONTEXT scrubbed so it cannot override the forced DOCKER_HOST.
     assert "DOCKER_CONTEXT" not in docker_environ
+    # Other client config still threads through to the probe.
+    assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
+
+
+def test_doctor_preserves_context_only_daemon_selection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A context-only daemon selection must survive into the probe environment.
+
+    When the service env selects the daemon via ``DOCKER_CONTEXT`` alone -- no
+    ``AWF_DOCKER_HOST``/``DOCKER_HOST`` -- ``bootstrap._docker_cli_environ`` does
+    NOT scrub the context (its scrub is guarded by ``if docker_host or
+    clears_docker_host``), so the worker provisions against the context-backed
+    daemon. The doctor must mirror that: preserve ``DOCKER_CONTEXT`` and pin no
+    ``DOCKER_HOST``, rather than stripping the context and falling back to
+    ``settings.docker_host`` -- which would probe the default socket while the
+    worker pulls against the context daemon.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The service env selects the daemon via DOCKER_CONTEXT only -- no host pinned.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"DOCKER_CONTEXT": "desktop-linux", "DOCKER_CONFIG": "/svc/.docker"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    docker_environ = captured["docker_environ"]
+    assert isinstance(docker_environ, dict)
+    # The context-backed daemon selection is preserved; no DOCKER_HOST is pinned
+    # over it (which would otherwise redirect the probe to the wrong daemon).
+    assert docker_environ["DOCKER_CONTEXT"] == "desktop-linux"
+    assert "DOCKER_HOST" not in docker_environ
     # Other client config still threads through to the probe.
     assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
 

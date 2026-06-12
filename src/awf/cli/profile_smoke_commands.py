@@ -106,38 +106,49 @@ def profile_doctor(
     # bare image probe would inherit the caller shell instead and inspect the wrong
     # daemon, so a green doctor would not match the worker's actual pulls. Thread the
     # merged service env with DOCKER_HOST forced to the resolved daemon so a stray
-    # caller DOCKER_HOST/DOCKER_CONTEXT cannot redirect the probe. Docker's CLI
-    # treats DOCKER_CONTEXT as overriding DOCKER_HOST, so drop it (matching the
-    # service Docker helpers' scrub) or a stale context would still redirect the
-    # probe to the wrong daemon despite the pinned DOCKER_HOST. Also scrub any
-    # Docker CLI client keys (DOCKER_CONFIG/DOCKER_CERT_PATH/DOCKER_TLS*/...) the
-    # service environment explicitly clears, exactly as the worker's
-    # bootstrap._docker_cli_environ does via cleared_docker_cli_client_keys; without
-    # it a stale caller client key (e.g. a TLS config the service env blanks) would
-    # survive into the probe and let it talk to a different daemon/config than the
-    # worker's compose pulls, so preflight would not match provisioning.
-    scrubbed_keys = {"DOCKER_CONTEXT", *cleared_docker_cli_client_keys(host_env)}
+    # caller DOCKER_HOST/DOCKER_CONTEXT cannot redirect the probe. Mirror
+    # bootstrap._docker_cli_environ's daemon precedence exactly: prefer AWF_DOCKER_HOST
+    # OR a bare DOCKER_HOST from the merged Compose view (host_env, sourced via
+    # local_service_environ -- the same view the worker's raw_service_env is built
+    # from -- exactly like the lease checks above). resolve_service_settings()'s
+    # Settings() only reads an AWF_-prefixed, cwd-relative .env, so a daemon selected
+    # only via an AWF_DOCKER_HOST/DOCKER_HOST in the Compose env file (with the doctor
+    # invoked from another cwd) would otherwise leave the probe on the default socket
+    # while the worker targets the env-file daemon, so preflight would not match
+    # provisioning.
+    env_docker_host = non_empty_env_value(host_env, "AWF_DOCKER_HOST") or non_empty_env_value(
+        host_env, "DOCKER_HOST"
+    )
+    # Always scrub the Docker CLI client keys (DOCKER_CONFIG/DOCKER_CERT_PATH/
+    # DOCKER_TLS*/...) the service environment explicitly clears, exactly as the
+    # worker's bootstrap._docker_cli_environ does via cleared_docker_cli_client_keys;
+    # without it a stale caller client key (e.g. a TLS config the service env blanks)
+    # would survive into the probe and let it talk to a different daemon/config than
+    # the worker's compose pulls, so preflight would not match provisioning.
+    scrubbed_keys = set(cleared_docker_cli_client_keys(host_env))
+    # Docker's CLI treats DOCKER_CONTEXT as overriding DOCKER_HOST. The worker only
+    # drops DOCKER_CONTEXT when it is actually pinning a host-selected daemon
+    # (_docker_cli_environ scrubs it under `if docker_host or clears_docker_host`);
+    # when the service env selects the daemon via DOCKER_CONTEXT alone -- no
+    # AWF_DOCKER_HOST/DOCKER_HOST -- the worker inherits that context. Mirror that:
+    # only scrub DOCKER_CONTEXT when an env-selected DOCKER_HOST will override it, so a
+    # context-only daemon selection is preserved instead of being stripped and
+    # redirected to settings.docker_host (which would probe the wrong daemon).
+    if env_docker_host:
+        scrubbed_keys.add("DOCKER_CONTEXT")
     docker_environ = {
         key: value for key, value in host_env.items() if key.upper() not in scrubbed_keys
     }
-    # Pin DOCKER_HOST to the daemon the worker actually materialises. The worker
-    # derives its daemon in bootstrap._docker_cli_environ from the resolved service
-    # environment as AWF_DOCKER_HOST OR a bare DOCKER_HOST, so mirror that exact
-    # precedence against the merged Compose view (host_env, sourced via
-    # local_service_environ -- the same view the worker's raw_service_env is built
-    # from -- exactly like the lease checks above) and fall back to
-    # settings.docker_host. resolve_service_settings()'s Settings() only reads an
-    # AWF_-prefixed, cwd-relative .env, so a daemon selected only via an
-    # AWF_DOCKER_HOST or DOCKER_HOST in the Compose env file (with the doctor invoked
-    # from another cwd) would otherwise leave the probe on the default socket while
-    # the worker targets the env-file daemon, so preflight would not match
-    # provisioning. DOCKER_CONTEXT (which Docker treats as overriding DOCKER_HOST) is
-    # still scrubbed above so a stale context cannot redirect the pinned daemon.
-    docker_environ["DOCKER_HOST"] = (
-        non_empty_env_value(host_env, "AWF_DOCKER_HOST")
-        or non_empty_env_value(host_env, "DOCKER_HOST")
-        or settings.docker_host
-    )
+    if env_docker_host:
+        # Pin DOCKER_HOST to the daemon the worker materialises; DOCKER_CONTEXT was
+        # scrubbed above so a stale context cannot redirect the pinned daemon.
+        docker_environ["DOCKER_HOST"] = env_docker_host
+    elif not non_empty_env_value(docker_environ, "DOCKER_CONTEXT"):
+        # No env-selected daemon and no DOCKER_CONTEXT to honour -> fall back to the
+        # resolved settings socket (the worker's settings.docker_host default). When a
+        # DOCKER_CONTEXT is present we leave it in place and pin nothing, so the probe
+        # targets the same context-backed daemon the worker provisions against.
+        docker_environ["DOCKER_HOST"] = settings.docker_host
     report = collect_profile_doctor_report(
         resolved,
         repo_url=detect_repo_url_from_checkout(resolved),
