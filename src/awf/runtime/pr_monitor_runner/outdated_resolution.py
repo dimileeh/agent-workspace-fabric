@@ -375,7 +375,12 @@ def _reconcile_comment_keyed_outdated_verdicts(
     ``fix_committed``, a reply ``needs_human``). Promoting the resolvable verdict
     in that case would resolve the thread and let ``decide`` merge over the
     blocking sibling, so ``_thread_has_blocking_comment_verdict`` gates promotion:
-    a thread with any non-resolvable comment verdict stays open (#548).
+    a thread with any non-resolvable comment verdict instead has ``needs_human``
+    promoted onto its ``thread_id`` (#548 / PRRT_kwDOSJAM6s6JIGQB). Merely
+    skipping is insufficient — ``decide``'s outdated gate consults only the
+    ``thread_id`` verdict, never the comment ids, so a comment-keyed blocking
+    verdict alone would not block the merge; promoting ``needs_human`` keeps the
+    thread open AND makes ``decide`` return ``NotifyHuman``.
 
     Finally, an UNTRIAGED reviewer reply (a new comment carrying no verdict) that
     postdates the comment-path fix must not be silently resolved over. Because
@@ -394,10 +399,23 @@ def _reconcile_comment_keyed_outdated_verdicts(
         # #548: a thread can hold mixed per-comment verdicts — e.g. one comment
         # ``fix_committed`` and a reply ``needs_human``. Promoting the resolvable
         # verdict here (and resolving the thread) would silently bypass the
-        # blocking sibling's safety gate. Only promote when NO comment carries a
-        # blocking verdict, so a thread with any unaddressed-by-a-human sibling
-        # stays open and ``decide`` keeps blocking the merge.
+        # blocking sibling's safety gate.
+        #
+        # But a bare ``continue`` is NOT enough to keep ``decide`` blocking
+        # (PRRT_kwDOSJAM6s6JIGQB): the blocking verdict is recorded under the
+        # sibling's ``comment_id``, while ``decide``'s outdated gate
+        # (``_outdated_thread_blocks_merge``) only consults ``thread.thread_id``,
+        # the requeue flag, and the body-hash snapshot — it never looks up the
+        # thread's comment ids. So skipping would leave the outdated thread with
+        # NO thread-keyed verdict and the PR could auto-merge over the blocking
+        # sibling. Promote a ``needs_human`` verdict onto the ``thread_id`` so the
+        # gate's ``== "needs_human"`` check fires (``decide`` → ``NotifyHuman``).
+        # Plain ``mark_addressed`` (no body-hash snapshot) suffices — ``needs_human``
+        # is not in ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS`` so the resolve loop
+        # still leaves the thread open, and the outdated gate keys on the verdict
+        # alone, not the hash.
         if _thread_has_blocking_comment_verdict(thread, state):
+            state.mark_addressed(thread.thread_id, "needs_human")
             continue
         comment_ids = sorted(_thread_identifier_set(thread) - {thread.thread_id})
         for comment_id in comment_ids:

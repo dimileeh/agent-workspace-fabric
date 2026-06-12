@@ -1427,10 +1427,14 @@ async def test_comment_keyed_defer_outdated_thread_stays_open(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """(#547) A ``defer`` verdict recorded under the head ``comment_id`` must NOT be
-    promoted onto the outdated thread — a deferred thread stays open with its
-    tracking issue (``defer`` is excluded from
-    ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``)."""
+    """(#547 / PRRT_kwDOSJAM6s6JIGQB) A ``defer`` verdict recorded under the head
+    ``comment_id`` must NOT be promoted as a *resolvable* verdict — a deferred thread
+    stays open with its tracking issue (``defer`` is excluded from
+    ``_OUTDATED_RESOLVABLE_THREAD_VERDICTS``). But the thread must still block the
+    merge: a bare skip would leave only the comment-keyed ``defer`` in state, which
+    ``decide``'s outdated gate never consults, so the PR could auto-merge over the
+    deferred feedback. The reconcile promotes ``needs_human`` onto the ``thread_id``
+    so the gate blocks while the thread stays open."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     gh = _RecordingGitHub(cmd)
@@ -1449,17 +1453,23 @@ async def test_comment_keyed_defer_outdated_thread_stays_open(
     # evidence either: the seed grep finds nothing.
     cmd.queue_result(returncode=0, stdout="")
 
+    status = _status_with_outdated(thread)
     await _call_resolve(
         runner,
         workspace_id=workspace_id,
-        status=_status_with_outdated(thread),
+        status=status,
         state=state,
     )
 
     assert gh.attempts == []
-    # The comment verdict was not promoted onto the thread.
-    assert "PRRT_defer" not in state.threads_addressed_ids
+    # The ``defer`` verdict was NOT promoted as resolvable; instead ``needs_human`` is
+    # promoted onto the thread so ``decide`` blocks the merge while the thread stays
+    # open. The comment-keyed ``defer`` is preserved.
+    assert state.threads_addressed_ids["PRRT_defer"] == "needs_human"
     assert state.threads_addressed_ids["4688598838"] == "defer"
+    # End-to-end: the deferred outdated thread blocks auto-merge.
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
 
 
 @pytest.mark.unit
@@ -1467,13 +1477,16 @@ async def test_mixed_verdict_outdated_thread_stays_open(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """(#548) A thread holding BOTH a resolvable comment verdict (``fix_committed``)
-    and a blocking sibling (``needs_human``) must NOT be reconciled/resolved — the
-    blocking verdict's safety gate must not be bypassed.
+    """(#548 / PRRT_kwDOSJAM6s6JIGQB) A thread holding BOTH a resolvable comment
+    verdict (``fix_committed``) and a blocking sibling (``needs_human``) must NOT be
+    resolved, and must keep blocking the merge.
 
     The resolvable comment id (``1000``) sorts BEFORE the blocking one (``9000``),
     so the old break-on-first-resolvable loop would have promoted ``fix_committed``
-    and resolved over the ``needs_human``. The guard now keeps the thread open."""
+    and resolved over the ``needs_human``. The guard keeps the thread open — and
+    promotes ``needs_human`` onto the ``thread_id`` so ``decide``'s outdated gate
+    (which consults only the ``thread_id`` verdict, never the comment ids) actually
+    blocks the merge instead of auto-merging over the blocking sibling."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     gh = _RecordingGitHub(cmd)
@@ -1490,17 +1503,25 @@ async def test_mixed_verdict_outdated_thread_stays_open(
     state.mark_addressed("1000", "fix_committed")
     state.mark_addressed("9000", "needs_human")
 
+    status = _status_with_outdated(thread)
     await _call_resolve(
         runner,
         workspace_id=workspace_id,
-        status=_status_with_outdated(thread),
+        status=status,
         state=state,
     )
 
-    # Thread neither promoted nor resolved; the blocking sibling held it open.
+    # Thread not resolved; the blocking sibling is promoted onto the thread_id as
+    # ``needs_human`` so ``decide`` keeps blocking the merge (the resolvable
+    # ``fix_committed`` is NOT promoted, which would have resolved over the sibling).
     assert gh.attempts == []
-    assert "PRRT_mixed" not in state.threads_addressed_ids
+    assert state.threads_addressed_ids["PRRT_mixed"] == "needs_human"
     assert state.threads_addressed_ids["9000"] == "needs_human"
+    # End-to-end: ``decide`` actually blocks the merge over the blocking sibling.
+    # A bare ``continue`` left only the comment-keyed verdict in state, which the
+    # outdated gate never consults, so the PR would have auto-merged (the bug).
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
 
 
 @pytest.mark.unit
@@ -1540,8 +1561,11 @@ async def test_mixed_verdict_outdated_thread_not_seeded_from_branch_evidence(
     )
 
     assert gh.attempts == []
-    assert "PRRT_mixed_seed" not in state.threads_addressed_ids
-    # No git call: the seed's ``unseeded`` filter excluded the blocked thread.
+    # The reconcile step promotes ``needs_human`` onto the thread_id for the blocking
+    # sibling, so it is never seeded ``fix_committed`` from branch evidence.
+    assert state.threads_addressed_ids["PRRT_mixed_seed"] == "needs_human"
+    # No git call: the seed's ``unseeded`` filter excludes the thread (it now carries
+    # a thread_id verdict), so the queued fix-commit result is never popped.
     assert cmd.calls == []
 
 
