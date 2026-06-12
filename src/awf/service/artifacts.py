@@ -240,6 +240,12 @@ def _open_planning_source_under_root(*, worktree_root: Path, resolved: Path) -> 
             child_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
             os.close(dir_fd)
             dir_fd = child_fd
+        # The ``os.open`` below is evaluated *before* ``finally`` runs: it
+        # produces the file descriptor that is returned. The ``dir_fd`` that
+        # ``finally`` closes is the *parent directory* descriptor used to open
+        # that file (the worktree root when ``rel_parts`` has one component),
+        # never the returned file fd — so closing it here does not leak or
+        # invalidate the descriptor handed back to the caller.
         return os.open(rel_parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
     finally:
         os.close(dir_fd)
