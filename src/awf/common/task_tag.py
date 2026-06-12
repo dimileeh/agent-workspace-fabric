@@ -104,20 +104,26 @@ def title_with_task_tag(title: str, tag: str | None) -> str:
 
 
 def strip_leading_task_tag(text: str, tag: str | None) -> str:
-    """Remove a single leading ``"{tag} "`` prefix from ``text``; no-op if falsy/absent.
+    """Remove a single leading task key from ``text``; no-op if falsy/absent.
+
+    Strips the key when it leads as a delimited token — the ``"{tag} "`` space
+    form *or* a punctuation form such as ``"{tag}: …"`` (a common Jira title
+    shape) — together with the trailing delimiter run, so the first real word
+    begins the result. The delimited-token check is shared with
+    :func:`title_with_task_tag` / :func:`commit_message_with_task_tag`, so a
+    *longer* key (``PROJ-1234`` when ``tag`` is ``PROJ-123``) is left untouched.
 
     Use this before embedding a (possibly already-tagged) ``task_title`` inside a
     composed commit subject such as ``f"awf: {title}"``: stripping the leading key
     first means the subsequent :func:`commit_message_with_task_tag` re-application
     yields a single leading key (``"{tag} awf: …"``) instead of a duplicated
-    ``"{tag} awf: {tag} …"`` that weakens Jira auto-linking.
+    ``"{tag} awf: {tag}: …"`` that weakens Jira auto-linking.
     """
     if not tag:
         return text
-    prefix = f"{tag}{MESSAGE_SEP}"
-    if text.startswith(prefix):
-        return text[len(prefix) :]
-    return text
+    if not _leads_with_task_key(text, tag):
+        return text
+    return re.sub(r"^[^0-9A-Za-z]+", "", text[len(tag) :])
 
 
 def commit_message_with_task_tag(message: str, tag: str | None) -> str:

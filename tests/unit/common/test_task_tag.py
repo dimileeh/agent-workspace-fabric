@@ -105,10 +105,39 @@ def test_strip_leading_task_tag_is_noop_without_exact_leading_prefix() -> None:
     assert strip_leading_task_tag("OTHER-1 Fix", "PROJ-123") == "OTHER-1 Fix"
 
 
+def test_strip_leading_task_tag_removes_colon_form_leading_key() -> None:
+    # Regression: the common Jira "PROJ-123: …" colon form is a delimited leading
+    # key just like the space form, so it must be stripped too — otherwise the
+    # re-applied commit tag duplicates the key (see the colon-form subject test).
+    assert strip_leading_task_tag("PROJ-123: Fix the bug", "PROJ-123") == "Fix the bug"
+
+
+def test_strip_leading_task_tag_is_noop_when_leading_token_is_a_longer_key() -> None:
+    # A longer key sharing the prefix is a *different* issue; the boundary check
+    # leaves it untouched rather than stripping a partial key, consistent with
+    # title_with_task_tag / commit_message_with_task_tag.
+    assert strip_leading_task_tag("PROJ-1234: Fix", "PROJ-123") == "PROJ-1234: Fix"
+
+
+def test_strip_leading_task_tag_when_text_is_exactly_the_key() -> None:
+    assert strip_leading_task_tag("PROJ-123", "PROJ-123") == ""
+
+
 def test_strip_then_commit_tag_yields_single_leading_key() -> None:
     # An already-tagged title embedded in an ``awf:`` subject must not duplicate
     # the issue key once the tag is re-applied.
     title = "PROJ-123 Fix the bug"
+    subject = commit_message_with_task_tag(
+        f"awf: {strip_leading_task_tag(title, 'PROJ-123')}", "PROJ-123"
+    )
+    assert subject == "PROJ-123 awf: Fix the bug"
+
+
+def test_strip_then_commit_tag_yields_single_leading_key_for_colon_form() -> None:
+    # Regression for the reported bug: a colon-form Jira title must collapse to a
+    # single leading key in the composed ``awf:`` commit subject, not
+    # "PROJ-123 awf: PROJ-123: …".
+    title = "PROJ-123: Fix the bug"
     subject = commit_message_with_task_tag(
         f"awf: {strip_leading_task_tag(title, 'PROJ-123')}", "PROJ-123"
     )
