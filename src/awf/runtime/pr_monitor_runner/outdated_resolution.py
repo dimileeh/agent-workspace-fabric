@@ -142,25 +142,34 @@ def _parse_commit_iso(raw: str) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
-def _addressed_comment_activity_at(thread: ReviewThread, comment_id: str) -> datetime | None:
-    """Newest ``created_at`` / ``updated_at`` of the thread comment ``comment_id``.
+def _addressed_comment_created_at(thread: ReviewThread, comment_id: str) -> datetime | None:
+    """``created_at`` of the thread comment ``comment_id`` (its fix-time lower bound).
 
     The reconcile's post-fix activity guard (#548) compares the newest reviewer
     comment against the comment the fix actually addressed (the one carrying the
     resolvable verdict). The reviewer posted that comment no later than AWF fixed
-    it, so its own timestamp is a conservative lower bound on fix time — any
-    reviewer comment newer than it is a reply AWF never re-triaged. Returns ``None``
-    when the comment carries no usable timestamp (the guard then keeps the
-    promote-baseline, mirroring the branch-evidence seed when ordering is unprovable).
+    it, so its ``created_at`` is a conservative lower bound on fix time — any
+    reviewer comment newer than it is feedback AWF never re-triaged.
+
+    Use ``created_at`` ONLY, not ``max(created_at, updated_at)``: when the addressed
+    comment is itself EDITED after the fix, its ``updated_at`` advances past the fix
+    time and is simultaneously the newest reviewer activity that
+    ``_latest_reviewer_comment_at`` reports. A ``updated_at`` baseline would then move
+    in lockstep with that activity, so ``latest_comment_at > addressed_at`` could never
+    fire and the edited body would be snapshotted as handled — silently closing an
+    untriaged edit (#548 / PRRT_kwDOSJAM6s6JH9Zx). ``created_at`` cannot move with an
+    edit, so it stays a true lower bound and the guard catches the edit. The cost is a
+    conservative ``needs_human`` when a comment was edited BEFORE the fix (ordering is
+    unprovable without a recorded fix time), which surfaces to a human rather than
+    merging over feedback — the safe direction, matching the rest of this module.
+
+    Returns ``None`` when the comment carries no ``created_at`` (the guard then keeps
+    the promote-baseline, mirroring the branch-evidence seed when ordering is unprovable).
     """
-    latest: datetime | None = None
     for comment in thread.comments:
-        if comment.comment_id != comment_id:
-            continue
-        for stamp in (comment.created_at, comment.updated_at):
-            if stamp is not None and (latest is None or stamp > latest):
-                latest = stamp
-    return latest
+        if comment.comment_id == comment_id:
+            return comment.created_at
+    return None
 
 
 def _latest_reviewer_comment_at(thread: ReviewThread) -> datetime | None:
@@ -402,13 +411,17 @@ def _reconcile_comment_keyed_outdated_verdicts(
             # ``_review_thread_needs_attention`` would see a matching hash and resolve
             # over it — unlike the thread-keyed path, whose snapshot predates the reply
             # and blocks. The comment-path verdict stored no thread body-hash at fix
-            # time, so detect the post-fix reply by timestamp: when a reviewer comment
-            # is newer than the addressed comment, seed ``needs_human`` (which the
-            # resolve loop skips and ``decide`` treats as a merge blocker) instead of
-            # promoting the resolvable verdict. When timestamps are unavailable we
-            # cannot prove ordering, so keep the promote-baseline (the common no-reply
-            # case still resolves and unblocks the PR).
-            addressed_at = _addressed_comment_activity_at(thread, comment_id)
+            # time, so detect post-fix activity by timestamp: when a reviewer comment
+            # is newer than the addressed comment's CREATION, seed ``needs_human`` (which
+            # the resolve loop skips and ``decide`` treats as a merge blocker) instead of
+            # promoting the resolvable verdict. The baseline is the addressed comment's
+            # ``created_at``, NOT ``max(created_at, updated_at)``: an EDIT to the addressed
+            # comment itself advances its ``updated_at`` and is also the newest reviewer
+            # activity, so a ``updated_at`` baseline would move in lockstep and never fire
+            # (PRRT_kwDOSJAM6s6JH9Zx). When timestamps are unavailable we cannot prove
+            # ordering, so keep the promote-baseline (the common no-activity case still
+            # resolves and unblocks the PR).
+            addressed_at = _addressed_comment_created_at(thread, comment_id)
             latest_comment_at = _latest_reviewer_comment_at(thread)
             if (
                 addressed_at is not None

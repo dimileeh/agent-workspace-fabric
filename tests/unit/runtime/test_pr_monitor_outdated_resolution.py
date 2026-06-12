@@ -1677,3 +1677,89 @@ async def test_comment_keyed_pre_fix_reply_still_resolves(
     assert gh.resolved == ["PRRT_prefix_reply"]
     assert state.threads_addressed_ids["PRRT_prefix_reply"] == "fix_committed"
     assert cmd.calls == []
+
+
+def _outdated_thread_with_edited_comment(
+    tid: str,
+    *,
+    addressed_comment_id: str,
+    created_at: datetime,
+    edited_at: datetime,
+) -> ReviewThread:
+    """An outdated thread whose SOLE addressed comment was edited after the fix
+    (#548 / PRRT_kwDOSJAM6s6JH9Zx).
+
+    The fix-cycle COMMENT path keyed its verdict on ``addressed_comment_id``. The
+    reviewer then edited that very comment (its ``updated_at`` advances past its
+    ``created_at`` and its body changes), so the edit is untriaged feedback. The
+    edited comment is itself the newest reviewer activity, so the post-fix guard
+    must anchor on the comment's stable ``created_at`` — not its moving
+    ``updated_at`` — to detect the edit.
+    """
+    return ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id=addressed_comment_id,
+                body="actually, also handle the edited edge case",
+                author="greptile",
+                created_at=created_at,
+                updated_at=edited_at,
+            ),
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_comment_keyed_edited_addressed_comment_blocks_resolve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(PRRT_kwDOSJAM6s6JH9Zx) An EDIT to the addressed comment itself must not be
+    silently resolved over by the in-memory reconcile.
+
+    When the addressed comment is edited after the comment-path ``fix_committed``
+    verdict, its ``updated_at`` advances and is simultaneously the newest reviewer
+    activity. A baseline of ``max(created_at, updated_at)`` would move in lockstep
+    with that activity, so ``latest_comment_at > addressed_at`` could never fire and
+    the edited body would be snapshotted as handled. Anchoring the baseline on the
+    comment's ``created_at`` (a stable lower bound on fix time that an edit cannot
+    move) lets the guard seed ``needs_human`` so the resolve loop leaves the thread
+    open and ``decide`` blocks merge."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = _outdated_thread_with_edited_comment(
+        "PRRT_edited_comment",
+        addressed_comment_id="4688598838",
+        created_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+        edited_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+    )
+    state.mark_addressed("4688598838", "fix_committed")
+
+    status = _status_with_outdated(thread)
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    # Not resolved — the edit postdates the addressed comment's creation.
+    assert gh.attempts == []
+    assert state.threads_addressed_ids["PRRT_edited_comment"] == "needs_human"
+    # No git call: the in-memory reconcile decided before the branch-evidence seed.
+    assert cmd.calls == []
+    # ``decide`` holds the merge-ready PR at NotifyHuman so a human sees the edit.
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
