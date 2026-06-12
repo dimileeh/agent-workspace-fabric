@@ -78,8 +78,9 @@ class ProfileRuntime(BaseModel):
             "to the versions that must be available in the runtime/toolchain image, "
             'e.g. ``{"java": ["17", "21"]}``. Absent (the default empty mapping) '
             "means no toolchain requirement is declared. The runtime/toolchain image "
-            "is expected to provide each declared version side by side (selected "
-            "per-command via ``JAVA_HOME``/``update-alternatives``). A provision-time, "
+            "is expected to provide each declared version side by side; for Java these "
+            "are selected per-command via ``JAVA_HOME``/``update-alternatives``, while "
+            "other runtimes may use different resolution mechanisms. A provision-time, "
             "in-container probe discovers the installed versions and the "
             "``runtime_toolchain_findings`` lint seam yields a non-blocking "
             "``RUNTIME_TOOLCHAIN_UNAVAILABLE`` warning when a declared version is "
