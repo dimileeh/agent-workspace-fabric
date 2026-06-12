@@ -62,6 +62,32 @@ class _WedgedProbeRunner:
         raise AssertionError("wedged exec should never return")  # pragma: no cover
 
 
+class _WedgedCleanupProbeRunner:
+    """Hangs on BOTH the probe exec and the targeted cleanup exec.
+
+    Models a wedged Docker daemon where even the post-timeout cleanup
+    ``docker compose exec`` never returns, so the cleanup must be bounded by its
+    own wall timeout or it would stall the non-blocking probe indefinitely.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.cleanup_started = asyncio.Event()
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        self.calls.append(list(args))
+        if "awf-cleanup" in args:
+            self.cleanup_started.set()
+        await asyncio.sleep(3600)  # pragma: no cover - cancelled by timeout
+        raise AssertionError("wedged exec should never return")  # pragma: no cover
+
+
 @pytest.mark.unit
 class TestProbeRuntimeToolchainFindings:
     async def test_probe_builds_compose_exec_and_returns_findings(self, tmp_path: Path) -> None:
@@ -152,6 +178,33 @@ class TestProbeRuntimeToolchainFindings:
         )
 
         assert findings == ()
+        assert any("awf-cleanup" in call for call in fake.calls)
+
+    async def test_probe_bounds_wedged_cleanup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A wedged Docker daemon makes even the post-timeout cleanup exec hang;
+        # the cleanup's own wall timeout must keep the probe non-blocking.
+        monkeypatch.setattr(validation_runner_module, "_TOOLCHAIN_PROBE_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(
+            validation_runner_module, "_TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS", 0.05
+        )
+        fake = _WedgedCleanupProbeRunner()
+        runner = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+
+        findings = await asyncio.wait_for(
+            runner.probe_runtime_toolchain_findings(
+                workspace_id="ws-1",
+                compose_project="awf_ws1",
+                compose_file=tmp_path / "compose.yml",
+                profile=_profile_with_toolchains({"java": ["17", "21"]}),
+            ),
+            timeout=5,
+        )
+
+        # Silent, and the bounded cleanup was attempted before being abandoned.
+        assert findings == ()
+        assert fake.cleanup_started.is_set()
         assert any("awf-cleanup" in call for call in fake.calls)
 
     async def test_probe_cleans_up_on_cancellation(self, tmp_path: Path) -> None:

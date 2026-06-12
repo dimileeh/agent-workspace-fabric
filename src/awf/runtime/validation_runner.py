@@ -140,6 +140,11 @@ DB_REFRESH_PHASE = "db_refresh"
 # that runs the probe, so the exec is bounded and the tracked process tree torn
 # down on timeout (the failure stays silent — see ``probe_runtime_toolchains``).
 _TOOLCHAIN_PROBE_TIMEOUT_SECONDS = 30.0
+# Wall timeout for the post-timeout cleanup exec. ``cleanup_compose_exec_invocation``
+# runs another ``docker compose exec`` via ``runner.run`` with no internal wall
+# timeout, so a wedged Docker daemon would let the cleanup itself hang the probe
+# (and the handoff) forever — bound it too, and give up cleanup rather than block.
+_TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS = 30.0
 _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT = 1000
 _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_SCAN_LIMIT = 4 * _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT
 _SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT = 500
@@ -370,11 +375,17 @@ class ValidationRunner:
                 # language instead of warning falsely.
                 # Cleanup already logs any failure; the probe must stay strictly
                 # non-blocking, so swallow a cleanup error rather than propagate.
-                with suppress(ComposeExecCleanupError):
-                    await cleanup_compose_exec_invocation(
-                        self._runner,
-                        invocation,
-                        workspace_id=workspace_id,
+                # The cleanup is itself an unbounded ``docker compose exec``, so a
+                # wedged daemon could hang it forever — bound it with its own short
+                # wall timeout and abandon cleanup rather than stall the handoff.
+                with suppress(ComposeExecCleanupError, TimeoutError):
+                    await asyncio.wait_for(
+                        cleanup_compose_exec_invocation(
+                            self._runner,
+                            invocation,
+                            workspace_id=workspace_id,
+                        ),
+                        timeout=_TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS,
                     )
                 return ProbeExecResult(
                     returncode=124,
