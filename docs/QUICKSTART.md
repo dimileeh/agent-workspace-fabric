@@ -15,8 +15,8 @@ then, use one of the lanes below.
 - `uv` for the `uv tool` and source lanes, or `pipx` for the `pipx` lane.
 - Forge auth for PR automation — only what your repo's host needs: GitHub
   (github.com) needs the GitHub CLI `gh` authenticated; Bitbucket (bitbucket.org)
-  needs `BITBUCKET_API_TOKEN`, `BITBUCKET_EMAIL`, and `BITBUCKET_AUTH_MODE` in
-  `.env` (no `gh` required).
+  needs `BITBUCKET_API_TOKEN` (plus `BITBUCKET_EMAIL` for the default basic auth,
+  or `BITBUCKET_AUTH_MODE=bearer` for bearer tokens) in `.env` (no `gh` required).
 - At least one coding-agent credential for real workspace execution.
 
 Mocked smoke does not require live GitHub or provider access. Local first-run
