@@ -34,6 +34,15 @@ _ENV_COMMENT_WORD_RE = re.compile(r"[a-z0-9]+")
 
 _ENV_COMMENT_KEY_IGNORE_WORDS = frozenset({"awf"})
 
+# Bitbucket env-auth contract verified at ``awf init`` for bitbucket.org repos
+# (issue #539). These names mirror the private constants in
+# ``awf.common.git_auth``; kept local so init_ops does not import private symbols.
+_BITBUCKET_AUTH_ENV_KEYS: tuple[str, ...] = (
+    "BITBUCKET_API_TOKEN",
+    "BITBUCKET_EMAIL",
+    "BITBUCKET_AUTH_MODE",
+)
+
 
 def _run_init_project_onboarding(
     path: Path,
@@ -101,6 +110,11 @@ def _run_init_project_onboarding(
     service_status: dict[str, object]
     doctor_report: DoctorReport | None
     doctor_error: str | None = None
+    # Captured to the outer scope so forge detection can still read them after the
+    # collection block — and degrade gracefully to ``None`` (auth signals become
+    # ``unknown``/skipped, never blocking) when the collection itself raises.
+    settings: Any = None
+    service_env: Mapping[str, str] | None = None
     try:
         settings = resolve_service_settings()
         service_env = local_service_environ()
@@ -216,6 +230,13 @@ def _run_init_project_onboarding(
             typer.echo(f"error: {exc}", err=True)
             raise typer.Exit(code=1) from None
 
+    forge_block = _detect_project_forge_auth(
+        repository,
+        preview=preview,
+        settings=settings,
+        service_env=service_env,
+    )
+
     mode = "guided" if effective_guided else "write" if should_write else "preview"
     payload = _init_project_onboarding_payload(
         preview=preview,
@@ -226,6 +247,7 @@ def _run_init_project_onboarding(
         local_checks_ready=local_checks_ready,
         guided=effective_guided,
         mode=mode,
+        forge=forge_block,
     )
 
     if fmt == OutputFormat.json:
@@ -341,8 +363,15 @@ def _init_project_onboarding_payload(
     local_checks_ready: bool,
     guided: bool,
     mode: str,
+    forge: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Build the structured project-onboarding payload for pretty and JSON output."""
+    """Build the structured project-onboarding payload for pretty and JSON output.
+
+    ``forge`` carries the issue #539 forge detection + per-signal auth status. The
+    CLI ``awf init <PATH>`` path always supplies it; the lighter MCP
+    ``project_init`` contract (which reports doctor/readiness as ``not_checked``)
+    omits it, so it defaults to a neutral block here.
+    """
     payload = cast(dict[str, object], preview.to_dict())
     profile_exists = existing_profile_path is not None or written_path is not None
     payload.update(
@@ -354,6 +383,10 @@ def _init_project_onboarding_payload(
             "service_status": service_status,
             "doctor_status": doctor_status,
             "local_checks_ready": local_checks_ready,
+            # Forge detection + per-key/per-signal auth status lives in the JSON
+            # payload (not only the pretty echo) so ``--format json`` / ``--yes``
+            # callers can read it (issue #539).
+            "forge": dict(forge) if forge is not None else _neutral_forge_block(),
             "next_steps": _init_project_next_steps(
                 existing_profile_path=existing_profile_path,
                 written_path=written_path,
@@ -418,6 +451,13 @@ def _emit_init_project_onboarding_pretty(
         typer.echo("Smoke request payload (local-only, not submitted):")
         typer.echo(json.dumps(preview.smoke_request, indent=2, sort_keys=True, default=str))
 
+    # The onboarding payload always carries a forge block (at minimum the neutral
+    # no-remote block), so the forge-auth section is emitted unconditionally.
+    typer.echo("")
+    typer.echo("Forge auth:")
+    for line in _forge_guidance_lines(_mapping_value(payload.get("forge"))):
+        typer.echo(f"  {line}")
+
     typer.echo("")
     typer.echo("Suggested next steps:")
     for step in _list_value(payload.get("next_steps")):
@@ -433,6 +473,171 @@ def _emit_init_project_onboarding_pretty(
             "\nLocal prerequisites are not fully ready yet; profile onboarding can "
             "continue, but fix the issues above before creating or retrying workspaces."
         )
+
+
+def _redacted_remote_host(repo_url: str) -> str | None:
+    """Return the lowercased host of ``repo_url`` with any credentials stripped.
+
+    Never surfaces the raw remote URL: an ``https://user:token@host/...`` origin
+    can embed a secret, so only the credential-free host is reported for forge
+    diagnostics (issue #539; redaction is mandatory for any logged/persisted
+    value). Returns ``None`` when no host can be parsed (e.g. a bare ``owner/repo``
+    slug or a malformed URL).
+    """
+    from urllib.parse import urlsplit
+
+    scp = re.match(r"^[^/@\s]+@([^/:]+):", repo_url)
+    if scp is not None:
+        return scp.group(1).lower()
+    try:
+        host = urlsplit(repo_url).hostname
+    except ValueError:
+        return None
+    return host.lower() if host else None
+
+
+def _neutral_forge_block() -> dict[str, object]:
+    """Return the forge block used when no forge detection was performed."""
+    return {
+        "host": None,
+        "forge": None,
+        "host_detected": False,
+        "auth": None,
+        "auth_ok": True,
+        "level": "neutral",
+    }
+
+
+def _detect_github_forge_auth(
+    *, settings: Any, service_env: Mapping[str, str] | None
+) -> tuple[dict[str, object], bool]:
+    """Verify GitHub presence (gh) and auth (readiness) as two distinct signals.
+
+    Presence (``check_gh``) and auth (``provider_readiness``) are reported
+    separately: a gh CLI installed but unauthenticated is ``gh_present=True`` with
+    ``github_readiness="fail"``. Readiness degrades to ``"unknown"`` (never
+    blocking) when local service settings are unavailable.
+    """
+    from awf.host_setup.system_checks import SetupCheckLevel, check_gh
+
+    gh_present = check_gh().level is SetupCheckLevel.OK
+    readiness = "unknown"
+    if settings is not None:
+        from awf.service.provider_readiness import check_single_provider_readiness
+
+        result = check_single_provider_readiness(settings, provider="github", environ=service_env)
+        readiness = "ok" if result.get("ok") else "fail"
+    auth: dict[str, object] = {"gh_present": gh_present, "github_readiness": readiness}
+    return auth, gh_present and readiness == "ok"
+
+
+def _detect_bitbucket_forge_auth(
+    service_env: Mapping[str, str] | None,
+) -> tuple[dict[str, object], bool]:
+    """Verify the three ``BITBUCKET_*`` env keys; name exactly which are missing.
+
+    Never mentions gh — a bitbucket.org repo does not need the GitHub CLI. Falls
+    back to ``os.environ`` when the resolved service env is unavailable.
+    """
+    env = service_env if service_env is not None else os.environ
+    present = {key: bool(env.get(key)) for key in _BITBUCKET_AUTH_ENV_KEYS}
+    missing = [key for key in _BITBUCKET_AUTH_ENV_KEYS if not present[key]]
+    auth: dict[str, object] = {"bitbucket_keys": present, "missing": missing}
+    return auth, not missing
+
+
+def _detect_project_forge_auth(
+    repository: Path,
+    *,
+    preview: Any,
+    settings: Any,
+    service_env: Mapping[str, str] | None,
+) -> dict[str, object]:
+    """Detect the repo's forge from its origin remote and verify only matching auth.
+
+    Forge detection (GitHub vs Bitbucket) belongs at project onboarding, where the
+    repo's ``git remote`` is in scope — not at the repo-agnostic host/service
+    readiness layer (issue #539). Reuses the existing detection seam
+    (``detect_repo_url_from_checkout`` -> ``forge``); the explicit ``forge:`` in
+    ``.awf/workspace.yml`` is honored over the URL host for free via
+    ``concrete_forge_for_repo``. Missing matching auth is reported as a WARNING and
+    never blocks, preserving the invariant that mocked smoke needs no live forge
+    access. The returned dict is structured and secret-free (the raw remote URL is
+    reduced to its credential-free host).
+    """
+    from awf.common.forge import concrete_forge_for_repo, detect_forge_from_url
+    from awf.common.git_remote import detect_repo_url_from_checkout
+
+    repo_url = detect_repo_url_from_checkout(repository)
+    if repo_url is None:
+        # No ``origin`` remote: stay neutral, assume no forge, never block.
+        return _neutral_forge_block()
+
+    explicit_forge = getattr(getattr(preview.draft, "profile", None), "forge", "auto")
+    forge = concrete_forge_for_repo(explicit_forge, repo_url)
+    # ``host_detected`` distinguishes a recognized host from an unknown host
+    # (GHE/GitLab/self-hosted) that ``forge.py`` defaults to github.
+    host_detected = detect_forge_from_url(repo_url) is not None
+
+    if forge == "bitbucket":
+        auth, auth_ok = _detect_bitbucket_forge_auth(service_env)
+    else:
+        auth, auth_ok = _detect_github_forge_auth(settings=settings, service_env=service_env)
+
+    return {
+        "host": _redacted_remote_host(repo_url),
+        "forge": forge,
+        "host_detected": host_detected,
+        "auth": auth,
+        "auth_ok": auth_ok,
+        "level": "ok" if auth_ok else "warning",
+    }
+
+
+def _forge_guidance_lines(forge_block: Mapping[str, object]) -> list[str]:
+    """Return forge-scoped Next-step guidance lines (WARNING text never blocks)."""
+    forge = forge_block.get("forge")
+    if forge is None:
+        return [
+            "No `origin` remote detected; forge auth check skipped. Add a git "
+            "remote, then re-run `awf init <path>` to verify forge auth.",
+        ]
+    auth = _mapping_value(forge_block.get("auth"))
+    if forge == "bitbucket":
+        bitbucket_lines = ["Detected forge: bitbucket."]
+        missing = _list_value(auth.get("missing"))
+        if missing:
+            names = ", ".join(str(key) for key in missing)
+            bitbucket_lines.append(f"  - Set the missing Bitbucket auth env in .env: {names}.")
+        else:
+            bitbucket_lines.append(
+                "  - Bitbucket auth env present: "
+                "BITBUCKET_API_TOKEN, BITBUCKET_EMAIL, BITBUCKET_AUTH_MODE."
+            )
+        return bitbucket_lines
+
+    if forge_block.get("host_detected"):
+        github_lines = ["Detected forge: github."]
+    else:
+        github_lines = [
+            f"Forge host {forge_block.get('host')!r} not recognized; defaulting to "
+            "github. Set `forge:` in .awf/workspace.yml to override.",
+        ]
+    if auth.get("gh_present"):
+        github_lines.append("  - GitHub CLI (gh) is installed.")
+    else:
+        github_lines.append("  - Install the GitHub CLI (gh) for GitHub PR operations.")
+    readiness = auth.get("github_readiness")
+    if readiness == "ok":
+        github_lines.append("  - GitHub auth verified.")
+    elif readiness == "fail":
+        github_lines.append(
+            "  - GitHub auth not verified: set AWF_GITHUB_TOKEN "
+            '(e.g. `export AWF_GITHUB_TOKEN="$(gh auth token)"`).'
+        )
+    else:
+        github_lines.append("  - GitHub auth not checked (local service settings unavailable).")
+    return github_lines
 
 
 def _existing_project_profile_path(repository: Path) -> Path | None:
@@ -1444,7 +1649,14 @@ def _run_init_service_bootstrap(
         typer.echo("  bootstrap status: ok")
         typer.echo("")
         typer.echo("Next steps:")
-        typer.echo('  - export AWF_GITHUB_TOKEN="$(gh auth token)" so the worker can create PRs.')
+        # Service bootstrap is repo-agnostic (host/service level), so it cannot
+        # know the repo's forge: defer forge-scoped auth (GitHub token or the
+        # BITBUCKET_* env) to ``awf init <path>``, which detects the forge from the
+        # repo's git remote (issue #539).
+        typer.echo(
+            "  - Run `awf init <path>` to detect your repo's forge and verify the "
+            "matching auth (GitHub token or BITBUCKET_* env)."
+        )
         typer.echo("  - Run `awf service status --format pretty` to verify readiness.")
         typer.echo(
             "  - Optional console: `npm --prefix apps/console run dev`, then open http://localhost:3000."

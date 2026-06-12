@@ -68,6 +68,91 @@ def test_project_onboarding_rejects_guided_json(
     assert "--guided cannot be used with --format json" in capsys.readouterr().err
 
 
+# --- Forge detection / auth helpers (issue #539) --------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("repo_url", "expected"),
+    [
+        ("git@github.com:acme/widgets.git", "github.com"),
+        ("https://user:token@bitbucket.org/acme/widgets.git", "bitbucket.org"),
+        ("ssh://git@gitlab.example.com:22/acme/widgets.git", "gitlab.example.com"),
+        # Bare ``owner/repo`` slug has no host.
+        ("acme/widgets", None),
+        # Malformed URL makes ``urlsplit`` raise ``ValueError`` -> ``None``.
+        ("https://[", None),
+    ],
+)
+def test_redacted_remote_host_strips_credentials_and_handles_unparseable(
+    repo_url: str, expected: str | None
+) -> None:
+    # An ``https://user:token@host/...`` origin must never surface its embedded
+    # credential; only the credential-free host is returned.
+    assert init_ops._redacted_remote_host(repo_url) == expected  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_detect_github_forge_auth_degrades_to_unknown_without_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readiness is ``unknown`` (never blocking) when settings are unavailable."""
+    from awf.host_setup.system_checks import SetupCheckLevel, SetupCheckResult
+
+    monkeypatch.setattr(
+        "awf.host_setup.system_checks.check_gh",
+        lambda **_kwargs: SetupCheckResult(
+            name="gh", level=SetupCheckLevel.OK, summary="ok", detail="ok"
+        ),
+    )
+
+    def _readiness_must_not_run(*_a: object, **_k: object) -> dict[str, object]:
+        raise AssertionError("readiness must not run without settings")
+
+    monkeypatch.setattr(
+        "awf.service.provider_readiness.check_single_provider_readiness",
+        _readiness_must_not_run,
+    )
+
+    auth, auth_ok = init_ops._detect_github_forge_auth(  # noqa: SLF001
+        settings=None, service_env=None
+    )
+
+    assert auth == {"gh_present": True, "github_readiness": "unknown"}
+    assert auth_ok is False
+
+
+@pytest.mark.unit
+def test_detect_bitbucket_forge_auth_falls_back_to_os_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the resolved service env is unavailable, read ``os.environ``."""
+    monkeypatch.setenv("BITBUCKET_API_TOKEN", "tok")
+    monkeypatch.setenv("BITBUCKET_EMAIL", "dev@example.com")
+    monkeypatch.delenv("BITBUCKET_AUTH_MODE", raising=False)
+
+    auth, auth_ok = init_ops._detect_bitbucket_forge_auth(None)  # noqa: SLF001
+
+    assert auth["missing"] == ["BITBUCKET_AUTH_MODE"]
+    assert auth_ok is False
+
+
+@pytest.mark.unit
+def test_forge_guidance_lines_cover_github_missing_gh_and_unknown_auth() -> None:
+    lines = init_ops._forge_guidance_lines(  # noqa: SLF001
+        {
+            "forge": "github",
+            "host": "github.com",
+            "host_detected": True,
+            "auth": {"gh_present": False, "github_readiness": "unknown"},
+        }
+    )
+
+    assert "Detected forge: github." in lines
+    assert any("Install the GitHub CLI (gh)" in line for line in lines)
+    assert any("GitHub auth not checked" in line for line in lines)
+
+
 @pytest.mark.unit
 def test_guided_project_onboarding_rejects_unknown_template(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
