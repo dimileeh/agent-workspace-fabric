@@ -421,6 +421,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "model",
                 "effort",
                 "task_external_id",
+                "task_tag",
                 "task_class",
                 "priority",
                 "human_boost",
@@ -525,6 +526,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "initial_review_grace_period_seconds",
                 "task_title",
                 "task_prompt",
+                "task_tag",
                 "reason",
             }
         ),
@@ -544,6 +546,7 @@ _CAPABILITIES: tuple[ContractCapability, ...] = (
                 "initial_review_grace_period_seconds",
                 "task_title",
                 "task_prompt",
+                "task_tag",
                 "reason",
             }
         ),

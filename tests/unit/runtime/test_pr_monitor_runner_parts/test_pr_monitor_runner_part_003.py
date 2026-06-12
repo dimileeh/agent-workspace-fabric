@@ -842,6 +842,53 @@ async def test_fetch_status_repairs_orphaned_broken_awf_ref_before_counting_base
 
 
 @pytest.mark.unit
+async def test_fetch_status_repairs_orphaned_broken_task_tagged_awf_ref(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Tagged workspaces leave ``<tag>-awf/ws_...`` refs; repair must delete them.
+
+    With ``--task-tag`` the provisioner names the local branch
+    ``PROJ-123-awf/ws_...`` (see ``_provision_local_branch_name``), so an
+    orphaned broken ref surfaces as ``refs/heads/PROJ-123-awf/ws_...``. The
+    fetch-repair must recognise the tagged prefix and delete the exact ref,
+    otherwise the monitor stays wedged on the base-fetch error.
+    """
+    cmd = FakeCommandRunner()
+    cmd.queue_result(
+        returncode=128,
+        stderr="fatal: bad object refs/heads/PROJ-123-awf/ws_deadbeef1234567890",
+    )
+    cmd.queue_result(returncode=0)  # update-ref -d broken orphan branch
+    cmd.queue_result(returncode=0)  # worktree prune stale metadata
+    cmd.queue_result(returncode=0)  # retry fetch with explicit base refspec
+    cmd.queue_result(returncode=0, stdout="2\n")  # rev-list HEAD..origin/base
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.gh = _CapturingGH()  # type: ignore[assignment]
+
+    status = await runner._fetch_status_for_decision(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        workspace_id="ws_current",
+        base_branch="development",
+    )
+
+    assert status.base_behind_count == 2
+    assert cmd.calls[1].args[-3:] == [
+        "update-ref",
+        "-d",
+        "refs/heads/PROJ-123-awf/ws_deadbeef1234567890",
+    ]
+    assert cmd.calls[2].args[-2:] == ["worktree", "prune"]
+
+
+@pytest.mark.unit
 async def test_fetch_status_supplies_workspace_test_commands_to_ci_log_evidence(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

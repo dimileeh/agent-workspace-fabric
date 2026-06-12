@@ -181,6 +181,7 @@ async def test_execution_validation_rejects_fix_pass_dirty_worktree_without_recl
         agent="codex",
         owned_paths=(),
         id="ws_dirty_fix",
+        task_tag=None,
     )
 
     setup_check = ValidationWorktreeCheck(clean=True)

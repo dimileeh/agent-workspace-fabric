@@ -95,6 +95,7 @@ def _workspace(workspace_id: str, *, pr_url: str | None = None) -> SimpleNamespa
         owned_paths=(),
         id=workspace_id,
         pr_url=pr_url,
+        task_tag=None,
     )
 
 

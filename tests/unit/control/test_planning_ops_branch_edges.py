@@ -568,7 +568,7 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
 
     failure = await executor._run_post_validation_conformance_check(
         adapter=_ReportWritingAdapter(report_abs_path=report_abs, content=satisfied),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -847,7 +847,7 @@ async def test_planning_conformance_timeout_falls_back_to_stdout_report(
 
     result = await executor._run_agent_task_with_optional_planning(  # noqa: SLF001
         adapter=_StdoutTimeoutAdapter(satisfied_stdout=satisfied),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_stdout", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_stdout", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",

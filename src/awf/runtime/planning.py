@@ -167,17 +167,34 @@ def render_coordination_warning_section(
     return "\n".join(lines) + "\n\n"
 
 
+def render_task_tag_commit_guidance(task_tag: str | None) -> str:
+    """Return a commit-message guidance section for the task tag, or empty.
+
+    Steers the agent's *own* commits to carry the Jira issue key so they link to
+    the issue. AWF-authored commits carry the tag deterministically; this is
+    best-effort guidance for the agent's commits.
+    """
+    if not task_tag:
+        return ""
+    return (
+        f"### Commit message tag\nPrefix every commit message with `{task_tag} ` "
+        "so commits link to the Jira issue.\n\n"
+    )
+
+
 def build_agent_task_prompt(
     *,
     task_prompt: str,
     coordination_warnings: Sequence[Mapping[str, Any]] = (),
     workspace_runtime_context: str = "",
+    task_tag: str | None = None,
 ) -> str:
     warning_section = render_coordination_warning_section(coordination_warnings)
     runtime_section = render_workspace_runtime_context_section(workspace_runtime_context)
-    if not warning_section and not runtime_section:
+    tag_section = render_task_tag_commit_guidance(task_tag)
+    if not warning_section and not runtime_section and not tag_section:
         return task_prompt
-    return f"{runtime_section}{warning_section}### Task\n{task_prompt}\n"
+    return f"{runtime_section}{warning_section}{tag_section}### Task\n{task_prompt}\n"
 
 
 def build_planning_prompt(
@@ -265,6 +282,7 @@ def build_execution_prompt(
     gaps: tuple[str, ...],
     coordination_warnings: Sequence[Mapping[str, Any]] = (),
     workspace_runtime_context: str = "",
+    task_tag: str | None = None,
 ) -> str:
     if iteration == 0:
         instruction = (
@@ -281,6 +299,7 @@ def build_execution_prompt(
 
     warning_section = render_coordination_warning_section(coordination_warnings)
     runtime_section = render_workspace_runtime_context_section(workspace_runtime_context)
+    tag_section = render_task_tag_commit_guidance(task_tag)
     return (
         "## Execution phase\n\n"
         f"Read `{plan_path.as_posix()}` and use it as the implementation contract.\n"
@@ -288,6 +307,7 @@ def build_execution_prompt(
         "Do not switch branches, push, or open a PR. AWF owns branch and PR lifecycle.\n\n"
         f"{runtime_section}"
         f"{warning_section}"
+        f"{tag_section}"
         f"### Task\n{task_prompt}\n"
     )
 

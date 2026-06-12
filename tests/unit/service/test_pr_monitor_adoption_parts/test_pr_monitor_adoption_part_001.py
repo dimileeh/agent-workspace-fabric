@@ -364,6 +364,31 @@ class TestPullRequestMonitorAdoptionServicePart001:
                 assert "agent_model" not in workspace.task_policy
 
     @pytest.mark.unit
+    async def test_persists_task_tag_on_adopted_workspace(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        fetcher = _MetadataFetcher(_metadata())
+        async with factory() as session:
+            result = await PullRequestMonitorAdoptionService(
+                session,
+                metadata_fetcher=fetcher,
+            ).adopt(
+                PullRequestMonitorAdoptionRequest(
+                    repo_slug="dimileeh/aira-web",
+                    pr_number=277,
+                    agent="codex",
+                    task_tag="PROJ-123",
+                )
+            )
+            await session.commit()
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(result.workspace_id)
+            assert workspace is not None
+            assert workspace.task_tag == "PROJ-123"
+
+    @pytest.mark.unit
     def test_model_only_policy_omits_effort_when_agent_default_has_no_effort(
         self,
         monkeypatch: pytest.MonkeyPatch,

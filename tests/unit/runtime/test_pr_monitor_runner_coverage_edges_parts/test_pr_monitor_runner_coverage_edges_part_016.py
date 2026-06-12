@@ -21,7 +21,7 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
     ReviewThread,
 )
-from awf.runtime.pr_monitor_runner import remote_repair as pr_monitor_runner_remote_repair
+from awf.runtime.pr_monitor_runner import path_helpers as pr_monitor_runner_path_helpers
 from awf.runtime.pr_monitor_runner.helpers import (
     _is_protected_manual_ready_handoff,
     _review_comment_body_state_key,
@@ -111,12 +111,12 @@ def test_read_worktree_text_reports_decode_and_os_errors(tmp_path: Path) -> None
     invalid = tmp_path / "invalid.yml"
     invalid.write_bytes(b"\xff\xfe")
     with pytest.raises(ProtectedScopeDiffError, match="as UTF-8"):
-        pr_monitor_runner_remote_repair._read_worktree_text(invalid, display_path="invalid.yml")  # noqa: SLF001
+        pr_monitor_runner_path_helpers._read_worktree_text(invalid, display_path="invalid.yml")  # noqa: SLF001
 
     directory = tmp_path / "config-dir"
     directory.mkdir()
     with pytest.raises(ProtectedScopeDiffError, match="Could not read protected worktree file"):
-        pr_monitor_runner_remote_repair._read_worktree_text(directory, display_path="config-dir")  # noqa: SLF001
+        pr_monitor_runner_path_helpers._read_worktree_text(directory, display_path="config-dir")  # noqa: SLF001
 
 
 @pytest.mark.unit
@@ -532,8 +532,13 @@ async def test_address_thread_stashes_agent_verdict_reasons(
         async def _invoke(**_kwargs: object) -> VerdictResult:
             return result
 
+        async def _resolve_task_tag(_workspace_id: str) -> str | None:
+            return None
+
         return SimpleNamespace(
-            _workspace_runtime_context="", _invoke_cli_for_verdict_result=_invoke
+            _workspace_runtime_context="",
+            _invoke_cli_for_verdict_result=_invoke,
+            _resolve_task_tag=_resolve_task_tag,
         )
 
     async def _call(runner: object, state: MonitorState | None) -> str:

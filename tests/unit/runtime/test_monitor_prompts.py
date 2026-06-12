@@ -989,3 +989,54 @@ class TestReasoningGuidance:
         assert "a justified " in prompt
         assert "non-behavioral" in prompt
         assert "Protocol stub" in prompt
+
+
+class TestCommitTaskTagFooter:
+    """Monitor prompts must instruct the agent to tag the commits it authors.
+
+    For a tagged workspace the agent commits its own monitor fix (the worktree
+    is clean, so AWF's ``_commit_dirty_worktree`` fallback never runs and never
+    tags it). Without the prompt instruction the pushed monitor commit stays
+    untagged and loses its Jira link (PRRT_kwDOSJAM6s6I9Tng).
+    """
+
+    _TAG = "PROJ-123"
+
+    def _tagged_prompts(self, tag: str | None) -> list[str]:
+        thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="x")
+        comment = ReviewComment(
+            comment_id="c1", author="r", body="b", body_excerpt="b", state="COMMENTED"
+        )
+        failures = (CheckFailure(name="lint", conclusion="FAILURE", log_excerpt="x"),)
+        return [
+            address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread, task_tag=tag),
+            address_review_comment_prompt(
+                pr_number=1, repo_slug="a/b", comment=comment, task_tag=tag
+            ),
+            operator_hint_prompt(pr_number=1, repo_slug="a/b", reason="do x", task_tag=tag),
+            sync_base_conflict_prompt(
+                pr_number=1, repo_slug="a/b", base_branch="main", conflicting_files=(), task_tag=tag
+            ),
+            fix_ci_prompt(pr_number=1, repo_slug="a/b", failures=failures, task_tag=tag),
+        ]
+
+    @pytest.mark.unit
+    def test_every_committing_prompt_instructs_tag_prefix_when_tag_present(self) -> None:
+        for prompt in self._tagged_prompts(self._TAG):
+            assert f"task tag `{self._TAG}`" in prompt
+            assert "links to its tracking issue" in prompt
+            assert "do not add it again" in prompt
+
+    @pytest.mark.unit
+    def test_no_tag_instruction_when_tag_absent(self) -> None:
+        for prompt in self._tagged_prompts(None):
+            assert "task tag" not in prompt
+            assert "links to its tracking issue" not in prompt
+            # The plain do-not-push footer is still present.
+            assert "Do NOT push" in prompt
+
+    @pytest.mark.unit
+    def test_tag_instruction_defaults_off_for_backward_compatibility(self) -> None:
+        thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="x")
+        prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
+        assert "task tag" not in prompt

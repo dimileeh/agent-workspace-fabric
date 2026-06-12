@@ -135,6 +135,13 @@ def java_profile(*, build_tool: str = "maven", source: str = "builtin:java") -> 
         source=source,
         confidence="medium",
         description=description,
+        # Declare the JDKs the build needs side by side: a Gradle repo may require
+        # JDK 17 for test execution even when the runtime ships a newer JDK 21
+        # (issue #527, item 6). The ``runtime_toolchain_findings`` lint seam yields
+        # RUNTIME_TOOLCHAIN_UNAVAILABLE once a preflight introspects the runtime/
+        # toolchain image, but no production path discovers installed versions yet
+        # (``awf profile doctor`` does not run it), so the declaration is advisory.
+        runtime=ProfileRuntime(toolchains={"java": ["17", "21"]}),
         phases={
             "setup": [setup],
             "validate": [validate],

@@ -242,6 +242,14 @@ def register_workspace_tools(
         task_external_id: str | None = Field(
             default=None, description="Optional caller-side task ID for correlation."
         ),
+        task_tag: str | None = Field(
+            default=None,
+            max_length=64,
+            description=(
+                "Optional Jira issue key (e.g. PROJ-123) prepended to the branch, PR "
+                "title, and every AWF-authored commit message so work links to the issue."
+            ),
+        ),
         task_class: TaskClass | None = Field(
             default=None,
             description="Optional PRD policy class for scheduling and overlap-risk policy.",
@@ -400,6 +408,7 @@ def register_workspace_tools(
                     "model": model,
                     "effort": effort,
                     "external_id": task_external_id,
+                    "task_tag": task_tag,
                     "task_class": task_class,
                     "priority": priority,
                     "human_boost": human_boost,

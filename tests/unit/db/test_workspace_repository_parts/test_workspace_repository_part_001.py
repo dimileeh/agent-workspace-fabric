@@ -201,6 +201,7 @@ class TestCreate:
             requires_database=True,
             idempotency_key="source-key",
             task_kind="sync_release_pr",
+            task_tag="PROJ-123",
             remote_push_branch="development",
         )
         source.branch_name = "release-sync/source"
@@ -221,6 +222,7 @@ class TestCreate:
         assert replacement.task_title == source.task_title
         assert replacement.task_prompt == source.task_prompt
         assert replacement.task_external_id == source.task_external_id
+        assert replacement.task_tag == "PROJ-123"
         assert replacement.task_class == source.task_class
         assert replacement.owned_paths == ["src/awf/**"]
         assert replacement.task_policy == {"provider": {"model": "gpt-5.5"}}

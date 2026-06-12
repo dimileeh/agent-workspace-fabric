@@ -748,6 +748,43 @@ class TestSuccess:
         )
 
     @pytest.mark.unit
+    def test_feature_branch_pr_local_branch_prepends_task_tag(self) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="main",
+            task_kind="feature_branch_pr",
+            task_policy={},
+        )
+        assert (
+            _provision_local_branch_name(
+                ws, workspace_id="ws1", branch_prefix="awf", task_tag="PROJ-123"
+            )
+            == "PROJ-123-awf/ws1"
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("task_kind", "expected"),
+        [
+            ("sync_feature_pr", "feature-sync/ws1"),
+            ("sync_release_pr", "release-sync/ws1"),
+        ],
+    )
+    def test_sync_branch_names_ignore_task_tag(self, task_kind: str, expected: str) -> None:
+        ws = Workspace(
+            repo_url="https://github.com/dimileeh/aira-web.git",
+            branch_base="main",
+            task_kind=task_kind,
+            task_policy={},
+        )
+        assert (
+            _provision_local_branch_name(
+                ws, workspace_id="ws1", branch_prefix="awf", task_tag="PROJ-123"
+            )
+            == expected
+        )
+
+    @pytest.mark.unit
     async def test_profile_secret_leases_are_issued_before_launch_and_mounted_after_success(
         self,
         session_factory: async_sessionmaker[AsyncSession],

@@ -449,6 +449,7 @@ async def retry_workspace_row(
         task_title=source.task_title,
         task_prompt=retried_prompt,
         task_external_id=source.task_external_id,
+        task_tag=source.task_tag,
         task_class=source.task_class,
         owned_paths=list(source.owned_paths),
         task_policy=retried_task_policy,

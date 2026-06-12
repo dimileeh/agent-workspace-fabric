@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from awf.api import schemas_operations as _schemas_operations
 from awf.api import schemas_responses as _schemas_responses
 from awf.api.schemas_companions import WorkspaceCompanionRequest
+from awf.common.task_tag import validate_task_tag
 from awf.db.enums import (
     DEPRECATED_MONITOR_RELEASE_PR_TASK_KIND,
     AgentRuntime,
@@ -153,6 +154,7 @@ class WorkspaceTask(BaseModel):
     model: Annotated[str | None, Field(default=None, min_length=1, max_length=128)] = None
     effort: Annotated[str | None, Field(default=None, min_length=1, max_length=64)] = None
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
+    task_tag: Annotated[str | None, Field(default=None, max_length=64)] = None
     task_class: TaskClass | None = None
     priority: int = Field(default=0, ge=0, le=100)
     human_boost: int = Field(default=0, ge=0, le=5)
@@ -165,6 +167,12 @@ class WorkspaceTask(BaseModel):
         le=86400,
     )
     provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
+
+    @field_validator("task_tag")
+    @classmethod
+    def _validate_task_tag(cls, value: str | None) -> str | None:
+        """Normalize + validate the optional Jira issue key; ``None`` when absent."""
+        return validate_task_tag(value)
 
     @field_validator("kind")
     @classmethod
@@ -329,6 +337,10 @@ class WorkspaceCreateRequest(BaseModel):
         return self.task.external_id
 
     @property
+    def task_tag(self) -> str | None:
+        return self.task.task_tag
+
+    @property
     def agent(self) -> AgentRuntime:
         return self.task.agent
 
@@ -372,7 +384,14 @@ class PullRequestMonitorAdoptionRequest(BaseModel):
         str | None,
         Field(default=None, min_length=1, max_length=16384),
     ] = None
+    task_tag: Annotated[str | None, Field(default=None, max_length=64)] = None
     reason: Annotated[str | None, Field(default=None, max_length=512)] = None
+
+    @field_validator("task_tag")
+    @classmethod
+    def _validate_task_tag(cls, value: str | None) -> str | None:
+        """Normalize + validate the optional Jira issue key; ``None`` when absent."""
+        return validate_task_tag(value)
 
 
 class PullRequestMonitorAdoptionResponse(BaseModel):
@@ -770,6 +789,7 @@ class WorkspaceResponse(BaseModel):
     task_title: str
     task_prompt: str
     task_external_id: str | None
+    task_tag: str | None = None
     task_class: TaskClass | None
     owned_paths: list[str]
     task_policy: dict[str, Any] = Field(default_factory=dict)

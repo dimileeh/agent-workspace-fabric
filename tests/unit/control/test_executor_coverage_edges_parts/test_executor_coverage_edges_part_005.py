@@ -365,7 +365,7 @@ async def test_planning_required_accepts_committed_plan_file(tmp_path: Path) -> 
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_commit", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_commit", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -403,7 +403,7 @@ async def test_planning_required_rejects_committed_code_as_outside_plan(tmp_path
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_code", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_code", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -462,7 +462,7 @@ async def test_planning_required_falls_back_to_porcelain_when_no_baseline_sha(
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_fallback", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_fallback", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -511,7 +511,7 @@ async def test_planning_required_dirty_plan_still_accepted(tmp_path: Path) -> No
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_dirty", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_dirty", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -553,7 +553,7 @@ async def test_planning_required_dirty_extra_file_still_rejected(tmp_path: Path)
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_extra_dirty", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_extra_dirty", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",

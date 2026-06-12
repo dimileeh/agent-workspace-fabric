@@ -12,7 +12,12 @@ from awf.profiles.lint import (
     profile_lint_errors,
     profile_service_volume_lint_errors,
 )
-from awf.profiles.models import ProfileLintSeverity, WorkspaceProfile
+from awf.profiles.models import (
+    RUNTIME_TOOLCHAIN_UNAVAILABLE,
+    ProfileLintSeverity,
+    WorkspaceProfile,
+    runtime_toolchain_findings,
+)
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 
 _PRIVATE_KEY_SENTINEL = "-----BEGIN " + "PRIVATE KEY-----"
@@ -847,3 +852,93 @@ def test_host_home_mount_to_auth_like_or_root_target_is_blocked() -> None:
         "HOST_HOME_AUTH_MOUNT_TOO_BROAD",
         "HOST_HOME_AUTH_MOUNT_TOO_BROAD",
     ]
+
+
+def _profile_with_toolchains(toolchains: dict[str, list[str]]) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {"name": "toolchain-profile", "runtime": {"toolchains": toolchains}}
+    )
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_unknown_availability_is_silent() -> None:
+    """``available is None`` means image contents are unknown -> never warn."""
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    assert runtime_toolchain_findings(profile, None) == ()
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_all_versions_present_no_findings() -> None:
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    assert runtime_toolchain_findings(profile, {"java": {"17", "21"}}) == ()
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_single_missing_version_warns() -> None:
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    findings = runtime_toolchain_findings(profile, {"java": {"21"}})
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.reason_code == RUNTIME_TOOLCHAIN_UNAVAILABLE
+    assert finding.severity == ProfileLintSeverity.warning
+    assert finding.path == "runtime.toolchains.java"
+    assert finding.details == {
+        "language": "java",
+        "version": "17",
+        "available_versions": ["21"],
+    }
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_language_entirely_absent_warns_each_version() -> None:
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    findings = runtime_toolchain_findings(profile, {"python": {"3.12"}})
+
+    assert [f.details["version"] for f in findings] == ["17", "21"]
+    assert all(f.reason_code == RUNTIME_TOOLCHAIN_UNAVAILABLE for f in findings)
+    assert all(f.details["available_versions"] == [] for f in findings)
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_mixed_case_availability_keys_match_lowercased() -> None:
+    """Availability keys discovered from the image may be mixed-case; folding them to
+    lowercase prevents false-positive warnings against lowercase profile toolchain keys."""
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    assert runtime_toolchain_findings(profile, {"Java": {"17", "21"}}) == ()
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_mixed_case_availability_keys_still_detect_missing() -> None:
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    findings = runtime_toolchain_findings(profile, {"Java": {"21"}})
+
+    assert len(findings) == 1
+    assert findings[0].details == {
+        "language": "java",
+        "version": "17",
+        "available_versions": ["21"],
+    }
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_duplicate_casing_availability_keys_merge_versions() -> None:
+    """Two casings of the same availability key union their versions instead of letting the
+    later entry overwrite the earlier one — otherwise a dropped version warns falsely."""
+    profile = _profile_with_toolchains({"java": ["17", "21"]})
+
+    assert runtime_toolchain_findings(profile, {"JAVA": {"17", "21"}, "Java": {"17"}}) == ()
+
+
+@pytest.mark.unit
+def test_runtime_toolchain_findings_no_declaration_never_warns() -> None:
+    profile = WorkspaceProfile.model_validate({"name": "plain"})
+
+    assert runtime_toolchain_findings(profile, {"java": {"21"}}) == ()
+    assert runtime_toolchain_findings(profile, None) == ()

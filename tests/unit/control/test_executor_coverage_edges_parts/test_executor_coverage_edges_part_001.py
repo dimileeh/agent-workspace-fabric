@@ -609,6 +609,34 @@ async def test_post_validation_report_repairs_git_ownership_before_add(
 
 
 @pytest.mark.unit
+async def test_post_validation_report_commit_prepends_task_tag(
+    tmp_path: Path,
+) -> None:
+    """The conformance-report commit subject carries the task tag so the
+    report push still auto-links to the Jira issue."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    runner.queue_result(returncode=0)  # git add report
+    runner.queue_result(returncode=0, stdout=f"{report_path.as_posix()}\n")
+    runner.queue_result(returncode=0)  # git commit report
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._repair_agent_git_ownership = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    committed = await executor._commit_post_validation_conformance_report(
+        workspace_id="ws_post",
+        worktree_path=tmp_path / "worktree",
+        report_path=report_path,
+        validation_run_id="validation-run-1",
+        task_tag="PROJ-3",
+    )
+
+    assert committed is True
+    commit_call = next(call for call in runner.calls if "commit" in call.args)
+    subject = commit_call.args[commit_call.args.index("-m") + 1]
+    assert subject == "PROJ-3 awf: post-validation conformance report"
+
+
+@pytest.mark.unit
 async def test_post_validation_report_unstages_report_when_cached_diff_fails(
     tmp_path: Path,
 ) -> None:
@@ -1081,7 +1109,7 @@ async def test_satisfied_post_validation_conformance_report_is_committed(
         adapter=_PlanningAdapter(
             '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
         ),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -1152,7 +1180,7 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
 
     failure = await executor._run_post_validation_conformance_check(
         adapter=_PlanningAdapter(satisfied_stdout),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -1208,7 +1236,7 @@ async def test_post_validation_conformance_ignores_stale_report_without_stdout(
 
     failure = await executor._run_post_validation_conformance_check(
         adapter=_PlanningAdapter(""),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -1258,7 +1286,7 @@ async def test_post_validation_conformance_failure_counts_handoff_iterations(
             '{"status":"needs_iteration","summary":"docs still missing",'
             '"gaps":["Document the validated endpoint."]}'
         ),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -1310,7 +1338,7 @@ async def test_post_validation_conformance_rejects_committed_implementation_path
         adapter=_PlanningAdapter(
             '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
         ),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -1377,7 +1405,7 @@ async def test_post_validation_conformance_rejects_pre_dirty_committed_paths(
         adapter=_PlanningAdapter(
             '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
         ),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -1446,7 +1474,7 @@ async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
         adapter=_SamePathEditingAdapter(
             '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
         ),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",

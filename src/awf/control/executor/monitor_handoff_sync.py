@@ -20,6 +20,7 @@ from awf.common.github_client import (
     PullRequestMetadataError,
     RepoRef,
 )
+from awf.common.task_tag import title_with_task_tag
 from awf.control.executor.constants import (
     _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
     _PR_ADOPTION_SKIP_AGENT_REASON_CODE,
@@ -271,7 +272,10 @@ async def _handoff_sync_release_pr_monitor(
                 repo=repo,
                 source_branch=source_branch,
                 target_branch=target_branch,
-                title=release_pr_title(source_branch=source_branch, target_branch=target_branch),
+                title=title_with_task_tag(
+                    release_pr_title(source_branch=source_branch, target_branch=target_branch),
+                    workspace.task_tag,
+                ),
                 body=release_pr_body(source_branch=source_branch, target_branch=target_branch),
             )
     except (ReleasePrSyncError, PullRequestMetadataError) as exc:
