@@ -318,7 +318,7 @@ async def test_planning_conformance_reraises_non_timeout_agent_error(tmp_path: P
     with pytest.raises(AgentRunError, match="AGENT_CLI_FAILED"):
         await executor._run_agent_task_with_optional_planning(
             adapter=adapter,  # type: ignore[arg-type]
-            workspace=SimpleNamespace(id="ws_non_timeout", task_prompt="do it"),  # type: ignore[arg-type]
+            workspace=SimpleNamespace(id="ws_non_timeout", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
             profile=profile,
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
@@ -378,7 +378,7 @@ async def test_planning_conformance_timeout_uses_fresh_report_file(tmp_path: Pat
 
     failure = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_timeout", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_timeout", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -472,7 +472,7 @@ async def test_planning_required_reports_invalid_rendered_paths(tmp_path: Path) 
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_bad_path", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_bad_path", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -510,7 +510,7 @@ async def test_planning_required_rejects_extra_plan_phase_changes(tmp_path: Path
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_extra", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_extra", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -576,7 +576,7 @@ async def test_planning_required_allows_extra_plan_changes_when_policy_disabled(
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_plan_unenforced", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_unenforced", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -628,7 +628,7 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_compare", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_compare", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -690,7 +690,7 @@ async def test_conformance_phase_allows_side_effects_when_deviation_policy_disab
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_compare_unenforced", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_compare_unenforced", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -750,7 +750,7 @@ async def test_planning_required_allows_extra_changes_when_profile_disables_guar
 
     message = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_permissive", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_permissive", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
@@ -801,7 +801,7 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
 
     failure = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_unsat", task_prompt="do it"),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_unsat", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
         profile=profile,
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
