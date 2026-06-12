@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from awf.service.config import local_service_worker_environment_keys
+from awf.service.config import (
+    local_service_worker_environment,
+    local_service_worker_environment_keys,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -214,6 +217,106 @@ def test_x_fallback_skipped_when_worker_environment_present(tmp_path: Path) -> N
     assert "GH_TOKEN" in keys
     # The unrelated x-debug-service env key never reaches the worker container.
     assert "DEBUG_ONLY_SECRET" not in keys
+
+
+_ALIAS_COMPOSE = """\
+name: awf-local-service
+
+x-awf-service: &awf-service
+  image: awf-control-plane:local
+  environment: &awf-environment
+    AWF_SERVICE_NAME: awf
+    AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
+    GH_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
+    GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+services:
+  worker:
+    <<: *awf-service
+    command: sh -c "awf worker"
+"""
+
+
+def test_materializes_aliased_default_from_host_alias(tmp_path: Path) -> None:
+    """An aliased Compose default is materialized from the host source it reads (PR #540).
+
+    The worker container receives ``AWF_GITHUB_TOKEN`` populated from ``GH_TOKEN``
+    via ``${AWF_GITHUB_TOKEN:-${GH_TOKEN:-...}}``, even though ``AWF_GITHUB_TOKEN``
+    is absent from the pre-interpolation inputs. A ``provider: env`` lease with
+    ``ref: AWF_GITHUB_TOKEN`` provisioning satisfies must therefore see the
+    materialized value, not be dropped as a missing input.
+    """
+    compose_file = tmp_path / "local-service.yml"
+    compose_file.write_text(_ALIAS_COMPOSE)
+
+    materialized = local_service_worker_environment(
+        {"GH_TOKEN": "ghp_alias"}, compose_file=compose_file
+    )
+
+    assert materialized is not None
+    # All three GitHub aliases resolve from the single host GH_TOKEN, exactly as
+    # the worker container receives them.
+    assert materialized["AWF_GITHUB_TOKEN"] == "ghp_alias"
+    assert materialized["GH_TOKEN"] == "ghp_alias"
+    assert materialized["GITHUB_TOKEN"] == "ghp_alias"
+    # A literal value passes through; an unset optional resolves to empty string
+    # (the worker receives ``""``, which the secret-lease resolver treats as
+    # missing -- so keeping it does not weaken the signal).
+    assert materialized["AWF_SERVICE_NAME"] == "awf"
+    assert materialized["ANTHROPIC_API_KEY"] == ""
+
+
+def test_materializes_direct_value_from_merged_env(tmp_path: Path) -> None:
+    compose_file = tmp_path / "local-service.yml"
+    compose_file.write_text(_ALIAS_COMPOSE)
+
+    materialized = local_service_worker_environment(
+        {"ANTHROPIC_API_KEY": "sk-real"}, compose_file=compose_file
+    )
+
+    assert materialized is not None
+    assert materialized["ANTHROPIC_API_KEY"] == "sk-real"
+
+
+def test_materialization_keys_match_allowlist(tmp_path: Path) -> None:
+    """The materialized env exposes exactly the worker allowlist KEYS."""
+    compose_file = tmp_path / "local-service.yml"
+    compose_file.write_text(_ALIAS_COMPOSE)
+
+    materialized = local_service_worker_environment({}, compose_file=compose_file)
+    keys = local_service_worker_environment_keys(compose_file=compose_file)
+
+    assert materialized is not None
+    assert keys is not None
+    assert frozenset(materialized) == keys
+
+
+def test_materialization_returns_none_when_compose_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist.yml"
+
+    assert local_service_worker_environment({}, compose_file=missing) is None
+
+
+def test_bare_list_entry_forwards_present_host_value_and_omits_unset(tmp_path: Path) -> None:
+    """A bare ``- KEY`` list entry forwards the host value, omitting it when unset.
+
+    Compose passes a bare environment entry through from the host unchanged and
+    leaves it unset in the container when the host does not export it.
+    """
+    compose_file = tmp_path / "local-service.yml"
+    compose_file.write_text(
+        "services:\n  worker:\n    environment:\n      - GH_TOKEN\n      - GITHUB_TOKEN\n"
+    )
+
+    materialized = local_service_worker_environment(
+        {"GH_TOKEN": "ghp_host"}, compose_file=compose_file
+    )
+
+    assert materialized is not None
+    assert materialized["GH_TOKEN"] == "ghp_host"
+    # GITHUB_TOKEN is not set on the host, so the worker never receives it.
+    assert "GITHUB_TOKEN" not in materialized
 
 
 def test_real_local_service_yml_contains_expected_keys() -> None:

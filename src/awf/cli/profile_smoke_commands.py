@@ -74,7 +74,7 @@ def profile_doctor(
     from awf.common.git_remote import detect_repo_url_from_checkout
     from awf.service.config import (
         local_service_environ,
-        local_service_worker_environment_keys,
+        local_service_worker_environment,
         resolve_service_settings,
     )
     from awf.service.environment import (
@@ -103,23 +103,28 @@ def profile_doctor(
     # Probe secret leases against the SAME env the worker's resolver actually
     # sees. The worker constructs its LocalSecretLeaseMountResolver with
     # host_env=os.environ from INSIDE the service container, where os.environ is
-    # only what Docker Compose forwarded -- the KEYS on the worker service's
+    # the MATERIALIZED worker environment: every KEY on the worker service's
     # environment: block in docker/compose/local-service.yml (the shared
-    # &awf-environment anchor), each interpolated from .env/host. Restrict the
-    # merged view to that allowlist so a provider: env lease satisfiable only by a
-    # host-only shell export (whose NAME is not on the worker's environment:
-    # block) is surfaced as a finding -- matching provisioning's
-    # SECRET_LEASE_SOURCE_MISSING -- instead of falsely passing. A var that IS on
-    # the allowlist but lives only in the operator shell still passes (Compose
-    # forwards it), preserving the false-negative fix from PR #531. When the
-    # compose asset cannot be located/parsed the allowlist is None and we fall
-    # back to the unrestricted merged view (legacy behavior; never over-fail).
-    allowlist = local_service_worker_environment_keys()
-    lease_host_env = (
-        dict(merged_env)
-        if allowlist is None
-        else {key: value for key, value in merged_env.items() if key in allowlist}
-    )
+    # &awf-environment anchor), each carrying the VALUE Docker Compose
+    # interpolated from .env/host. Model that materialized view -- not a filter of
+    # the pre-interpolation merged inputs -- so an aliased default such as
+    # AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}} (a key
+    # whose NAME is absent from the host shell yet which the worker still receives,
+    # populated from GH_TOKEN) is present for a provider: env lease with
+    # ref: AWF_GITHUB_TOKEN -- matching provisioning -- instead of being falsely
+    # surfaced as SECRET_LEASE_SOURCE_MISSING. A host-only shell export whose NAME
+    # is NOT on the worker's environment: block is dropped (the worker never
+    # receives it), so a lease satisfiable only by it is still surfaced as a
+    # finding. A var that IS on the block but lives only in the operator shell
+    # still passes (Compose forwards it via ${VAR:-...}), preserving the
+    # false-negative fix from PR #531. Empty-resolved keys are kept but treated as
+    # missing by the resolver (matching the worker, which receives them as ""), so
+    # materializing them does not weaken the signal. When the compose asset cannot
+    # be located/parsed the materialized view is None and we fall back to the
+    # unrestricted merged view (legacy behavior; never over-fail).
+    lease_host_env = local_service_worker_environment(merged_env)
+    if lease_host_env is None:
+        lease_host_env = dict(merged_env)
     # The worker mutates os.environ via _apply_service_git_environment(git_env) --
     # os.environ.update(git_env) -- BEFORE constructing its
     # LocalSecretLeaseMountResolver(host_env=os.environ). So its real lease env
@@ -127,19 +132,19 @@ def profile_doctor(
     # just the GH_TOKEN/GITHUB_TOKEN aliases: HOME (= host_home), GIT_CONFIG_GLOBAL,
     # GIT_SSH_COMMAND, the numbered GIT_CONFIG_* safe.directory entries, SSH_AUTH_SOCK,
     # and the Bitbucket credential-helper config -- none of which live on the Compose
-    # environment: allowlist. Mirror the SAME git_env (computed from the worker's
-    # host_home + service github_token) and let it OVERRIDE the allowlisted view,
+    # environment: block. Mirror the SAME git_env (computed from the worker's
+    # host_home + service github_token) and let it OVERRIDE the materialized view,
     # exactly as os.environ.update does, so a provider: env lease satisfiable only by
     # a worker-injected source (e.g. HOME) the real worker context can satisfy is not
     # falsely surfaced as SECRET_LEASE_SOURCE_MISSING. This also forwards a github
     # token that resolves only through service settings (not the env file), since
     # git_env carries GH_TOKEN/GITHUB_TOKEN when settings.github_token is set.
-    # Feed _service_git_environment the allowlisted lease_host_env as its source_env
+    # Feed _service_git_environment the materialized lease_host_env as its source_env
     # (NOT the caller os.environ it defaults to): its Bitbucket/SSH wiring inspects
     # that env for credentials, and the real worker reads its Compose-forwarded
-    # container env -- modelled by the allowlisted view -- there. Bitbucket creds
+    # container env -- modelled by the materialized view -- there. Bitbucket creds
     # present only in docker/compose/.env (BITBUCKET_API_TOKEN/BITBUCKET_EMAIL are on
-    # the worker environment: allowlist) make the worker add GIT_TERMINAL_PROMPT and
+    # the worker environment: block) make the worker add GIT_TERMINAL_PROMPT and
     # the bitbucket GIT_CONFIG_* helper; passing the caller os.environ would omit
     # those keys (the operator shell lacks the .env-only creds) and still surface
     # SECRET_LEASE_SOURCE_MISSING for a lease the worker-injected keys satisfy.
