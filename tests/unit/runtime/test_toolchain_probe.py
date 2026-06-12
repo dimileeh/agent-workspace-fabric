@@ -189,6 +189,13 @@ class TestParseJavaVersions:
 
         assert _parse_java_versions(output) == {"17", "21"}
 
+    def test_parses_legacy_dotted_jvm_path(self) -> None:
+        # RHEL-style legacy JDK 8 directories embed ``1.8.0`` in the path; the
+        # path regex must capture the dotted version so it normalizes to ``8``.
+        output = "/usr/lib/jvm/java-1.8.0-openjdk-amd64/bin/java\n"
+
+        assert _parse_java_versions(output) == {"8"}
+
     def test_parses_quoted_java_version_line(self) -> None:
         output = 'openjdk version "17.0.9" 2023-10-17\n'
 

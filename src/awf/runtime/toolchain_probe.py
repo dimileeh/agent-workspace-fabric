@@ -79,8 +79,11 @@ _JAVA_RELEASE_VERSION_RE = re.compile(r'JAVA_VERSION="?([0-9][0-9._]*)"?')
 _JAVA_QUOTED_VERSION_RE = re.compile(r'version "([0-9][0-9._]*)"')
 # JDK major embedded in a jvm directory / alternatives path, e.g.
 # ``/usr/lib/jvm/java-17-openjdk-amd64/bin/java`` or ``temurin-21-jdk``.
+# Capture dotted/underscored versions too so legacy RHEL-style paths like
+# ``java-1.8.0-openjdk-amd64`` yield ``1.8.0`` (normalized to ``8``) rather
+# than a bare ``1`` that cannot be resolved to its real major.
 _JAVA_PATH_MAJOR_RE = re.compile(
-    r"(?:java|jdk|jre|openjdk|temurin|zulu|corretto|graalvm|semeru)-(\d+)"
+    r"(?:java|jdk|jre|openjdk|temurin|zulu|corretto|graalvm|semeru)-([0-9][0-9._]*)"
 )
 _LEADING_INT_RE = re.compile(r"\d+")
 
