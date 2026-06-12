@@ -71,7 +71,7 @@ def profile_doctor(
     """
     from awf.common.git_remote import detect_repo_url_from_checkout
     from awf.service.config import local_service_environ, resolve_service_settings
-    from awf.service.environment import cleared_docker_cli_client_keys
+    from awf.service.environment import cleared_docker_cli_client_keys, non_empty_env_value
     from awf.service.profile_doctor import collect_profile_doctor_report
 
     resolved = repo.expanduser().resolve()
@@ -120,7 +120,20 @@ def profile_doctor(
     docker_environ = {
         key: value for key, value in host_env.items() if key.upper() not in scrubbed_keys
     }
-    docker_environ["DOCKER_HOST"] = settings.docker_host
+    # Pin DOCKER_HOST to the daemon the worker actually materialises. The worker
+    # reads its daemon from AWF_DOCKER_HOST in the resolved service environment, so
+    # prefer that key from the merged Compose view (host_env, sourced via
+    # local_service_environ exactly like the lease checks above) and fall back to
+    # settings.docker_host. resolve_service_settings()'s Settings() only reads an
+    # AWF_-prefixed, cwd-relative .env, so an AWF_DOCKER_HOST present only in the
+    # Compose env file (with the doctor invoked from another cwd) would otherwise
+    # leave the probe on the default socket while the worker targets the env-file
+    # daemon, so preflight would not match provisioning. A bare, un-namespaced
+    # DOCKER_HOST is intentionally NOT honoured here -- it is the stray caller value
+    # scrubbed/overridden above so it cannot redirect the probe.
+    docker_environ["DOCKER_HOST"] = (
+        non_empty_env_value(host_env, "AWF_DOCKER_HOST") or settings.docker_host
+    )
     report = collect_profile_doctor_report(
         resolved,
         repo_url=detect_repo_url_from_checkout(resolved),

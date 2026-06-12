@@ -549,6 +549,58 @@ def test_doctor_scrubs_cleared_docker_client_keys_from_probe(
     assert docker_environ["DOCKER_CONFIG"] == "/svc/.docker"
 
 
+def test_doctor_prefers_compose_env_docker_host_over_bare_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The probe must target the daemon the merged Compose env names.
+
+    ``settings.docker_host`` comes from a bare ``Settings()`` that only reads an
+    ``AWF_``-prefixed, cwd-relative ``.env``, while the lease context (``host_env``)
+    comes from ``local_service_environ()`` which resolves the Compose ``.env`` the
+    worker actually receives. When ``AWF_DOCKER_HOST`` lives only in that Compose
+    env file, the merged view carries the worker's real daemon while the bare
+    settings value stays on the default socket. The probe must follow the merged
+    view's ``AWF_DOCKER_HOST`` so preflight matches provisioning.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # AWF_DOCKER_HOST is present only in the merged Compose env, not in the bare
+    # settings value (which stays on the default socket).
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"AWF_DOCKER_HOST": "tcp://compose-env:2375"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(tmp_path),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    docker_environ = captured["docker_environ"]
+    assert isinstance(docker_environ, dict)
+    # The merged Compose env's AWF_DOCKER_HOST wins over the bare settings socket.
+    assert docker_environ["DOCKER_HOST"] == "tcp://compose-env:2375"
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0
