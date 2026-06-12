@@ -418,38 +418,60 @@ def _reconcile_comment_keyed_outdated_verdicts(
             state.mark_addressed(thread.thread_id, "needs_human")
             continue
         comment_ids = sorted(_thread_identifier_set(thread) - {thread.thread_id})
-        for comment_id in comment_ids:
-            verdict = state.threads_addressed_ids.get(comment_id)
-            if verdict not in _OUTDATED_RESOLVABLE_THREAD_VERDICTS:
-                continue
-            # Post-fix reviewer activity guard (#548 / PRRT_kwDOSJAM6s6JHeA2),
-            # mirroring the branch-evidence seed above. ``_mark_review_thread_addressed``
-            # snapshots the thread's CURRENT body, so a reviewer reply that landed
-            # AFTER the comment-path fix would be baked into the snapshot and
-            # ``_review_thread_needs_attention`` would see a matching hash and resolve
-            # over it — unlike the thread-keyed path, whose snapshot predates the reply
-            # and blocks. The comment-path verdict stored no thread body-hash at fix
-            # time, so detect post-fix activity by timestamp: when a reviewer comment
-            # is newer than the addressed comment's CREATION, seed ``needs_human`` (which
-            # the resolve loop skips and ``decide`` treats as a merge blocker) instead of
-            # promoting the resolvable verdict. The baseline is the addressed comment's
-            # ``created_at``, NOT ``max(created_at, updated_at)``: an EDIT to the addressed
-            # comment itself advances its ``updated_at`` and is also the newest reviewer
-            # activity, so a ``updated_at`` baseline would move in lockstep and never fire
-            # (PRRT_kwDOSJAM6s6JH9Zx). When timestamps are unavailable we cannot prove
-            # ordering, so keep the promote-baseline (the common no-activity case still
-            # resolves and unblocks the PR).
-            addressed_at = _addressed_comment_created_at(thread, comment_id)
-            latest_comment_at = _latest_reviewer_comment_at(thread)
-            if (
-                addressed_at is not None
-                and latest_comment_at is not None
-                and latest_comment_at > addressed_at
-            ):
-                state.mark_addressed(thread.thread_id, "needs_human")
-            else:
-                _mark_review_thread_addressed(state, thread, verdict)
-            break
+        resolvable_comment_ids = [
+            comment_id
+            for comment_id in comment_ids
+            if state.threads_addressed_ids.get(comment_id) in _OUTDATED_RESOLVABLE_THREAD_VERDICTS
+        ]
+        if not resolvable_comment_ids:
+            continue
+        # Post-fix reviewer activity guard (#548 / PRRT_kwDOSJAM6s6JHeA2),
+        # mirroring the branch-evidence seed above. ``_mark_review_thread_addressed``
+        # snapshots the thread's CURRENT body, so a reviewer reply that landed
+        # AFTER the comment-path fix would be baked into the snapshot and
+        # ``_review_thread_needs_attention`` would see a matching hash and resolve
+        # over it — unlike the thread-keyed path, whose snapshot predates the reply
+        # and blocks. The comment-path verdict stored no thread body-hash at fix
+        # time, so detect post-fix activity by timestamp: when a reviewer comment
+        # is newer than the addressed comment's CREATION, seed ``needs_human`` (which
+        # the resolve loop skips and ``decide`` treats as a merge blocker) instead of
+        # promoting the resolvable verdict.
+        #
+        # The baseline is the NEWEST handled comment's ``created_at``, across ALL of
+        # the thread's resolvable-verdict comments — not just the first sorted one
+        # (#548 / PRRT_kwDOSJAM6s6JISCM). A thread can hold several comment-keyed
+        # resolvable verdicts; if a sibling comment was ALSO already handled but was
+        # created later than the promoted one, anchoring on only the promoted comment
+        # would make that handled sibling's own ``created_at`` satisfy
+        # ``latest_comment_at > addressed_at`` and falsely seed ``needs_human``,
+        # leaving a fully-addressed thread open and blocking auto-merge. Taking the
+        # max over every handled comment treats a handled sibling as part of the fix,
+        # not fresh feedback, while a genuinely untriaged reply newer than them all
+        # still trips the guard.
+        #
+        # Use ``created_at``, NOT ``max(created_at, updated_at)``: an EDIT to a handled
+        # comment advances its ``updated_at`` and is also the newest reviewer activity,
+        # so a ``updated_at`` baseline would move in lockstep and never fire
+        # (PRRT_kwDOSJAM6s6JH9Zx). When timestamps are unavailable we cannot prove
+        # ordering, so keep the promote-baseline (the common no-activity case still
+        # resolves and unblocks the PR).
+        addressed_ats = [
+            created_at
+            for comment_id in resolvable_comment_ids
+            if (created_at := _addressed_comment_created_at(thread, comment_id)) is not None
+        ]
+        addressed_at = max(addressed_ats, default=None)
+        latest_comment_at = _latest_reviewer_comment_at(thread)
+        if (
+            addressed_at is not None
+            and latest_comment_at is not None
+            and latest_comment_at > addressed_at
+        ):
+            state.mark_addressed(thread.thread_id, "needs_human")
+        else:
+            _mark_review_thread_addressed(
+                state, thread, state.threads_addressed_ids[resolvable_comment_ids[0]]
+            )
 
 
 async def _resolve_addressed_outdated_threads(

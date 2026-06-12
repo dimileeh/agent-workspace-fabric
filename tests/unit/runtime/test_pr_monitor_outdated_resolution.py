@@ -1703,6 +1703,166 @@ async def test_comment_keyed_pre_fix_reply_still_resolves(
     assert cmd.calls == []
 
 
+def _outdated_thread_with_two_handled_comments(
+    tid: str,
+    *,
+    first_comment_id: str,
+    first_at: datetime,
+    second_comment_id: str,
+    second_at: datetime,
+) -> ReviewThread:
+    """An outdated thread whose head comment AND a later reply were BOTH addressed
+    comment-by-comment (#548 / PRRT_kwDOSJAM6s6JISCM).
+
+    Both comments carry resolvable comment-keyed verdicts; the reply was created
+    after the head comment. The post-fix activity guard must anchor on the NEWEST
+    handled comment so an already-handled sibling is not mistaken for fresh
+    feedback (which would falsely keep a fully-addressed thread open).
+    """
+    return ReviewThread(
+        thread_id=tid,
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id=first_comment_id,
+                body="please fix this finding",
+                author="greptile",
+                created_at=first_at,
+                updated_at=first_at,
+            ),
+            ReviewThreadComment(
+                comment_id=second_comment_id,
+                body="and this related one too",
+                author="greptile",
+                created_at=second_at,
+                updated_at=second_at,
+            ),
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_comment_keyed_later_handled_sibling_still_resolves(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """(PRRT_kwDOSJAM6s6JISCM) A thread with multiple comment-keyed resolvable verdicts
+    must still resolve when a HANDLED sibling was created later than the promoted one.
+
+    The reconcile picks the first sorted resolvable comment to promote, but the
+    post-fix activity guard must compare the newest reviewer activity against the
+    NEWEST handled comment — not just the promoted one. Otherwise an already-handled
+    later sibling (whose ``created_at`` is the latest reviewer activity) would satisfy
+    ``latest_comment_at > addressed_at`` and falsely seed ``needs_human``, leaving a
+    fully-addressed thread open and blocking auto-merge."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    # "a" sorts first but is the OLDER comment; "b" was handled and created later.
+    thread = _outdated_thread_with_two_handled_comments(
+        "PRRT_two_handled",
+        first_comment_id="a",
+        first_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+        second_comment_id="b",
+        second_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+    )
+    state.mark_addressed("a", "fix_committed")
+    state.mark_addressed("b", "fix_committed")
+
+    await _call_resolve(
+        runner,
+        workspace_id=workspace_id,
+        status=_status_with_outdated(thread),
+        state=state,
+    )
+
+    # Both siblings are handled — the thread is fully addressed and resolves.
+    assert gh.resolved == ["PRRT_two_handled"]
+    assert state.threads_addressed_ids["PRRT_two_handled"] == "fix_committed"
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_comment_keyed_untriaged_reply_after_handled_sibling_blocks(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A genuinely untriaged reply newer than every handled comment still blocks.
+
+    Anchoring the guard on the newest HANDLED comment must not mask a fresh reviewer
+    reply that carries no verdict and postdates all handled siblings — that feedback
+    is still surfaced via ``needs_human``."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    gh = _RecordingGitHub(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    state = MonitorState()
+    thread = ReviewThread(
+        thread_id="PRRT_two_plus_reply",
+        path="src/anchor.py",
+        line=7,
+        body_excerpt="please fix this finding",
+        author="greptile",
+        is_resolved=False,
+        is_outdated=True,
+        comments=(
+            ReviewThreadComment(
+                comment_id="a",
+                body="please fix this finding",
+                author="greptile",
+                created_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+                updated_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            ),
+            ReviewThreadComment(
+                comment_id="b",
+                body="and this related one too",
+                author="greptile",
+                created_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+                updated_at=datetime(2026, 6, 10, 9, 30, tzinfo=UTC),
+            ),
+            ReviewThreadComment(
+                comment_id="reply-99",
+                body="actually this is still broken",
+                author="greptile",
+                created_at=datetime(2026, 6, 10, 10, 0, tzinfo=UTC),
+                updated_at=datetime(2026, 6, 10, 10, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    state.mark_addressed("a", "fix_committed")
+    state.mark_addressed("b", "fix_committed")
+
+    status = _status_with_outdated(thread)
+    await _call_resolve(runner, workspace_id=workspace_id, status=status, state=state)
+
+    assert gh.attempts == []
+    assert state.threads_addressed_ids["PRRT_two_plus_reply"] == "needs_human"
+    assert cmd.calls == []
+    action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
+    assert isinstance(action, NotifyHuman)
+
+
 def _outdated_thread_with_edited_comment(
     tid: str,
     *,
