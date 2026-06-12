@@ -17,6 +17,7 @@ import asyncio
 import json
 import re
 import time
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from awf.common.commands import (
     CommandResult,
 )
 from awf.common.compose_exec import (
+    ComposeExecCleanupError,
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
     cleanup_compose_exec_invocation_after_cancellation,
@@ -133,6 +135,11 @@ SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED = "SETUP_DEPENDENCY_NETWORK_RETRY_EXHAU
 SETUP_DEPENDENCY_NETWORK_METADATA_KEY = "setup_dependency_network"
 DB_GENERATED_SETUP_PHASE = "db_generated_setup"
 DB_REFRESH_PHASE = "db_refresh"
+# Wall timeout for the non-blocking provision-time toolchain discovery exec. A
+# wedged ``docker compose exec`` must never stall the execute()/monitor handoff
+# that runs the probe, so the exec is bounded and the tracked process tree torn
+# down on timeout (the failure stays silent — see ``probe_runtime_toolchains``).
+_TOOLCHAIN_PROBE_TIMEOUT_SECONDS = 30.0
 _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT = 1000
 _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_SCAN_LIMIT = 4 * _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT
 _SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT = 500
@@ -338,7 +345,6 @@ class ValidationRunner:
         pure ``runtime_toolchain_findings`` helper over the discovered versions.
         Skips entirely (zero exec) when no toolchains are declared.
         """
-        del workspace_id
         if not profile.runtime.toolchains:
             return ()
 
@@ -350,7 +356,38 @@ class ValidationRunner:
                 source="toolchain_probe",
                 label="toolchain_probe",
             )
-            result = await self._runner.run(invocation.args)
+            try:
+                result = await asyncio.wait_for(
+                    self._runner.run(invocation.args),
+                    timeout=_TOOLCHAIN_PROBE_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                # The default runner waits on ``proc.communicate()`` with no wall
+                # timeout, so a wedged ``docker compose exec`` would otherwise stall
+                # this non-blocking probe (and the handoff that runs it) forever.
+                # Tear the tracked in-container process tree down, then report a
+                # probe-infra failure (non-zero) so the helper stays silent for this
+                # language instead of warning falsely.
+                # Cleanup already logs any failure; the probe must stay strictly
+                # non-blocking, so swallow a cleanup error rather than propagate.
+                with suppress(ComposeExecCleanupError):
+                    await cleanup_compose_exec_invocation(
+                        self._runner,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
+                return ProbeExecResult(
+                    returncode=124,
+                    stdout="",
+                    stderr=f"toolchain probe timed out after {_TOOLCHAIN_PROBE_TIMEOUT_SECONDS}s",
+                )
+            except asyncio.CancelledError:
+                await cleanup_compose_exec_invocation_after_cancellation(
+                    self._runner,
+                    invocation,
+                    workspace_id=workspace_id,
+                )
+                raise
             return ProbeExecResult(
                 returncode=result.returncode,
                 stdout=result.stdout,
