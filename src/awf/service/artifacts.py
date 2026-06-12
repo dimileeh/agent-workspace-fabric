@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,12 +19,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceArtifactListResponse, WorkspaceArtifactResponse
 from awf.common.config import get_settings
+from awf.common.logging import get_logger
 from awf.db.repositories import WorkspaceRepository
 from awf.service.bounded_list import BoundedListPage, paginate_bounded_iterable
+
+_log = get_logger(__name__)
 
 DEFAULT_ARTIFACT_LIST_LIMIT = 50
 MAX_ARTIFACT_LIST_LIMIT = 500
 MAX_ARTIFACT_CONTENT_BYTES = 1_048_576
+
+# Stable filenames for the per-workspace plan + conformance report deposited
+# into the served artifact dir. The console labels artifacts by these names;
+# ``artifact_kind`` stays suffix-based (``md`` / ``json``).
+DEPOSITED_PLAN_NAME = "plan.md"
+DEPOSITED_CONFORMANCE_NAME = "conformance.json"
 
 
 class ArtifactPathError(ValueError):
@@ -112,6 +122,60 @@ def _workspace_artifact_dir(
 ) -> Path:
     root = Path(work_dir) if work_dir is not None else Path(get_settings().work_dir)
     return workspace_artifact_dir(root, workspace_id)
+
+
+def deposit_workspace_planning_artifacts(
+    *,
+    work_dir: str | Path,
+    workspace_id: str,
+    worktree_path: Path,
+    plan_path: Path,
+    report_path: Path,
+) -> None:
+    """Best-effort copy of the worktree plan + conformance report into the
+    served artifact dir under stable names.
+
+    ``plan_path`` and ``report_path`` are worktree-relative. The served artifact
+    dir (``work_dir/artifacts/{workspace_id}``) is a sibling of the worktree, so
+    deposits made here survive successful-workspace teardown. Each file is
+    copied independently (either may be absent) and overwritten on re-run.
+    A copy failure is logged and skipped — depositing an inspectable artifact
+    must never fail the workspace.
+    """
+    artifact_dir = workspace_artifact_dir(work_dir, workspace_id)
+    for source, dest_name in (
+        (worktree_path / plan_path, DEPOSITED_PLAN_NAME),
+        (worktree_path / report_path, DEPOSITED_CONFORMANCE_NAME),
+    ):
+        _deposit_one_planning_artifact(
+            artifact_dir=artifact_dir,
+            workspace_id=workspace_id,
+            source=source,
+            dest_name=dest_name,
+        )
+
+
+def _deposit_one_planning_artifact(
+    *,
+    artifact_dir: Path,
+    workspace_id: str,
+    source: Path,
+    dest_name: str,
+) -> None:
+    try:
+        if not source.is_file():
+            return
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, artifact_dir / dest_name)
+    except OSError as exc:
+        _log.warning(
+            "service.planning_artifact_deposit_failed",
+            workspace_id=workspace_id,
+            source=str(source),
+            dest_name=dest_name,
+            error_type=type(exc).__name__,
+            errno=exc.errno,
+        )
 
 
 def list_artifacts(workspace_id: str, artifact_dir: Path) -> list[ArtifactMetadata]:

@@ -5,10 +5,12 @@ Activity,
 AlertCircle,
 Ban,
 CheckCircle2,
+ClipboardCheck,
 FileText,
 Loader2,
 Radio,
 RefreshCw,
+ScrollText,
 X
 } from "lucide-react";
 import {
@@ -18,6 +20,14 @@ useState
 } from "react";
 
 import { formatAgentEffort,formatAgentLabel } from "@/lib/agent-format";
+import {
+artifactDownloadPath,
+CONFORMANCE_ARTIFACT_NAME,
+formatConformanceJson,
+hasConformanceArtifact,
+hasPlanArtifact,
+PLAN_ARTIFACT_NAME
+} from "@/lib/artifact-format";
 import { summarizeVisibleCoordinationWarnings } from "@/lib/coordination-format";
 import {
 compactId,
@@ -43,6 +53,8 @@ MergeQueueItem,
 PricingMetadata,
 ProviderReadinessPreflight,
 Workspace,
+WorkspaceArtifact,
+WorkspaceArtifactList,
 WorkspaceOperatorAction,
 WorkspaceOverview,
 WorkspaceStatus
@@ -53,9 +65,11 @@ import {
 Badge,
 ExternalAnchor,
 Fact,
+MutedLine,
 OperatorActionState,
 Panel,
 RetryActionState,
+apiGet,
 formatPrLinkLabel,
 formatTokenCount
 } from "./console-dashboard-shared";
@@ -135,6 +149,7 @@ export function TaskDetailsModal({
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
           <CoordinationWarningBlock warnings={workspace.coordination_warnings} status={workspace.status} />
+          <TaskArtifactsSection workspaceId={workspace.workspace_id} />
           <section className="grid gap-2 rounded-md border border-line bg-surface-2 p-3">
             <div className="text-xs font-semibold text-fg-muted">Prompt sent to AWF</div>
             <TaskPromptBody prompt={workspace.task_prompt} />
@@ -208,6 +223,131 @@ export function TaskPromptBody({ prompt }: { prompt: string }) {
         );
       })}
     </div>
+  );
+}
+
+type TaskArtifactView = "plan" | "validation";
+
+export function TaskArtifactsSection({ workspaceId }: { workspaceId: string }) {
+  const [items, setItems] = useState<WorkspaceArtifact[]>([]);
+  const [view, setView] = useState<TaskArtifactView | null>(null);
+  const [content, setContent] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const result = await apiGet<WorkspaceArtifactList>(
+        `/api/awf/workspaces/${workspaceId}/artifacts`,
+      );
+      if (cancelled) {
+        return;
+      }
+      if (!result.ok) {
+        setError(result.message);
+        return;
+      }
+      setError(null);
+      setItems(result.data.items);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+
+  const showPlan = hasPlanArtifact(items);
+  const showValidation = hasConformanceArtifact(items);
+
+  // Conditional on presence — render nothing (no empty buttons) until at least
+  // one of the named artifacts has been deposited for this workspace.
+  if (!showPlan && !showValidation) {
+    return null;
+  }
+
+  const openArtifact = async (target: TaskArtifactView) => {
+    const name = target === "plan" ? PLAN_ARTIFACT_NAME : CONFORMANCE_ARTIFACT_NAME;
+    setView(target);
+    setLoading(true);
+    setError(null);
+    setContent("");
+    try {
+      const response = await fetch(artifactDownloadPath(workspaceId, name), { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Request failed with HTTP ${response.status}.`);
+      }
+      const text = await response.text();
+      setContent(target === "validation" ? formatConformanceJson(text) : text);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to load artifact.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const buttonClass = (active: boolean) =>
+    `inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs transition ${
+      active
+        ? "border-line-strong bg-surface-2 text-fg-strong"
+        : "border-line bg-surface text-fg hover:bg-surface-2"
+    }`;
+
+  return (
+    <section
+      data-testid="task-artifacts"
+      className="grid gap-2 rounded-md border border-line bg-surface-2 p-3"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-fg-muted">Artifacts</div>
+        <div className="flex items-center gap-2">
+          {showPlan ? (
+            <button
+              type="button"
+              onClick={() => void openArtifact("plan")}
+              aria-pressed={view === "plan"}
+              className={buttonClass(view === "plan")}
+            >
+              <ScrollText size={13} aria-hidden />
+              Plan
+            </button>
+          ) : null}
+          {showValidation ? (
+            <button
+              type="button"
+              onClick={() => void openArtifact("validation")}
+              aria-pressed={view === "validation"}
+              className={buttonClass(view === "validation")}
+            >
+              <ClipboardCheck size={13} aria-hidden />
+              Validation
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {error ? (
+        <div className="rounded-md border border-danger-border bg-danger-soft px-3 py-2 text-xs text-danger-text">
+          {error}
+        </div>
+      ) : null}
+      {view ? (
+        <div data-testid="task-artifact-content" className="rounded-md border border-line bg-surface p-3">
+          {loading ? (
+            <div className="flex items-center gap-2 text-xs text-fg-muted">
+              <Loader2 size={13} className="animate-spin" aria-hidden />
+              Loading {view === "plan" ? "plan" : "validation report"}…
+            </div>
+          ) : view === "plan" ? (
+            <TaskPromptBody prompt={content} />
+          ) : content ? (
+            <pre className="mono max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--terminal)] p-3 text-[11px] leading-relaxed text-[var(--terminal-foreground)]">
+              {content}
+            </pre>
+          ) : (
+            <MutedLine>No validation report content.</MutedLine>
+          )}
+        </div>
+      ) : null}
+    </section>
   );
 }
 

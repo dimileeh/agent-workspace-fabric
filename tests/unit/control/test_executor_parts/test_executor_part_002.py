@@ -771,6 +771,7 @@ class TestHappyPathPart001:
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready_workspace(
             factory,
@@ -785,6 +786,17 @@ class TestHappyPathPart001:
                 },
                 "phases": {"validate": ["pytest -q"]},
             },
+        )
+
+        # The planning + conformance adapters are faked, so seed the worktree
+        # plan + conformance report files the real agent would write; the
+        # deposit step surfaces them into the served artifact dir.
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- implement foo\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "satisfied", "summary": "plan achieved", "gaps": []}',
+            encoding="utf-8",
         )
 
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
@@ -840,6 +852,13 @@ class TestHappyPathPart001:
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.subphase == "validation"
             assert ws.last_activity_at is not None
+
+        # The plan + conformance report were deposited into the served artifact
+        # dir (a sibling of the worktree) before teardown, so the console can
+        # surface them by stable name.
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").is_file()
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_runs_validation_then_conformance_only_check(
@@ -1250,6 +1269,7 @@ class TestHappyPathPart001:
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
     ) -> None:
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1263,6 +1283,16 @@ class TestHappyPathPart001:
                 },
                 "phases": {"validate": ["pytest -q"]},
             },
+        )
+        # Seed the worktree plan + (unsatisfied) conformance report the real
+        # agent would write; the deposit must surface them even on the
+        # preserved-FAILED stop path so the console stays uniform.
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "needs_iteration", "gaps": ["incomplete"]}',
+            encoding="utf-8",
         )
         operation_id = "op_post_validation_conformance_gap"
         await _insert_validate_handoff_recovery_operation(
@@ -1385,6 +1415,14 @@ class TestHappyPathPart001:
         assert result["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
         assert result["requested_tier"] == 1
         assert extra_validate_recovery_ops == 0
+
+        # Preserved FAILED workspace still surfaces its plan + (unsatisfied)
+        # conformance report in the served artifact dir.
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").is_file()
+        assert (served_dir / "conformance.json").read_text(
+            encoding="utf-8"
+        ) == '{"status": "needs_iteration", "gaps": ["incomplete"]}'
 
     @pytest.mark.unit
     async def test_planning_validation_handoff_cleanup_failure_finishes_validate_operation(

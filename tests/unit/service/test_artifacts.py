@@ -13,6 +13,8 @@ from awf.common.config import get_settings
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.artifacts import (
+    DEPOSITED_CONFORMANCE_NAME,
+    DEPOSITED_PLAN_NAME,
     MAX_ARTIFACT_CONTENT_BYTES,
     ArtifactNotFoundError,
     ArtifactOversizedError,
@@ -21,8 +23,10 @@ from awf.service.artifacts import (
     _artifact_kind,
     _is_symlink,
     _resolve_artifact_root,
+    _workspace_artifact_dir,
     artifact_id,
     artifact_kind,
+    deposit_workspace_planning_artifacts,
     get_downloadable_artifact,
     get_workspace_artifact_content,
     list_artifacts,
@@ -987,3 +991,204 @@ class TestArtifactService:
                 relative_path="report.txt",
                 limit_bytes=1024,
             )
+
+
+class TestDepositWorkspacePlanningArtifacts:
+    """Deposit of the worktree plan + conformance report into the served dir."""
+
+    @staticmethod
+    def _seed_worktree(
+        tmp_path: Path,
+        *,
+        plan_text: str | None = None,
+        report_text: str | None = None,
+    ) -> tuple[Path, Path, Path]:
+        worktree = tmp_path / "work" / "worktrees" / "ws_dep"
+        plan_path = Path("docs/awf-plans/ws_dep.md")
+        report_path = Path("docs/awf-plans/ws_dep.conformance.json")
+        if plan_text is not None or report_text is not None:
+            (worktree / "docs" / "awf-plans").mkdir(parents=True, exist_ok=True)
+        if plan_text is not None:
+            (worktree / plan_path).write_text(plan_text, encoding="utf-8")
+        if report_text is not None:
+            (worktree / report_path).write_text(report_text, encoding="utf-8")
+        return worktree, plan_path, report_path
+
+    @pytest.mark.unit
+    def test_deposits_both_plan_and_conformance(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        plan_text = "# Plan\n\n- step one\n"
+        report_text = '{"satisfied": true, "summary": "done"}'
+        worktree, plan_path, report_path = self._seed_worktree(
+            tmp_path, plan_text=plan_text, report_text=report_text
+        )
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert (artifact_dir / DEPOSITED_PLAN_NAME).read_text(encoding="utf-8") == plan_text
+        assert (artifact_dir / DEPOSITED_CONFORMANCE_NAME).read_text(
+            encoding="utf-8"
+        ) == report_text
+
+    @pytest.mark.unit
+    def test_idempotent_overwrite_on_rerun(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(
+            tmp_path, plan_text="first", report_text="{}"
+        )
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+        (worktree / plan_path).write_text("second", encoding="utf-8")
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert (artifact_dir / DEPOSITED_PLAN_NAME).read_text(encoding="utf-8") == "second"
+
+    @pytest.mark.unit
+    def test_plan_only_present_deposits_only_plan(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path, plan_text="# Plan")
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert (artifact_dir / DEPOSITED_PLAN_NAME).is_file()
+        assert not (artifact_dir / DEPOSITED_CONFORMANCE_NAME).exists()
+
+    @pytest.mark.unit
+    def test_report_only_present_deposits_only_conformance(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path, report_text="{}")
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert (artifact_dir / DEPOSITED_CONFORMANCE_NAME).is_file()
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+
+    @pytest.mark.unit
+    def test_no_deposit_and_no_dir_when_sources_absent(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        assert not workspace_artifact_dir(work_dir, "ws_dep").exists()
+
+    @pytest.mark.unit
+    def test_unsatisfied_conformance_still_deposits_report(self, tmp_path: Path) -> None:
+        work_dir = tmp_path / "work"
+        report_text = '{"satisfied": false, "gaps": ["missing tests"]}'
+        worktree, plan_path, report_path = self._seed_worktree(tmp_path, report_text=report_text)
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert (artifact_dir / DEPOSITED_CONFORMANCE_NAME).read_text(
+            encoding="utf-8"
+        ) == report_text
+
+    @pytest.mark.unit
+    def test_deposited_artifacts_survive_worktree_teardown(self, tmp_path: Path) -> None:
+        import shutil as shutil_module
+
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(
+            tmp_path, plan_text="# Plan", report_text="{}"
+        )
+
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+        # Successful-workspace teardown removes the worktree; the served
+        # artifact dir is a sibling, so the deposited copies must survive.
+        shutil_module.rmtree(worktree)
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert (artifact_dir / DEPOSITED_PLAN_NAME).is_file()
+        assert (artifact_dir / DEPOSITED_CONFORMANCE_NAME).is_file()
+
+    @pytest.mark.unit
+    def test_copy_failure_is_non_fatal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        work_dir = tmp_path / "work"
+        worktree, plan_path, report_path = self._seed_worktree(
+            tmp_path, plan_text="# Plan", report_text="{}"
+        )
+
+        def boom(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(artifacts_module.shutil, "copyfile", boom)
+
+        # Must not raise despite every copy failing.
+        deposit_workspace_planning_artifacts(
+            work_dir=work_dir,
+            workspace_id="ws_dep",
+            worktree_path=worktree,
+            plan_path=plan_path,
+            report_path=report_path,
+        )
+
+        artifact_dir = workspace_artifact_dir(work_dir, "ws_dep")
+        assert not (artifact_dir / DEPOSITED_PLAN_NAME).exists()
+        assert not (artifact_dir / DEPOSITED_CONFORMANCE_NAME).exists()
+
+    @pytest.mark.unit
+    def test_served_dir_matches_api_resolution(self, tmp_path: Path) -> None:
+        # The executor passes ``compose_projects_root.parent`` as work_dir; the
+        # API resolves the served dir from the same work_dir. Guard the
+        # ``.parent`` derivation against drift.
+        work_dir = tmp_path / "work"
+        compose_projects_root = work_dir / "compose"
+        assert workspace_artifact_dir(compose_projects_root.parent, "ws_dep") == (
+            _workspace_artifact_dir("ws_dep", work_dir=work_dir)
+        )

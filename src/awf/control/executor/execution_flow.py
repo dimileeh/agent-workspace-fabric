@@ -106,12 +106,13 @@ from awf.runtime.ownership import (
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     repair_agent_runtime_ownership,
 )
-from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION
+from awf.runtime.planning import AGENT_PLAN_PHASE_SCOPE_VIOLATION, render_workspace_path
 from awf.runtime.pr_creator import PullRequestError
 from awf.runtime.validation import (
     ValidationCoverageResult,
     ValidationResult,
 )
+from awf.service.artifacts import deposit_workspace_planning_artifacts
 
 
 async def execute(
@@ -1006,6 +1007,24 @@ async def execute(
         rebase_recovery_result=rebase_recovery_result,
         git_in_worktree=_git_in_worktree,
     )
+    # Deposit the worktree plan + conformance report into the served artifact
+    # dir (a sibling of the worktree) before any teardown removes the worktree,
+    # so the console can surface them. Gated on the resolved planning profile —
+    # the only reliable "planning was required" signal (the handoff is set only
+    # on the AWF-validation path, not when conformance is satisfied inline).
+    # Runs on the success path and the validation/conformance stop paths
+    # (preserved FAILED workspaces) while the worktree still exists. A copy
+    # failure is best-effort and non-fatal.
+    if profile is not None and profile.planning.required:
+        deposit_workspace_planning_artifacts(
+            work_dir=self._config.compose_projects_root.parent,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            plan_path=render_workspace_path(profile.planning.plan_path, workspace_id=workspace_id),
+            report_path=render_workspace_path(
+                profile.planning.conformance_report_path, workspace_id=workspace_id
+            ),
+        )
     if validation_result.stop:
         return
     assert profile is not None
