@@ -8,9 +8,25 @@ from typing import Any
 
 from awf.common.profile_paths import PROFILE_MARKER_PATHS
 from awf.service.config import ServiceSettings
+from awf.service.report_shape import collect_next_actions, compute_overall_status
 from awf.service.worker_heartbeat import (
     WORKER_HEARTBEAT_FRESH_REASON,
     WORKER_HEARTBEAT_UNAVAILABLE_REASON,
+)
+
+# Item 7 (issue #527): a green *mocked* smoke must not be mistaken for real
+# readiness. The mocked proof never resolves the real profile, secret leases,
+# egress posture, or service images — so it explicitly points operators at the
+# real preflight.
+MOCKED_SMOKE_PREFLIGHT_HINT = (
+    "mocked smoke passed; real profile preflight NOT run — run "
+    "`awf profile doctor <repo>` for real readiness"
+)
+# Non-ok counterpart: a warn/fail mocked run did not pass, so the advisory must
+# not claim it did (would contradict the overall status and mislead operators).
+MOCKED_SMOKE_PREFLIGHT_HINT_NONOK = (
+    "mocked smoke did not pass; real profile preflight NOT run — run "
+    "`awf profile doctor <repo>` for real readiness"
 )
 
 ServiceCollector = Callable[[ServiceSettings], Awaitable[dict[str, Any]]]
@@ -107,16 +123,17 @@ async def collect_smoke_report(
         )
         phases.append(console_phase)
         overall.append(console_phase["status"])
-        status = _compute_overall_status(overall)
-        next_actions = _collect_next_actions(phases)
-        return {
-            "status": status,
-            "project": str(project),
-            "mode": mode,
-            "phases": phases,
-            "console_links": console_links,
-            "next_actions": next_actions,
-        }
+        status = compute_overall_status(overall)
+        next_actions = collect_next_actions(phases)
+        return _finalize_smoke_report(
+            status=status,
+            project=str(project),
+            mode=mode,
+            phases=phases,
+            console_links=console_links,
+            next_actions=next_actions,
+            mocked_local=mocked_local,
+        )
 
     profile_preview_obj, profile_phase = _phase_profile_preview(
         effective_project, mocked_local, profile_preview
@@ -142,16 +159,56 @@ async def collect_smoke_report(
     phases.append(console_phase)
     overall.append(console_phase["status"])
 
-    status = _compute_overall_status(overall)
-    next_actions = _collect_next_actions(phases)
+    status = compute_overall_status(overall)
+    next_actions = collect_next_actions(phases)
 
+    return _finalize_smoke_report(
+        status=status,
+        project=str(effective_project),
+        mode=mode,
+        phases=phases,
+        console_links=console_links,
+        next_actions=next_actions,
+        mocked_local=mocked_local,
+    )
+
+
+def _finalize_smoke_report(
+    *,
+    status: str,
+    project: str,
+    mode: str,
+    phases: list[dict[str, Any]],
+    console_links: dict[str, str],
+    next_actions: list[str],
+    mocked_local: bool,
+) -> dict[str, Any]:
+    """Assemble the smoke report, adding the mocked-vs-real preflight advisory.
+
+    Item 7 (issue #527): a green *mocked* smoke is not real readiness, so when
+    ``mocked_local`` is set the report carries ``preflight_hint`` and appends it
+    to ``next_actions`` pointing at ``awf profile doctor``. The change is additive
+    (new field + appended action) so existing smoke phase assertions stay green.
+
+    The advisory wording tracks ``status`` so a warn/fail mocked run does not
+    claim it "passed" — that would contradict the non-ok overall status.
+    """
+    if not mocked_local:
+        preflight_hint = None
+    elif status == "ok":
+        preflight_hint = MOCKED_SMOKE_PREFLIGHT_HINT
+    else:
+        preflight_hint = MOCKED_SMOKE_PREFLIGHT_HINT_NONOK
+    if preflight_hint is not None:
+        next_actions = [*next_actions, preflight_hint]
     return {
         "status": status,
-        "project": str(effective_project),
+        "project": project,
         "mode": mode,
         "phases": phases,
         "console_links": console_links,
         "next_actions": next_actions,
+        "preflight_hint": preflight_hint,
     }
 
 
@@ -592,27 +649,6 @@ async def _phase_console_links(
             "AWF_CONSOLE_URL to a reachable console URL."
         ),
     }, links
-
-
-def _compute_overall_status(phase_statuses: list[str]) -> str:
-    """Collapse per-phase status values into the overall smoke status."""
-    has_fail = any(s == "fail" for s in phase_statuses)
-    has_warn = any(s == "warn" for s in phase_statuses)
-    if has_fail:
-        return "fail"
-    if has_warn:
-        return "warn"
-    return "ok"
-
-
-def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
-    """Collect non-no-op actionable hints from smoke phases."""
-    actions: list[str] = []
-    for phase in phases:
-        action = phase.get("action", "")
-        if action and action != "No action required.":
-            actions.append(action)
-    return actions
 
 
 async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any]:

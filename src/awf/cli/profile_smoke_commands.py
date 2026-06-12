@@ -50,6 +50,160 @@ def profile_preview(
         _emit(payload, fmt)
 
 
+@profile_app.command("doctor")
+def profile_doctor(
+    repo: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Path to a checked-out repository.",
+    ),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Run a real profile-readiness preflight (resolve, lint, secrets, egress, images).
+
+    Unlike ``awf smoke`` (which can run mocked), this resolves the RESOLVED profile
+    and runs the *same* probes provisioning uses, from the same host context — no
+    agent run, no PR, no workspace creation. Use it before onboarding to catch
+    profile/runtime gaps (notably ``SECRET_LEASE_SOURCE_MISSING``).
+    """
+    from awf.common.git_remote import detect_repo_url_from_checkout
+    from awf.service.config import local_service_environ, resolve_service_settings
+    from awf.service.environment import cleared_docker_cli_client_keys, non_empty_env_value
+    from awf.service.profile_doctor import collect_profile_doctor_report
+
+    resolved = repo.expanduser().resolve()
+    # Probe secret leases against the SAME host_home the worker uses
+    # (build_worker_runtime: Path(settings.host_home)), not Path.home(). When
+    # AWF_HOST_HOME points the service at a different credential home than the
+    # shell's HOME, falling back to Path.home() would check the wrong directory
+    # and produce false passes/failures despite advertising the worker's context.
+    settings = resolve_service_settings()
+    # Probe secret leases against the SAME effective env the worker uses. The
+    # worker constructs its LocalSecretLeaseMountResolver with host_env=os.environ
+    # from INSIDE the service container, where Compose forwards every provider
+    # credential (e.g. BITBUCKET_API_TOKEN/BITBUCKET_EMAIL) from
+    # docker/compose/.env. Source host_env from that same merged Compose view
+    # (local_service_environ) rather than the bare caller shell, so a provider:
+    # bitbucket (or any env-backed) lease provisioning would satisfy is not
+    # falsely reported as SECRET_LEASE_SOURCE_MISSING when the credential lives in
+    # the service env file but is not exported in the current shell.
+    host_env = dict(local_service_environ())
+    # The worker additionally exports settings.github_token into
+    # GH_TOKEN/GITHUB_TOKEN before constructing the resolver (build_worker_runtime
+    # -> _service_git_environment + _apply_service_git_environment). Mirror that
+    # explicit forward so a token that resolves only through service settings (not
+    # the env file) still satisfies a provider: github lease.
+    if settings.github_token:
+        host_env["GH_TOKEN"] = settings.github_token
+        host_env["GITHUB_TOKEN"] = settings.github_token
+    # Run the image probes against the SAME Docker daemon/config the worker's
+    # compose pulls target. The worker selects its daemon from the resolved service
+    # environment (AWF_DOCKER_HOST, materialised as DOCKER_HOST -- settings.docker_host
+    # -- with DOCKER_CONFIG and other client controls from docker/compose/.env). A
+    # bare image probe would inherit the caller shell instead and inspect the wrong
+    # daemon, so a green doctor would not match the worker's actual pulls. Thread the
+    # merged service env with DOCKER_HOST forced to the resolved daemon so a stray
+    # caller DOCKER_HOST/DOCKER_CONTEXT cannot redirect the probe. Docker's CLI
+    # treats DOCKER_CONTEXT as overriding DOCKER_HOST, so drop it (matching the
+    # service Docker helpers' scrub) or a stale context would still redirect the
+    # probe to the wrong daemon despite the pinned DOCKER_HOST. Also scrub any
+    # Docker CLI client keys (DOCKER_CONFIG/DOCKER_CERT_PATH/DOCKER_TLS*/...) the
+    # service environment explicitly clears, exactly as the worker's
+    # bootstrap._docker_cli_environ does via cleared_docker_cli_client_keys; without
+    # it a stale caller client key (e.g. a TLS config the service env blanks) would
+    # survive into the probe and let it talk to a different daemon/config than the
+    # worker's compose pulls, so preflight would not match provisioning.
+    scrubbed_keys = {"DOCKER_CONTEXT", *cleared_docker_cli_client_keys(host_env)}
+    docker_environ = {
+        key: value for key, value in host_env.items() if key.upper() not in scrubbed_keys
+    }
+    # Pin DOCKER_HOST to the daemon the worker actually materialises. The worker
+    # derives its daemon in bootstrap._docker_cli_environ from the resolved service
+    # environment as AWF_DOCKER_HOST OR a bare DOCKER_HOST, so mirror that exact
+    # precedence against the merged Compose view (host_env, sourced via
+    # local_service_environ -- the same view the worker's raw_service_env is built
+    # from -- exactly like the lease checks above) and fall back to
+    # settings.docker_host. resolve_service_settings()'s Settings() only reads an
+    # AWF_-prefixed, cwd-relative .env, so a daemon selected only via an
+    # AWF_DOCKER_HOST or DOCKER_HOST in the Compose env file (with the doctor invoked
+    # from another cwd) would otherwise leave the probe on the default socket while
+    # the worker targets the env-file daemon, so preflight would not match
+    # provisioning. DOCKER_CONTEXT (which Docker treats as overriding DOCKER_HOST) is
+    # still scrubbed above so a stale context cannot redirect the pinned daemon.
+    docker_environ["DOCKER_HOST"] = (
+        non_empty_env_value(host_env, "AWF_DOCKER_HOST")
+        or non_empty_env_value(host_env, "DOCKER_HOST")
+        or settings.docker_host
+    )
+    report = collect_profile_doctor_report(
+        resolved,
+        repo_url=detect_repo_url_from_checkout(resolved),
+        host_home=Path(settings.host_home).expanduser().resolve(),
+        host_env=host_env,
+        # Probe the SAME agent runtime image the worker renders into every stack
+        # (build_worker_runtime -> ComposeStackLauncher(agent_runtime_image=...)),
+        # so a missing/private custom AWF_AGENT_RUNTIME_IMAGE fails preflight here
+        # rather than at provision time. The worker resolves settings.agent_runtime_image
+        # from INSIDE the service container, where Compose forwards AWF_AGENT_RUNTIME_IMAGE
+        # (local-service.yml) so Settings() reads the custom image. resolve_service_settings()
+        # here only reads an AWF_-prefixed, cwd-relative .env, so an image set only in the
+        # Compose env file (with the doctor invoked from another cwd) would leave
+        # settings.agent_runtime_image on the bare default while the worker pulls the custom
+        # image. Source AWF_AGENT_RUNTIME_IMAGE from the merged Compose view (host_env, the
+        # same view used for the lease/Docker checks above) first, exactly like the DOCKER_HOST
+        # pin, and fall back to settings.agent_runtime_image.
+        agent_runtime_image=(
+            non_empty_env_value(host_env, "AWF_AGENT_RUNTIME_IMAGE") or settings.agent_runtime_image
+        ),
+        docker_environ=docker_environ,
+    )
+    if fmt == OutputFormat.pretty:
+        _emit_profile_doctor_pretty(report)
+    else:
+        _emit(report, fmt)
+    if report["status"] == "fail":
+        raise typer.Exit(code=1)
+
+
+def _emit_profile_doctor_pretty(report: dict[str, object]) -> None:
+    """Render a human-readable profile-doctor report (status + per-phase lines)."""
+    from awf.service.report_shape import NO_ACTION
+
+    status = report.get("status", "unknown")
+    repo = report.get("repo", "unknown")
+    typer.echo(f"AWF profile doctor: {status}")
+    typer.echo(f"Repo: {repo}")
+
+    phases = report.get("phases")
+    if isinstance(phases, list) and phases:
+        typer.echo("")
+        typer.echo("Phases:")
+        for phase in phases:
+            if not isinstance(phase, dict):
+                continue
+            phase_status = phase.get("status", "unknown")
+            name = phase.get("name", "unknown")
+            message = phase.get("message", "")
+            header = f"  [{phase_status}] {name}"
+            typer.echo(f"{header}: {message}" if message else header)
+            reason = phase.get("reason_code", "")
+            if reason:
+                typer.echo(f"        reason: {reason}")
+            action = phase.get("action", "")
+            if action and action not in {NO_ACTION, "none"}:
+                typer.echo(f"        action: {action}")
+
+    next_actions = report.get("next_actions")
+    if isinstance(next_actions, list) and next_actions:
+        typer.echo("")
+        typer.echo("Next actions:")
+        for action in next_actions:
+            typer.echo(f"  - {action}")
+
+
 @profile_app.command("init")
 def profile_init(
     path: Path = typer.Argument(..., help="Path to the repository to inspect."),
