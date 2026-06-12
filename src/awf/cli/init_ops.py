@@ -232,7 +232,6 @@ def _run_init_project_onboarding(
 
     forge_block = _detect_project_forge_auth(
         repository,
-        preview=preview,
         settings=settings,
         service_env=service_env,
     )
@@ -546,10 +545,39 @@ def _detect_bitbucket_forge_auth(
     return auth, not missing
 
 
+def _explicit_project_forge(repository: Path) -> str:
+    """Read the explicit ``forge:`` from an on-disk workspace profile, if any.
+
+    ``awf init`` builds its preview via ``preview_project_onboarding``, which
+    *drafts* a fresh profile (always ``forge: auto``) and never reads an existing
+    ``.awf/workspace.yml``. So the drafted preview cannot carry a pinned forge —
+    reading it would always yield ``"auto"`` and silently follow the origin URL
+    host. Re-running init on an already-onboarded repo that pins
+    ``forge: bitbucket``/``github`` must honor that override (precedence: explicit
+    ``forge:`` > URL host > github), so the on-disk value is read directly here.
+    Falls back to ``"auto"`` (defer to URL detection) when there is no profile, no
+    ``forge:`` key, or an unreadable/malformed file — this is a non-blocking
+    diagnostic, never a hard failure.
+    """
+    import yaml
+
+    profile_path = _existing_project_profile_path(repository)
+    if profile_path is None:
+        return "auto"
+    try:
+        raw = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return "auto"
+    profile = raw.get("awf", raw) if isinstance(raw, dict) else None
+    if not isinstance(profile, dict):
+        return "auto"
+    forge = profile.get("forge", "auto")
+    return forge if isinstance(forge, str) else "auto"
+
+
 def _detect_project_forge_auth(
     repository: Path,
     *,
-    preview: Any,
     settings: Any,
     service_env: Mapping[str, str] | None,
 ) -> dict[str, object]:
@@ -558,12 +586,12 @@ def _detect_project_forge_auth(
     Forge detection (GitHub vs Bitbucket) belongs at project onboarding, where the
     repo's ``git remote`` is in scope — not at the repo-agnostic host/service
     readiness layer (issue #539). Reuses the existing detection seam
-    (``detect_repo_url_from_checkout`` -> ``forge``); the explicit ``forge:`` in
-    ``.awf/workspace.yml`` is honored over the URL host for free via
-    ``concrete_forge_for_repo``. Missing matching auth is reported as a WARNING and
-    never blocks, preserving the invariant that mocked smoke needs no live forge
-    access. The returned dict is structured and secret-free (the raw remote URL is
-    reduced to its credential-free host).
+    (``detect_repo_url_from_checkout`` -> ``forge``); an explicit ``forge:`` pinned
+    in an on-disk ``.awf/workspace.yml`` (via :func:`_explicit_project_forge`) is
+    honored over the URL host through ``concrete_forge_for_repo``. Missing matching
+    auth is reported as a WARNING and never blocks, preserving the invariant that
+    mocked smoke needs no live forge access. The returned dict is structured and
+    secret-free (the raw remote URL is reduced to its credential-free host).
     """
     from awf.common.forge import concrete_forge_for_repo, detect_forge_from_url
     from awf.common.git_remote import detect_repo_url_from_checkout
@@ -573,7 +601,7 @@ def _detect_project_forge_auth(
         # No ``origin`` remote: stay neutral, assume no forge, never block.
         return _neutral_forge_block()
 
-    explicit_forge = getattr(getattr(preview.draft, "profile", None), "forge", "auto")
+    explicit_forge = _explicit_project_forge(repository)
     forge = concrete_forge_for_repo(explicit_forge, repo_url)
     # ``host_detected`` distinguishes a recognized host from an unknown host
     # (GHE/GitLab/self-hosted) that ``forge.py`` defaults to github.

@@ -231,7 +231,14 @@ def test_init_explicit_forge_override_wins_over_url_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _stub_prereqs(monkeypatch)
-    # Origin host is github.com, but the workspace profile pins ``forge: bitbucket``.
+    # Origin host is github.com, but the on-disk workspace profile pins
+    # ``forge: bitbucket``. ``awf init`` drafts a fresh profile (always
+    # ``forge: auto``) and never reads this file into the preview, so the override
+    # must be read straight off disk — otherwise re-running init follows the
+    # github.com URL host and runs the wrong (GitHub) auth checks.
+    awf_dir = tmp_path / ".awf"
+    awf_dir.mkdir()
+    (awf_dir / "workspace.yml").write_text("forge: bitbucket\n", encoding="utf-8")
     _stub_origin(monkeypatch, "https://github.com/acme/widgets.git")
     _forbid_check_gh(monkeypatch)
     monkeypatch.setattr(
@@ -243,24 +250,11 @@ def test_init_explicit_forge_override_wins_over_url_host(
         },
     )
 
-    def _preview(_path: Path, **_kwargs: object) -> object:
-        return SimpleNamespace(
-            path=_path,
-            draft=SimpleNamespace(
-                template="generic",
-                profile=SimpleNamespace(forge="bitbucket"),
-            ),
-            smoke_request=None,
-            to_dict=lambda: {"path": str(_path), "draft": {"template": "generic"}},
-        )
-
-    monkeypatch.setattr("awf.profiles.onboarding.preview_project_onboarding", _preview)
-
     result = _runner.invoke(app, ["init", str(tmp_path), "--format", "json"])
 
     assert result.exit_code == 0, result.output
     forge = json.loads(result.output)["forge"]
-    # Explicit ``forge:`` beats the github.com URL host.
+    # Explicit on-disk ``forge:`` beats the github.com URL host.
     assert forge["forge"] == "bitbucket"
     assert forge["auth_ok"] is True
 

@@ -138,6 +138,53 @@ def test_detect_bitbucket_forge_auth_falls_back_to_os_environ(
 
 
 @pytest.mark.unit
+def test_explicit_project_forge_reads_pinned_value_from_disk(tmp_path: Path) -> None:
+    """A pinned ``forge:`` in an on-disk profile is read (not the drafted default)."""
+    awf_dir = tmp_path / ".awf"
+    awf_dir.mkdir()
+    (awf_dir / "workspace.yml").write_text("forge: bitbucket\n", encoding="utf-8")
+
+    assert init_ops._explicit_project_forge(tmp_path) == "bitbucket"  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_explicit_project_forge_reads_nested_awf_section(tmp_path: Path) -> None:
+    """The ``forge:`` under a top-level ``awf:`` mapping is honored too."""
+    awf_dir = tmp_path / ".awf"
+    awf_dir.mkdir()
+    (awf_dir / "workspace.yml").write_text("awf:\n  forge: github\n", encoding="utf-8")
+
+    assert init_ops._explicit_project_forge(tmp_path) == "github"  # noqa: SLF001
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "contents",
+    [
+        # No profile file at all is handled by the missing-path branch (see below).
+        "forge: 123\n",  # non-string forge value -> "auto"
+        "awf: not-a-mapping\n",  # awf section is not a mapping -> "auto"
+        "- just\n- a\n- list\n",  # top-level is not a mapping -> "auto"
+        "",  # empty file parses to ``None`` -> "auto"
+        ": : invalid : :\n",  # malformed YAML -> "auto"
+    ],
+)
+def test_explicit_project_forge_falls_back_to_auto(tmp_path: Path, contents: str) -> None:
+    """Missing key, wrong shape, or unreadable profile defers to URL detection."""
+    awf_dir = tmp_path / ".awf"
+    awf_dir.mkdir()
+    (awf_dir / "workspace.yml").write_text(contents, encoding="utf-8")
+
+    assert init_ops._explicit_project_forge(tmp_path) == "auto"  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_explicit_project_forge_returns_auto_without_profile(tmp_path: Path) -> None:
+    """No on-disk workspace profile defers to URL-host detection."""
+    assert init_ops._explicit_project_forge(tmp_path) == "auto"  # noqa: SLF001
+
+
+@pytest.mark.unit
 def test_forge_guidance_lines_cover_github_missing_gh_and_unknown_auth() -> None:
     lines = init_ops._forge_guidance_lines(  # noqa: SLF001
         {
