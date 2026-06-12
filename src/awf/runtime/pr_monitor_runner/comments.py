@@ -50,6 +50,7 @@ async def _address_thread(
     compose_file: Path,
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> Verdict:
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
@@ -61,17 +62,23 @@ async def _address_thread(
         if owned_paths is not None
         else await _owned_paths_for_prompt(runner, workspace_id)
     )
-    # Resolve the workspace's optional Jira issue key once for this repair path
-    # and thread it into the downstream commit sink so the cycle does not re-query
-    # the DB for the same immutable value.
-    task_tag = await runner._resolve_task_tag(workspace_id)
+    # The workspace's optional Jira issue key is immutable, so resolve it once per
+    # repair cycle and thread it (alongside ``owned_paths``) into every item in the
+    # fix-cycle loops. Self-resolve only as a fallback for callers that pass nothing
+    # (the sentinel default), so a single comment-repair cycle with many threads
+    # opens one workspace lookup instead of one per item (#537).
+    resolved_task_tag = (
+        await runner._resolve_task_tag(workspace_id)
+        if isinstance(task_tag, _TaskTagUnset)
+        else task_tag
+    )
     prompt = address_thread_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         thread=thread,
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
-        task_tag=task_tag,
+        task_tag=resolved_task_tag,
     )
     result = await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -80,7 +87,7 @@ async def _address_thread(
         compose_project=compose_project,
         compose_file=compose_file,
         state=state,
-        task_tag=task_tag,
+        task_tag=resolved_task_tag,
     )
     # Stash the agent's defer reason so the deferred-capture path can preserve it
     # in the filed tracking issue (the verdict alone loses that follow-up detail).
@@ -133,23 +140,30 @@ async def _address_review_comment_result(
     compose_file: Path,
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
+    task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
 ) -> VerdictResult:
     prompt_owned_paths = (
         owned_paths
         if owned_paths is not None
         else await _owned_paths_for_prompt(runner, workspace_id)
     )
-    # Resolve the workspace's optional Jira issue key once for this repair path
-    # and thread it into the downstream commit sink so the cycle does not re-query
-    # the DB for the same immutable value.
-    task_tag = await runner._resolve_task_tag(workspace_id)
+    # The workspace's optional Jira issue key is immutable, so resolve it once per
+    # repair cycle and thread it (alongside ``owned_paths``) into every item in the
+    # fix-cycle loops. Self-resolve only as a fallback for callers that pass nothing
+    # (the sentinel default), so a single comment-repair cycle with many comments
+    # opens one workspace lookup instead of one per item (#537).
+    resolved_task_tag = (
+        await runner._resolve_task_tag(workspace_id)
+        if isinstance(task_tag, _TaskTagUnset)
+        else task_tag
+    )
     prompt = address_review_comment_prompt(
         pr_number=pr_number,
         repo_slug=repo.slug(),
         comment=comment,
         workspace_runtime_context=runner._workspace_runtime_context,
         owned_paths=prompt_owned_paths,
-        task_tag=task_tag,
+        task_tag=resolved_task_tag,
     )
     return await runner._invoke_cli_for_verdict_result(
         workspace_id=workspace_id,
@@ -158,7 +172,7 @@ async def _address_review_comment_result(
         compose_project=compose_project,
         compose_file=compose_file,
         state=state,
-        task_tag=task_tag,
+        task_tag=resolved_task_tag,
     )
 
 
