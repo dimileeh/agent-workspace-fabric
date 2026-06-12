@@ -571,6 +571,7 @@ async def _reparent_fix_pass_commit(
     fix_start_head: str,
     current_head: str,
     pass_number: int,
+    task_tag: str | None,
 ) -> tuple[str | None, bool, str | None]:
     """Re-parent the fix agent's resulting tree onto ``fix_start_head`` (issue #411).
 
@@ -650,11 +651,13 @@ async def _reparent_fix_pass_commit(
 
     # Prepend the workspace's Jira issue key (if any) so the reparented fix commit
     # links to the issue, matching ``_commit_dirty_worktree`` in this same flow.
+    # ``task_tag`` is resolved once by the caller (``_run_pre_push_validation_fix_pass``)
+    # for the fix prompt and threaded in here, avoiding a second DB round-trip.
     # Idempotent: a ``%B`` body that already carries the tag is left unchanged.
     # Unlike the single-line dirty-worktree subject, the reparented message reuses
     # the agent's full ``%B`` body, so it is NOT truncated to [:72] (that would drop
     # the commit body); the tag only prefixes the subject line.
-    message = commit_message_with_task_tag(message, await self._resolve_task_tag(workspace_id))
+    message = commit_message_with_task_tag(message, task_tag)
 
     commit_result = await self._deps.runner.run(
         git_worktree_command(
@@ -778,6 +781,10 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
         )
         return False, None
+    # Resolve the workspace's optional Jira issue key once; reused for the fix prompt
+    # and threaded into any ``_reparent_fix_pass_commit`` call below so the reparent
+    # path does not re-query the DB for the same value.
+    task_tag = await self._resolve_task_tag(workspace_id)
     context = ValidationFixContext(
         failed_command=first_fail.command,
         returncode=first_fail.returncode,
@@ -809,7 +816,7 @@ async def _run_pre_push_validation_fix_pass(
             if validation_result.coverage is not None
             else ()
         ),
-        task_tag=await self._resolve_task_tag(workspace_id),
+        task_tag=task_tag,
     )
     command_evidence: list[str] = []
     try:
@@ -949,6 +956,7 @@ async def _run_pre_push_validation_fix_pass(
                 fix_start_head=fix_start_head,
                 current_head=current_head,
                 pass_number=pass_number,
+                task_tag=task_tag,
             )
             if reparent_failure_reason is not None:
                 return True, reparent_failure_reason
@@ -1012,6 +1020,7 @@ async def _run_pre_push_validation_fix_pass(
             fix_start_head=fix_start_head,
             current_head=committed_head,
             pass_number=pass_number,
+            task_tag=task_tag,
         )
         if reparent_failure_reason is not None:
             return True, reparent_failure_reason
