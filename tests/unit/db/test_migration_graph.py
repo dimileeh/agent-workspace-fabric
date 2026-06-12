@@ -32,6 +32,7 @@ _AUTH_OVERLAY_BACKFILL_FILENAME = (
     f"{_AUTH_OVERLAY_BACKFILL_REVISION}_backfill_auth_overlay_unmount_pending.py"
 )
 _EXECUTION_CLAIM_EPOCH_REVISION = "b2d4f6a8c0e1"
+_WORKSPACE_TASK_TAG_REVISION = "c3e5f7b9d1a2"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -99,7 +100,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_EXECUTION_CLAIM_EPOCH_REVISION]
+    assert script.get_heads() == [_WORKSPACE_TASK_TAG_REVISION]
 
 
 @pytest.mark.unit
