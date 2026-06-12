@@ -1033,6 +1033,69 @@ def test_doctor_falls_back_to_merged_view_when_allowlist_unavailable(
     assert host_env["ANTHROPIC_API_KEY"] == "y"
 
 
+def test_doctor_mirrors_worker_git_env_into_host_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The doctor must mirror ALL worker-injected git env, not just the GH tokens.
+
+    ``build_worker_runtime`` calls ``_apply_service_git_environment(git_env)`` --
+    ``os.environ.update(git_env)`` -- BEFORE constructing its
+    ``LocalSecretLeaseMountResolver(host_env=os.environ)``. So the worker's real
+    lease env carries every key ``_service_git_environment`` injects after Compose
+    startup -- notably ``HOME`` (= ``host_home``) -- none of which live on the
+    Compose ``environment:`` allowlist. A ``provider: env`` lease satisfiable only
+    by such a worker-injected source (e.g. ``HOME``) provisioning would satisfy
+    must NOT be falsely reported as ``SECRET_LEASE_SOURCE_MISSING``, so the doctor
+    must forward the same ``git_env`` (overriding the allowlisted view, exactly as
+    ``os.environ.update`` does).
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(*_args: object, **kwargs: object) -> dict:
+        captured.update(kwargs)
+        return _ok_report(str(tmp_path))
+
+    monkeypatch.setattr(
+        "awf.service.profile_doctor.collect_profile_doctor_report",
+        _capture,
+    )
+    monkeypatch.setattr(
+        "awf.common.git_remote.detect_repo_url_from_checkout",
+        lambda _path: None,
+    )
+    # The allowlisted view does not carry HOME; only the worker's git_env does.
+    monkeypatch.setattr(
+        "awf.service.config.local_service_environ",
+        lambda: {"ANTHROPIC_API_KEY": "y"},
+    )
+    monkeypatch.setattr(
+        "awf.service.config.local_service_worker_environment_keys",
+        lambda: frozenset({"ANTHROPIC_API_KEY", "GH_TOKEN", "GITHUB_TOKEN"}),
+    )
+    host_home = tmp_path / "worker-host-home"
+    host_home.mkdir()
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        lambda: types.SimpleNamespace(
+            host_home=str(host_home),
+            github_token=None,
+            agent_runtime_image="awf-agent-runtime:latest",
+            docker_host="unix:///var/run/docker.sock",
+        ),
+    )
+
+    result = _runner.invoke(app, ["profile", "doctor", str(tmp_path)])
+
+    assert result.exit_code == 0
+    host_env = captured["host_env"]
+    assert isinstance(host_env, dict)
+    # HOME is injected by the worker's git_env even though it is not on the
+    # Compose allowlist, so the lease probe sees the same source the worker has.
+    assert host_env["HOME"] == str(host_home.expanduser().resolve())
+    # The allowlisted var still survives alongside the mirrored git_env.
+    assert host_env["ANTHROPIC_API_KEY"] == "y"
+
+
 def test_doctor_appears_in_profile_help() -> None:
     result = _runner.invoke(app, ["profile", "--help"])
     assert result.exit_code == 0

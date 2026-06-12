@@ -83,6 +83,7 @@ def profile_doctor(
         non_empty_env_value,
     )
     from awf.service.profile_doctor import collect_profile_doctor_report
+    from awf.service.worker import _service_git_environment
 
     resolved = repo.expanduser().resolve()
     # Probe secret leases against the SAME host_home the worker uses
@@ -91,6 +92,7 @@ def profile_doctor(
     # shell's HOME, falling back to Path.home() would check the wrong directory
     # and produce false passes/failures despite advertising the worker's context.
     settings = resolve_service_settings()
+    host_home = Path(settings.host_home).expanduser().resolve()
     # The merged Compose view (local_service_environ) overlays docker/compose/.env
     # with the entire caller shell. It is the right source for the Docker
     # daemon/agent-image pins below (the worker reads those from the resolved
@@ -118,16 +120,21 @@ def profile_doctor(
         if allowlist is None
         else {key: value for key, value in merged_env.items() if key in allowlist}
     )
-    # The worker additionally exports settings.github_token into
-    # GH_TOKEN/GITHUB_TOKEN before constructing the resolver (build_worker_runtime
-    # -> _service_git_environment + _apply_service_git_environment). Mirror that
-    # explicit forward so a token that resolves only through service settings (not
-    # the env file) still satisfies a provider: github lease. GH_TOKEN/GITHUB_TOKEN
-    # are on the worker allowlist, so this also supplies a value when it comes from
-    # settings rather than the env file.
-    if settings.github_token:
-        lease_host_env["GH_TOKEN"] = settings.github_token
-        lease_host_env["GITHUB_TOKEN"] = settings.github_token
+    # The worker mutates os.environ via _apply_service_git_environment(git_env) --
+    # os.environ.update(git_env) -- BEFORE constructing its
+    # LocalSecretLeaseMountResolver(host_env=os.environ). So its real lease env
+    # carries EVERY key build_worker_runtime injects after Compose startup, not
+    # just the GH_TOKEN/GITHUB_TOKEN aliases: HOME (= host_home), GIT_CONFIG_GLOBAL,
+    # GIT_SSH_COMMAND, the numbered GIT_CONFIG_* safe.directory entries, SSH_AUTH_SOCK,
+    # and the Bitbucket credential-helper config -- none of which live on the Compose
+    # environment: allowlist. Mirror the SAME git_env (computed from the worker's
+    # host_home + service github_token) and let it OVERRIDE the allowlisted view,
+    # exactly as os.environ.update does, so a provider: env lease satisfiable only by
+    # a worker-injected source (e.g. HOME) the real worker context can satisfy is not
+    # falsely surfaced as SECRET_LEASE_SOURCE_MISSING. This also forwards a github
+    # token that resolves only through service settings (not the env file), since
+    # git_env carries GH_TOKEN/GITHUB_TOKEN when settings.github_token is set.
+    lease_host_env.update(_service_git_environment(host_home, github_token=settings.github_token))
     # Run the image probes against the SAME Docker daemon/config the worker's
     # compose pulls target. The worker selects its daemon from the resolved service
     # environment (AWF_DOCKER_HOST, materialised as DOCKER_HOST -- settings.docker_host
@@ -202,7 +209,7 @@ def profile_doctor(
     report = collect_profile_doctor_report(
         resolved,
         repo_url=detect_repo_url_from_checkout(resolved),
-        host_home=Path(settings.host_home).expanduser().resolve(),
+        host_home=host_home,
         host_env=lease_host_env,
         # Probe the SAME agent runtime image the worker renders into every stack
         # (build_worker_runtime -> ComposeStackLauncher(agent_runtime_image=...)),
