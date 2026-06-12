@@ -1027,6 +1027,73 @@ class TestHappyPathPart002:
             }
 
     @pytest.mark.unit
+    async def test_planning_failure_deposits_plan_and_conformance_artifacts(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # When the initial planning loop fails (conformance unsatisfied with no
+        # iteration budget) the executor marks the workspace FAILED and returns
+        # before the post-validation deposit block. The plan + conformance
+        # report the agent already wrote into the worktree must still be
+        # surfaced into the served artifact dir so the console buttons can show
+        # the failed report on the preserved-FAILED workspace.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 0,
+                },
+            },
+        )
+        worktree_plans = _test_worktrees_root(factory) / ws_id / "docs" / "awf-plans"
+        worktree_plans.mkdir(parents=True, exist_ok=True)
+        (worktree_plans / f"{ws_id}.md").write_text("# Plan\n\n- do work\n", encoding="utf-8")
+        (worktree_plans / f"{ws_id}.conformance.json").write_text(
+            '{"status": "needs_iteration", "gaps": ["add tests"]}',
+            encoding="utf-8",
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(
+            returncode=0,
+            stdout='{"status":"needs_iteration","summary":"still short","gaps":["add tests"]}',
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                f"?? docs/awf-plans/{ws_id}.md\n"
+                f"?? docs/awf-plans/{ws_id}.conformance.json\n"
+                " M src/x.py\n"
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+
+        served_dir = tmp_path / "work" / "artifacts" / ws_id
+        assert (served_dir / "plan.md").read_text(encoding="utf-8").startswith("# Plan")
+        assert (served_dir / "conformance.json").read_text(encoding="utf-8") == (
+            '{"status": "needs_iteration", "gaps": ["add tests"]}'
+        )
+
+    @pytest.mark.unit
     async def test_planning_profile_fails_when_plan_phase_changes_code(
         self,
         executor: WorkspaceExecutor,

@@ -115,6 +115,36 @@ from awf.runtime.validation import (
 from awf.service.artifacts import deposit_workspace_planning_artifacts
 
 
+def _deposit_planning_artifacts_best_effort(
+    self: Any,
+    *,
+    profile: Any,
+    workspace_id: str,
+    worktree_path: Path,
+) -> None:
+    """Deposit the worktree plan + conformance report into the served artifact
+    dir (a sibling of the worktree) before any teardown removes the worktree,
+    so the console can surface them. Gated on the resolved planning profile —
+    the only reliable "planning was required" signal (the handoff is set only
+    on the AWF-validation path, not when conformance is satisfied inline).
+    Runs on the success path, the validation/conformance stop paths, and the
+    early planning-failure return — all preserve a FAILED workspace whose
+    worktree still holds the plan/report. A copy failure is best-effort and
+    non-fatal.
+    """
+    if profile is None or not profile.planning.required:
+        return
+    deposit_workspace_planning_artifacts(
+        work_dir=self._config.compose_projects_root.parent,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        plan_path=render_workspace_path(profile.planning.plan_path, workspace_id=workspace_id),
+        report_path=render_workspace_path(
+            profile.planning.conformance_report_path, workspace_id=workspace_id
+        ),
+    )
+
+
 async def execute(
     self: Any,
     workspace_id: str,
@@ -464,6 +494,17 @@ async def execute(
                     reason_code=reason_code,
                     details=details,
                     salvage=_failure_salvage_payload(ws, worktree_path=worktree_path),
+                )
+                # The planning loop preserves the FAILED workspace's worktree,
+                # which can already hold the plan + (unsatisfied) conformance
+                # report. Deposit them now — this branch returns before the
+                # post-validation deposit block, so without this the console
+                # could not surface the failed report.
+                _deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
                 )
                 if (
                     isinstance(planning_failure, _PlanningRunFailure)
@@ -1008,23 +1049,15 @@ async def execute(
         git_in_worktree=_git_in_worktree,
     )
     # Deposit the worktree plan + conformance report into the served artifact
-    # dir (a sibling of the worktree) before any teardown removes the worktree,
-    # so the console can surface them. Gated on the resolved planning profile —
-    # the only reliable "planning was required" signal (the handoff is set only
-    # on the AWF-validation path, not when conformance is satisfied inline).
-    # Runs on the success path and the validation/conformance stop paths
-    # (preserved FAILED workspaces) while the worktree still exists. A copy
-    # failure is best-effort and non-fatal.
-    if profile is not None and profile.planning.required:
-        deposit_workspace_planning_artifacts(
-            work_dir=self._config.compose_projects_root.parent,
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            plan_path=render_workspace_path(profile.planning.plan_path, workspace_id=workspace_id),
-            report_path=render_workspace_path(
-                profile.planning.conformance_report_path, workspace_id=workspace_id
-            ),
-        )
+    # dir before teardown so the console can surface them (best-effort; see the
+    # helper). Runs on the success path and the validation/conformance stop
+    # paths (preserved FAILED workspaces) while the worktree still exists.
+    _deposit_planning_artifacts_best_effort(
+        self,
+        profile=profile,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+    )
     if validation_result.stop:
         return
     assert profile is not None
