@@ -35,6 +35,7 @@ from awf.profiles.models import (
     ProfileCommand,
     ProfileCoverage,
     ProfileHealthCheck,
+    ProfileLintFinding,
     WorkspaceProfile,
 )
 from awf.runtime.alembic_validation import (
@@ -44,6 +45,7 @@ from awf.runtime.alembic_validation import (
     validate_alembic_migration_chain,
 )
 from awf.runtime.logs import LogStore
+from awf.runtime.toolchain_probe import ProbeExecResult, probe_runtime_toolchains
 from awf.runtime.validation_coverage import (
     _alembic_policy_missing_worktree_metadata,
     _compose_exec_timed_out,
@@ -319,6 +321,43 @@ class ValidationRunner:
             metadata=metadata,
         )
         return ValidationResult(commands=[result])
+
+    async def probe_runtime_toolchain_findings(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: WorkspaceProfile,
+    ) -> tuple[ProfileLintFinding, ...]:
+        """Discover declared toolchain versions in the container; return findings.
+
+        Provision-time, non-blocking probe: when the profile declares
+        ``runtime.toolchains``, exec the per-language discovery commands inside
+        the agent container (reusing the tracked compose-exec path) and run the
+        pure ``runtime_toolchain_findings`` helper over the discovered versions.
+        Skips entirely (zero exec) when no toolchains are declared.
+        """
+        del workspace_id
+        if not profile.runtime.toolchains:
+            return ()
+
+        async def _exec(cli_args: list[str]) -> ProbeExecResult:
+            invocation = build_tracked_compose_exec(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                cli_args=cli_args,
+                source="toolchain_probe",
+                label="toolchain_probe",
+            )
+            result = await self._runner.run(invocation.args)
+            return ProbeExecResult(
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+
+        return await probe_runtime_toolchains(profile=profile, exec_in_container=_exec)
 
     async def run_profile_phases(
         self,

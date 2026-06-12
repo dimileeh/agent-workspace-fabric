@@ -373,6 +373,18 @@ async def execute(
                 details=setup_dependency_details,
             )
             return
+        try:
+            await self._record_runtime_toolchain_findings(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
+        except Exception:
+            _log.exception(
+                "executor.runtime_toolchain_probe_record_failed",
+                workspace_id=workspace_id,
+            )
         profile_preflight = getattr(self._validation, "run_profile_tool_preflight", None)
         profile_preflight_result = (
             await profile_preflight(workspace_id=workspace_id, profile=profile)

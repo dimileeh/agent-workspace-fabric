@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, cast
 
+from awf.common.logging import get_logger
 from awf.control.executor.constants import (
     _EXECUTOR_AUDIT_ACTOR,
+    RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
 )
@@ -17,11 +19,14 @@ from awf.control.executor.logging_ops import (
 from awf.control.executor.metadata import _metadata_int
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import RUNTIME_TOOLCHAIN_UNAVAILABLE
 from awf.runtime.validation import (
     SETUP_DEPENDENCY_NETWORK_RETRY,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED,
     ValidationResult,
 )
+
+_log = get_logger(__name__)
 
 _UNSET_SOURCE_HEAD_SHA = object()
 
@@ -171,5 +176,62 @@ async def _record_setup_dependency_network_events(
                 event_type=event_type,
                 reason_code=reason_code,
                 payload=payload,
+            )
+        await session.commit()
+
+
+async def _record_runtime_toolchain_findings(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Any,
+    profile: Any,
+) -> None:
+    """Probe the container for declared toolchains; record warnings (non-blocking).
+
+    Runs the provision-time toolchain probe via the validation runner and
+    appends one ``RUNTIME_TOOLCHAIN_UNAVAILABLE`` warning event per finding. The
+    probe is strictly additive: any failure is swallowed here so it can never
+    affect provisioning or a state transition. Legacy ``_validation`` stubs that
+    predate the probe method are a no-op (the ``getattr`` returns ``None``).
+    """
+    probe = getattr(self._validation, "probe_runtime_toolchain_findings", None)
+    if not callable(probe):
+        return
+    try:
+        findings = await probe(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+        )
+    except Exception:
+        _log.exception(
+            "executor.runtime_toolchain_probe_failed",
+            workspace_id=workspace_id,
+        )
+        return
+    if not findings:
+        return
+
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        if workspace is None:  # pragma: no cover - destroyed mid-flight
+            return
+        for finding in findings:
+            details = dict(finding.details)
+            await repo.add_event(
+                workspace,
+                event_type=RUNTIME_TOOLCHAIN_UNAVAILABLE_EVENT_TYPE,
+                reason_code=RUNTIME_TOOLCHAIN_UNAVAILABLE,
+                payload={
+                    "language": details.get("language"),
+                    "version": details.get("version"),
+                    "available_versions": details.get("available_versions"),
+                    "path": finding.path,
+                    "message": finding.message,
+                },
             )
         await session.commit()

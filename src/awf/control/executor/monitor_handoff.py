@@ -68,6 +68,7 @@ _record_executor_pr_audit_event = _monitor_handoff_audit._record_executor_pr_aud
 _record_setup_dependency_network_events = (
     _monitor_handoff_audit._record_setup_dependency_network_events
 )
+_record_runtime_toolchain_findings = _monitor_handoff_audit._record_runtime_toolchain_findings
 _ComposeInterpolationPreservingDumper = _companion_env._ComposeInterpolationPreservingDumper
 _ComposeStringKeySafeLoader = _companion_env._ComposeStringKeySafeLoader
 _atomic_write_text = _companion_env._atomic_write_text
