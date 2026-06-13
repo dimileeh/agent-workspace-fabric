@@ -424,8 +424,8 @@ async def execute(
                 return
             # For OpenCode/Ollama, discover + auto-pull the requested model
             # before the agent runs so OpenCode never rejects a daemon-served
-            # model (issue #552). No-op for other runtimes; recovery resumes
-            # skip this since the model was already ensured on the first run.
+            # model (issue #552). No-op for other runtimes; recovery runs skip
+            # this block since the model was already ensured on the first run.
             if not await self._ensure_ollama_model_or_mark_failed(
                 workspace_id=workspace_id,
                 ws=ws,
