@@ -1067,7 +1067,10 @@ def _pull_ollama_model(
                 failures.append(f"{url}: {stream_error}" if len(urls) > 1 else stream_error)
                 continue
             return {"ok": True, "detail": None}
-        except Exception as exc:
+        except httpx.HTTPError as exc:
+            # Only transport failures are retried across URLs; non-transport
+            # bugs (e.g. a faulty on_progress callback) must surface, not be
+            # masked as OLLAMA_MODEL_PULL_FAILED.
             _log_redacted_exception(
                 "provider_readiness.ollama_pull_exception",
                 exc,

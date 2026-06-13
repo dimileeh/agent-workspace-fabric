@@ -218,6 +218,24 @@ def test_pull_timeout_maps_to_pull_failed() -> None:
 
 
 @pytest.mark.unit
+def test_pull_non_transport_exception_propagates() -> None:
+    # A non-transport error (e.g. a programming bug, not an httpx transport
+    # failure) must surface rather than being masked as OLLAMA_MODEL_PULL_FAILED
+    # during URL retries.
+    post = _FakePostStream(raise_exc=RuntimeError("boom: not a transport error"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        ensure_ollama_model_available(
+            model="ollama/llama4:70b",
+            tags_urls=_TAGS_URLS,
+            pull_urls=_PULL_URLS,
+            http_get=_http_get_returning(("other:latest",)),
+            http_post_stream=post,
+            secrets=frozenset(),
+        )
+
+
+@pytest.mark.unit
 def test_daemon_unreachable_for_tags_does_not_pull() -> None:
     def _get(url: str, *, timeout: float) -> Any:
         raise httpx.ConnectError("connection refused")
