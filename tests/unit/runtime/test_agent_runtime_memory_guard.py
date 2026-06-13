@@ -145,6 +145,26 @@ async def test_nested_agent_memory_paths_all_suppressed(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+async def test_empty_untracked_agent_memory_dir_is_clean(tmp_path: Path) -> None:
+    """An empty agent-memory directory (no file yet) is still suppressed.
+
+    The agent runtime can create ``.claude/agent-memory/<agent>/`` before it
+    writes any file. git status omits empty directories, so the empty-dir
+    snapshot is what surfaces them — and it must honour the AWF runtime roots,
+    or the parents (``.claude/agent-memory/``, ``.claude/``) get reported dirty.
+    """
+    worktree = _init_real_worktree(tmp_path)
+    (worktree / ".claude" / "agent-memory" / "bug-hunter").mkdir(parents=True)
+    run_git = _real_run_git(worktree)
+
+    check = await check_validation_worktree_clean(run_git=run_git, worktree_path=worktree)
+
+    assert check.clean is True
+    assert check.paths == ()
+    assert check.untracked_paths == ()
+
+
+@pytest.mark.unit
 async def test_gitignored_agent_memory_unchanged(tmp_path: Path) -> None:
     """A target repo that already gitignores agent-memory keeps working."""
     worktree = _init_real_worktree(tmp_path)

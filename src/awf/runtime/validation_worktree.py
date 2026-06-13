@@ -384,7 +384,11 @@ async def check_validation_worktree_clean(
     )
     empty_untracked_dirs = _snapshot_empty_untracked_dirs(
         worktree_path=worktree_path,
-        ignored_paths=ignored_paths,
+        # The snapshot appends its results unfiltered below, so it must skip the
+        # AWF-agent-runtime roots itself — an empty ``.claude/agent-memory/<agent>/``
+        # (created before any file is written) would otherwise surface the root
+        # and its parents as dirty, escaping the unconditional suppression above.
+        ignored_paths=(*ignored_paths, *AWF_AGENT_RUNTIME_IGNORED_ROOTS),
     )
     # Ignored roots only suppress untracked or ignored artifacts; tracked files
     # below those roots must stay visible so cleanup can restore them.
