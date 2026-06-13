@@ -17,6 +17,9 @@ from awf.runtime.git_porcelain import (
     untracked_paths_from_porcelain as _untracked_paths_from_porcelain,
 )
 from awf.runtime.validation_worktree_constants import (
+    AWF_AGENT_RUNTIME_IGNORED_ROOTS as _AWF_AGENT_RUNTIME_IGNORED_ROOTS,
+)
+from awf.runtime.validation_worktree_constants import (
     VALIDATION_INFRASTRUCTURE_ERROR as _VALIDATION_INFRASTRUCTURE_ERROR,
 )
 from awf.runtime.validation_worktree_constants import (
@@ -37,6 +40,7 @@ VALIDATION_WORKTREE_PRE_EXISTING_DIRTY: str = _VALIDATION_WORKTREE_PRE_EXISTING_
 VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED: str = _VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
 VALIDATION_WORKTREE_STATUS_FAILED: str = _VALIDATION_WORKTREE_STATUS_FAILED
 VALIDATION_INFRASTRUCTURE_ERROR: str = _VALIDATION_INFRASTRUCTURE_ERROR
+AWF_AGENT_RUNTIME_IGNORED_ROOTS: tuple[str, ...] = _AWF_AGENT_RUNTIME_IGNORED_ROOTS
 
 GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 
@@ -111,6 +115,11 @@ def _is_under_ignored_path(path: str, ignored_paths: set[str]) -> bool:
         if not ignored_path.endswith("/") and normalized_path.startswith(f"{ignored_path}/"):
             return True
     return False
+
+
+def is_under_agent_runtime_root(path: str) -> bool:
+    """Return whether ``path`` is an AWF-agent-runtime artifact root/descendant."""
+    return _is_under_ignored_path(path, set(AWF_AGENT_RUNTIME_IGNORED_ROOTS))
 
 
 def _untracked_cleanup_parent_dirs(path: str, ignored_paths: set[str]) -> tuple[str, ...]:
@@ -359,6 +368,11 @@ async def check_validation_worktree_clean(
     ignored_paths_to_ignore = (
         {_normalize_porcelain_path(path) for path in ignored_paths} if ignore_all_ignored else set()
     )
+    # AWF-agent-runtime artifacts (reviewer subagent memory) never belong to the
+    # PR, so suppress them as untracked/ignored UNCONDITIONALLY — independent of
+    # the target repo's .gitignore and of the ``ignore_all_ignored`` flag. Only
+    # untracked entries are suppressed below; tracked memory stays visible.
+    ignored_paths_to_ignore |= set(AWF_AGENT_RUNTIME_IGNORED_ROOTS)
     changed_paths = _changed_paths_from_porcelain(status_stdout)
     untracked_paths_from_status = _untracked_paths_from_porcelain(
         status_stdout,

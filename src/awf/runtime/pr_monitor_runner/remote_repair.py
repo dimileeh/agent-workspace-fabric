@@ -85,6 +85,9 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
+from awf.runtime.validation_worktree import (
+    is_under_agent_runtime_root,
+)
 
 
 async def _pre_existing_dirty_repair_worktree_result(
@@ -124,7 +127,18 @@ async def _pre_existing_dirty_repair_worktree_result(
     if not status.stdout.strip():
         return None
 
-    paths = sorted(_changed_paths_from_porcelain(status.stdout))
+    # AWF-agent-runtime artifacts (reviewer subagent memory) written into the
+    # repair worktree are not part of the PR, so drop UNTRACKED memory paths
+    # before deciding the worktree is dirty. Tracked-modified memory (and every
+    # other path) stays visible/blocking. If nothing else remains, the worktree
+    # is effectively clean — return None, same as the empty-status path above.
+    all_paths = _changed_paths_from_porcelain(status.stdout)
+    untracked = set(_untracked_paths_from_porcelain(status.stdout))
+    paths = sorted(
+        path for path in all_paths if not (path in untracked and is_under_agent_runtime_root(path))
+    )
+    if not paths:
+        return None
     _log.warning(
         "monitor.repair_worktree_pre_existing_dirty",
         workspace_id=workspace_id,
