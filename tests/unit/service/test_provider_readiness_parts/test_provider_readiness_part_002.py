@@ -1137,6 +1137,45 @@ def test_overlay_profile_provider_credentials_resolves_placeholder_against_envir
 
 
 @pytest.mark.unit
+def test_overlay_profile_provider_credentials_profile_owned_key_masks_inherited() -> None:
+    """A profile-owned key that resolves empty masks an inherited worker/service value.
+
+    When the worker environ already carries a provider key (e.g. OPENAI_API_KEY) and the
+    selected profile declares the same key as a literal empty string, an unset required
+    placeholder, or one resolving empty, ``runtime.environment`` owns the agent's slot
+    (first-writer-wins). The launcher renders only the profile value into the agent, so the
+    inherited worker credential never reaches it. The overlay must drop the inherited value
+    rather than leave it in the readiness environ, otherwise create/retry preflight would
+    admit a workspace on a credential the agent will not receive."""
+    literal_empty = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"OPENAI_API_KEY": "sk-proj-worker-inherited"},
+        {
+            "name": "opencode-openai-mask-literal-empty",
+            "runtime": {"environment": {"OPENAI_API_KEY": ""}},
+        },
+    )
+    assert "OPENAI_API_KEY" not in literal_empty
+
+    required_placeholder = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"OPENAI_API_KEY": "sk-proj-worker-inherited"},
+        {
+            "name": "opencode-openai-mask-required-placeholder",
+            "runtime": {"environment": {"OPENAI_API_KEY": "${MISSING_KEY:?set MISSING_KEY}"}},
+        },
+    )
+    assert "OPENAI_API_KEY" not in required_placeholder
+
+    empty_placeholder = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"OPENAI_API_KEY": "sk-proj-worker-inherited"},
+        {
+            "name": "opencode-openai-mask-empty-placeholder",
+            "runtime": {"environment": {"OPENAI_API_KEY": "${MISSING_KEY}"}},
+        },
+    )
+    assert "OPENAI_API_KEY" not in empty_placeholder
+
+
+@pytest.mark.unit
 def test_overlay_profile_provider_credentials_no_profile_returns_environ_unchanged() -> None:
     """A workspace without a resolved profile (or an unvalidatable snapshot) falls back
     to the supplied environ unchanged."""

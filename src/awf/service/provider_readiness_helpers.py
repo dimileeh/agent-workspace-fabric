@@ -881,9 +881,18 @@ def overlay_profile_provider_credentials(
         try:
             expanded = compose_expand_value(raw, environ=environ).strip()
         except ComposeEnvInterpolationError:
-            continue
+            expanded = ""
         if expanded:
             result[key] = expanded
+        else:
+            # The profile owns this slot but its declared value resolves empty (a literal
+            # empty string, an unset required placeholder, or one resolving empty). The
+            # launcher renders only the profile value into the agent, so an inherited
+            # worker/service value of the same key — copied from ``environ`` into ``result``
+            # above — never reaches the agent. Drop it so the credential gate does not pass
+            # on a credential the agent will not receive (or a placeholder Compose cannot
+            # resolve).
+            result.pop(key, None)
     # A provider credential may instead be declared as a profile ``kind="env"`` secret
     # lease (e.g. ``target="OPENAI_API_KEY"``, ``ref="env/HOST_OPENAI_KEY"``). The stack
     # launcher merges the resolved lease environment into the agent env
