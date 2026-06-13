@@ -9,7 +9,7 @@ from collections.abc import Iterable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpx
 from pydantic import ValidationError
@@ -634,7 +634,20 @@ def _opencode_ollama_host_probe_deferrable(
     return _is_cloud_model(model) and _opencode_ollama_credentials_present(environ, host_home)
 
 
-def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
+def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
+    """Resolve and parse the Ollama base URL, normalizing malformed input.
+
+    Both the worker reachability classifier and the probe/pull URL builder need the
+    *same* resolution of ``AWF_OPENCODE_OLLAMA_BASE_URL`` / ``OLLAMA_HOST`` (falling
+    back to the default) and the *same* behavior for a garbled value. ``urlsplit``
+    raises ``ValueError`` for an unbalanced IPv6 literal (e.g. ``http://[::1``), and
+    its lazy ``.hostname`` / ``.port`` accessors raise for an invalid IPv6 host or a
+    non-numeric port. Force those accessors here so a malformed value normalizes to
+    the ``host.docker.internal`` default exactly once — host-reachable, never a crash
+    during readiness — instead of escaping as a ``ValueError`` from whichever caller
+    happens to touch the offending attribute first.
+    """
+
     raw = (
         environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
         or environ.get("OLLAMA_HOST")
@@ -642,7 +655,19 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
     ).strip()
     if "://" not in raw:
         raw = f"http://{raw}"
-    parts = urlsplit(raw)
+    try:
+        parts = urlsplit(raw)
+        # Trigger the lazy netloc parse so an invalid IPv6 host / non-numeric port
+        # surfaces here rather than at an arbitrary downstream attribute access.
+        _ = parts.hostname
+        _ = parts.port
+    except ValueError:
+        parts = urlsplit(DEFAULT_OLLAMA_OPENAI_BASE_URL)
+    return parts
+
+
+def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
+    parts = _parse_ollama_base_url(environ)
     path = parts.path.rstrip("/")
     if path.endswith("/v1"):
         path = path[: -len("/v1")]
@@ -688,20 +713,11 @@ def _ollama_url_host_reachable_from_worker(environ: Mapping[str, str]) -> bool:
     probe to the agent container rather than risk a false ``OLLAMA_MODEL_PROBE_FAILED``.
     """
 
-    raw = (
-        environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
-        or environ.get("OLLAMA_HOST")
-        or DEFAULT_OLLAMA_OPENAI_BASE_URL
-    ).strip()
-    if "://" not in raw:
-        raw = f"http://{raw}"
-    try:
-        host = (urlsplit(raw).hostname or "").lower()
-    except ValueError:
-        # A malformed URL (e.g. ``http://[::1`` with unbalanced IPv6 brackets)
-        # makes ``.hostname`` raise ``ValueError: Invalid IPv6 URL``. Treat it
-        # like any other garbled value: host-reachable, never a crash.
-        return True
+    # ``_parse_ollama_base_url`` normalizes a malformed value (unbalanced IPv6
+    # brackets, non-numeric port) to the ``host.docker.internal`` default, which is
+    # host-reachable — so a garbled URL is treated like any other garbled value
+    # (host-reachable, never a crash) without a guard here.
+    host = (_parse_ollama_base_url(environ).hostname or "").lower()
     if not host:
         return True
     if host in _WORKER_HOST_REACHABLE_HOSTNAMES:

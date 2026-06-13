@@ -985,6 +985,35 @@ def test_ollama_url_helpers_preserve_host_gateway_fallback_port() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "env",
+    [
+        # Unbalanced IPv6 brackets make ``urlsplit`` raise ``ValueError``.
+        {"OLLAMA_HOST": "http://[::1"},
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://[bad:11434"},
+        # A non-numeric port makes the lazy ``.port`` accessor raise ``ValueError``
+        # on a host the worker would otherwise treat as reachable (so the probe is
+        # not deferred and the URL builder runs).
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:notaport"},
+    ],
+)
+def test_ollama_url_helpers_normalize_malformed_base_url_to_default(
+    env: dict[str, str],
+) -> None:
+    """A malformed base URL must not escape as a ``ValueError`` from the probe/pull
+    URL builder during readiness. It normalizes to the ``host.docker.internal``
+    default like a blank value, matching the worker reachability classifier."""
+    assert provider_readiness_helpers._ollama_version_urls(env) == (
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+    )
+    assert provider_readiness_helpers._ollama_tags_urls(env) == (
+        "http://host.docker.internal:11434/api/tags",
+        "http://localhost:11434/api/tags",
+    )
+
+
+@pytest.mark.unit
 def test_overlay_profile_ollama_base_url_resolves_required_placeholder() -> None:
     """A profile may declare the Ollama endpoint via Compose's required form
     (``${OLLAMA_URL:?set OLLAMA_URL}``). When the variable is present in the worker
