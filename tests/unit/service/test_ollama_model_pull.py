@@ -714,7 +714,7 @@ def test_pull_all_urls_fail_reports_each_failure() -> None:
 
     class _AllFailPost:
         def __call__(self, url: str, *, json: Mapping[str, Any], timeout: float) -> _Ctx:
-            if url.startswith("http://host.docker.internal"):
+            if url == "http://host.docker.internal:11434/api/pull":
                 return _Ctx(_FakeStreamResponse(status_code=503, lines=()))
             return _Ctx(_FakeStreamResponse(lines=(error_line,)))
 
