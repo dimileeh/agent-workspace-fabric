@@ -17,6 +17,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
+from awf.adapters.base import AgentDefaults
+from awf.adapters.opencode import OPENCODE_OLLAMA_CLOUD_MODELS
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -42,19 +44,23 @@ def _make_executor(
     tmp_path: Path,
     *,
     default_models: dict[Any, str] | None = None,
+    agent_defaults: dict[AgentRuntime, AgentDefaults] | None = None,
 ) -> WorkspaceExecutor:
     fake = FakeCommandRunner()
+    config_kwargs: dict[str, Any] = {
+        "worktrees_root": tmp_path / "work" / "worktrees",
+        "compose_projects_root": tmp_path / "work" / "compose",
+        "default_models": default_models,
+    }
+    if agent_defaults is not None:
+        config_kwargs["agent_defaults"] = agent_defaults
     return WorkspaceExecutor(
         session_factory=factory,
         runner=fake,
         compose=SimpleNamespace(),
         validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
         pr_creator=PullRequestCreator(fake),
-        config=ExecutorConfig(
-            worktrees_root=tmp_path / "work" / "worktrees",
-            compose_projects_root=tmp_path / "work" / "compose",
-            default_models=default_models,
-        ),
+        config=ExecutorConfig(**config_kwargs),
     )
 
 
@@ -244,6 +250,38 @@ async def test_ensure_resolves_executor_config_model_override(
 
     assert proceed is True
     assert seen["model"] == "ollama/custom-glm:32b"
+
+
+@pytest.mark.unit
+async def test_ensure_falls_back_to_adapter_cloud_default_when_no_model_resolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When neither an explicit ``agent_model`` nor an adapter default resolves a
+    model, the preflight must mirror the OpenCode adapter's final fallback to
+    ``OPENCODE_OLLAMA_CLOUD_MODELS[0]`` — probing/pulling the model the agent will
+    actually launch — instead of failing the workspace with ``MODEL_NOT_SELECTED``."""
+    workspace_id = await _seed_running(factory)
+    executor = _make_executor(factory, tmp_path, agent_defaults={})
+
+    seen: dict[str, Any] = {}
+
+    def _stub(*, model: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        seen["model"] = model
+        return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+
+    monkeypatch.setattr(ollama_model, "ensure_ollama_model_available", _stub)
+
+    proceed = await executor._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=SimpleNamespace(agent="opencode", task_policy={}),
+    )
+
+    assert proceed is True
+    assert seen["model"] == OPENCODE_OLLAMA_CLOUD_MODELS[0]
+    snap = await _get_status(factory, workspace_id)
+    assert snap.status == WorkspaceStatus.running.value
 
 
 @pytest.mark.unit
