@@ -682,7 +682,7 @@ def test_pull_tries_multiple_urls_until_one_succeeds() -> None:
 
         def __call__(self, url: str, *, json: Mapping[str, Any], timeout: float) -> _Ctx:
             self.calls.append(url)
-            if url.startswith("http://host.docker.internal"):
+            if url == "http://host.docker.internal:11434/api/pull":
                 raise httpx.ConnectError("host gateway refused")
             return _Ctx(_FakeStreamResponse(lines=(json_dumps_success(),)))
 
