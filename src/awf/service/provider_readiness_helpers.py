@@ -12,9 +12,19 @@ from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from pydantic import ValidationError
 
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
+from awf.profiles.models import WorkspaceProfile
 from awf.service.config import ServiceSettings
+
+# Env keys that select the Ollama daemon. The OpenCode launcher resolves the
+# base URL from these (``AWF_OPENCODE_OLLAMA_BASE_URL`` first, then ``OLLAMA_HOST``)
+# inside the rendered workspace container, where a profile's ``runtime.environment``
+# value wins over the worker-env placeholder (``merge_agent_environment`` is
+# first-writer-wins). Mirror that resolution wherever a probe/pull must target the
+# same daemon the agent will reach.
+_OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
 
 
 def _credential_source(
@@ -552,6 +562,38 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
         fallback = urlunsplit((parts.scheme, f"localhost:{fallback_port}", path, "", ""))
         return (primary, fallback)
     return (primary,)
+
+
+def overlay_profile_ollama_base_url(
+    environ: Mapping[str, str],
+    profile_snapshot: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Return *environ* overlaid with the profile's agent Ollama base URL.
+
+    The OpenCode launcher derives ``AWF_OPENCODE_OLLAMA_BASE_URL`` / ``OLLAMA_HOST``
+    from the agent container environment, where a profile's ``runtime.environment``
+    value wins over the worker-env placeholder. If an Ollama probe/pull derived
+    those URLs from the worker process env alone, AWF could target a different
+    daemon than the agent reaches — admitting a workspace for a daemon the agent
+    cannot use, or recording readiness against the wrong host. Overlay the
+    profile-declared base URL so create-time admission and the executor pre-agent
+    step both probe the same daemon. A workspace without a resolved profile (or an
+    unvalidatable snapshot) falls back to *environ* unchanged.
+    """
+
+    result: dict[str, str] = dict(environ)
+    if not isinstance(profile_snapshot, Mapping):
+        return result
+    try:
+        profile = WorkspaceProfile.model_validate(dict(profile_snapshot))
+    except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
+        return result
+    profile_env = profile.runtime.environment
+    for key in _OLLAMA_BASE_URL_ENV_KEYS:
+        value = profile_env.get(key)
+        if value:
+            result[key] = value
+    return result
 
 
 def _ollama_probe_failure_debug(
