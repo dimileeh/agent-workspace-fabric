@@ -1375,124 +1375,10 @@ def _check_gemini(
     )
 
 
-def _check_opencode(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    http_get: HttpGet,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    opencode_config = (host_home / ".config" / "opencode").is_dir()
-    ollama_files = [
-        filename for filename in _OLLAMA_AUTH_FILES if (host_home / ".ollama" / filename).is_file()
-    ]
-    env_signal = _first_present_env(environ, _OPENCODE_ENV_KEYS)
-    signals: list[str] = []
-    credential_sources: list[dict[str, str]] = []
-    if opencode_config:
-        signals.append("~/.config/opencode")
-        credential_sources.append(
-            _credential_source(
-                type_="path",
-                signal="~/.config/opencode",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-        )
-    if ollama_files:
-        signals.append("~/.ollama auth files")
-        credential_sources.extend(
-            _credential_source(
-                type_="path",
-                signal=f"~/.ollama/{filename}",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-            for filename in ollama_files
-        )
-    if env_signal is not None:
-        signals.append(env_signal)
-        credential_sources.append(
-            _credential_source(
-                type_="env",
-                signal=env_signal,
-                credential_scope="static_env_token",
-                isolation="service_env",
-            )
-        )
-
-    if not signals:
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="OPENCODE_OLLAMA_AUTH_MISSING",
-            message=(
-                "No OpenCode/Ollama auth signal was visible. Mount ~/.config/opencode, "
-                "mount small ~/.ollama auth files, or set OLLAMA_API_KEY."
-            ),
-            secrets=secrets,
-            credential_scope="not_observed",
-            isolation="none",
-        )
-
-    version_urls = _ollama_version_urls(environ)
-    probe = _probe_ollama(version_urls, http_get=http_get, secrets=secrets)
-    if not probe["ok"]:
-        probe_detail = probe.get("detail")
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="OLLAMA_HOST_UNREACHABLE",
-            message=(
-                "OpenCode/Ollama auth is visible, but the Ollama host did not answer "
-                "a cheap /api/version readiness probe."
-            ),
-            detail=probe_detail if isinstance(probe_detail, str) else None,
-            signals=[*signals, "ollama /api/version"],
-            secrets=secrets,
-            credential_sources=credential_sources,
-            credential_scope=_primary_credential_scope(credential_sources),
-            isolation=_primary_isolation(credential_sources),
-            warnings=_static_env_warnings(
-                provider_label="OpenCode/Ollama",
-                signals=[env_signal]
-                if env_signal is not None and not (opencode_config or ollama_files)
-                else [],
-            ),
-        )
-
-    # Keep successful readiness payloads schema-stable. `_probe_ollama` retains
-    # recovered candidate failures under debug for internal diagnostics; only
-    # terminal probe failures become operator-facing provider detail.
-    reason = "OPENCODE_FILE_AUTH_PRESENT"
-    if not opencode_config and ollama_files:
-        reason = "OLLAMA_FILE_AUTH_PRESENT"
-    elif not opencode_config and env_signal is not None:
-        reason = "OLLAMA_ENV_AUTH_PRESENT"
-
-    return _provider_result(
-        ok=True,
-        strict=strict,
-        reason=reason,
-        message="OpenCode/Ollama auth is visible and the Ollama host is reachable.",
-        signals=[*signals, "OLLAMA_HOST_REACHABLE"],
-        secrets=secrets,
-        credential_sources=credential_sources,
-        credential_scope=_primary_credential_scope(credential_sources),
-        isolation=_primary_isolation(credential_sources),
-        warnings=_static_env_warnings(
-            provider_label="OpenCode/Ollama",
-            signals=[env_signal]
-            if env_signal is not None and not (opencode_config or ollama_files)
-            else [],
-        ),
-    )
-
-
 from awf.service.provider_readiness_helpers import (  # noqa: E402
     _check_docker_provider,
     _check_grok,
+    _check_opencode,
     _codex_file_sources,
     _credential_source,
     _existing_credential_sources,
@@ -1504,7 +1390,6 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _log_redacted_exception,
     _ollama_pull_urls,
     _ollama_tags_urls,
-    _ollama_version_urls,
     _ordered_names,
     _primary_credential_scope,
     _primary_isolation,
@@ -1520,7 +1405,6 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _secret_values,
     _security_summary,
     _security_warning,
-    _static_env_warnings,
     _truncate,
     ensure_ollama_model_available,
 )
@@ -1543,6 +1427,9 @@ __all__ = [
     "_ollama_pull_urls",
     "_ollama_tags_urls",
     "_redact",
+    "_primary_credential_scope",
+    "_primary_isolation",
     "_probe_cli_auth_status",
+    "_probe_ollama",
     "_secret_values",
 ]
