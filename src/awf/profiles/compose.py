@@ -64,6 +64,14 @@ AGENT_AUTH_ENV_VARS = (
 )
 
 
+# Ollama base-URL env keys in precedence order (highest first) — the OpenCode
+# launcher prelude and the worker-side Ollama preflight both resolve the daemon
+# from the first non-empty key here. Mirrors ``provider_readiness_helpers``'
+# ``_OLLAMA_BASE_URL_ENV_KEYS``; kept local so ``profiles`` does not import the
+# ``service`` layer.
+_OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
+
+
 class ProfileServiceValidationError(ValueError):
     """Raised when profile-declared services fail security validation."""
 
@@ -385,8 +393,29 @@ def agent_environment_with_legacy_host_auth(
     source_env = os.environ if host_env is None else host_env
     merged: list[tuple[str, str]] = list(base_environment)
     existing = {key for key, _ in merged}
+    shadowing_ollama_keys = _shadowing_worker_ollama_keys(existing)
     for name in AGENT_AUTH_ENV_VARS:
+        if name in shadowing_ollama_keys:
+            continue
         if name not in existing and source_env.get(name):
             merged.append((name, f"${{{name}}}"))
             existing.add(name)
     return agent_environment_with_github_token(tuple(merged), host_env=source_env)
+
+
+def _shadowing_worker_ollama_keys(profile_keys: set[str]) -> frozenset[str]:
+    """Worker Ollama base-URL keys that would shadow the profile's own selection.
+
+    When a profile declares only a lower-precedence Ollama key (e.g. ``OLLAMA_HOST``)
+    the worker env may still carry a higher-precedence ``AWF_OPENCODE_OLLAMA_BASE_URL``.
+    Injecting that worker placeholder would let the agent's OpenCode launcher resolve
+    a different daemon than AWF's profile-aware preflight just readied (see
+    ``provider_readiness_helpers.overlay_profile_ollama_base_url``). Return the
+    higher-precedence keys to skip so the profile-declared daemon wins.
+    """
+
+    declared = [i for i, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS) if key in profile_keys]
+    if not declared:
+        return frozenset()
+    top = min(declared)
+    return frozenset(_OLLAMA_BASE_URL_ENV_KEYS[:top])
