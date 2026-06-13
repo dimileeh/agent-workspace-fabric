@@ -95,7 +95,7 @@ async def _ensure_ollama_model_or_mark_failed(
     )
 
     reason_code = str(result.get("reason_code") or "OLLAMA_MODEL_PROBE_FAILED")
-    if str(result.get("status") or "fail") != "fail":
+    if str(result.get("status") or "") == "ok":
         if reason_code == "OLLAMA_MODEL_PULLED":
             await _record_ollama_model_event(
                 self,
