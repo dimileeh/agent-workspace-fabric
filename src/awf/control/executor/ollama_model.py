@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections import deque
 from collections.abc import Mapping
 from typing import Any
 
@@ -73,7 +74,9 @@ async def _ensure_ollama_model_or_mark_failed(
     )
     environ = os.environ
     secrets = _environ_secret_values(environ)
-    progress: list[str] = []
+    # Bound the buffered tail: only the last ``_PULL_PROGRESS_EVENT_LIMIT`` lines
+    # are ever persisted, so a long pull cannot grow this without limit.
+    progress: deque[str] = deque(maxlen=_PULL_PROGRESS_EVENT_LIMIT)
 
     def _on_progress(line: str) -> None:
         progress.append(line)
@@ -105,7 +108,7 @@ async def _ensure_ollama_model_or_mark_failed(
                 payload={
                     "model": model,
                     "message": str(result.get("message") or "")[:1000],
-                    "progress": progress[-_PULL_PROGRESS_EVENT_LIMIT:],
+                    "progress": list(progress),
                 },
             )
         else:
@@ -129,7 +132,7 @@ async def _ensure_ollama_model_or_mark_failed(
         reason_code=reason_code,
         details={
             "model": model,
-            "progress": progress[-_PULL_PROGRESS_EVENT_LIMIT:],
+            "progress": list(progress),
         },
     )
     return False
