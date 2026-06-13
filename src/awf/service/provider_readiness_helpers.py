@@ -1052,7 +1052,11 @@ def _pull_ollama_model(
     timeout: float,
     on_progress: Callable[[str], None] | None,
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {"name": name, "stream": True}
+    # The documented /api/pull body field is ``model``; ``name`` is the
+    # deprecated alias still accepted by current daemons. Send both so newer
+    # daemons (which prefer ``model``) and older ones (which only know ``name``)
+    # both resolve the model to pull. See https://docs.ollama.com/api/pull.
+    body: dict[str, Any] = {"model": name, "name": name, "stream": True}
     failures: list[str] = []
     for url in urls:
         try:

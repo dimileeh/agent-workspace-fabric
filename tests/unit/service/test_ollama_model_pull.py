@@ -148,7 +148,11 @@ def test_absent_non_cloud_model_is_pulled_then_used() -> None:
     assert result["reason_code"] == "OLLAMA_MODEL_PULLED"
     assert result["status"] == "ok"
     assert len(post.calls) == 1
-    assert post.calls[0].json == {"name": "llama4:70b", "stream": True}
+    assert post.calls[0].json == {
+        "model": "llama4:70b",
+        "name": "llama4:70b",
+        "stream": True,
+    }
     assert post.calls[0].url == "http://ollama.local:11434/api/pull"
     # Streamed progress lines reach the callback.
     assert any("pulling manifest" in line for line in progress)
