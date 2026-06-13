@@ -622,6 +622,38 @@ def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
+def test_selected_opencode_preflight_non_ollama_provider_model_skips_ollama_check(
+    tmp_path: Path,
+    model: str,
+) -> None:
+    # No ~/.config/opencode, no ~/.ollama auth files, no OLLAMA_API_KEY: the
+    # Ollama auth/host preflight would otherwise return OPENCODE_OLLAMA_AUTH_MISSING
+    # and block create-time admission. A provider-qualified non-Ollama model is
+    # served by the selected provider, so the Ollama preflight must be skipped
+    # here too (mirroring the executor pre-agent skip) and never run a probe.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == model
+    assert result["reason_code"] == "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED"
+    assert result["probe_status"] == "unavailable"
+    assert result["auth_status"] == "ok"
+    assert result["override_required"] is False
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
 def test_selected_opencode_preflight_suppresses_recovered_tags_fallback_logs(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,

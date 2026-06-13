@@ -345,6 +345,43 @@ def selected_provider_readiness_preflight(
         )
 
     provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
+    if provider == "opencode" and _opencode_model_targets_non_ollama_provider(identity.model):
+        # OpenCode can run a provider-qualified non-Ollama model (``openai/...``
+        # or ``anthropic/...``) served by the selected provider rather than the
+        # local Ollama daemon. ``_check_opencode`` only knows how to probe Ollama
+        # auth/host, so running it here would reject the workspace with an Ollama
+        # reason code at create time — before the executor's pre-agent step could
+        # skip it. Apply the same skip here so admission defers provider auth to
+        # OpenCode instead of blocking on an Ollama check that does not apply.
+        message = (
+            f"OpenCode model {identity.model!r} targets a non-Ollama provider; the "
+            "Ollama auth/daemon preflight does not apply and is skipped."
+        )
+        return _launch_preflight_payload(
+            agent=runtime.value,
+            provider=provider,
+            model=identity.model,
+            model_source=identity.model_source,
+            provider_result=_provider_result(
+                ok=True,
+                strict=True,
+                reason="OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+                message=message,
+                secrets=secrets,
+                credential_scope="deferred_to_provider",
+                isolation="none",
+            ),
+            probe={
+                "status": "unavailable",
+                "reason_code": "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            },
+            reason_code="OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            message=message,
+            override=override,
+            override_reason=override_reason,
+            checked_at=checked,
+            secrets=secrets,
+        )
     provider_result = _check_provider_readiness(
         provider,
         settings,
@@ -396,6 +433,20 @@ def selected_provider_readiness_preflight(
         checked_at=checked,
         secrets=secrets,
     )
+
+
+def _opencode_model_targets_non_ollama_provider(model: str | None) -> bool:
+    """Return whether an OpenCode model names a non-Ollama provider.
+
+    Mirrors ``OpenCodeAdapter.get_provider``: a provider-qualified model such as
+    ``openai/gpt-oss`` or ``anthropic/claude-sonnet`` carries a ``<provider>/``
+    prefix, while a bare or ``ollama/``-prefixed reference targets the local
+    Ollama daemon. Only the latter is probed/pulled against Ollama, so a
+    non-Ollama provider model must skip the Ollama auth/host preflight.
+    """
+
+    provider, slash, _remainder = (model or "").strip().partition("/")
+    return bool(slash) and provider != "ollama"
 
 
 def provider_readiness_preflight_from_task_policy(
