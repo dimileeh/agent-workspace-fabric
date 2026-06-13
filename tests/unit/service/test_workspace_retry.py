@@ -441,6 +441,72 @@ async def test_retry_runs_provider_preflight_probe_off_event_loop(
 
 
 @pytest.mark.unit
+async def test_retry_preflight_probes_source_profile_ollama_daemon(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    """A retry must overlay the source profile's Ollama base URL onto the
+    readiness probe so admission targets the same daemon the executor's
+    pre-agent step reaches — not the worker env's daemon (regression for
+    PRRT_kwDOSJAM6s6JU4FX)."""
+    settings = _settings_with_host_home(tmp_path)
+
+    payload = _request(provider_readiness_override=False).model_dump(mode="python")
+    payload["task"]["agent"] = "opencode"
+    payload["task"]["model"] = "ollama/kimi-k2.6:cloud"
+    payload["workspace"] = {
+        "profile_ref": "inline",
+        "profile": {
+            "name": "ollama-sidecar",
+            "runtime": {
+                "environment": {
+                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434",
+                },
+            },
+        },
+    }
+    request = WorkspaceCreateRequest.model_validate(payload)
+
+    async with factory() as session:
+        first = await create_workspace_row(
+            session,
+            request,
+            settings=settings,
+            provider_environ={
+                "OLLAMA_API_KEY": "ollama_secret",
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434",
+            },
+            run_subprocess=_docker_ok,
+            http_get=_ollama_ok,
+        )
+        await session.commit()
+    await _mark_failed(factory, first.id)
+
+    probed: list[str] = []
+
+    def _capturing_http_get(url: str, *, timeout: float) -> SimpleNamespace:
+        probed.append(url)
+        return _ollama_ok(url, timeout=timeout)
+
+    async with factory() as session:
+        await retry_workspace_row(
+            session,
+            first.id,
+            settings=settings,
+            provider_environ={
+                "OLLAMA_API_KEY": "ollama_secret",
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434",
+            },
+            run_subprocess=_docker_ok,
+            http_get=_capturing_http_get,
+        )
+
+    assert probed, "expected the retry readiness probe to hit the Ollama daemon"
+    assert all("ollama-sidecar:11434" in url for url in probed)
+    assert all("worker-daemon" not in url for url in probed)
+
+
+@pytest.mark.unit
 async def test_retry_with_provider_readiness_override_records_source_and_target(
     factory: async_sessionmaker[AsyncSession],
     tmp_path,
