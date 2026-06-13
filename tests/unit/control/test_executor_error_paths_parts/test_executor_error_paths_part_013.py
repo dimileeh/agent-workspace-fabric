@@ -550,6 +550,15 @@ class TestExecutorMonitorHandoffSetup:
         # PR_ADOPTION_SKIP_AGENT must skip only the AGENT RUN, never profile setup,
         # so setup runs *before* that transition (while still ``running``) and the
         # toolchain is present when the monitor later runs pre-push validation.
+        #
+        # NB: ``auto_merge=True`` here reflects the typical real-world configuration
+        # for ``existing_github_pr`` adoptions; it is NOT a code-path branch. The
+        # executor never reads ``workspace.auto_merge`` in the sync_feature_pr
+        # dispatch chain — the existing_github_pr handoff is selected solely by the
+        # presence of ``pr_adoption`` in ``task_policy``. The distinct value this
+        # test adds over test_sync_feature_pr_handoff_runs_profile_setup_before_monitor
+        # is asserting the workspace *status* at setup time (via
+        # _StatusAtSetupValidation), not the auto_merge flag.
         monitor_runs: list[str] = []
         validation = _StatusAtSetupValidation(factory)
         ws_id = await _seed_ready(
