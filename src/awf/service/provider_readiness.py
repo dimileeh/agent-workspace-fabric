@@ -446,6 +446,34 @@ def selected_provider_readiness_preflight(
             checked_at=checked,
             secrets=secrets,
         )
+    if (
+        provider == "opencode"
+        and _opencode_model_is_local_ollama(identity.model)
+        and not _ollama_url_host_reachable_from_worker(env)
+    ):
+        # #569 symmetry: this create/retry admission path runs in the worker/service
+        # process off ``awf_net`` and cannot reach a workspace Compose service DNS
+        # name such as ``http://ollama-sidecar:11434``. A worker-side ``/api/version``
+        # / ``/api/tags`` probe of such a host would falsely reject the workspace
+        # with ``OLLAMA_HOST_UNREACHABLE`` (auth visible) or ``OPENCODE_OLLAMA_AUTH_
+        # MISSING`` (authless local, daemon reachability cannot be verified to waive)
+        # before the executor pre-agent step — which already skips the same probe —
+        # could defer it. Skip the Ollama auth/daemon preflight here too and defer to
+        # the agent container where the sidecar daemon IS reachable. Gated on a
+        # *local* Ollama model so the ``:cloud`` credential gate and the non-Ollama
+        # provider gate (both handled above / via ``_check_opencode``) still apply.
+        return _opencode_local_ollama_host_deferred_preflight(
+            settings,
+            runtime=runtime,
+            model=identity.model,
+            model_source=identity.model_source,
+            env=env,
+            run_subprocess=resolved_run,
+            secrets=secrets,
+            override=override,
+            override_reason=override_reason,
+            checked=checked,
+        )
     provider_result = _check_provider_readiness(
         provider,
         settings,
@@ -497,6 +525,85 @@ def selected_provider_readiness_preflight(
         reason_code=reason_code,
         message=message,
         model_required=model_required,
+        override=override,
+        override_reason=override_reason,
+        checked_at=checked,
+        secrets=secrets,
+    )
+
+
+def _opencode_local_ollama_host_deferred_preflight(
+    settings: ServiceSettings,
+    *,
+    runtime: AgentRuntime,
+    model: str | None,
+    model_source: str,
+    env: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+    override: bool,
+    override_reason: str | None,
+    checked: datetime,
+) -> dict[str, Any]:
+    """Admit a local-Ollama workspace whose daemon URL the worker cannot reach.
+
+    Symmetric to the executor pre-agent skip (#569): when the resolved Ollama base
+    URL is a workspace Compose service DNS name (e.g. ``http://ollama-sidecar:11434``)
+    the worker/service cannot reach it, so a worker-side ``/api/version`` /
+    ``/api/tags`` probe would falsely block the workspace before launch. Skip the
+    Ollama auth/daemon preflight and defer to the agent container where the sidecar
+    daemon IS reachable. The OpenCode CLI must still be present in the runtime image
+    regardless of which daemon serves the model, so keep the generic runtime-CLI
+    availability probe (mirroring the non-Ollama provider skip) — a runtime image
+    missing the ``opencode`` binary must still block here rather than be admitted as
+    ready and only fail later as an agent command failure.
+    """
+
+    deferred_message = (
+        f"OpenCode model {model!r} targets an Ollama daemon URL the worker cannot "
+        "reach; the worker-side Ollama auth/daemon preflight is skipped and deferred "
+        "to the agent container."
+    )
+    provider_result = _provider_result(
+        ok=True,
+        strict=True,
+        reason="OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE",
+        message=deferred_message,
+        secrets=secrets,
+        credential_scope="deferred_to_provider",
+        isolation="none",
+    )
+    cli_probe = _probe_agent_runtime_cli(
+        settings,
+        executable="opencode",
+        provider="opencode",
+        environ=env,
+        run_subprocess=run_subprocess,
+        secrets=secrets,
+    )
+    if cli_probe.get("status") == "ok":
+        probe: dict[str, Any] = {
+            "status": "unavailable",
+            "reason_code": "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE",
+        }
+        reason_code = "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
+        message = deferred_message
+    else:
+        probe = cli_probe
+        reason_code = str(cli_probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+        message = str(
+            cli_probe.get("message")
+            or "OpenCode runtime CLI is not available in the configured runtime image."
+        )
+    return _launch_preflight_payload(
+        agent=runtime.value,
+        provider="opencode",
+        model=model,
+        model_source=model_source,
+        provider_result=provider_result,
+        probe=probe,
+        reason_code=reason_code,
+        message=message,
         override=override,
         override_reason=override_reason,
         checked_at=checked,
@@ -1437,6 +1544,8 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _is_cloud_model,
     _ollama_pull_urls,
     _ollama_tags_urls,
+    _ollama_url_host_reachable_from_worker,
+    _opencode_model_is_local_ollama,
     _opencode_provider_credentials_present,
     _ordered_names,
     _primary_credential_scope,

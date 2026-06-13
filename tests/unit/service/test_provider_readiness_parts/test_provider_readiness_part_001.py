@@ -565,11 +565,14 @@ def test_selected_opencode_preflight_absent_non_cloud_model_is_pull_pending(
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
 
+    # ``localhost`` is worker-reachable, so the create-time daemon probe runs (the
+    # #569 host-unreachable skip does not apply); a sidecar DNS name is covered by
+    # ``test_selected_opencode_preflight_local_model_non_worker_reachable_url_defers``.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -580,7 +583,7 @@ def test_selected_opencode_preflight_absent_non_cloud_model_is_pull_pending(
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -599,11 +602,13 @@ def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
 
+    # A worker-reachable URL (``localhost``) whose daemon is down still blocks: the
+    # #569 skip only defers a daemon URL the worker cannot reach at all.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             raise RuntimeError("connection refused")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
@@ -611,7 +616,7 @@ def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -629,12 +634,13 @@ def test_selected_opencode_preflight_authless_local_model_reachable_daemon_allow
     # ``ollama/``-prefixed model is served by the host daemon, whose /api/tags
     # and /api/pull need no OpenCode/Ollama Cloud credential. With the daemon
     # reachable the strict auth gate is waived (carve-out symmetric to
-    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED) so admission can proceed.
+    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED) so admission can proceed. ``localhost``
+    # is worker-reachable, so the daemon probe runs rather than the #569 skip.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"llama4:70b"}]}',
@@ -645,7 +651,7 @@ def test_selected_opencode_preflight_authless_local_model_reachable_daemon_allow
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -670,12 +676,13 @@ def test_selected_opencode_preflight_authless_local_absent_model_is_pull_pending
     # Authless local model that is not yet present: the waived auth gate lets the
     # pull-pending probe run, so admission is non-blocking and the executor
     # pre-agent step can auto-pull rather than the workspace being rejected at
-    # create time with OPENCODE_OLLAMA_AUTH_MISSING.
+    # create time with OPENCODE_OLLAMA_AUTH_MISSING. ``localhost`` is worker-
+    # reachable, so the carve-out daemon probe runs rather than the #569 skip.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -686,7 +693,7 @@ def test_selected_opencode_preflight_authless_local_absent_model_is_pull_pending
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -726,10 +733,12 @@ def test_selected_opencode_preflight_authless_cloud_model_still_requires_creds(
 def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blocks(
     tmp_path: Path,
 ) -> None:
-    # Authless local model but the daemon is unreachable: the waiver is
-    # conditional on daemon reachability, so with no credential present this
-    # still blocks with OPENCODE_OLLAMA_AUTH_MISSING. Only the cheap /api/version
-    # probe runs before the gate falls through.
+    # Authless local model at a worker-reachable URL (``localhost``) whose daemon is
+    # down: the waiver is conditional on daemon reachability, so with no credential
+    # present this still blocks with OPENCODE_OLLAMA_AUTH_MISSING. Only the cheap
+    # /api/version probe runs before the gate falls through. (A daemon URL the worker
+    # cannot reach at all is deferred instead — see
+    # ``test_selected_opencode_preflight_authless_local_non_worker_reachable_url_defers``.)
     seen: list[str] = []
 
     def _http_get(url: str, *, timeout: float) -> Any:
@@ -741,7 +750,7 @@ def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blo
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_unexpected_subprocess,
         http_get=_http_get,
     )
@@ -749,7 +758,96 @@ def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blo
     assert result["auth_status"] == "fail"
     assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
     assert result["blocks_launch"] is True
-    assert seen == ["http://ollama.local:11434/api/version"]
+    assert seen == ["http://localhost:11434/api/version"]
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_local_model_non_worker_reachable_url_defers(
+    tmp_path: Path,
+) -> None:
+    # #569 symmetry: a profile Ollama URL like ``http://ollama-sidecar:11434`` is a
+    # workspace Compose service DNS name the create/retry admission process cannot
+    # reach. A worker-side /api/version|/api/tags probe would falsely block the
+    # workspace with OLLAMA_HOST_UNREACHABLE before the executor pre-agent step (which
+    # already skips the same probe) could defer it. Admission must instead skip the
+    # Ollama daemon probe and defer to the agent container where the sidecar IS
+    # reachable. Auth is present here, so the skip is purely about host reachability.
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed for a sidecar URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == "ollama/llama4:70b"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
+    assert result["probe_status"] == "unavailable"
+    assert result["auth_status"] == "ok"
+    assert result["override_required"] is False
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_local_non_worker_reachable_url_defers(
+    tmp_path: Path,
+) -> None:
+    # The reviewer's other reported reason code: an authless local model at a sidecar
+    # URL currently blocks with OPENCODE_OLLAMA_AUTH_MISSING because the worker cannot
+    # reach the daemon to waive the auth gate. The host-reachability skip must apply
+    # here too (no credential, no daemon probe) and defer to the agent container.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed for a sidecar URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["reason_code"] == "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
+    assert result["probe_status"] == "unavailable"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_non_worker_reachable_url_still_blocks_missing_cli(
+    tmp_path: Path,
+) -> None:
+    # Skipping the Ollama daemon probe for a sidecar URL must not also skip the
+    # generic OpenCode CLI availability check: a runtime image missing the
+    # ``opencode`` binary still has to block admission here rather than be admitted
+    # as ready and only fail later as an agent command failure.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed for a sidecar URL: {url}")
+
+    def _runtime_cli_missing(args: list[str], **_kwargs: object) -> Any:
+        assert args[-1] == "command -v opencode"
+        return _completed(returncode=1, stderr="opencode: not found")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_runtime_cli_missing,
+        http_get=_no_http,
+    )
+
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "OPENCODE_RUNTIME_CLI_NOT_FOUND"
+    assert result["blocks_launch"] is True
 
 
 @pytest.mark.unit
