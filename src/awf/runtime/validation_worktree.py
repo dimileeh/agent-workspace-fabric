@@ -108,11 +108,15 @@ def _is_under_ignored_path(path: str, ignored_paths: set[str]) -> bool:
     """Return whether `path` should be treated as part of an ignored root."""
     normalized_path = _normalize_porcelain_path(path)
     for ignored_path in ignored_paths:
-        if normalized_path == ignored_path:
+        # Normalize the ignored root too: roots may carry a trailing slash
+        # (e.g. ``.claude/agent-memory/``), and git collapses a fully-untracked
+        # directory to that exact root entry. Comparing normalized-to-normalized
+        # matches the root itself as well as its descendants, while keeping the
+        # sibling ``.claude/agent-memory-archive/`` excluded.
+        normalized_ignored = _normalize_porcelain_path(ignored_path)
+        if normalized_path == normalized_ignored:
             return True
-        if ignored_path.endswith("/") and normalized_path.startswith(ignored_path):
-            return True
-        if not ignored_path.endswith("/") and normalized_path.startswith(f"{ignored_path}/"):
+        if normalized_path.startswith(f"{normalized_ignored}/"):
             return True
     return False
 

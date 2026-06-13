@@ -77,6 +77,25 @@ async def test_untracked_agent_memory_only_returns_none(
 
 
 @pytest.mark.unit
+async def test_untracked_agent_memory_collapsed_root_returns_none(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """A collapsed untracked-root entry (``.claude/agent-memory/``) is not blocking.
+
+    Plain ``git status --porcelain`` (the repair guard's status mode) collapses a
+    fully-untracked ``.claude/agent-memory`` directory to a single
+    ``?? .claude/agent-memory/`` line. That root entry must still be suppressed.
+    """
+    result = await _run_guard(
+        factory,
+        tmp_path,
+        status_stdout="?? .claude/agent-memory/\n",
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
 async def test_untracked_agent_memory_plus_real_path_blocks_with_real_path(
     factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
