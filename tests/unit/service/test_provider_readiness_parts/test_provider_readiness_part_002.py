@@ -1024,6 +1024,75 @@ def test_overlay_profile_ollama_base_url_treats_unset_required_placeholder_as_un
 
 
 @pytest.mark.unit
+def test_overlay_profile_provider_credentials_overlays_profile_declared_key() -> None:
+    """A provider API key declared solely in the profile's runtime.environment reaches
+    the agent container but not the worker process the non-Ollama credential gate runs
+    in. The overlay brings the profile-declared key into the readiness environ so a
+    workspace is not blocked with OPENCODE_PROVIDER_AUTH_MISSING for a credential the
+    agent would use — symmetric to overlay_profile_ollama_base_url."""
+    result = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {},
+        {
+            "name": "opencode-openai",
+            "runtime": {"environment": {"OPENAI_API_KEY": "sk-proj-profile-only"}},
+        },
+    )
+
+    assert result["OPENAI_API_KEY"] == "sk-proj-profile-only"
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_resolves_placeholder_against_environ() -> None:
+    """Profile env values may carry Compose-style ``${NAME}`` placeholders resolved by
+    the agent container. The worker-side overlay resolves them against ``environ``; an
+    unresolvable required placeholder is treated as undeclared, not surfaced as a 500."""
+    declared = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_ANTHROPIC_KEY": "sk-ant-host"},
+        {
+            "name": "opencode-anthropic",
+            "runtime": {"environment": {"ANTHROPIC_API_KEY": "${HOST_ANTHROPIC_KEY}"}},
+        },
+    )
+    assert declared["ANTHROPIC_API_KEY"] == "sk-ant-host"
+
+    undeclared = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {},
+        {
+            "name": "opencode-anthropic",
+            "runtime": {"environment": {"ANTHROPIC_API_KEY": "${MISSING_KEY:?set MISSING_KEY}"}},
+        },
+    )
+    assert "ANTHROPIC_API_KEY" not in undeclared
+
+    # A plain ``${NAME}`` placeholder resolving to empty is also treated as undeclared.
+    empty = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {},
+        {
+            "name": "opencode-anthropic",
+            "runtime": {"environment": {"ANTHROPIC_API_KEY": "${MISSING_KEY}"}},
+        },
+    )
+    assert "ANTHROPIC_API_KEY" not in empty
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_no_profile_returns_environ_unchanged() -> None:
+    """A workspace without a resolved profile (or an unvalidatable snapshot) falls back
+    to the supplied environ unchanged."""
+    environ = {"OPENAI_API_KEY": "sk-proj-worker"}
+
+    assert provider_readiness_helpers.overlay_profile_provider_credentials(environ, None) == (
+        environ
+    )
+    assert (
+        provider_readiness_helpers.overlay_profile_provider_credentials(
+            environ, {"not": "a valid profile snapshot"}
+        )
+        == environ
+    )
+
+
+@pytest.mark.unit
 def test_provider_readiness_opencode_env_only_reason_when_ollama_reachable(
     tmp_path: Path,
 ) -> None:

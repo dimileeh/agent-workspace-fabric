@@ -724,6 +724,48 @@ def overlay_profile_ollama_base_url(
     return result
 
 
+def overlay_profile_provider_credentials(
+    environ: Mapping[str, str],
+    profile_snapshot: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Return *environ* overlaid with the profile's OpenCode provider API keys.
+
+    The non-Ollama OpenCode create-time gate (``_opencode_provider_credentials_present``)
+    detects a usable provider credential from the readiness environ, but a provider API
+    key declared solely in a profile's ``runtime.environment`` (e.g. ``OPENAI_API_KEY``)
+    reaches the *agent* container — not the worker process this admission check runs in.
+    Without this overlay such a workspace would be blocked with
+    ``OPENCODE_PROVIDER_AUTH_MISSING`` despite the credential the agent would use.
+    Symmetric to ``overlay_profile_ollama_base_url``: bring the profile-declared provider
+    key into the environ so create/retry admission sees the same credential the agent
+    reaches. Compose-style ``${NAME}`` placeholders are resolved against *environ*; a
+    value resolving empty or to an unset required placeholder is treated as undeclared
+    (the worker env is a best-effort approximation of the agent's Compose context).
+    A workspace without a resolved profile falls back to *environ* unchanged.
+    """
+
+    result: dict[str, str] = dict(environ)
+    if not isinstance(profile_snapshot, Mapping):
+        return result
+    try:
+        profile = WorkspaceProfile.model_validate(dict(profile_snapshot))
+    except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
+        return result
+    profile_env = profile.runtime.environment
+    for keys in _OPENCODE_PROVIDER_ENV_KEYS.values():
+        for key in keys:
+            raw = profile_env.get(key)
+            if not raw:
+                continue
+            try:
+                expanded = compose_expand_value(raw, environ=environ).strip()
+            except ComposeEnvInterpolationError:
+                continue
+            if expanded:
+                result[key] = expanded
+    return result
+
+
 def _ollama_probe_failure_debug(
     *,
     url: str,

@@ -1453,6 +1453,7 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _security_warning,
     ensure_ollama_model_available,
     overlay_profile_ollama_base_url,
+    overlay_profile_provider_credentials,
 )
 from awf.service.provider_readiness_redaction import (  # noqa: E402
     _log_redacted_exception,
@@ -1471,6 +1472,7 @@ __all__ = [
     "default_subprocess_runner",
     "ensure_ollama_model_available",
     "overlay_profile_ollama_base_url",
+    "overlay_profile_provider_credentials",
     "provider_readiness_preflight_from_task_policy",
     "redact_launch_preflight_text",
     "selected_provider_readiness_preflight",
