@@ -99,8 +99,15 @@ async def _pre_existing_dirty_repair_worktree_result(
 ) -> _GitPushResult | None:
     if not worktree_path.exists():
         return None
+    # ``--untracked-files=all`` is load-bearing here: with git's default
+    # ``normal`` mode a *fully*-untracked ``.claude/`` (no tracked content under
+    # it) collapses all the way to a single ``?? .claude/`` entry, which is NOT
+    # under the ``.claude/agent-memory/`` ignored root and would therefore stay
+    # in ``paths`` and refuse repair in the common case this guard unblocks.
+    # Enumerating leaf paths lets the agent-runtime filter below see and drop the
+    # memory files. Mirrors ``check_validation_worktree_clean``.
     status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
     )
     if not status.ok:
         stderr = status.stderr[:400]

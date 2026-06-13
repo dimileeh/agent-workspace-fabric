@@ -39,9 +39,10 @@ async def _run_guard(
     tmp_path: Path,
     *,
     status_stdout: str,
+    cmd: FakeCommandRunner | None = None,
 ):
     """Invoke the repair dirty-tree guard with a canned ``git status`` stdout."""
-    cmd = FakeCommandRunner()
+    cmd = cmd or FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=status_stdout)
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -82,9 +83,9 @@ async def test_untracked_agent_memory_collapsed_root_returns_none(
 ) -> None:
     """A collapsed untracked-root entry (``.claude/agent-memory/``) is not blocking.
 
-    Plain ``git status --porcelain`` (the repair guard's status mode) collapses a
-    fully-untracked ``.claude/agent-memory`` directory to a single
-    ``?? .claude/agent-memory/`` line. That root entry must still be suppressed.
+    Even though the guard requests ``--untracked-files=all`` (which normally
+    enumerates leaf files), a collapsed ``?? .claude/agent-memory/`` root entry
+    must still be suppressed if git ever reports it that way.
     """
     result = await _run_guard(
         factory,
@@ -127,6 +128,35 @@ async def test_tracked_modified_agent_memory_blocks(
     assert result.failed is True
     assert result.reason_code == _PRE_EXISTING_DIRTY_WORKTREE_REASON
     assert result.details["paths"] == [".claude/agent-memory/notes.md"]
+
+
+@pytest.mark.unit
+async def test_status_requests_all_untracked_files(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """The guard must inspect untracked files in ``all`` mode.
+
+    Plain ``git status --porcelain`` (``--untracked-files=normal``) collapses a
+    *fully*-untracked ``.claude/`` directory all the way to a single
+    ``?? .claude/`` entry when nothing under ``.claude`` is tracked. That parent
+    entry is not under the ``.claude/agent-memory/`` ignored root, so the filter
+    would leave it in ``paths`` and refuse repair in the common case this guard
+    is meant to unblock (a target repo that tracks nothing under ``.claude``).
+    Requesting ``--untracked-files=all`` forces git to enumerate the leaf
+    memory files so they are suppressed. See PR #575.
+    """
+    cmd = FakeCommandRunner()
+    await _run_guard(
+        factory,
+        tmp_path,
+        status_stdout="?? .claude/agent-memory/bug-hunter/notes.md\n",
+        cmd=cmd,
+    )
+
+    assert cmd.calls, "guard never ran git status"
+    status_args = cmd.calls[0].args
+    assert "status" in status_args
+    assert "--untracked-files=all" in status_args
 
 
 @pytest.mark.unit
