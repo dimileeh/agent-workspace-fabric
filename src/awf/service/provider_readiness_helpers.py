@@ -640,7 +640,13 @@ def _ollama_url_host_reachable_from_worker(environ: Mapping[str, str]) -> bool:
     ).strip()
     if "://" not in raw:
         raw = f"http://{raw}"
-    host = (urlsplit(raw).hostname or "").lower()
+    try:
+        host = (urlsplit(raw).hostname or "").lower()
+    except ValueError:
+        # A malformed URL (e.g. ``http://[::1`` with unbalanced IPv6 brackets)
+        # makes ``.hostname`` raise ``ValueError: Invalid IPv6 URL``. Treat it
+        # like any other garbled value: host-reachable, never a crash.
+        return True
     if not host:
         return True
     if host in _WORKER_HOST_REACHABLE_HOSTNAMES:

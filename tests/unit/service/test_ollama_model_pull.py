@@ -796,6 +796,10 @@ def test_opencode_model_is_local_ollama_classifier() -> None:
         ({}, True),
         ({"AWF_OPENCODE_OLLAMA_BASE_URL": "   "}, True),
         ({"AWF_OPENCODE_OLLAMA_BASE_URL": "://"}, True),
+        # Malformed IPv6 brackets make ``.hostname`` raise ``ValueError``;
+        # the classifier must default to host-reachable, not crash.
+        ({"OLLAMA_HOST": "http://[::1"}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://[bad:11434"}, True),
     ],
 )
 def test_ollama_url_host_reachable_from_worker_classifier(
