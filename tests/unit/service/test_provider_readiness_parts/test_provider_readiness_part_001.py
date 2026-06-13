@@ -754,16 +754,51 @@ def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blo
 
 @pytest.mark.unit
 @pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
-def test_selected_opencode_preflight_non_ollama_provider_model_skips_ollama_check(
+def test_selected_opencode_preflight_non_ollama_provider_model_missing_creds_blocks(
     tmp_path: Path,
     model: str,
 ) -> None:
-    # No ~/.config/opencode, no ~/.ollama auth files, no OLLAMA_API_KEY: the
-    # Ollama auth/host preflight would otherwise return OPENCODE_OLLAMA_AUTH_MISSING
-    # and block create-time admission. A provider-qualified non-Ollama model is
-    # served by the selected provider, so the Ollama preflight must be skipped
-    # here too (mirroring the executor pre-agent skip) and never run an Ollama
-    # probe. The generic OpenCode runtime-CLI availability probe still runs.
+    # #554: a provider-qualified non-Ollama model served by an OpenCode cloud
+    # provider needs an OpenCode/provider credential. With no ~/.config/opencode
+    # and no provider API key visible, create-time readiness must FAIL up front
+    # with the clear OPENCODE_PROVIDER_AUTH_MISSING reason (symmetric to the
+    # OPENCODE_OLLAMA_AUTH_MISSING cloud-Ollama gate) instead of deferring to the
+    # provider and surfacing a confusing agent-CLI error later. Neither the Ollama
+    # probe nor the OpenCode CLI probe runs in the no-creds path.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == model
+    assert result["reason_code"] == "OPENCODE_PROVIDER_AUTH_MISSING"
+    assert result["auth_status"] == "fail"
+    assert result["probe_status"] == "skipped"
+    assert result["override_required"] is True
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
+def test_selected_opencode_preflight_non_ollama_provider_model_with_config_creds_defers(
+    tmp_path: Path,
+    model: str,
+) -> None:
+    # #554: ~/.config/opencode is OpenCode's own multi-provider credential store,
+    # so its presence satisfies the create-time credential gate for any provider.
+    # With creds present the behavior is unchanged from #553: the Ollama
+    # auth/daemon preflight is skipped (deferred to the provider), only the
+    # generic OpenCode runtime-CLI probe runs, and the workspace is admitted.
+    (tmp_path / "home" / ".config" / "opencode").mkdir(parents=True)
+
     def _no_http(url: str, *, timeout: float) -> Any:
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
@@ -786,6 +821,44 @@ def test_selected_opencode_preflight_non_ollama_provider_model_skips_ollama_chec
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("model", "env_key", "env_value"),
+    [
+        ("openai/gpt-oss", "OPENAI_API_KEY", "sk-proj-opencode-readiness"),
+        ("anthropic/claude-sonnet", "ANTHROPIC_API_KEY", "sk-ant-opencode-readiness"),
+    ],
+)
+def test_selected_opencode_preflight_non_ollama_provider_model_with_env_key_defers(
+    tmp_path: Path,
+    model: str,
+    env_key: str,
+    env_value: str,
+) -> None:
+    # #554: with no ~/.config/opencode, the provider API key matching the model's
+    # provider prefix (OPENAI_API_KEY for openai/..., ANTHROPIC_API_KEY for
+    # anthropic/...) satisfies the credential gate, so admission defers to the
+    # provider exactly as when ~/.config/opencode is present.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={env_key: env_value},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == model
+    assert result["reason_code"] == "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED"
+    assert result["probe_status"] == "unavailable"
+    assert result["auth_status"] == "ok"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
 def test_selected_opencode_preflight_non_ollama_provider_model_blocks_missing_cli(
     tmp_path: Path,
@@ -794,7 +867,11 @@ def test_selected_opencode_preflight_non_ollama_provider_model_blocks_missing_cl
     # Skipping the Ollama preflight for a provider-qualified non-Ollama model must
     # not also skip the generic OpenCode CLI availability check: a runtime image
     # missing the ``opencode`` binary has to block admission here rather than be
-    # admitted as ready and only fail later as an agent command failure.
+    # admitted as ready and only fail later as an agent command failure. Provide
+    # ~/.config/opencode so the #554 auth gate passes and the missing-CLI block is
+    # the contract under test.
+    (tmp_path / "home" / ".config" / "opencode").mkdir(parents=True)
+
     def _no_http(url: str, *, timeout: float) -> Any:
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
@@ -816,6 +893,38 @@ def test_selected_opencode_preflight_non_ollama_provider_model_blocks_missing_cl
     assert result["probe_status"] == "fail"
     assert result["reason_code"] == "OPENCODE_RUNTIME_CLI_NOT_FOUND"
     assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_opencode_provider_credentials_present_classifier(tmp_path: Path) -> None:
+    # #554 credential detection: ~/.config/opencode satisfies any provider; a
+    # provider-matched env key satisfies its provider; an unknown provider with
+    # no config dir is unsatisfied.
+    from awf.service.provider_readiness_helpers import _opencode_provider_credentials_present
+
+    config_home = tmp_path / "with_config"
+    (config_home / ".config" / "opencode").mkdir(parents=True)
+    assert _opencode_provider_credentials_present("openai/gpt-oss", {}, config_home) == (
+        True,
+        "~/.config/opencode",
+    )
+
+    bare_home = tmp_path / "bare"
+    bare_home.mkdir()
+    assert _opencode_provider_credentials_present(
+        "openai/gpt-oss", {"OPENAI_API_KEY": "sk-proj-x"}, bare_home
+    ) == (True, "OPENAI_API_KEY")
+    assert _opencode_provider_credentials_present(
+        "anthropic/claude-sonnet", {"ANTHROPIC_AUTH_TOKEN": "sk-ant-x"}, bare_home
+    ) == (True, "ANTHROPIC_AUTH_TOKEN")
+    # An unknown provider prefix is satisfied only by ~/.config/opencode.
+    assert _opencode_provider_credentials_present(
+        "mystery/model", {"OPENAI_API_KEY": "sk-proj-x"}, bare_home
+    ) == (False, None)
+    # The matching provider key must be present, not just any provider key.
+    assert _opencode_provider_credentials_present(
+        "openai/gpt-oss", {"ANTHROPIC_API_KEY": "sk-ant-x"}, bare_home
+    ) == (False, None)
 
 
 @pytest.mark.unit

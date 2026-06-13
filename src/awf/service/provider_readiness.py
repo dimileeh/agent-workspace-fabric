@@ -346,6 +346,47 @@ def selected_provider_readiness_preflight(
 
     provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
     if provider == "opencode" and _opencode_model_targets_non_ollama_provider(identity.model):
+        # A provider-qualified non-Ollama model is served by an OpenCode cloud
+        # provider, which needs an OpenCode/provider credential. With none visible
+        # (#554), fail create-time admission up front with a clear reason —
+        # symmetric to OPENCODE_OLLAMA_AUTH_MISSING — instead of deferring to the
+        # provider and surfacing a confusing agent-CLI error later. No probe runs
+        # in the no-creds path (mirroring how OPENCODE_OLLAMA_AUTH_MISSING blocks
+        # before any probe).
+        creds_present, _creds_signal = _opencode_provider_credentials_present(
+            identity.model, env, host_home
+        )
+        if not creds_present:
+            target_provider = (identity.model or "").strip().partition("/")[0].lower()
+            auth_missing_message = (
+                f"OpenCode model {identity.model!r} targets the {target_provider!r} "
+                "provider but no OpenCode/provider credentials were visible. Mount "
+                "~/.config/opencode or set the provider API key (e.g. OPENAI_API_KEY / "
+                "ANTHROPIC_API_KEY)."
+            )
+            provider_result = _provider_result(
+                ok=False,
+                strict=True,
+                reason="OPENCODE_PROVIDER_AUTH_MISSING",
+                message=auth_missing_message,
+                secrets=secrets,
+                credential_scope="not_observed",
+                isolation="none",
+            )
+            return _launch_preflight_payload(
+                agent=runtime.value,
+                provider=provider,
+                model=identity.model,
+                model_source=identity.model_source,
+                provider_result=provider_result,
+                probe={"status": "skipped", "reason_code": "OPENCODE_PROVIDER_AUTH_MISSING"},
+                reason_code="OPENCODE_PROVIDER_AUTH_MISSING",
+                message=auth_missing_message,
+                override=override,
+                override_reason=override_reason,
+                checked_at=checked,
+                secrets=secrets,
+            )
         # OpenCode can run a provider-qualified non-Ollama model (``openai/...``
         # or ``anthropic/...``) served by the selected provider rather than the
         # local Ollama daemon. ``_check_opencode`` only knows how to probe Ollama
@@ -1396,6 +1437,7 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _is_cloud_model,
     _ollama_pull_urls,
     _ollama_tags_urls,
+    _opencode_provider_credentials_present,
     _ordered_names,
     _primary_credential_scope,
     _primary_isolation,

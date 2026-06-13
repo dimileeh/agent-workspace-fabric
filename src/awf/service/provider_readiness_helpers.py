@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import subprocess
@@ -244,6 +245,41 @@ def _github_token(settings: ServiceSettings, environ: Mapping[str, str]) -> tupl
 
 def _first_present_env(environ: Mapping[str, str], keys: Iterable[str]) -> str | None:
     return next((key for key in keys if environ.get(key)), None)
+
+
+# Provider prefix -> env keys that satisfy that provider for OpenCode. All of
+# these are already in ``KNOWN_SECRET_ENV_KEYS``, so detection keeps redaction
+# intact. A provider prefix absent from this map is satisfied only by the
+# OpenCode credential store (``~/.config/opencode``).
+_OPENCODE_PROVIDER_ENV_KEYS: Mapping[str, tuple[str, ...]] = {
+    "openai": ("OPENAI_API_KEY", "OPENAI_API_TOKEN"),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "xai": ("XAI_API_KEY",),
+}
+
+
+def _opencode_provider_credentials_present(
+    model: str | None,
+    environ: Mapping[str, str],
+    host_home: Path,
+) -> tuple[bool, str | None]:
+    """Return whether OpenCode has a credential for a non-Ollama provider model.
+
+    Symmetric to the OpenCode/Ollama auth gate: a provider-qualified non-Ollama
+    model (``openai/...``, ``anthropic/...``) is served by an OpenCode cloud
+    provider, so create-time readiness requires a usable credential. ``~/.config/
+    opencode`` is OpenCode's own multi-provider credential store and satisfies any
+    provider; otherwise the provider API key matching the model's ``<provider>/``
+    prefix must be visible. An unknown provider prefix not in
+    ``_OPENCODE_PROVIDER_ENV_KEYS`` is satisfied only by ``~/.config/opencode``.
+    """
+
+    if (host_home / ".config" / "opencode").is_dir():
+        return True, "~/.config/opencode"
+    provider = (model or "").strip().partition("/")[0].lower()
+    signal = _first_present_env(environ, _OPENCODE_PROVIDER_ENV_KEYS.get(provider, ()))
+    return (signal is not None), signal
 
 
 def _secret_values(settings: ServiceSettings, environ: Mapping[str, str]) -> frozenset[str]:
@@ -569,6 +605,50 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
         fallback = urlunsplit((parts.scheme, f"localhost:{fallback_port}", path, "", ""))
         return (primary, fallback)
     return (primary,)
+
+
+# Hostnames that resolve to the host the worker runs on (Docker host gateway
+# aliases and localhost). An Ollama base URL pointing at one of these — or any
+# loopback IP — is reachable from the worker; anything else (a workspace Compose
+# service DNS name, a routable LAN IP) is not.
+_WORKER_HOST_REACHABLE_HOSTNAMES = frozenset(
+    {
+        "host.docker.internal",
+        "gateway.docker.internal",
+        "localhost",
+    }
+)
+
+
+def _ollama_url_host_reachable_from_worker(environ: Mapping[str, str]) -> bool:
+    """Return whether the resolved Ollama base URL is reachable from the worker.
+
+    The worker runs off ``awf_net`` and cannot reach a workspace Compose service
+    DNS name (e.g. ``http://ollama-sidecar:11434``). Mirror ``_ollama_api_urls``'s
+    URL resolution, then classify the host: the Docker host gateway aliases,
+    ``localhost``, and loopback IPs are host-reachable; any other DNS name (a
+    Compose service) or routable IP is not. A missing/blank/garbled value resolves
+    to the ``host.docker.internal`` default and is therefore host-reachable (no
+    crash). The skip is conservative: a non-host-reachable URL defers the model
+    probe to the agent container rather than risk a false ``OLLAMA_MODEL_PROBE_FAILED``.
+    """
+
+    raw = (
+        environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
+        or environ.get("OLLAMA_HOST")
+        or DEFAULT_OLLAMA_OPENAI_BASE_URL
+    ).strip()
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    host = (urlsplit(raw).hostname or "").lower()
+    if not host:
+        return True
+    if host in _WORKER_HOST_REACHABLE_HOSTNAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def overlay_profile_ollama_base_url(

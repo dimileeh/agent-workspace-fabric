@@ -21,6 +21,7 @@ from awf.service.provider_readiness_helpers import (
     _is_cloud_model,
     _ollama_pull_name,
     _ollama_pull_urls,
+    _ollama_url_host_reachable_from_worker,
     _opencode_model_is_local_ollama,
     ensure_ollama_model_available,
 )
@@ -770,3 +771,34 @@ def test_opencode_model_is_local_ollama_classifier() -> None:
     # No selected model is not a local Ollama model.
     assert _opencode_model_is_local_ollama(None) is False
     assert _opencode_model_is_local_ollama("   ") is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("environ", "expected"),
+    [
+        # Host gateway / loopback hosts are reachable from the worker.
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://host.docker.internal:11434"}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434"}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"}, True),
+        ({"OLLAMA_HOST": "http://127.0.0.1:11434"}, True),
+        ({"OLLAMA_HOST": "http://[::1]:11434"}, True),
+        # A bare host:port without scheme still classifies on the hostname.
+        ({"OLLAMA_HOST": "host.docker.internal:11434"}, True),
+        # A workspace Compose service DNS name is NOT reachable from the worker.
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"}, False),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434/v1"}, False),
+        ({"OLLAMA_HOST": "ollama-sidecar:11434"}, False),
+        # A routable LAN IP is conservatively treated as non-host-reachable.
+        ({"OLLAMA_HOST": "http://192.168.1.10:11434"}, False),
+        # Missing / blank / garbled values fall back to the host.docker.internal
+        # default, which is host-reachable (no crash).
+        ({}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "   "}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "://"}, True),
+    ],
+)
+def test_ollama_url_host_reachable_from_worker_classifier(
+    environ: dict[str, str], expected: bool
+) -> None:
+    assert _ollama_url_host_reachable_from_worker(environ) is expected
