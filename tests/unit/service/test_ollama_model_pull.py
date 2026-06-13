@@ -326,6 +326,62 @@ def test_pull_stream_never_terminating_is_bounded_by_wall_clock() -> None:
 
 
 @pytest.mark.unit
+def test_expired_deadline_skips_fallback_url() -> None:
+    # Once the shared wall-clock deadline is reached on the first URL, the
+    # localhost fallback must not be opened with a fresh full timeout — that
+    # would let the intended total bound be exceeded substantially. The loop
+    # stops and surfaces OLLAMA_MODEL_PULL_FAILED instead of attempting more URLs.
+    pull_urls = (
+        "http://host.docker.internal:11434/api/pull",
+        "http://localhost:11434/api/pull",
+    )
+
+    def _endless_lines() -> Iterator[str]:
+        while True:
+            yield json.dumps({"status": "downloading", "completed": 1, "total": 100})
+
+    class _EndlessResponse:
+        status_code = 200
+
+        def iter_lines(self) -> Iterator[str]:
+            return _endless_lines()
+
+    class _FirstUrlEndlessPost:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def __call__(self, url: str, *, json: Mapping[str, Any], timeout: float) -> _Ctx:
+            self.calls.append(url)
+            if url.startswith("http://host.docker.internal"):
+                return _Ctx(_EndlessResponse())  # type: ignore[arg-type]
+            raise AssertionError("fallback URL must not be opened after deadline")
+
+    ticks = iter(range(10_000))
+
+    def _monotonic() -> float:
+        return float(next(ticks))
+
+    post = _FirstUrlEndlessPost()
+    result = ensure_ollama_model_available(
+        model="ollama/llama4:70b",
+        tags_urls=_TAGS_URLS,
+        pull_urls=pull_urls,
+        http_get=_http_get_returning(("other:latest",)),
+        http_post_stream=post,
+        secrets=frozenset(),
+        timeout=3.0,
+        monotonic=_monotonic,
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULL_FAILED"
+    assert "timeout" in result["detail"].lower()
+    # Only the first URL was opened; the fallback was skipped once the deadline
+    # had already elapsed.
+    assert post.calls == ["http://host.docker.internal:11434/api/pull"]
+
+
+@pytest.mark.unit
 def test_pull_non_transport_exception_propagates() -> None:
     # A non-transport error (e.g. a programming bug, not an httpx transport
     # failure) must surface rather than being masked as OLLAMA_MODEL_PULL_FAILED
