@@ -153,6 +153,53 @@ def test_ollama_http_probe_exception_logs_redacted_traceback(
 
 
 @pytest.mark.unit
+def test_ollama_http_probe_invalid_url_is_structured_failure_not_raise() -> None:
+    """A syntactically invalid probe URL raises ``httpx.InvalidURL`` (not an
+    ``httpx.HTTPError`` subclass). It must be captured as a structured, redacted
+    readiness failure — an operator configuration error — rather than escape as
+    an unhandled raise from service readiness/doctor."""
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        raise httpx.InvalidURL(f"malformed URL with sk-proj-ollama-secret: {url}")
+
+    result = provider_readiness._probe_ollama(
+        ("http://ollama.local:11434/api/version",),
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    serialized = json.dumps(result, sort_keys=True)
+    assert result["ok"] is False
+    assert "InvalidURL:" in serialized
+    assert "sk-proj-ollama-secret" not in serialized
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
+def test_ollama_model_probe_invalid_url_is_structured_failure_not_raise() -> None:
+    """The model availability probe shares the ``http_get`` config-URL path, so an
+    ``httpx.InvalidURL`` must likewise resolve to ``OLLAMA_MODEL_PROBE_FAILED``
+    rather than escape as an unhandled raise."""
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        raise httpx.InvalidURL(f"malformed URL with sk-proj-ollama-secret: {url}")
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://ollama.local:11434/api/tags",),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
+    assert "InvalidURL:" in json.dumps(result, sort_keys=True)
+    assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
 def test_ollama_model_probe_reports_missing_model_and_transport_failures() -> None:
     calls: list[str] = []
 

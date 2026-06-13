@@ -51,11 +51,16 @@ def _probe_ollama(
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
-        except httpx.HTTPError as exc:
-            # Only httpx transport failures become probe "exception" dispositions
-            # (mirroring ``_pull_ollama_model`` below); other exceptions are
-            # wrapper/programming bugs that must surface rather than be masked as a
-            # readiness failure.
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            # httpx transport failures *and* a syntactically invalid probe URL
+            # (``httpx.InvalidURL`` — e.g. an unresolved ``${OLLAMA_HOST}``
+            # placeholder or a bad percent escape from operator config) become
+            # probe "exception" dispositions, mirroring ``_pull_ollama_model``
+            # below and the ``smoke._default_console_checker`` guard. ``InvalidURL``
+            # is not an ``httpx.HTTPError`` subclass, so it must be named
+            # explicitly or an operator config error would escape as an unhandled
+            # raise instead of a structured, redacted readiness result. Other
+            # exceptions remain wrapper/programming bugs that must surface.
             exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
@@ -127,11 +132,16 @@ def _probe_ollama_model(
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
-        except httpx.HTTPError as exc:
-            # Only httpx transport failures become probe "exception" dispositions
-            # (mirroring ``_pull_ollama_model`` below); other exceptions are
-            # wrapper/programming bugs that must surface rather than be masked as a
-            # readiness failure.
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            # httpx transport failures *and* a syntactically invalid probe URL
+            # (``httpx.InvalidURL`` — e.g. an unresolved ``${OLLAMA_HOST}``
+            # placeholder or a bad percent escape from operator config) become
+            # probe "exception" dispositions, mirroring ``_pull_ollama_model``
+            # below and the ``smoke._default_console_checker`` guard. ``InvalidURL``
+            # is not an ``httpx.HTTPError`` subclass, so it must be named
+            # explicitly or an operator config error would escape as an unhandled
+            # raise instead of a structured, redacted readiness result. Other
+            # exceptions remain wrapper/programming bugs that must surface.
             exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
