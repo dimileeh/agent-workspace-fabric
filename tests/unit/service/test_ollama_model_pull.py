@@ -740,6 +740,11 @@ def test_helpers_classify_cloud_and_pull_name_and_urls() -> None:
     assert _is_cloud_model("llama4:70b") is False
     # A model name ending in ``-cloud`` without a tag is not a cloud model.
     assert _is_cloud_model("my-cloud") is False
+    # A local tag that merely ends in ``-cloud`` but is not a size-qualified
+    # Ollama Cloud tag must NOT be classified as cloud, or readiness would skip
+    # the pull-pending check and the executor would never POST /api/pull.
+    assert _is_cloud_model("llama4:not-cloud") is False
+    assert _is_cloud_model("mymodel:on-cloud") is False
     assert _is_cloud_model(None) is False
     assert _ollama_pull_name("ollama/llama4:70b") == "llama4:70b"
     assert _ollama_pull_name("llama4:70b") == "llama4:70b"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -518,10 +519,15 @@ def _is_cloud_model(model: str | None) -> bool:
     size-qualified tag ending in ``-cloud`` (e.g. ``gpt-oss:120b-cloud``,
     ``gemma4:31b-cloud``). Match on the tag portion so both are treated as
     served-remotely (no local ``/api/pull``).
+
+    The size qualifier always begins with a digit (a parameter count such as
+    ``31b`` or ``120b``), so a plain suffix match on ``-cloud`` would be too
+    loose: a local tag like ``:not-cloud`` must NOT be classified as cloud, or
+    readiness would skip pull-pending and the executor would never pull it.
     """
     pull_name = _ollama_pull_name(model)
     tag = pull_name.rpartition(":")[2] if ":" in pull_name else ""
-    return tag == "cloud" or tag.endswith("-cloud")
+    return tag == "cloud" or re.fullmatch(r"[0-9][0-9.]*[a-z]*-cloud", tag) is not None
 
 
 def _opencode_model_is_local_ollama(model: str | None) -> bool:
