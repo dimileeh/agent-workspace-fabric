@@ -252,8 +252,13 @@ async def retry_workspace_row(
     # URLs are derived). Without this, an OpenCode/Ollama profile pointing at a
     # sidecar daemon would be admitted (or blocked) against the worker's daemon —
     # mirroring the create-time overlay in workspaces_create.create_workspace_row.
-    preflight_environ = workspaces_create.overlay_profile_ollama_base_url(
-        provider_environ if provider_environ is not None else os.environ,
+    # Also overlay any profile-declared provider API key the agent receives so the
+    # non-Ollama credential gate does not block on a profile-only credential.
+    preflight_environ = workspaces_create.overlay_profile_provider_credentials(
+        workspaces_create.overlay_profile_ollama_base_url(
+            provider_environ if provider_environ is not None else os.environ,
+            source.resolved_profile,
+        ),
         source.resolved_profile,
     )
     preflight = await workspaces_create._selected_provider_preflight_for_task_async(

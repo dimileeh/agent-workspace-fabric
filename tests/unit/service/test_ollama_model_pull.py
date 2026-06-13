@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,7 +22,10 @@ from awf.service.provider_readiness_helpers import (
     _is_cloud_model,
     _ollama_pull_name,
     _ollama_pull_urls,
+    _ollama_url_host_reachable_from_worker,
     _opencode_model_is_local_ollama,
+    _opencode_ollama_credentials_present,
+    _opencode_ollama_host_probe_deferrable,
     ensure_ollama_model_available,
 )
 
@@ -571,7 +575,7 @@ def test_unexpected_probe_disposition_is_not_pulled(
         "message": "hypothetical future non-pull disposition",
     }
     monkeypatch.setattr(
-        "awf.service.provider_readiness_helpers._probe_ollama_model",
+        "awf.service.provider_readiness_ollama._probe_ollama_model",
         lambda *_args, **_kwargs: dict(probe),
     )
 
@@ -770,3 +774,77 @@ def test_opencode_model_is_local_ollama_classifier() -> None:
     # No selected model is not a local Ollama model.
     assert _opencode_model_is_local_ollama(None) is False
     assert _opencode_model_is_local_ollama("   ") is False
+
+
+@pytest.mark.unit
+def test_opencode_ollama_credentials_present(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    # No OpenCode/Ollama credential signal of any kind.
+    assert _opencode_ollama_credentials_present({}, home) is False
+    # The OLLAMA_API_KEY env satisfies the gate.
+    assert _opencode_ollama_credentials_present({"OLLAMA_API_KEY": "k"}, home) is True
+    # A mounted ~/.ollama auth file satisfies the gate.
+    (home / ".ollama").mkdir()
+    (home / ".ollama" / "config.json").write_text("{}", encoding="utf-8")
+    assert _opencode_ollama_credentials_present({}, home) is True
+    # OpenCode's own credential store satisfies the gate.
+    other = tmp_path / "other"
+    (other / ".config" / "opencode").mkdir(parents=True)
+    assert _opencode_ollama_credentials_present({}, other) is True
+
+
+@pytest.mark.unit
+def test_opencode_ollama_host_probe_deferrable(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    # A local Ollama model is authless and always defers, with or without creds.
+    assert _opencode_ollama_host_probe_deferrable("ollama/llama4:70b", {}, home) is True
+    # A provider-qualified non-Ollama model has its own carve-out and never defers here.
+    assert _opencode_ollama_host_probe_deferrable("openai/gpt-oss", {}, home) is False
+    # A :cloud model defers only once the Cloud credential is visible.
+    assert _opencode_ollama_host_probe_deferrable("glm-5.1:cloud", {}, home) is False
+    assert (
+        _opencode_ollama_host_probe_deferrable("glm-5.1:cloud", {"OLLAMA_API_KEY": "k"}, home)
+        is True
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("environ", "expected"),
+    [
+        # Host gateway / loopback hosts are reachable from the worker.
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://host.docker.internal:11434"}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434"}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"}, True),
+        ({"OLLAMA_HOST": "http://127.0.0.1:11434"}, True),
+        ({"OLLAMA_HOST": "http://[::1]:11434"}, True),
+        # ``0.0.0.0`` is a valid Ollama bind address that, as a connection target,
+        # routes to the loopback like ``localhost`` — reachable from the worker even
+        # though it is not itself a loopback IP (``is_loopback`` is ``False``).
+        ({"OLLAMA_HOST": "http://0.0.0.0:11434"}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "0.0.0.0:11434"}, True),
+        # A bare host:port without scheme still classifies on the hostname.
+        ({"OLLAMA_HOST": "host.docker.internal:11434"}, True),
+        # A workspace Compose service DNS name is NOT reachable from the worker.
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"}, False),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434/v1"}, False),
+        ({"OLLAMA_HOST": "ollama-sidecar:11434"}, False),
+        # A routable LAN IP is conservatively treated as non-host-reachable.
+        ({"OLLAMA_HOST": "http://192.168.1.10:11434"}, False),
+        # Missing / blank / garbled values fall back to the host.docker.internal
+        # default, which is host-reachable (no crash).
+        ({}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "   "}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "://"}, True),
+        # Malformed IPv6 brackets make ``.hostname`` raise ``ValueError``;
+        # the classifier must default to host-reachable, not crash.
+        ({"OLLAMA_HOST": "http://[::1"}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://[bad:11434"}, True),
+    ],
+)
+def test_ollama_url_host_reachable_from_worker_classifier(
+    environ: dict[str, str], expected: bool
+) -> None:
+    assert _ollama_url_host_reachable_from_worker(environ) is expected

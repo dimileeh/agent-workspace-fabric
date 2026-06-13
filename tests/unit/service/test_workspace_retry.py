@@ -98,7 +98,12 @@ async def test_create_preflight_probes_profile_ollama_daemon(
 ) -> None:  # type: ignore[no-untyped-def]
     """A profile-declared Ollama base URL must drive the create-time readiness
     probe so admission targets the same daemon the executor's pre-agent step
-    reaches — not the worker env's daemon (regression for PRRT_kwDOSJAM6s6JU0zF)."""
+    reaches — not the worker env's daemon (regression for PRRT_kwDOSJAM6s6JU0zF).
+
+    Both URLs are worker-reachable loopback hosts so the create-time daemon probe
+    actually runs for the ``:cloud`` model: a non-worker-reachable sidecar URL now
+    defers the probe to the agent container (PRRT_kwDOSJAM6s6JV_Rl), which would
+    leave nothing to assert the overlay against."""
     settings = _settings_with_host_home(tmp_path)
 
     payload = _request(provider_readiness_override=False).model_dump(mode="python")
@@ -107,10 +112,10 @@ async def test_create_preflight_probes_profile_ollama_daemon(
     payload["workspace"] = {
         "profile_ref": "inline",
         "profile": {
-            "name": "ollama-sidecar",
+            "name": "ollama-profile-host",
             "runtime": {
                 "environment": {
-                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434",
+                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434",
                 },
             },
         },
@@ -130,7 +135,7 @@ async def test_create_preflight_probes_profile_ollama_daemon(
             settings=settings,
             provider_environ={
                 "OLLAMA_API_KEY": "ollama_secret",
-                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434",
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://127.0.0.1:11434",
             },
             run_subprocess=_docker_ok,
             http_get=_capturing_http_get,
@@ -139,8 +144,8 @@ async def test_create_preflight_probes_profile_ollama_daemon(
     preflight = workspace.task_policy["provider_readiness_preflight"]
     assert preflight["provider"] == "opencode"
     assert probed, "expected the create-time readiness probe to hit the Ollama daemon"
-    assert all("ollama-sidecar:11434" in url for url in probed)
-    assert all("worker-daemon" not in url for url in probed)
+    assert all("localhost:11434" in url for url in probed)
+    assert all("127.0.0.1" not in url for url in probed)
 
 
 async def test_create_with_provider_readiness_override_records_policy_and_event(
@@ -275,7 +280,12 @@ async def test_retry_preflight_probes_source_profile_ollama_daemon(
     """A retry must overlay the source profile's Ollama base URL onto the
     readiness probe so admission targets the same daemon the executor's
     pre-agent step reaches — not the worker env's daemon (regression for
-    PRRT_kwDOSJAM6s6JU4FX)."""
+    PRRT_kwDOSJAM6s6JU4FX).
+
+    Both URLs are worker-reachable loopback hosts so the retry daemon probe
+    actually runs for the ``:cloud`` model: a non-worker-reachable sidecar URL now
+    defers the probe to the agent container (PRRT_kwDOSJAM6s6JV_Rl), which would
+    leave nothing to assert the overlay against."""
     settings = _settings_with_host_home(tmp_path)
 
     payload = _request(provider_readiness_override=False).model_dump(mode="python")
@@ -284,10 +294,10 @@ async def test_retry_preflight_probes_source_profile_ollama_daemon(
     payload["workspace"] = {
         "profile_ref": "inline",
         "profile": {
-            "name": "ollama-sidecar",
+            "name": "ollama-profile-host",
             "runtime": {
                 "environment": {
-                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434",
+                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434",
                 },
             },
         },
@@ -301,7 +311,7 @@ async def test_retry_preflight_probes_source_profile_ollama_daemon(
             settings=settings,
             provider_environ={
                 "OLLAMA_API_KEY": "ollama_secret",
-                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434",
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434",
             },
             run_subprocess=_docker_ok,
             http_get=_ollama_ok,
@@ -322,15 +332,15 @@ async def test_retry_preflight_probes_source_profile_ollama_daemon(
             settings=settings,
             provider_environ={
                 "OLLAMA_API_KEY": "ollama_secret",
-                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434",
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://127.0.0.1:11434",
             },
             run_subprocess=_docker_ok,
             http_get=_capturing_http_get,
         )
 
     assert probed, "expected the retry readiness probe to hit the Ollama daemon"
-    assert all("ollama-sidecar:11434" in url for url in probed)
-    assert all("worker-daemon" not in url for url in probed)
+    assert all("localhost:11434" in url for url in probed)
+    assert all("127.0.0.1" not in url for url in probed)
 
 
 async def test_retry_with_provider_readiness_override_records_source_and_target(

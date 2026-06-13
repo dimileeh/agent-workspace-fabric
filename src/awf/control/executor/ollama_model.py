@@ -36,6 +36,7 @@ from awf.service.provider_readiness_helpers import (
     _http_post_stream,
     _ollama_pull_urls,
     _ollama_tags_urls,
+    _ollama_url_host_reachable_from_worker,
 )
 
 # Keep the persisted progress tail bounded; the live stream is logged in full.
@@ -121,6 +122,19 @@ async def _ensure_ollama_model_or_mark_failed(
         )
         return True
     environ = _effective_ollama_environ(ws)
+    # #569: the worker runs off ``awf_net`` and cannot reach a workspace Compose
+    # service DNS name (e.g. ``http://ollama-sidecar:11434``). Probing it from here
+    # would falsely fail with ``OLLAMA_MODEL_PROBE_FAILED`` and block an otherwise
+    # valid sidecar-Ollama workspace. Skip the worker-side reachability/model probe
+    # for a non-host-reachable URL and let validation defer to the agent container
+    # where the sidecar daemon IS reachable.
+    if not _ollama_url_host_reachable_from_worker(environ):
+        _log.info(
+            "executor.ollama_model_skip_non_host_reachable",
+            workspace_id=workspace_id,
+            model=model,
+        )
+        return True
     secrets = _environ_secret_values(environ)
     # Bound the buffered tail: only the last ``_PULL_PROGRESS_EVENT_LIMIT`` lines
     # are ever persisted, so a long pull cannot grow this without limit.

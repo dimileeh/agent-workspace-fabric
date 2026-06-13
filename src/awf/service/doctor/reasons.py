@@ -1003,6 +1003,13 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "docs/REASON_CATALOG.md#opencode_ollama_auth_missing",
     ),
+    "OPENCODE_PROVIDER_AUTH_MISSING": _ReasonText(
+        "No OpenCode/provider auth signal was visible for a non-Ollama OpenCode model.",
+        "Mount ~/.config/opencode or set the provider API key (e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY).",
+        "Missing OpenCode/provider credentials for a provider-qualified (non-Ollama) model.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#opencode_provider_auth_missing",
+    ),
     "GROK_AUTH_MISSING": _ReasonText(
         "No Grok Build auth signal was visible.",
         "Mount ~/.grok or set XAI_API_KEY in the AWF service environment.",

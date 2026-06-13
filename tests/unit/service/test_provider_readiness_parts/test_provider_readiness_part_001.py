@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 import awf.service.provider_readiness as provider_readiness
@@ -54,9 +55,18 @@ def _unexpected_subprocess(args: list[str], **_kwargs: object) -> Any:
 
 def _ollama_ok(url: str, *, timeout: float) -> Any:
     assert timeout > 0
-    if url == "http://ollama.local:11434/api/version":
+    # Answer both a non-worker-reachable DNS host (``ollama.local``) and the
+    # worker-reachable ``localhost`` so callers that need the create-time daemon
+    # probe to actually run can point at a host that is not deferred away.
+    if url in {
+        "http://ollama.local:11434/api/version",
+        "http://localhost:11434/api/version",
+    }:
         return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-    if url == "http://ollama.local:11434/api/tags":
+    if url in {
+        "http://ollama.local:11434/api/tags",
+        "http://localhost:11434/api/tags",
+    }:
         return SimpleNamespace(
             status_code=200,
             text='{"models":[{"name":"kimi-k2.6:cloud"}]}',
@@ -263,7 +273,9 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     (home / ".gemini").mkdir()
     (home / ".config" / "opencode").mkdir(parents=True)
     env = {
-        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+        # ``localhost`` is worker-reachable so the OpenCode create-time daemon probe
+        # runs for the ``:cloud`` model rather than being deferred as non-reachable.
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1",
         "CURSOR_API_KEY": "cursor_secret",
         "XAI_API_KEY": "xai-selected-grok-secret",
     }
@@ -522,12 +534,16 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
     (home / ".config" / "opencode").mkdir(parents=True)
     urls: list[str] = []
 
+    # ``localhost`` is worker-reachable, so the create-time daemon probe runs and
+    # exercises the cloud-absent-from-tags disposition. (A ``:cloud`` model at a
+    # daemon URL the worker cannot reach defers instead — see
+    # ``test_selected_opencode_preflight_cloud_model_with_creds_non_worker_reachable_url_defers``.)
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         urls.append(url)
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -538,7 +554,7 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/kimi-k2.6:cloud"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -553,8 +569,8 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
     assert result["blocks_launch"] is False
     # Preflight never pulls — only the cheap version + tags probes run.
     assert urls == [
-        "http://ollama.local:11434/api/version",
-        "http://ollama.local:11434/api/tags",
+        "http://localhost:11434/api/version",
+        "http://localhost:11434/api/tags",
     ]
 
 
@@ -565,11 +581,14 @@ def test_selected_opencode_preflight_absent_non_cloud_model_is_pull_pending(
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
 
+    # ``localhost`` is worker-reachable, so the create-time daemon probe runs (the
+    # #569 host-unreachable skip does not apply); a sidecar DNS name is covered by
+    # ``test_selected_opencode_preflight_local_model_non_worker_reachable_url_defers``.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -580,7 +599,7 @@ def test_selected_opencode_preflight_absent_non_cloud_model_is_pull_pending(
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -599,19 +618,21 @@ def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
 
+    # A worker-reachable URL (``localhost``) whose daemon is down still blocks: the
+    # #569 skip only defers a daemon URL the worker cannot reach at all.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
-            raise RuntimeError("connection refused")
+        if url == "http://localhost:11434/api/tags":
+            raise httpx.ConnectError("connection refused")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -629,12 +650,13 @@ def test_selected_opencode_preflight_authless_local_model_reachable_daemon_allow
     # ``ollama/``-prefixed model is served by the host daemon, whose /api/tags
     # and /api/pull need no OpenCode/Ollama Cloud credential. With the daemon
     # reachable the strict auth gate is waived (carve-out symmetric to
-    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED) so admission can proceed.
+    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED) so admission can proceed. ``localhost``
+    # is worker-reachable, so the daemon probe runs rather than the #569 skip.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"llama4:70b"}]}',
@@ -645,7 +667,7 @@ def test_selected_opencode_preflight_authless_local_model_reachable_daemon_allow
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -670,12 +692,13 @@ def test_selected_opencode_preflight_authless_local_absent_model_is_pull_pending
     # Authless local model that is not yet present: the waived auth gate lets the
     # pull-pending probe run, so admission is non-blocking and the executor
     # pre-agent step can auto-pull rather than the workspace being rejected at
-    # create time with OPENCODE_OLLAMA_AUTH_MISSING.
+    # create time with OPENCODE_OLLAMA_AUTH_MISSING. ``localhost`` is worker-
+    # reachable, so the carve-out daemon probe runs rather than the #569 skip.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -686,7 +709,7 @@ def test_selected_opencode_preflight_authless_local_absent_model_is_pull_pending
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -726,22 +749,24 @@ def test_selected_opencode_preflight_authless_cloud_model_still_requires_creds(
 def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blocks(
     tmp_path: Path,
 ) -> None:
-    # Authless local model but the daemon is unreachable: the waiver is
-    # conditional on daemon reachability, so with no credential present this
-    # still blocks with OPENCODE_OLLAMA_AUTH_MISSING. Only the cheap /api/version
-    # probe runs before the gate falls through.
+    # Authless local model at a worker-reachable URL (``localhost``) whose daemon is
+    # down: the waiver is conditional on daemon reachability, so with no credential
+    # present this still blocks with OPENCODE_OLLAMA_AUTH_MISSING. Only the cheap
+    # /api/version probe runs before the gate falls through. (A daemon URL the worker
+    # cannot reach at all is deferred instead — see
+    # ``test_selected_opencode_preflight_authless_local_non_worker_reachable_url_defers``.)
     seen: list[str] = []
 
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         seen.append(url)
-        raise RuntimeError("connection refused")
+        raise httpx.ConnectError("connection refused")
 
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_unexpected_subprocess,
         http_get=_http_get,
     )
@@ -749,21 +774,242 @@ def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blo
     assert result["auth_status"] == "fail"
     assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
     assert result["blocks_launch"] is True
-    assert seen == ["http://ollama.local:11434/api/version"]
+    assert seen == ["http://localhost:11434/api/version"]
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_local_model_non_worker_reachable_url_defers(
+    tmp_path: Path,
+) -> None:
+    # #569 symmetry: a profile Ollama URL like ``http://ollama-sidecar:11434`` is a
+    # workspace Compose service DNS name the create/retry admission process cannot
+    # reach. A worker-side /api/version|/api/tags probe would falsely block the
+    # workspace with OLLAMA_HOST_UNREACHABLE before the executor pre-agent step (which
+    # already skips the same probe) could defer it. Admission must instead skip the
+    # Ollama daemon probe and defer to the agent container where the sidecar IS
+    # reachable. Auth is present here, so the skip is purely about host reachability.
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed for a sidecar URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == "ollama/llama4:70b"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
+    assert result["probe_status"] == "unavailable"
+    assert result["auth_status"] == "ok"
+    assert result["override_required"] is False
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_local_non_worker_reachable_url_defers(
+    tmp_path: Path,
+) -> None:
+    # The reviewer's other reported reason code: an authless local model at a sidecar
+    # URL currently blocks with OPENCODE_OLLAMA_AUTH_MISSING because the worker cannot
+    # reach the daemon to waive the auth gate. The host-reachability skip must apply
+    # here too (no credential, no daemon probe) and defer to the agent container.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed for a sidecar URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["reason_code"] == "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
+    assert result["probe_status"] == "unavailable"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_cloud_model_with_creds_non_worker_reachable_url_defers(
+    tmp_path: Path,
+) -> None:
+    # PRRT_kwDOSJAM6s6JV_Rl: a ``:cloud`` Ollama model (e.g. ``glm-5.1:cloud``) with
+    # valid OpenCode credentials and a sidecar daemon URL the worker cannot reach must
+    # also defer the worker-side /api/version probe to the agent container. The defer
+    # was previously gated on a *local* model, so a cloud model fell through to
+    # _check_opencode and blocked with OLLAMA_HOST_UNREACHABLE before the executor's
+    # sidecar skip (which already defers for any non-host-reachable URL) could run.
+    # Credentials are present here, so the cloud auth gate is satisfied.
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed for a sidecar URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "glm-5.1:cloud"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == "glm-5.1:cloud"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
+    assert result["probe_status"] == "unavailable"
+    assert result["auth_status"] == "ok"
+    assert result["override_required"] is False
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_cloud_model_without_creds_non_worker_reachable_url_blocks(
+    tmp_path: Path,
+) -> None:
+    # The ``:cloud`` defer is gated on visible OpenCode/Ollama credentials: a cloud
+    # model is served remotely and still needs the cloud credential. With none, the
+    # worker must NOT defer and must NOT probe the unreachable sidecar — admission
+    # blocks with OPENCODE_OLLAMA_AUTH_MISSING (the host probe never runs because the
+    # credential gate fails first).
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed when creds are missing: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "glm-5.1:cloud"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
+    assert result["auth_status"] == "fail"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_non_worker_reachable_url_still_blocks_missing_cli(
+    tmp_path: Path,
+) -> None:
+    # Skipping the Ollama daemon probe for a sidecar URL must not also skip the
+    # generic OpenCode CLI availability check: a runtime image missing the
+    # ``opencode`` binary still has to block admission here rather than be admitted
+    # as ready and only fail later as an agent command failure.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed for a sidecar URL: {url}")
+
+    def _runtime_cli_missing(args: list[str], **_kwargs: object) -> Any:
+        assert args[-1] == "command -v opencode"
+        return _completed(returncode=1, stderr="opencode: not found")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_runtime_cli_missing,
+        http_get=_no_http,
+    )
+
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "OPENCODE_RUNTIME_CLI_NOT_FOUND"
+    assert result["blocks_launch"] is True
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
-def test_selected_opencode_preflight_non_ollama_provider_model_skips_ollama_check(
+def test_selected_opencode_preflight_non_ollama_provider_model_missing_creds_blocks(
     tmp_path: Path,
     model: str,
 ) -> None:
-    # No ~/.config/opencode, no ~/.ollama auth files, no OLLAMA_API_KEY: the
-    # Ollama auth/host preflight would otherwise return OPENCODE_OLLAMA_AUTH_MISSING
-    # and block create-time admission. A provider-qualified non-Ollama model is
-    # served by the selected provider, so the Ollama preflight must be skipped
-    # here too (mirroring the executor pre-agent skip) and never run an Ollama
-    # probe. The generic OpenCode runtime-CLI availability probe still runs.
+    # #554: a provider-qualified non-Ollama model served by an OpenCode cloud
+    # provider needs an OpenCode/provider credential. With no ~/.config/opencode
+    # and no provider API key visible, create-time readiness must FAIL up front
+    # with the clear OPENCODE_PROVIDER_AUTH_MISSING reason (symmetric to the
+    # OPENCODE_OLLAMA_AUTH_MISSING cloud-Ollama gate) instead of deferring to the
+    # provider and surfacing a confusing agent-CLI error later. Neither the Ollama
+    # probe nor the OpenCode CLI probe runs in the no-creds path.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == model
+    assert result["reason_code"] == "OPENCODE_PROVIDER_AUTH_MISSING"
+    assert result["auth_status"] == "fail"
+    assert result["probe_status"] == "skipped"
+    assert result["override_required"] is True
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("model", "expected_hint"),
+    [
+        ("openai/gpt-oss", "OPENAI_API_KEY"),
+        ("anthropic/claude-sonnet", "ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN"),
+        ("google/gemini-pro", "GEMINI_API_KEY / GOOGLE_API_KEY"),
+        ("xai/grok", "XAI_API_KEY"),
+        ("mystery/model", "the provider API key"),
+    ],
+)
+def test_selected_opencode_preflight_non_ollama_auth_missing_hint_is_provider_accurate(
+    tmp_path: Path,
+    model: str,
+    expected_hint: str,
+) -> None:
+    # The auth-missing fix message must name the provider's own credential env
+    # var(s) (GEMINI_API_KEY for google/..., XAI_API_KEY for xai/...) rather than
+    # a hardcoded openai/anthropic example, so the operator follows the right fix.
+    # An unknown provider prefix falls back to a generic "the provider API key".
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["reason_code"] == "OPENCODE_PROVIDER_AUTH_MISSING"
+    assert f"set {expected_hint}." in result["message"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
+def test_selected_opencode_preflight_non_ollama_provider_model_with_config_creds_defers(
+    tmp_path: Path,
+    model: str,
+) -> None:
+    # #554: ~/.config/opencode is OpenCode's own multi-provider credential store,
+    # so its presence satisfies the create-time credential gate for any provider.
+    # With creds present the behavior is unchanged from #553: the Ollama
+    # auth/daemon preflight is skipped (deferred to the provider), only the
+    # generic OpenCode runtime-CLI probe runs, and the workspace is admitted.
+    (tmp_path / "home" / ".config" / "opencode").mkdir(parents=True)
+
     def _no_http(url: str, *, timeout: float) -> Any:
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
@@ -786,6 +1032,44 @@ def test_selected_opencode_preflight_non_ollama_provider_model_skips_ollama_chec
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("model", "env_key", "env_value"),
+    [
+        ("openai/gpt-oss", "OPENAI_API_KEY", "sk-proj-opencode-readiness"),
+        ("anthropic/claude-sonnet", "ANTHROPIC_API_KEY", "sk-ant-opencode-readiness"),
+    ],
+)
+def test_selected_opencode_preflight_non_ollama_provider_model_with_env_key_defers(
+    tmp_path: Path,
+    model: str,
+    env_key: str,
+    env_value: str,
+) -> None:
+    # #554: with no ~/.config/opencode, the provider API key matching the model's
+    # provider prefix (OPENAI_API_KEY for openai/..., ANTHROPIC_API_KEY for
+    # anthropic/...) satisfies the credential gate, so admission defers to the
+    # provider exactly as when ~/.config/opencode is present.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={env_key: env_value},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == model
+    assert result["reason_code"] == "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED"
+    assert result["probe_status"] == "unavailable"
+    assert result["auth_status"] == "ok"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
 def test_selected_opencode_preflight_non_ollama_provider_model_blocks_missing_cli(
     tmp_path: Path,
@@ -794,7 +1078,11 @@ def test_selected_opencode_preflight_non_ollama_provider_model_blocks_missing_cl
     # Skipping the Ollama preflight for a provider-qualified non-Ollama model must
     # not also skip the generic OpenCode CLI availability check: a runtime image
     # missing the ``opencode`` binary has to block admission here rather than be
-    # admitted as ready and only fail later as an agent command failure.
+    # admitted as ready and only fail later as an agent command failure. Provide
+    # ~/.config/opencode so the #554 auth gate passes and the missing-CLI block is
+    # the contract under test.
+    (tmp_path / "home" / ".config" / "opencode").mkdir(parents=True)
+
     def _no_http(url: str, *, timeout: float) -> Any:
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
@@ -819,6 +1107,45 @@ def test_selected_opencode_preflight_non_ollama_provider_model_blocks_missing_cl
 
 
 @pytest.mark.unit
+def test_opencode_provider_credentials_present_classifier(tmp_path: Path) -> None:
+    # #554 credential detection: ~/.config/opencode satisfies any provider; a
+    # provider-matched env key satisfies its provider; an unknown provider with
+    # no config dir is unsatisfied.
+    from awf.service.provider_readiness_helpers import _opencode_provider_credentials_present
+
+    config_home = tmp_path / "with_config"
+    (config_home / ".config" / "opencode").mkdir(parents=True)
+    assert _opencode_provider_credentials_present("openai/gpt-oss", {}, config_home) == (
+        True,
+        "~/.config/opencode",
+    )
+
+    bare_home = tmp_path / "bare"
+    bare_home.mkdir()
+    assert _opencode_provider_credentials_present(
+        "openai/gpt-oss", {"OPENAI_API_KEY": "sk-proj-x"}, bare_home
+    ) == (True, "OPENAI_API_KEY")
+    assert _opencode_provider_credentials_present(
+        "anthropic/claude-sonnet", {"ANTHROPIC_AUTH_TOKEN": "sk-ant-x"}, bare_home
+    ) == (True, "ANTHROPIC_AUTH_TOKEN")
+    # An unknown provider prefix is satisfied only by ~/.config/opencode.
+    assert _opencode_provider_credentials_present(
+        "mystery/model", {"OPENAI_API_KEY": "sk-proj-x"}, bare_home
+    ) == (False, None)
+    # The matching provider key must be present, not just any provider key.
+    assert _opencode_provider_credentials_present(
+        "openai/gpt-oss", {"ANTHROPIC_API_KEY": "sk-ant-x"}, bare_home
+    ) == (False, None)
+    # The Codex-style OPENAI_API_TOKEN is not a credential OpenCode reads (its
+    # OpenAI path uses the AI SDK provider, whose apiKey default is
+    # OPENAI_API_KEY), so it must not satisfy the openai gate — otherwise
+    # preflight admits a workspace whose agent launches without a usable key.
+    assert _opencode_provider_credentials_present(
+        "openai/gpt-oss", {"OPENAI_API_TOKEN": "sk-proj-token"}, bare_home
+    ) == (False, None)
+
+
+@pytest.mark.unit
 def test_selected_opencode_preflight_suppresses_recovered_tags_fallback_logs(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -832,11 +1159,11 @@ def test_selected_opencode_preflight_suppresses_recovered_tags_fallback_logs(
         assert timeout > 0
         urls.append(url)
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("version fallback recovered")
+            raise httpx.ConnectError("version fallback recovered")
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
         if url == "http://host.docker.internal:11434/api/tags":
-            raise RuntimeError("tags fallback recovered")
+            raise httpx.ConnectError("tags fallback recovered")
         if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
@@ -1080,308 +1407,3 @@ def test_cli_auth_probe_reports_success_and_unusable_auth() -> None:
     assert failure["reason_code"] == "PROBE_AUTH_FAILED"
     assert "sk-proj-auth-secret" not in json.dumps(failure, sort_keys=True)
     assert "<redacted>" in failure["detail"]
-
-
-@pytest.mark.unit
-def test_provider_readiness_rejects_unreachable_internal_provider(tmp_path: Path) -> None:
-    with pytest.raises(AssertionError, match="unsupported provider"):
-        provider_readiness._check_provider_readiness(  # type: ignore[arg-type]
-            "not_a_provider",
-            _settings(tmp_path),
-            environ={},
-            host_home=tmp_path / "home",
-            strict=False,
-            run_subprocess=_unexpected_subprocess,
-            http_get=_ollama_ok,
-            secrets=frozenset(),
-        )
-
-
-@pytest.mark.unit
-def test_selected_launch_probe_skips_when_provider_or_model_is_unavailable(
-    tmp_path: Path,
-) -> None:
-    assert provider_readiness._selected_launch_probe(
-        "codex",
-        settings=_settings(tmp_path),
-        provider_result={"ok": False},
-        model="gpt-5.5",
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-        http_get=_ollama_ok,
-        secrets=frozenset(),
-    ) == {"status": "skipped"}
-    assert provider_readiness._selected_launch_probe(
-        "codex",
-        settings=_settings(tmp_path),
-        provider_result={"ok": True},
-        model=None,
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-        http_get=_ollama_ok,
-        secrets=frozenset(),
-    ) == {"status": "skipped"}
-
-
-@pytest.mark.unit
-def test_selected_launch_probe_returns_runtime_failure_and_unavailable_provider(
-    tmp_path: Path,
-) -> None:
-    runtime_failure = provider_readiness._selected_launch_probe(
-        "codex",
-        settings=_settings(tmp_path),
-        provider_result={"ok": True},
-        model="gpt-5.5",
-        environ={},
-        run_subprocess=lambda _args, **_kwargs: _completed(returncode=127, stderr="missing"),
-        http_get=_ollama_ok,
-        secrets=frozenset(),
-    )
-    unavailable = provider_readiness._selected_launch_probe(
-        "docker",
-        settings=_settings(tmp_path),
-        provider_result={"ok": True},
-        model="docker-host",
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-        http_get=_ollama_ok,
-        secrets=frozenset(),
-    )
-
-    assert runtime_failure["reason_code"] == "CODEX_RUNTIME_CLI_NOT_FOUND"
-    assert unavailable == {
-        "status": "unavailable",
-        "reason_code": "PROVIDER_PROBE_UNAVAILABLE",
-    }
-
-
-@pytest.mark.unit
-def test_selected_gemini_preflight_requires_usable_non_secret_probe(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    (home / ".gemini").mkdir(parents=True)
-    (home / ".gemini" / "oauth_creds.json").write_text("gemini_file_secret")
-    token = "AIzaGeminiProbeSecret"
-
-    def _run(args: list[str], **kwargs: object) -> Any:
-        assert args == [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            "awf-agent-runtime:latest",
-            "-lc",
-            "command -v gemini",
-        ]
-        assert kwargs["env"]["GEMINI_API_KEY"] == token
-        return _completed(returncode=1, stdout=f"missing cli with token {token}")
-
-    result = selected_provider_readiness_preflight(
-        _settings(tmp_path),
-        agent="gemini",
-        task_policy={},
-        environ={"GEMINI_API_KEY": token},
-        run_subprocess=_run,
-    )
-
-    assert result["auth_status"] == "ok"
-    assert result["probe_status"] == "fail"
-    assert result["reason_code"] == "GEMINI_RUNTIME_CLI_NOT_FOUND"
-    assert result["blocks_launch"] is True
-    serialized = json.dumps(result, sort_keys=True)
-    assert token not in serialized
-    assert "gemini_file_secret" not in serialized
-    assert "<redacted>" in serialized
-
-
-@pytest.mark.unit
-def test_selected_gemini_preflight_uses_agent_runtime_cli_not_api_cli(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    (home / ".gemini").mkdir(parents=True)
-    calls: list[list[str]] = []
-
-    def _run(args: list[str], **_kwargs: object) -> Any:
-        calls.append(args)
-        if args[0] == "gemini":
-            raise FileNotFoundError("api container gemini is absent")
-        return _completed(stdout="/usr/bin/gemini\n")
-
-    result = selected_provider_readiness_preflight(
-        _settings(tmp_path),
-        agent="gemini",
-        task_policy={},
-        environ={},
-        run_subprocess=_run,
-    )
-
-    assert result["provider"] == "gemini"
-    assert result["readiness_status"] == "ready"
-    assert result["probe_status"] == "ok"
-    assert result["reason_code"] == "PROVIDER_READY"
-    assert result["blocks_launch"] is False
-    assert calls == [
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            "awf-agent-runtime:latest",
-            "-lc",
-            "command -v gemini",
-        ]
-    ]
-
-
-@pytest.mark.unit
-def test_selected_grok_preflight_requires_xai_api_key_and_runtime_cli(
-    tmp_path: Path,
-) -> None:
-    token = "xai-runtime-secret"
-    calls: list[list[str]] = []
-
-    def _run(args: list[str], **kwargs: object) -> Any:
-        calls.append(args)
-        assert kwargs["env"]["XAI_API_KEY"] == token
-        return _completed(stdout="/usr/local/bin/grok\n")
-
-    result = selected_provider_readiness_preflight(
-        _settings(tmp_path),
-        agent="grok",
-        task_policy={},
-        environ={"XAI_API_KEY": token},
-        run_subprocess=_run,
-    )
-
-    assert result["provider"] == "grok"
-    assert result["agent"] == "grok"
-    assert result["model"] == "grok-build"
-    assert result["readiness_status"] == "ready"
-    assert result["auth_status"] == "ok"
-    assert result["auth_source"] == "XAI_API_KEY"
-    assert result["probe_status"] == "ok"
-    assert result["reason_code"] == "PROVIDER_READY"
-    assert result["blocks_launch"] is False
-    assert calls == [
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            "awf-agent-runtime:latest",
-            "-lc",
-            "command -v grok",
-        ]
-    ]
-    serialized = json.dumps(result, sort_keys=True)
-    assert token not in serialized
-
-
-@pytest.mark.unit
-def test_selected_grok_preflight_uses_file_auth_before_xai_api_key(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    (home / ".grok").mkdir(parents=True)
-    (home / ".grok" / "auth.json").write_text('{"token":"grok_file_secret"}')
-    token = "xai-env-fallback-secret"
-
-    def _run(args: list[str], **kwargs: object) -> Any:
-        assert args[-1] == "command -v grok"
-        assert kwargs["env"]["XAI_API_KEY"] == token
-        return _completed(stdout="/usr/local/bin/grok\n")
-
-    result = selected_provider_readiness_preflight(
-        _settings(tmp_path),
-        agent="grok",
-        task_policy={},
-        environ={"XAI_API_KEY": token},
-        run_subprocess=_run,
-    )
-
-    assert result["provider"] == "grok"
-    assert result["readiness_status"] == "ready"
-    assert result["auth_status"] == "ok"
-    assert result["auth_source"] == "~/.grok/auth.json"
-    assert result["probe_status"] == "ok"
-    assert result["reason_code"] == "PROVIDER_READY"
-    serialized = json.dumps(result, sort_keys=True)
-    assert token not in serialized
-    assert "grok_file_secret" not in serialized
-
-
-@pytest.mark.unit
-def test_selected_grok_preflight_blocks_missing_xai_api_key(tmp_path: Path) -> None:
-    result = selected_provider_readiness_preflight(
-        _settings(tmp_path),
-        agent="grok",
-        task_policy={},
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    assert result["provider"] == "grok"
-    assert result["readiness_status"] == "blocked"
-    assert result["auth_status"] == "fail"
-    assert result["probe_status"] == "skipped"
-    assert result["reason_code"] == "GROK_AUTH_MISSING"
-    assert result["blocks_launch"] is True
-
-
-@pytest.mark.unit
-def test_selected_grok_preflight_blocks_missing_runtime_cli_and_redacts_key(
-    tmp_path: Path,
-) -> None:
-    token = "xai-missing-cli-secret"
-
-    def _run(args: list[str], **kwargs: object) -> Any:
-        assert args[-1] == "command -v grok"
-        assert kwargs["env"]["XAI_API_KEY"] == token
-        return _completed(returncode=1, stderr=f"grok: not found for {token}")
-
-    result = selected_provider_readiness_preflight(
-        _settings(tmp_path),
-        agent="grok",
-        task_policy={},
-        environ={"XAI_API_KEY": token},
-        run_subprocess=_run,
-    )
-
-    assert result["auth_status"] == "ok"
-    assert result["probe_status"] == "fail"
-    assert result["reason_code"] == "GROK_RUNTIME_CLI_NOT_FOUND"
-    assert result["blocks_launch"] is True
-    serialized = json.dumps(result, sort_keys=True)
-    assert token not in serialized
-    assert "<redacted>" in serialized
-
-
-@pytest.mark.unit
-def test_selected_codex_preflight_blocks_when_runtime_cli_missing(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    (home / ".codex").mkdir(parents=True)
-    (home / ".codex" / "auth.json").write_text('{"token":"codex_file_secret"}')
-
-    def _run(args: list[str], **_kwargs: object) -> Any:
-        assert args[-1] == "command -v codex"
-        return _completed(returncode=1, stderr="codex: not found")
-
-    result = selected_provider_readiness_preflight(
-        _settings(tmp_path),
-        agent="codex",
-        task_policy={},
-        environ={},
-        run_subprocess=_run,
-    )
-
-    assert result["auth_status"] == "ok"
-    assert result["probe_status"] == "fail"
-    assert result["reason_code"] == "CODEX_RUNTIME_CLI_NOT_FOUND"
-    assert result["blocks_launch"] is True
