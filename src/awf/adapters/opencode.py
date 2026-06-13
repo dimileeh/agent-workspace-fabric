@@ -20,7 +20,14 @@ OPENCODE_OLLAMA_CLOUD_MODELS = (
     "gemma4:31b-cloud",
     "deepseek-v4-pro:cloud",
 )
-"""Ollama Cloud models AWF exposes through the OpenCode adapter."""
+"""Default Ollama models AWF declares in the OpenCode config.
+
+This is a *default fallback* set, **not** an allowlist gate. The host Ollama
+daemon is the source of truth for which models are usable; the selected model
+is always threaded into ``provider.ollama.models`` (see
+``_opencode_config_for_effort``) so OpenCode never rejects a model the daemon
+can serve. The tuple only supplies the default model when none is requested.
+"""
 
 DEFAULT_OLLAMA_OPENAI_BASE_URL = "http://host.docker.internal:11434/v1"
 
@@ -40,10 +47,9 @@ class OpenCodeAdapter(AgentAdapter):
         return "ollama"
 
     def _cli_args(self, *, model: str | None) -> list[str]:
-        selected_model = _qualified_model(
-            model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
-        )
-        script = _opencode_launcher_script(effort=self._default_effort)
+        requested_model = model or self._default_model or OPENCODE_OLLAMA_CLOUD_MODELS[0]
+        selected_model = _qualified_model(requested_model)
+        script = _opencode_launcher_script(effort=self._default_effort, model=requested_model)
         args = [
             "sh",
             "-c",
@@ -65,8 +71,23 @@ def _qualified_model(model: str) -> str:
     return f"ollama/{model}"
 
 
-def _opencode_launcher_script(*, effort: str | None) -> str:
-    config = _opencode_config_for_effort(effort=effort)
+def _config_model_key(model: str) -> str:
+    """Return the OpenCode ``provider.ollama.models`` key for a model reference.
+
+    Strips a leading ``ollama/`` provider prefix while preserving the ``:tag`` /
+    ``:cloud`` suffix, so the config key agrees with the bare model name the
+    Ollama daemon serves and with the ``--model`` flag derivation.
+    """
+    raw = model.strip()
+    if "/" in raw:
+        provider, remainder = raw.split("/", 1)
+        if provider == "ollama" and remainder:
+            return remainder
+    return raw
+
+
+def _opencode_launcher_script(*, effort: str | None, model: str | None = None) -> str:
+    config = _opencode_config_for_effort(effort=effort, model=model)
     config_json = json.dumps(config, separators=(",", ":"))
     return (
         "set -eu\n"
@@ -117,7 +138,11 @@ def _opencode_launcher_script(*, effort: str | None) -> str:
     )
 
 
-def _opencode_config_for_effort(*, effort: str | None) -> dict[str, object]:
+def _opencode_config_for_effort(
+    *,
+    effort: str | None,
+    model: str | None = None,
+) -> dict[str, object]:
     model_config: dict[str, object] = {"name": ""}
     if _thinking_enabled(effort):
         # Ollama Cloud exposes thinking-capable models; OpenCode's provider
@@ -126,7 +151,15 @@ def _opencode_config_for_effort(*, effort: str | None) -> dict[str, object]:
         # support it.
         model_config["options"] = {"think": True}
 
-    models = {model: {**model_config, "name": model} for model in OPENCODE_OLLAMA_CLOUD_MODELS}
+    # Always declare the selected model (plus the default fallback set) so
+    # OpenCode never rejects a daemon-served model. The host Ollama daemon — not
+    # this list — is the source of truth; the tuple is only a sensible default.
+    model_keys = list(OPENCODE_OLLAMA_CLOUD_MODELS)
+    if model:
+        selected_key = _config_model_key(model)
+        if selected_key and selected_key not in model_keys:
+            model_keys.append(selected_key)
+    models = {key: {**model_config, "name": key} for key in model_keys}
     return {
         "$schema": "https://opencode.ai/config.json",
         "permission": "allow",

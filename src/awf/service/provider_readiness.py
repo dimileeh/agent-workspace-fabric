@@ -6,7 +6,8 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -45,6 +46,10 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
 _GITHUB_TIMEOUT_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 2.0
 _PROVIDER_PROBE_TIMEOUT_SECONDS = 5.0
+# Wall/read bound for a streamed ``POST /api/pull``. Multi-GB models take
+# minutes, so the bound is generous; a stalled stream still cannot hang forever
+# because the bound is passed through to the injected HTTP stream seam.
+_OLLAMA_PULL_TIMEOUT_SECONDS = 1800.0
 _TRACEBACK_LOG_LIMIT = 4000
 _REDACTION = "<redacted>"
 _CODEX_AUTH_FILES = ("auth.json", "config.toml", "installation_id")
@@ -177,6 +182,25 @@ class HttpGet(Protocol):
         *,
         timeout: float,
     ) -> HttpResponseLike: ...
+
+
+class HttpStreamResponseLike(Protocol):
+    @property
+    def status_code(self) -> int: ...  # pragma: no cover - Protocol declaration only.
+
+    def iter_lines(  # pragma: no cover - Protocol method declaration only.
+        self,
+    ) -> Iterator[str]: ...
+
+
+class HttpPostStream(Protocol):
+    def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        url: str,
+        *,
+        json: Mapping[str, Any],
+        timeout: float,
+    ) -> AbstractContextManager[HttpStreamResponseLike]: ...
 
 
 class ProviderReadinessError(ValueError):
@@ -538,11 +562,17 @@ def _selected_launch_probe(
         if provider in {"codex", "claude_code", "cursor", "gemini", "grok"}:
             return runtime_probe
     if provider == "opencode":
+        # Create-time admission must never block on (or perform) a pull: a
+        # ``:cloud`` model is served remotely and an absent non-cloud model is
+        # pulled later in the async executor pre-agent step. Both are reported
+        # as non-blocking dispositions here; only an unreachable daemon blocks.
         return _probe_ollama_model(
             _ollama_tags_urls(environ),
             model=model,
             http_get=http_get,
             secrets=secrets,
+            allow_cloud=True,
+            pull_pending_ok=True,
         )
     return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
 
@@ -571,6 +601,11 @@ def _preflight_reason_code(
         return str(provider_result.get("reason") or "PROVIDER_AUTH_NOT_READY")
     if probe.get("status") == "fail":
         return str(probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+    if probe.get("status") == "pending":
+        # Non-blocking: the model is absent locally but will be auto-pulled
+        # before the agent runs. Surface the disposition so the console can show
+        # *why* the workspace is not yet fully ready without blocking launch.
+        return str(probe.get("reason_code") or "PROVIDER_PROBE_PENDING")
     return "PROVIDER_READY"
 
 
@@ -589,6 +624,11 @@ def _preflight_message(
         )
     if probe.get("status") == "fail":
         return str(probe.get("message") or "Selected provider auth probe did not report readiness.")
+    if probe.get("status") == "pending":
+        return str(
+            probe.get("message")
+            or "Selected provider model is not present locally yet; AWF will pull it before launch."
+        )
     return "Selected provider authentication and model readiness are sufficient for launch."
 
 
@@ -611,7 +651,10 @@ def _launch_preflight_payload(
     auth_ok = provider_result is not None and provider_result.get("ok") is True
     model_ok = bool(model) or not model_required
     probe_status = str(probe.get("status") or "skipped")
-    probe_ok = probe_status in {"ok", "unavailable"}
+    # ``pending`` is a non-blocking disposition: the requested Ollama model is
+    # absent locally but will be auto-pulled in the executor pre-agent step, so
+    # it must not require an override or block launch admission.
+    probe_ok = probe_status in {"ok", "unavailable", "pending"}
     override_required = not (auth_ok and model_ok and probe_ok)
     override_used = bool(override and override_required)
     blocks_launch = override_required and not override_used
@@ -1447,7 +1490,10 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _first_present_env,
     _github_token,
     _http_get,
+    _http_post_stream,
+    _is_cloud_model,
     _log_redacted_exception,
+    _ollama_pull_urls,
     _ollama_tags_urls,
     _ollama_version_urls,
     _ordered_names,
@@ -1467,18 +1513,26 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _security_warning,
     _static_env_warnings,
     _truncate,
+    ensure_ollama_model_available,
 )
 
 __all__ = [
+    "HttpPostStream",
+    "HttpStreamResponseLike",
     "ProviderName",
     "ProviderReadinessError",
     "check_single_provider_readiness",
     "collect_agent_readiness",
     "default_subprocess_runner",
+    "ensure_ollama_model_available",
     "provider_readiness_preflight_from_task_policy",
     "redact_launch_preflight_text",
     "selected_provider_readiness_preflight",
     "validate_provider_names",
+    "_http_post_stream",
+    "_is_cloud_model",
+    "_ollama_pull_urls",
+    "_ollama_tags_urls",
     "_redact",
     "_probe_cli_auth_status",
     "_secret_values",

@@ -515,7 +515,7 @@ def test_provider_readiness_cursor_env_auth_requires_runtime_cli(tmp_path: Path)
 
 
 @pytest.mark.unit
-def test_selected_opencode_preflight_requires_selected_ollama_model(
+def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blocking(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -546,13 +546,79 @@ def test_selected_opencode_preflight_requires_selected_ollama_model(
     assert result["provider"] == "opencode"
     assert result["model"] == "ollama/kimi-k2.6:cloud"
     assert result["auth_status"] == "ok"
-    assert result["probe_status"] == "fail"
-    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
-    assert result["blocks_launch"] is True
+    # A ``:cloud`` model is served remotely; it must not block launch even when
+    # it is absent from local /api/tags (regression for the old wrong block).
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+    # Preflight never pulls — only the cheap version + tags probes run.
     assert urls == [
         "http://ollama.local:11434/api/version",
         "http://ollama.local:11434/api/tags",
     ]
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_absent_non_cloud_model_is_pull_pending(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    # Absent non-cloud model is pullable: non-blocking, but the disposition is
+    # surfaced so the operator sees the pending pull.
+    assert result["probe_status"] == "pending"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULL_PENDING"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            raise RuntimeError("connection refused")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
+    assert result["blocks_launch"] is True
 
 
 @pytest.mark.unit

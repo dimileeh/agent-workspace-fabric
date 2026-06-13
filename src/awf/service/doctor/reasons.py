@@ -1280,6 +1280,25 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "docs/REASON_CATALOG.md#provider_auth_failed",
     ),
+    "OLLAMA_MODEL_PULL_FAILED": _ReasonText(
+        (
+            "AWF could not make the requested OpenCode/Ollama model available: the "
+            "host daemon failed to pull it before the agent run."
+        ),
+        (
+            "Check the host Ollama daemon (`ollama ls`, `ollama pull <model>`), "
+            "confirm the model name and registry reachability, then recreate or "
+            "remonitor the workspace once the model can be pulled."
+        ),
+        (
+            "The requested model is not present in the daemon's `/api/tags`, is not "
+            "an Ollama Cloud (`:cloud`) model, and the streamed `POST /api/pull` "
+            "reported an error, timed out, or left the model still missing — for "
+            "example a misspelled model name or an unreachable model registry."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("OLLAMA_MODEL_PULL_FAILED"),
+    ),
 }
 
 

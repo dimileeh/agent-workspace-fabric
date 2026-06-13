@@ -38,6 +38,7 @@ from awf.adapters.model_selection import cursor_model_for_effort, cursor_selecte
 from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     OpenCodeAdapter,
+    _config_model_key,
     _opencode_config_for_effort,
     _opencode_launcher_script,
     _qualified_model,
@@ -895,6 +896,64 @@ class TestOpenCodeAdapter:
         low_config = _opencode_config_for_effort(effort=None)
         models = low_config["provider"]["ollama"]["models"]  # type: ignore[index]
         assert all("options" not in model for model in models.values())
+
+    @pytest.mark.unit
+    def test_opencode_config_declares_arbitrary_non_allowlist_model(self) -> None:
+        config = _opencode_config_for_effort(effort=None, model="ollama/kimi-k2.7:cloud")
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        # The selected model is declared even though it is not in the default
+        # fallback tuple — the old hardcoded-allowlist rejection is gone.
+        assert "kimi-k2.7:cloud" not in OPENCODE_OLLAMA_CLOUD_MODELS
+        assert "kimi-k2.7:cloud" in models
+        assert models["kimi-k2.7:cloud"]["name"] == "kimi-k2.7:cloud"
+        # The default fallback set remains available too.
+        for default_model in OPENCODE_OLLAMA_CLOUD_MODELS:
+            assert default_model in models
+
+    @pytest.mark.unit
+    def test_opencode_config_normalizes_bare_model_key(self) -> None:
+        config = _opencode_config_for_effort(effort=None, model="llama4:70b")
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert "llama4:70b" in models
+        assert "ollama/llama4:70b" not in models
+
+    @pytest.mark.unit
+    def test_opencode_config_default_fallback_when_no_model(self) -> None:
+        config = _opencode_config_for_effort(effort=None, model=None)
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert set(models) == set(OPENCODE_OLLAMA_CLOUD_MODELS)
+
+    @pytest.mark.unit
+    def test_config_model_key_strips_ollama_prefix_only(self) -> None:
+        assert _config_model_key("ollama/kimi-k2.7:cloud") == "kimi-k2.7:cloud"
+        assert _config_model_key("llama4:70b") == "llama4:70b"
+        assert _config_model_key("foo:bar") == "foo:bar"
+        # Only the ``ollama/`` provider prefix is stripped.
+        assert _config_model_key("openai/gpt-x") == "openai/gpt-x"
+
+    @pytest.mark.unit
+    async def test_cli_model_and_embedded_config_agree(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(
+            runner=runner,
+            default_model="ollama/foo:bar",
+            default_effort="xhigh",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        assert "--model" in args
+        assert "ollama/foo:bar" in args
+        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
+        script = args[sh_start + 2]
+        # The embedded config JSON declares the selected model under its bare
+        # key, so the launched ``--model`` and the config never disagree.
+        assert '"foo:bar"' in script
 
     @pytest.mark.unit
     async def test_opencode_launcher_forwards_termination_and_cleans_temp_files(

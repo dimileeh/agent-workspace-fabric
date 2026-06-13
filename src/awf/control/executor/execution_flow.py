@@ -422,6 +422,15 @@ async def execute(
                 worktree_path=worktree_path,
             ):
                 return
+            # For OpenCode/Ollama, discover + auto-pull the requested model
+            # before the agent runs so OpenCode never rejects a daemon-served
+            # model (issue #552). No-op for other runtimes; recovery resumes
+            # skip this since the model was already ensured on the first run.
+            if not await self._ensure_ollama_model_or_mark_failed(
+                workspace_id=workspace_id,
+                ws=ws,
+            ):
+                return
             baseline_coverage = await self._run_baseline_coverage_preflight(
                 workspace_id=workspace_id,
                 compose_project=compose_project,

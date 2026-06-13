@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import subprocess
 import traceback
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -659,6 +660,25 @@ def _ollama_tags_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
     return _ollama_api_urls(environ, "api/tags")
 
 
+def _ollama_pull_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
+    return _ollama_api_urls(environ, "api/pull")
+
+
+def _ollama_pull_name(model: str | None) -> str:
+    """Return the bare Ollama model reference for a ``POST /api/pull`` body."""
+    raw = (model or "").strip()
+    if "/" in raw:
+        provider, remainder = raw.split("/", 1)
+        if provider == "ollama" and remainder:
+            return remainder
+    return raw
+
+
+def _is_cloud_model(model: str | None) -> bool:
+    """Return whether the model is an Ollama Cloud model (served remotely)."""
+    return _ollama_pull_name(model).endswith(":cloud")
+
+
 def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
     raw = (
         environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
@@ -765,6 +785,8 @@ def _probe_ollama_model(
     model: str | None,
     http_get: HttpGet,
     secrets: frozenset[str],
+    allow_cloud: bool = False,
+    pull_pending_ok: bool = False,
 ) -> dict[str, Any]:
     candidates = _ollama_model_candidates(model)
     if not candidates:
@@ -836,11 +858,33 @@ def _probe_ollama_model(
         detail = f"selected={model}; available_count={len(available_models)}"
         if failures:
             detail = f"{detail}; probe_failures={'; '.join(failures)}"
+        redacted_detail = _truncate(_redact(detail, secrets))
+        # The daemon answered but does not (yet) serve the model. A ``:cloud``
+        # model is served remotely (never pulled), and an absent non-cloud model
+        # is pullable — both are non-blocking launch dispositions when the caller
+        # opts in. Otherwise this stays the historical hard "not available" fail.
+        if allow_cloud and _is_cloud_model(model):
+            return {
+                "status": "ok",
+                "reason_code": "OLLAMA_MODEL_CLOUD",
+                "message": "Selected Ollama Cloud model is served remotely; no local pull required.",
+                "detail": redacted_detail,
+            }
+        if pull_pending_ok:
+            return {
+                "status": "pending",
+                "reason_code": "OLLAMA_MODEL_PULL_PENDING",
+                "message": (
+                    "Selected Ollama model is not present locally yet; "
+                    "AWF will pull it before the agent runs."
+                ),
+                "detail": redacted_detail,
+            }
         return {
             "status": "fail",
             "reason_code": "OLLAMA_MODEL_NOT_AVAILABLE",
             "message": "Selected OpenCode/Ollama model is not available from Ollama /api/tags.",
-            "detail": _truncate(_redact(detail, secrets)),
+            "detail": redacted_detail,
         }
 
     _log_ollama_model_probe_exceptions(exceptions, secrets)
@@ -902,6 +946,159 @@ def _ollama_model_names(payload: object) -> set[str]:
     return names
 
 
+def ensure_ollama_model_available(
+    *,
+    model: str | None,
+    tags_urls: tuple[str, ...],
+    pull_urls: tuple[str, ...],
+    http_get: HttpGet,
+    http_post_stream: HttpPostStream,
+    secrets: frozenset[str],
+    timeout: float | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Discover, classify, and (if needed) auto-pull the requested Ollama model.
+
+    The host Ollama daemon is the source of truth. Dispositions:
+
+    - already in ``/api/tags`` → ``OLLAMA_MODEL_AVAILABLE`` (no pull);
+    - ``:cloud`` model → ``OLLAMA_MODEL_CLOUD`` (served remotely, no pull);
+    - daemon unreachable → ``OLLAMA_MODEL_PROBE_FAILED`` (no pull, no hang);
+    - absent non-cloud → ``POST /api/pull`` with bounded ``timeout`` and streamed
+      (redacted) progress, then re-check ``/api/tags``: success →
+      ``OLLAMA_MODEL_PULLED``; daemon error / timeout / still-missing →
+      ``OLLAMA_MODEL_PULL_FAILED`` carrying the redacted daemon message.
+
+    Returns a structured ``{"status", "reason_code", "message"[, "detail"]}``.
+    """
+
+    pull_timeout = _OLLAMA_PULL_TIMEOUT_SECONDS if timeout is None else timeout
+
+    # An Ollama Cloud model is served remotely: it is never pulled and does not
+    # require local ``/api/tags`` membership, so short-circuit before any local
+    # daemon probe (cloud reachability/auth is validated by the create-time
+    # opencode readiness check).
+    if _is_cloud_model(model):
+        return {
+            "status": "ok",
+            "reason_code": "OLLAMA_MODEL_CLOUD",
+            "message": "Selected Ollama Cloud model is served remotely; no pull required.",
+        }
+
+    probe = _probe_ollama_model(tags_urls, model=model, http_get=http_get, secrets=secrets)
+    reason = probe.get("reason_code")
+    if reason == "OLLAMA_MODEL_AVAILABLE":
+        return {
+            "status": "ok",
+            "reason_code": "OLLAMA_MODEL_AVAILABLE",
+            "message": "Selected Ollama model is already available from /api/tags.",
+        }
+    if reason in {"MODEL_NOT_SELECTED", "OLLAMA_MODEL_PROBE_FAILED"}:
+        # No selectable model, or the daemon never answered: do not pull.
+        return dict(probe)
+
+    # reason == OLLAMA_MODEL_NOT_AVAILABLE: the daemon answered but lacks it.
+    pull_name = _ollama_pull_name(model)
+    pull_result = _pull_ollama_model(
+        pull_urls,
+        name=pull_name,
+        http_post_stream=http_post_stream,
+        secrets=secrets,
+        timeout=pull_timeout,
+        on_progress=on_progress,
+    )
+    if not pull_result["ok"]:
+        return {
+            "status": "fail",
+            "reason_code": "OLLAMA_MODEL_PULL_FAILED",
+            "message": f"Ollama pull of {pull_name!r} did not complete successfully.",
+            "detail": pull_result["detail"],
+        }
+
+    recheck = _probe_ollama_model(tags_urls, model=model, http_get=http_get, secrets=secrets)
+    if recheck.get("reason_code") == "OLLAMA_MODEL_AVAILABLE":
+        return {
+            "status": "ok",
+            "reason_code": "OLLAMA_MODEL_PULLED",
+            "message": f"Ollama model {pull_name!r} was pulled and is now available.",
+        }
+    return {
+        "status": "fail",
+        "reason_code": "OLLAMA_MODEL_PULL_FAILED",
+        "message": f"Ollama model {pull_name!r} is still unavailable after the pull completed.",
+        "detail": recheck.get("detail"),
+    }
+
+
+def _pull_ollama_model(
+    urls: tuple[str, ...],
+    *,
+    name: str,
+    http_post_stream: HttpPostStream,
+    secrets: frozenset[str],
+    timeout: float,
+    on_progress: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"name": name, "stream": True}
+    failures: list[str] = []
+    for url in urls:
+        try:
+            with http_post_stream(url, json=body, timeout=timeout) as response:
+                status_code = response.status_code
+                if not 200 <= status_code < 300:
+                    failure = f"HTTP {status_code}"
+                    failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+                    continue
+                stream_error = _consume_pull_stream(
+                    response,
+                    secrets=secrets,
+                    on_progress=on_progress,
+                )
+            if stream_error is not None:
+                failures.append(f"{url}: {stream_error}" if len(urls) > 1 else stream_error)
+                continue
+            return {"ok": True, "detail": None}
+        except Exception as exc:
+            _log_redacted_exception(
+                "provider_readiness.ollama_pull_exception",
+                exc,
+                secrets,
+            )
+            detail = f"{type(exc).__name__}: {exc}"
+            failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
+            continue
+    return {
+        "ok": False,
+        "detail": _truncate(_redact("; ".join(failures), secrets)) or None,
+    }
+
+
+def _consume_pull_stream(
+    response: HttpStreamResponseLike,
+    *,
+    secrets: frozenset[str],
+    on_progress: Callable[[str], None] | None,
+) -> str | None:
+    """Drain a ``/api/pull`` NDJSON stream; return a redacted error if any."""
+    error_detail: str | None = None
+    for line in response.iter_lines():
+        text = line.strip() if isinstance(line, str) else ""
+        if not text:
+            continue
+        redacted = _truncate(_redact(text, secrets))
+        if on_progress is not None:
+            on_progress(redacted)
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, Mapping):
+            err = payload.get("error")
+            if isinstance(err, str) and err:
+                error_detail = _truncate(_redact(err, secrets))
+    return error_detail
+
+
 def _ordered_names(providers: set[ProviderName]) -> list[str]:
     return [provider for provider in PROVIDER_NAMES if provider in providers]
 
@@ -927,6 +1124,23 @@ def _run_subprocess(
 
 def _http_get(url: str, *, timeout: float) -> HttpResponseLike:
     return httpx.get(url, timeout=timeout)
+
+
+def _http_post_stream(
+    url: str,
+    *,
+    json: Mapping[str, Any],
+    timeout: float,
+) -> AbstractContextManager[HttpStreamResponseLike]:
+    # Thin wrapper over httpx's streaming POST, mirroring ``_http_get``. The
+    # body is exercised through the injectable seam in tests; the live default
+    # is a trivial passthrough.
+    return httpx.stream(  # pragma: no cover - thin httpx passthrough
+        "POST",
+        url,
+        json=dict(json),
+        timeout=timeout,
+    )
 
 
 def _check_docker_provider(
@@ -1023,6 +1237,7 @@ from awf.service.provider_readiness import (  # noqa: E402
     _CODEX_AUTH_FILES,
     _GITHUB_TOKEN_ENV_KEYS,
     _HTTP_TIMEOUT_SECONDS,
+    _OLLAMA_PULL_TIMEOUT_SECONDS,
     _PROVIDER_PROBE_TIMEOUT_SECONDS,
     _REDACTION,
     _TRACEBACK_LOG_LIMIT,
@@ -1032,7 +1247,9 @@ from awf.service.provider_readiness import (  # noqa: E402
     URL_CREDENTIAL_RE,
     CompletedProcessLike,
     HttpGet,
+    HttpPostStream,
     HttpResponseLike,
+    HttpStreamResponseLike,
     ProviderName,
     SubprocessRun,
     _log,

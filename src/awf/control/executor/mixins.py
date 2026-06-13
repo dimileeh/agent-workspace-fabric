@@ -6,6 +6,7 @@ from awf.control.executor import git_methods as _git_methods
 from awf.control.executor import monitor_handoff as _monitor_handoff
 from awf.control.executor import monitor_handoff_setup as _monitor_handoff_setup
 from awf.control.executor import monitor_handoff_sync as _monitor_handoff_sync
+from awf.control.executor import ollama_model as _ollama_model
 from awf.control.executor import planning_ops as _planning_ops
 from awf.control.executor import quality_methods as _quality_methods
 from awf.control.executor import state_ops as _state_ops
@@ -26,6 +27,7 @@ class ExecutorDelegatesMixin:
         _git_methods._block_open_pr_reexecution_without_recovery
     )
     _ensure_worktree_available = _git_methods._ensure_worktree_available
+    _ensure_ollama_model_or_mark_failed = _ollama_model._ensure_ollama_model_or_mark_failed
     _git_rev_parse_head = _git_methods._git_rev_parse_head
     _git_commit_count_since = _git_methods._git_commit_count_since
     _changed_paths = _git_methods._changed_paths
