@@ -266,6 +266,12 @@ def test_pull_recoverable_error_before_success_is_not_failure() -> None:
 def test_pull_timeout_maps_to_pull_failed() -> None:
     post = _FakePostStream(raise_exc=httpx.TimeoutException("pull read timed out"))
 
+    # A frozen clock keeps the single attempt's bounded timeout exactly equal to
+    # the configured budget (deadline setup and the remaining-budget read both
+    # observe t=0), so the pass-through assertion stays deterministic.
+    def _monotonic() -> float:
+        return 0.0
+
     result = ensure_ollama_model_available(
         model="ollama/llama4:70b",
         tags_urls=_TAGS_URLS,
@@ -274,6 +280,7 @@ def test_pull_timeout_maps_to_pull_failed() -> None:
         http_post_stream=post,
         secrets=frozenset(),
         timeout=1800.0,
+        monotonic=_monotonic,
     )
 
     assert result["status"] == "fail"
@@ -379,6 +386,56 @@ def test_expired_deadline_skips_fallback_url() -> None:
     # Only the first URL was opened; the fallback was skipped once the deadline
     # had already elapsed.
     assert post.calls == ["http://host.docker.internal:11434/api/pull"]
+
+
+@pytest.mark.unit
+def test_fallback_attempt_timeout_bounded_by_remaining_deadline() -> None:
+    # A first pull attempt can return just *before* the shared wall-clock
+    # deadline elapses (so the pre-fallback guard does not trip), yet leave only
+    # a sliver of the budget. The fallback URL must then be opened with a
+    # connect/read timeout bounded by that remaining budget — not a fresh full
+    # ``timeout`` — otherwise the executor thread could block for roughly another
+    # whole ``timeout`` past the intended total pull deadline.
+    pull_urls = (
+        "http://host.docker.internal:11434/api/pull",
+        "http://localhost:11434/api/pull",
+    )
+
+    class _FiveHundredPost:
+        def __init__(self) -> None:
+            self.calls: list[SimpleNamespace] = []
+
+        def __call__(self, url: str, *, json: Mapping[str, Any], timeout: float) -> _Ctx:
+            self.calls.append(SimpleNamespace(url=url, timeout=timeout))
+            return _Ctx(_FakeStreamResponse(status_code=500))
+
+    # deadline setup -> 0.0 (deadline = 100.0); iter1 remaining -> 99.0 (1.0 s
+    # left); iter2 remaining -> 99.5 (0.5 s left). A non-2xx status skips stream
+    # consumption, so monotonic() is only read at the top of each URL attempt.
+    ticks = iter([0.0, 99.0, 99.5])
+
+    def _monotonic() -> float:
+        return next(ticks)
+
+    post = _FiveHundredPost()
+    result = ensure_ollama_model_available(
+        model="ollama/llama4:70b",
+        tags_urls=_TAGS_URLS,
+        pull_urls=pull_urls,
+        http_get=_http_get_returning(("other:latest",)),
+        http_post_stream=post,
+        secrets=frozenset(),
+        timeout=100.0,
+        monotonic=_monotonic,
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULL_FAILED"
+    # Both URLs were attempted, each bounded by the time left in the shared
+    # deadline rather than the full 100s timeout.
+    assert [c.url for c in post.calls] == list(pull_urls)
+    assert post.calls[0].timeout == pytest.approx(1.0)
+    assert post.calls[1].timeout == pytest.approx(0.5)
 
 
 @pytest.mark.unit

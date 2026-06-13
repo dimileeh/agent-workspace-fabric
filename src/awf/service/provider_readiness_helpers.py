@@ -1074,7 +1074,8 @@ def _pull_ollama_model(
     # without terminating still surfaces OLLAMA_MODEL_PULL_FAILED on time.
     deadline = monotonic() + timeout
     for url in urls:
-        if monotonic() >= deadline:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
             # The wall-clock budget is already spent — e.g. an earlier URL
             # streamed progress until the deadline. Opening this fallback with a
             # fresh full ``timeout`` would let the intended total bound be
@@ -1083,8 +1084,14 @@ def _pull_ollama_model(
             failure = "pull exceeded the bounded wall-clock timeout before fallback"
             failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
             break
+        # Bound this attempt by the time left in the shared deadline rather than
+        # the full ``timeout``. Otherwise a first attempt that returns just
+        # *before* the deadline still lets a fallback open with a fresh full
+        # connect/read timeout, so the executor thread could block for roughly
+        # another whole ``timeout`` past the intended total pull budget.
+        attempt_timeout = min(timeout, remaining)
         try:
-            with http_post_stream(url, json=body, timeout=timeout) as response:
+            with http_post_stream(url, json=body, timeout=attempt_timeout) as response:
                 status_code = response.status_code
                 if not 200 <= status_code < 300:
                     failure = f"HTTP {status_code}"
