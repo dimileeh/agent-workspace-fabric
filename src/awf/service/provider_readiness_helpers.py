@@ -863,17 +863,20 @@ def overlay_profile_provider_credentials(
     )
     runtime_declared: set[str] = set()
     for key in candidate_keys:
-        raw = profile_env.get(key)
-        if not raw:
+        if key not in profile_env:
             continue
+        raw = profile_env[key]
         # ``runtime.environment`` wins over secret leases in the launcher's agent-env
         # merge (``merge_agent_environment`` is first-writer-wins), so a key declared
         # here owns the agent's slot even when its value cannot be resolved from the
-        # worker environ — an unset required placeholder (``${MISSING:?set}``) or one
-        # resolving empty. Record the declaration *before* attempting expansion so the
-        # lease loop below never overlays a host credential the launcher would drop in
-        # favour of the failing runtime placeholder, which would admit a workspace whose
-        # agent never actually receives a usable credential.
+        # worker environ — an unset required placeholder (``${MISSING:?set}``), one
+        # resolving empty, or a literal empty string (``OPENAI_API_KEY: ""``). The
+        # launcher keeps that empty/failing runtime value (the key is *present* in the
+        # base env, so the skip-existing rule drops the lease addition), so record the
+        # declaration on *presence* in ``profile_env`` rather than truthiness of the
+        # value — and *before* attempting expansion. Otherwise the lease loop below
+        # would overlay a host credential the launcher then drops in favour of the empty
+        # runtime slot, admitting a workspace whose agent never receives a usable credential.
         runtime_declared.add(key)
         try:
             expanded = compose_expand_value(raw, environ=environ).strip()

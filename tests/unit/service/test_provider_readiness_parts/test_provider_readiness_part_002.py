@@ -1276,6 +1276,30 @@ def test_overlay_profile_provider_credentials_env_lease_unresolvable_runtime_win
 
     assert "OPENAI_API_KEY" not in empty
 
+    # A *literal* empty string (``OPENAI_API_KEY: ""``) is still a declaration: the
+    # launcher's first-writer-wins merge keeps the empty runtime slot and drops the lease,
+    # so the overlay must record the key on presence (not truthiness) and refrain from
+    # surfacing the lease's host credential — otherwise preflight would admit a workspace
+    # whose agent receives only the empty runtime value.
+    literal_empty = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-host-lease"},
+        {
+            "name": "opencode-openai-literal-empty",
+            "runtime": {"environment": {"OPENAI_API_KEY": ""}},
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "env/HOST_OPENAI_KEY",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert "OPENAI_API_KEY" not in literal_empty
+
 
 @pytest.mark.unit
 def test_overlay_profile_provider_credentials_env_lease_missing_source_undeclared() -> None:
