@@ -6,7 +6,8 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -45,6 +46,10 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
 _GITHUB_TIMEOUT_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 2.0
 _PROVIDER_PROBE_TIMEOUT_SECONDS = 5.0
+# Wall/read bound for a streamed ``POST /api/pull``. Multi-GB models take
+# minutes, so the bound is generous; a stalled stream still cannot hang forever
+# because the bound is passed through to the injected HTTP stream seam.
+_OLLAMA_PULL_TIMEOUT_SECONDS = 1800.0
 _TRACEBACK_LOG_LIMIT = 4000
 _REDACTION = "<redacted>"
 _CODEX_AUTH_FILES = ("auth.json", "config.toml", "installation_id")
@@ -177,6 +182,25 @@ class HttpGet(Protocol):
         *,
         timeout: float,
     ) -> HttpResponseLike: ...
+
+
+class HttpStreamResponseLike(Protocol):
+    @property
+    def status_code(self) -> int: ...  # pragma: no cover - Protocol declaration only.
+
+    def iter_lines(  # pragma: no cover - Protocol method declaration only.
+        self,
+    ) -> Iterator[str]: ...
+
+
+class HttpPostStream(Protocol):
+    def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        url: str,
+        *,
+        json: Mapping[str, Any],
+        timeout: float,
+    ) -> AbstractContextManager[HttpStreamResponseLike]: ...
 
 
 class ProviderReadinessError(ValueError):
@@ -321,6 +345,66 @@ def selected_provider_readiness_preflight(
         )
 
     provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
+    if provider == "opencode" and _opencode_model_targets_non_ollama_provider(identity.model):
+        # OpenCode can run a provider-qualified non-Ollama model (``openai/...``
+        # or ``anthropic/...``) served by the selected provider rather than the
+        # local Ollama daemon. ``_check_opencode`` only knows how to probe Ollama
+        # auth/host, so running it here would reject the workspace with an Ollama
+        # reason code at create time — before the executor's pre-agent step could
+        # skip it. Skip only the Ollama auth/daemon checks; the OpenCode CLI must
+        # still be present in the runtime image regardless of which provider serves
+        # the model, so keep the generic runtime-CLI availability probe — otherwise
+        # a runtime image missing the ``opencode`` binary would be admitted as
+        # ready here and only fail later as an agent command failure.
+        deferred_message = (
+            f"OpenCode model {identity.model!r} targets a non-Ollama provider; the "
+            "Ollama auth/daemon preflight does not apply and is skipped."
+        )
+        provider_result = _provider_result(
+            ok=True,
+            strict=True,
+            reason="OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            message=deferred_message,
+            secrets=secrets,
+            credential_scope="deferred_to_provider",
+            isolation="none",
+        )
+        cli_probe = _probe_agent_runtime_cli(
+            settings,
+            executable="opencode",
+            provider=provider,
+            environ=env,
+            run_subprocess=resolved_run,
+            secrets=secrets,
+        )
+        if cli_probe.get("status") == "ok":
+            probe: dict[str, Any] = {
+                "status": "unavailable",
+                "reason_code": "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            }
+            reason_code = "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED"
+            message = deferred_message
+        else:
+            probe = cli_probe
+            reason_code = str(cli_probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+            message = str(
+                cli_probe.get("message")
+                or "OpenCode runtime CLI is not available in the configured runtime image."
+            )
+        return _launch_preflight_payload(
+            agent=runtime.value,
+            provider=provider,
+            model=identity.model,
+            model_source=identity.model_source,
+            provider_result=provider_result,
+            probe=probe,
+            reason_code=reason_code,
+            message=message,
+            override=override,
+            override_reason=override_reason,
+            checked_at=checked,
+            secrets=secrets,
+        )
     provider_result = _check_provider_readiness(
         provider,
         settings,
@@ -331,6 +415,11 @@ def selected_provider_readiness_preflight(
         http_get=resolved_http_get,
         secrets=secrets,
         probe_runtime_cli=False,
+        # Pass the effective model so the OpenCode/Ollama check can apply the
+        # local-Ollama authless carve-out at launch admission. Broad readiness
+        # callers (collect_agent_readiness / check_single_provider_readiness)
+        # have no selected model, so they keep the strict AUTH_MISSING gate.
+        model=identity.model,
     )
     probe = _selected_launch_probe(
         provider,
@@ -372,6 +461,20 @@ def selected_provider_readiness_preflight(
         checked_at=checked,
         secrets=secrets,
     )
+
+
+def _opencode_model_targets_non_ollama_provider(model: str | None) -> bool:
+    """Return whether an OpenCode model names a non-Ollama provider.
+
+    Mirrors ``OpenCodeAdapter.get_provider``: a provider-qualified model such as
+    ``openai/gpt-oss`` or ``anthropic/claude-sonnet`` carries a ``<provider>/``
+    prefix, while a bare or ``ollama/``-prefixed reference targets the local
+    Ollama daemon. Only the latter is probed/pulled against Ollama, so a
+    non-Ollama provider model must skip the Ollama auth/host preflight.
+    """
+
+    provider, slash, _remainder = (model or "").strip().partition("/")
+    return bool(slash) and provider != "ollama"
 
 
 def provider_readiness_preflight_from_task_policy(
@@ -436,6 +539,7 @@ def _check_provider_readiness(
     http_get: HttpGet,
     secrets: frozenset[str],
     probe_runtime_cli: bool = True,
+    model: str | None = None,
 ) -> dict[str, Any]:
     if provider == "github":
         return _check_github(
@@ -489,6 +593,7 @@ def _check_provider_readiness(
             strict=strict,
             http_get=http_get,
             secrets=secrets,
+            model=model,
         )
     if provider == "grok":
         return _check_grok(
@@ -538,11 +643,17 @@ def _selected_launch_probe(
         if provider in {"codex", "claude_code", "cursor", "gemini", "grok"}:
             return runtime_probe
     if provider == "opencode":
+        # Create-time admission must never block on (or perform) a pull: a
+        # ``:cloud`` model is served remotely and an absent non-cloud model is
+        # pulled later in the async executor pre-agent step. Both are reported
+        # as non-blocking dispositions here; only an unreachable daemon blocks.
         return _probe_ollama_model(
             _ollama_tags_urls(environ),
             model=model,
             http_get=http_get,
             secrets=secrets,
+            allow_cloud=True,
+            pull_pending_ok=True,
         )
     return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
 
@@ -571,6 +682,11 @@ def _preflight_reason_code(
         return str(provider_result.get("reason") or "PROVIDER_AUTH_NOT_READY")
     if probe.get("status") == "fail":
         return str(probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+    if probe.get("status") == "pending":
+        # Non-blocking: the model is absent locally but will be auto-pulled
+        # before the agent runs. Surface the disposition so the console can show
+        # *why* the workspace is not yet fully ready without blocking launch.
+        return str(probe.get("reason_code") or "PROVIDER_PROBE_PENDING")
     return "PROVIDER_READY"
 
 
@@ -589,6 +705,11 @@ def _preflight_message(
         )
     if probe.get("status") == "fail":
         return str(probe.get("message") or "Selected provider auth probe did not report readiness.")
+    if probe.get("status") == "pending":
+        return str(
+            probe.get("message")
+            or "Selected provider model is not present locally yet; AWF will pull it before launch."
+        )
     return "Selected provider authentication and model readiness are sufficient for launch."
 
 
@@ -611,7 +732,10 @@ def _launch_preflight_payload(
     auth_ok = provider_result is not None and provider_result.get("ok") is True
     model_ok = bool(model) or not model_required
     probe_status = str(probe.get("status") or "skipped")
-    probe_ok = probe_status in {"ok", "unavailable"}
+    # ``pending`` is a non-blocking disposition: the requested Ollama model is
+    # absent locally but will be auto-pulled in the executor pre-agent step, so
+    # it must not require an override or block launch admission.
+    probe_ok = probe_status in {"ok", "unavailable", "pending"}
     override_required = not (auth_ok and model_ok and probe_ok)
     override_used = bool(override and override_required)
     blocks_launch = override_required and not override_used
@@ -1258,198 +1382,20 @@ def _check_gemini(
     )
 
 
-def _check_opencode(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    http_get: HttpGet,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    opencode_config = (host_home / ".config" / "opencode").is_dir()
-    ollama_files = [
-        filename for filename in _OLLAMA_AUTH_FILES if (host_home / ".ollama" / filename).is_file()
-    ]
-    env_signal = _first_present_env(environ, _OPENCODE_ENV_KEYS)
-    signals: list[str] = []
-    credential_sources: list[dict[str, str]] = []
-    if opencode_config:
-        signals.append("~/.config/opencode")
-        credential_sources.append(
-            _credential_source(
-                type_="path",
-                signal="~/.config/opencode",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-        )
-    if ollama_files:
-        signals.append("~/.ollama auth files")
-        credential_sources.extend(
-            _credential_source(
-                type_="path",
-                signal=f"~/.ollama/{filename}",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-            for filename in ollama_files
-        )
-    if env_signal is not None:
-        signals.append(env_signal)
-        credential_sources.append(
-            _credential_source(
-                type_="env",
-                signal=env_signal,
-                credential_scope="static_env_token",
-                isolation="service_env",
-            )
-        )
-
-    if not signals:
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="OPENCODE_OLLAMA_AUTH_MISSING",
-            message=(
-                "No OpenCode/Ollama auth signal was visible. Mount ~/.config/opencode, "
-                "mount small ~/.ollama auth files, or set OLLAMA_API_KEY."
-            ),
-            secrets=secrets,
-            credential_scope="not_observed",
-            isolation="none",
-        )
-
-    version_urls = _ollama_version_urls(environ)
-    probe = _probe_ollama(version_urls, http_get=http_get, secrets=secrets)
-    if not probe["ok"]:
-        probe_detail = probe.get("detail")
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="OLLAMA_HOST_UNREACHABLE",
-            message=(
-                "OpenCode/Ollama auth is visible, but the Ollama host did not answer "
-                "a cheap /api/version readiness probe."
-            ),
-            detail=probe_detail if isinstance(probe_detail, str) else None,
-            signals=[*signals, "ollama /api/version"],
-            secrets=secrets,
-            credential_sources=credential_sources,
-            credential_scope=_primary_credential_scope(credential_sources),
-            isolation=_primary_isolation(credential_sources),
-            warnings=_static_env_warnings(
-                provider_label="OpenCode/Ollama",
-                signals=[env_signal]
-                if env_signal is not None and not (opencode_config or ollama_files)
-                else [],
-            ),
-        )
-
-    # Keep successful readiness payloads schema-stable. `_probe_ollama` retains
-    # recovered candidate failures under debug for internal diagnostics; only
-    # terminal probe failures become operator-facing provider detail.
-    reason = "OPENCODE_FILE_AUTH_PRESENT"
-    if not opencode_config and ollama_files:
-        reason = "OLLAMA_FILE_AUTH_PRESENT"
-    elif not opencode_config and env_signal is not None:
-        reason = "OLLAMA_ENV_AUTH_PRESENT"
-
-    return _provider_result(
-        ok=True,
-        strict=strict,
-        reason=reason,
-        message="OpenCode/Ollama auth is visible and the Ollama host is reachable.",
-        signals=[*signals, "OLLAMA_HOST_REACHABLE"],
-        secrets=secrets,
-        credential_sources=credential_sources,
-        credential_scope=_primary_credential_scope(credential_sources),
-        isolation=_primary_isolation(credential_sources),
-        warnings=_static_env_warnings(
-            provider_label="OpenCode/Ollama",
-            signals=[env_signal]
-            if env_signal is not None and not (opencode_config or ollama_files)
-            else [],
-        ),
-    )
-
-
-def _check_grok(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    auth_json = host_home / ".grok" / "auth.json"
-    if auth_json.is_file():
-        file_sources = [
-            _credential_source(
-                type_="path",
-                signal="~/.grok/auth.json",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-        ]
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GROK_FILE_AUTH_PRESENT",
-            message="Grok Build auth files are visible for per-workspace isolated copies.",
-            signals=[source["signal"] for source in file_sources],
-            secrets=secrets,
-            credential_sources=file_sources,
-            credential_scope="isolated_workspace",
-            isolation="per_workspace_copy",
-            warnings=[],
-        )
-
-    signal = _first_present_env(environ, _XAI_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GROK_ENV_AUTH_PRESENT",
-            message="Grok Build auth is visible through service environment variables.",
-            signals=[signal],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="env",
-                    signal=signal,
-                    credential_scope="static_env_token",
-                    isolation="service_env",
-                )
-            ],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=_static_env_warnings(
-                provider_label="Grok Build",
-                signals=[signal],
-            ),
-        )
-
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="GROK_AUTH_MISSING",
-        message="No Grok Build auth signal was visible. Mount ~/.grok or set XAI_API_KEY.",
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
-
-
 from awf.service.provider_readiness_helpers import (  # noqa: E402
     _check_docker_provider,
+    _check_grok,
+    _check_opencode,
     _codex_file_sources,
     _credential_source,
     _existing_credential_sources,
     _first_present_env,
     _github_token,
     _http_get,
-    _log_redacted_exception,
+    _http_post_stream,
+    _is_cloud_model,
+    _ollama_pull_urls,
     _ollama_tags_urls,
-    _ollama_version_urls,
     _ordered_names,
     _primary_credential_scope,
     _primary_isolation,
@@ -1458,28 +1404,43 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _probe_ollama,
     _probe_ollama_model,
     _provider_result,
-    _redact,
-    _redact_with_redaction_parts,
     _run_subprocess,
     _runtime_cli_probe_payload,
     _secret_values,
     _security_summary,
     _security_warning,
-    _static_env_warnings,
+    ensure_ollama_model_available,
+    overlay_profile_ollama_base_url,
+)
+from awf.service.provider_readiness_redaction import (  # noqa: E402
+    _log_redacted_exception,
+    _redact,
+    _redact_with_redaction_parts,
     _truncate,
 )
 
 __all__ = [
+    "HttpPostStream",
+    "HttpStreamResponseLike",
     "ProviderName",
     "ProviderReadinessError",
     "check_single_provider_readiness",
     "collect_agent_readiness",
     "default_subprocess_runner",
+    "ensure_ollama_model_available",
+    "overlay_profile_ollama_base_url",
     "provider_readiness_preflight_from_task_policy",
     "redact_launch_preflight_text",
     "selected_provider_readiness_preflight",
     "validate_provider_names",
+    "_http_post_stream",
+    "_is_cloud_model",
+    "_ollama_pull_urls",
+    "_ollama_tags_urls",
     "_redact",
+    "_primary_credential_scope",
+    "_primary_isolation",
     "_probe_cli_auth_status",
+    "_probe_ollama",
     "_secret_values",
 ]

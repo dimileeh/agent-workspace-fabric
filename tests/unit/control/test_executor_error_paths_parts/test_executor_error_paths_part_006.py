@@ -876,7 +876,11 @@ class TestExecutorCoverageEdgesPart002:
             assert ws.status == WorkspaceStatus.cancelled.value
             assert ws.events[-1].event_type == "workspace.stale_action_skipped"
             assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
-            assert ws.events[-1].payload["action"] == "agent_run"
+            # The first status recheck after setup now guards the
+            # baseline-coverage preflight (which itself runs the profile
+            # coverage command), so a cancel landing during setup stops here
+            # rather than only at the later ``agent_run`` recheck.
+            assert ws.events[-1].payload["action"] == "baseline_coverage_preflight"
 
     @pytest.mark.unit
     async def test_persist_pr_records_stale_skip_when_status_changed_after_push(

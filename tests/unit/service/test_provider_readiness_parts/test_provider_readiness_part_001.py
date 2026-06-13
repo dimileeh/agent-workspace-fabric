@@ -515,7 +515,7 @@ def test_provider_readiness_cursor_env_auth_requires_runtime_cli(tmp_path: Path)
 
 
 @pytest.mark.unit
-def test_selected_opencode_preflight_requires_selected_ollama_model(
+def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blocking(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -546,13 +546,276 @@ def test_selected_opencode_preflight_requires_selected_ollama_model(
     assert result["provider"] == "opencode"
     assert result["model"] == "ollama/kimi-k2.6:cloud"
     assert result["auth_status"] == "ok"
-    assert result["probe_status"] == "fail"
-    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
-    assert result["blocks_launch"] is True
+    # A ``:cloud`` model is served remotely; it must not block launch even when
+    # it is absent from local /api/tags (regression for the old wrong block).
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["blocks_launch"] is False
+    # Preflight never pulls — only the cheap version + tags probes run.
     assert urls == [
         "http://ollama.local:11434/api/version",
         "http://ollama.local:11434/api/tags",
     ]
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_absent_non_cloud_model_is_pull_pending(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    # Absent non-cloud model is pullable: non-blocking, but the disposition is
+    # surfaced so the operator sees the pending pull.
+    assert result["probe_status"] == "pending"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULL_PENDING"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            raise RuntimeError("connection refused")
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_local_model_reachable_daemon_allowed(
+    tmp_path: Path,
+) -> None:
+    # No ~/.config/opencode, no ~/.ollama auth files, no OLLAMA_API_KEY. A local
+    # ``ollama/``-prefixed model is served by the host daemon, whose /api/tags
+    # and /api/pull need no OpenCode/Ollama Cloud credential. With the daemon
+    # reachable the strict auth gate is waived (carve-out symmetric to
+    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED) so admission can proceed.
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"llama4:70b"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["auth_status"] == "ok"
+    # Authless: no credential source is observed, so the auth source falls back
+    # to the credential scope rather than naming a credential.
+    assert result["auth_source"] == "not_observed"
+    assert result["credential_scope"] == "not_observed"
+    # The model is already present locally, so launch is fully ready.
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["override_required"] is False
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_local_absent_model_is_pull_pending(
+    tmp_path: Path,
+) -> None:
+    # Authless local model that is not yet present: the waived auth gate lets the
+    # pull-pending probe run, so admission is non-blocking and the executor
+    # pre-agent step can auto-pull rather than the workspace being rejected at
+    # create time with OPENCODE_OLLAMA_AUTH_MISSING.
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "pending"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULL_PENDING"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_cloud_model_still_requires_creds(
+    tmp_path: Path,
+) -> None:
+    # The carve-out is for local models only: a ``:cloud`` model is served
+    # remotely and still requires the OpenCode/Ollama Cloud credential, so with
+    # no auth signal it must block with OPENCODE_OLLAMA_AUTH_MISSING without even
+    # probing the daemon.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/kimi-k2.6:cloud"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["auth_status"] == "fail"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blocks(
+    tmp_path: Path,
+) -> None:
+    # Authless local model but the daemon is unreachable: the waiver is
+    # conditional on daemon reachability, so with no credential present this
+    # still blocks with OPENCODE_OLLAMA_AUTH_MISSING. Only the cheap /api/version
+    # probe runs before the gate falls through.
+    seen: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        seen.append(url)
+        raise RuntimeError("connection refused")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_http_get,
+    )
+
+    assert result["auth_status"] == "fail"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
+    assert result["blocks_launch"] is True
+    assert seen == ["http://ollama.local:11434/api/version"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
+def test_selected_opencode_preflight_non_ollama_provider_model_skips_ollama_check(
+    tmp_path: Path,
+    model: str,
+) -> None:
+    # No ~/.config/opencode, no ~/.ollama auth files, no OLLAMA_API_KEY: the
+    # Ollama auth/host preflight would otherwise return OPENCODE_OLLAMA_AUTH_MISSING
+    # and block create-time admission. A provider-qualified non-Ollama model is
+    # served by the selected provider, so the Ollama preflight must be skipped
+    # here too (mirroring the executor pre-agent skip) and never run an Ollama
+    # probe. The generic OpenCode runtime-CLI availability probe still runs.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == model
+    assert result["reason_code"] == "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED"
+    assert result["probe_status"] == "unavailable"
+    assert result["auth_status"] == "ok"
+    assert result["override_required"] is False
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
+def test_selected_opencode_preflight_non_ollama_provider_model_blocks_missing_cli(
+    tmp_path: Path,
+    model: str,
+) -> None:
+    # Skipping the Ollama preflight for a provider-qualified non-Ollama model must
+    # not also skip the generic OpenCode CLI availability check: a runtime image
+    # missing the ``opencode`` binary has to block admission here rather than be
+    # admitted as ready and only fail later as an agent command failure.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    def _runtime_cli_missing(args: list[str], **_kwargs: object) -> Any:
+        assert args[-1] == "command -v opencode"
+        return _completed(returncode=1, stderr="opencode: not found")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={},
+        run_subprocess=_runtime_cli_missing,
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == model
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "OPENCODE_RUNTIME_CLI_NOT_FOUND"
+    assert result["blocks_launch"] is True
 
 
 @pytest.mark.unit
@@ -1122,362 +1385,3 @@ def test_selected_codex_preflight_blocks_when_runtime_cli_missing(
     assert result["probe_status"] == "fail"
     assert result["reason_code"] == "CODEX_RUNTIME_CLI_NOT_FOUND"
     assert result["blocks_launch"] is True
-
-
-@pytest.mark.unit
-def test_preflight_payload_filters_sparse_provider_metadata() -> None:
-    provider_result = {
-        "ok": True,
-        "status": "ok",
-        "credential_scope": "fallback_scope",
-        "credential_sources": [
-            "ignored",
-            {},
-            {"type": "env", "signal": 42, "credential_scope": "static_env_token"},
-            {"signal": "VISIBLE_SIGNAL", "isolation": "service_env"},
-        ],
-        "warnings": [
-            {"reason": "STATIC_TOKEN_FALLBACK", "message": "uses env", "severity": "warning"},
-            "ignored",
-        ],
-    }
-
-    payload = provider_readiness._launch_preflight_payload(
-        agent="codex",
-        provider="codex",
-        model="gpt-5.5",
-        model_source="default",
-        provider_result=provider_result,
-        probe={"status": "unavailable"},
-        reason_code="PROVIDER_READY",
-        message="ready",
-        override=False,
-        override_reason=None,
-        checked_at=provider_readiness.datetime(2026, 5, 3, tzinfo=provider_readiness.UTC),
-        secrets=frozenset(),
-    )
-
-    assert payload["readiness_status"] == "ready"
-    assert payload["probe_status"] == "unavailable"
-    assert payload["auth_source"] == "fallback_scope"
-    assert payload["credential_sources"] == [
-        {"type": "env", "credential_scope": "static_env_token"},
-        {"signal": "VISIBLE_SIGNAL", "isolation": "service_env"},
-    ]
-    assert payload["warnings"] == [
-        {"reason": "STATIC_TOKEN_FALLBACK", "message": "uses env", "severity": "warning"}
-    ]
-    assert provider_readiness._credential_sources({"credential_sources": "bad-shape"}) == []
-
-
-@pytest.mark.unit
-def test_preflight_reason_and_message_report_missing_model() -> None:
-    provider_result = {"ok": True, "status": "ok"}
-    probe = {"status": "ok"}
-
-    assert (
-        provider_readiness._preflight_reason_code(
-            provider_result=provider_result,
-            probe=probe,
-            model=None,
-        )
-        == "MODEL_NOT_SELECTED"
-    )
-    assert (
-        provider_readiness._preflight_message(
-            provider_result=provider_result,
-            probe=probe,
-            model=None,
-        )
-        == "No effective model was selected for the workspace agent."
-    )
-
-
-@pytest.mark.unit
-def test_provider_readiness_preflight_snapshot_and_text_redaction(tmp_path: Path) -> None:
-    snapshot = {"provider": "codex", "reason_code": "PROVIDER_READY"}
-
-    assert (
-        provider_readiness.provider_readiness_preflight_from_task_policy(
-            {"provider_readiness_preflight": snapshot}
-        )
-        == snapshot
-    )
-    assert (
-        provider_readiness.provider_readiness_preflight_from_task_policy(
-            {"provider_readiness_preflight": "bad-shape"}
-        )
-        is None
-    )
-    redacted = provider_readiness.redact_launch_preflight_text(
-        _settings(tmp_path),
-        "token sk-proj-redact-text-secret",
-        environ={"OPENAI_API_KEY": "sk-proj-redact-text-secret"},
-    )
-    assert redacted == "token <redacted>"
-
-
-@pytest.mark.unit
-def test_preflight_payload_records_redacted_override_reason_parts() -> None:
-    payload = provider_readiness._launch_preflight_payload(
-        agent="codex",
-        provider="codex",
-        model="gpt-5.5",
-        model_source="default",
-        provider_result={"ok": False, "status": "fail", "reason": "CODEX_AUTH_MISSING"},
-        probe={"status": "skipped"},
-        reason_code="CODEX_AUTH_MISSING",
-        message="missing",
-        override=True,
-        override_reason="operator checked sk-proj-override-secret manually",
-        checked_at=provider_readiness.datetime(2026, 5, 4, tzinfo=provider_readiness.UTC),
-        secrets=frozenset({"sk-proj-override-secret"}),
-    )
-
-    assert payload["override_reason"] == "operator checked <redacted> manually"
-    assert payload["override_reason_redaction_parts"] == [
-        "operator checked ",
-        " manually",
-    ]
-
-
-@pytest.mark.unit
-def test_provider_readiness_all_green(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    (home / ".codex").mkdir(parents=True)
-    (home / ".codex" / "auth.json").write_text('{"token":"codex_file_secret"}')
-    (home / ".codex" / "config.toml").write_text("model = 'gpt-5.5'\n")
-    (home / ".codex" / "installation_id").write_text("installation-123\n")
-    (home / ".claude").mkdir(parents=True)
-    (home / ".gemini").mkdir()
-    (home / ".config" / "opencode").mkdir(parents=True)
-    (home / ".ollama").mkdir()
-    (home / ".ollama" / "config.json").write_text("ollama-file-secret")
-    github_secret = "ghp_green_secret"
-    anthropic_secret = "sk-ant-green-secret"
-    cursor_secret = "cursor_green_secret"
-    gemini_secret = "gemini_green_secret"
-    ollama_secret = "ollama_green_secret"
-    xai_secret = "xai_green_secret"
-    env = {
-        "AWF_GITHUB_TOKEN": github_secret,
-        "ANTHROPIC_API_KEY": anthropic_secret,
-        "CURSOR_API_KEY": cursor_secret,
-        "GEMINI_API_KEY": gemini_secret,
-        "OLLAMA_API_KEY": ollama_secret,
-        "XAI_API_KEY": xai_secret,
-        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
-    }
-    subprocess_calls: list[list[str]] = []
-
-    def _run(args: list[str], **kwargs: object) -> Any:
-        """Return successful auth and runtime probes for all providers."""
-        subprocess_calls.append(args)
-        if args == ["gh", "auth", "status", "--hostname", "github.com"]:
-            assert github_secret not in args
-            subprocess_env = kwargs["env"]
-            assert isinstance(subprocess_env, dict)
-            assert subprocess_env["GH_TOKEN"] == github_secret
-            return _completed(stdout="logged in\n")
-        assert args == [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            "awf-agent-runtime:latest",
-            "-lc",
-            "command -v cursor-agent",
-        ]
-        assert kwargs["env"]["CURSOR_API_KEY"] == cursor_secret
-        return _completed(stdout="/usr/local/bin/cursor-agent\n")
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ=env,
-        run_subprocess=_run,
-        http_get=_ollama_ok,
-    )
-
-    assert payload["status"] == "ok"
-    providers = payload["providers"]
-    assert set(providers) == {
-        "github",
-        "codex",
-        "claude_code",
-        "cursor",
-        "gemini",
-        "opencode",
-        "grok",
-        "docker",
-    }
-    assert all(provider["ok"] is True for provider in providers.values())
-    assert providers["github"]["capabilities"] == ["pr_create", "comment", "merge"]
-    assert subprocess_calls == [
-        ["gh", "auth", "status", "--hostname", "github.com"],
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "sh",
-            "awf-agent-runtime:latest",
-            "-lc",
-            "command -v cursor-agent",
-        ],
-    ]
-    serialized = json.dumps(payload, sort_keys=True)
-    for secret in (
-        github_secret,
-        "codex_file_secret",
-        anthropic_secret,
-        cursor_secret,
-        gemini_secret,
-        ollama_secret,
-        xai_secret,
-    ):
-        assert secret not in serialized
-
-
-@pytest.mark.unit
-def test_provider_readiness_codex_isolated_file_auth_reports_least_privilege(
-    tmp_path: Path,
-) -> None:
-    home = tmp_path / "home"
-    codex_home = home / ".codex"
-    codex_home.mkdir(parents=True)
-    (codex_home / "auth.json").write_text('{"token":"codex_file_secret"}')
-    (codex_home / "config.toml").write_text("model = 'gpt-5.5'\n")
-    (codex_home / "installation_id").write_text("installation-secret\n")
-    (codex_home / "sessions").mkdir()
-    (codex_home / "sessions" / "session.jsonl").write_text("session-secret\n")
-    (codex_home / "logs_2.db").write_text("log-secret\n")
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    codex = payload["providers"]["codex"]
-    assert codex["ok"] is True
-    assert codex["status"] == "ok"
-    assert codex["reason"] == "CODEX_FILE_AUTH_PRESENT"
-    assert codex["credential_scope"] == "isolated_workspace"
-    assert codex["isolation"] == "per_workspace_copy"
-    assert codex["warnings"] == []
-    assert {source["signal"] for source in codex["credential_sources"]} >= {
-        "~/.codex/auth.json",
-        "~/.codex/config.toml",
-        "~/.codex/installation_id",
-    }
-    serialized = json.dumps(payload, sort_keys=True)
-    for secret in (
-        "codex_file_secret",
-        "installation-secret",
-        "session-secret",
-        "log-secret",
-    ):
-        assert secret not in serialized
-
-
-@pytest.mark.unit
-def test_provider_readiness_codex_rules_directory_is_reported(tmp_path: Path) -> None:
-    codex_home = tmp_path / "home" / ".codex"
-    (codex_home / "rules").mkdir(parents=True)
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    codex = payload["providers"]["codex"]
-    assert codex["reason"] == "CODEX_FILE_AUTH_PRESENT"
-    assert "~/.codex/rules" in {source["signal"] for source in codex["credential_sources"]}
-
-
-@pytest.mark.unit
-def test_provider_readiness_codex_empty_directory_is_reported(tmp_path: Path) -> None:
-    (tmp_path / "home" / ".codex").mkdir(parents=True)
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    codex = payload["providers"]["codex"]
-    assert codex["reason"] == "CODEX_FILE_AUTH_PRESENT"
-    assert codex["credential_sources"] == [
-        {
-            "type": "path",
-            "signal": "~/.codex",
-            "credential_scope": "isolated_workspace",
-            "isolation": "per_workspace_copy",
-        }
-    ]
-
-
-@pytest.mark.unit
-def test_provider_readiness_codex_static_env_auth_warns_without_leaking_value(
-    tmp_path: Path,
-) -> None:
-    token = "sk-proj-codex-env-secret"
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={"OPENAI_API_KEY": token},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    codex = payload["providers"]["codex"]
-    assert codex["ok"] is True
-    assert codex["status"] == "ok"
-    assert codex["reason"] == "CODEX_ENV_AUTH_PRESENT"
-    assert codex["credential_scope"] == "static_env_token"
-    assert codex["isolation"] == "service_env"
-    assert codex["credential_sources"] == [
-        {
-            "type": "env",
-            "signal": "OPENAI_API_KEY",
-            "credential_scope": "static_env_token",
-            "isolation": "service_env",
-        }
-    ]
-    assert {warning["reason"] for warning in codex["warnings"]} == {"STATIC_TOKEN_FALLBACK"}
-    serialized = json.dumps(payload, sort_keys=True)
-    assert token not in serialized
-    assert "OPENAI_API_KEY" in serialized
-
-
-@pytest.mark.unit
-def test_provider_readiness_codex_missing_warns_by_default_and_fails_when_strict(
-    tmp_path: Path,
-) -> None:
-    default_payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    default_codex = default_payload["providers"]["codex"]
-    assert default_payload["status"] == "ok"
-    assert default_codex["ok"] is False
-    assert default_codex["status"] == "warn"
-    assert default_codex["reason"] == "CODEX_AUTH_MISSING"
-    assert default_codex["credential_scope"] == "not_observed"
-    assert default_codex["isolation"] == "none"
-
-    strict_payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={},
-        strict_providers={"codex"},
-        run_subprocess=_unexpected_subprocess,
-    )
-
-    strict_codex = strict_payload["providers"]["codex"]
-    assert strict_payload["status"] == "fail"
-    assert strict_payload["strict_providers"] == ["codex"]
-    assert strict_codex["status"] == "fail"
-    assert strict_codex["reason"] == "CODEX_AUTH_MISSING"

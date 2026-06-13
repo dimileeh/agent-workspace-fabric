@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
@@ -245,13 +246,23 @@ async def retry_workspace_row(
         owned_path_overlap_coordination_warnings(overlaps),
         planning_scope_context=planning_scope_context,
     )
+    # Overlay the source profile's Ollama base URL onto the readiness environ so
+    # retry admission probes the same daemon the executor's pre-agent step targets
+    # (the retried workspace inherits source.resolved_profile, from which those
+    # URLs are derived). Without this, an OpenCode/Ollama profile pointing at a
+    # sidecar daemon would be admitted (or blocked) against the worker's daemon —
+    # mirroring the create-time overlay in workspaces_create.create_workspace_row.
+    preflight_environ = workspaces_create.overlay_profile_ollama_base_url(
+        provider_environ if provider_environ is not None else os.environ,
+        source.resolved_profile,
+    )
     preflight = await workspaces_create._selected_provider_preflight_for_task_async(
         resolved_settings,
         agent=source.agent,
         task_policy=retried_task_policy,
         override=provider_readiness_override,
         override_reason=provider_readiness_override_reason,
-        provider_environ=provider_environ,
+        provider_environ=preflight_environ,
         run_subprocess=run_subprocess,
         http_get=http_get,
     )

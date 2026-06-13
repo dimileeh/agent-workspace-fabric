@@ -466,6 +466,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#network_posture_unavailable](#network_posture_unavailable)
 
+### OLLAMA_MODEL_PULL_FAILED
+**Problem:** AWF could not make the requested OpenCode/Ollama model available: the host daemon failed to pull it before the agent run.
+**Likely Cause:** The requested model is not present in the daemon's `/api/tags`, is not an Ollama Cloud (`:cloud`) model, and the streamed `POST /api/pull` reported an error, timed out, or left the model still missing — for example a misspelled model name or an unreachable model registry.
+**Operator Fix:** Check the host Ollama daemon (`ollama ls`, `ollama pull <model>`), confirm the model name and registry reachability, then recreate or remonitor the workspace once the model can be pulled.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#ollama_model_pull_failed](#ollama_model_pull_failed)
+
 ### OPENCODE_OLLAMA_AUTH_MISSING
 **Problem:** No OpenCode/Ollama auth signal was visible.
 **Likely Cause:** Missing OpenCode/Ollama credentials.

@@ -13,7 +13,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.service.workspaces import WorkspaceService
 from tests.postgres import postgres_test_engine
-from tests.unit.service.test_workspace_retry import (
+from tests.unit.service._workspace_retry_helpers import (
     _mark_planning_scope_failed,
     _request,
     _retry_with_preflight_override,
