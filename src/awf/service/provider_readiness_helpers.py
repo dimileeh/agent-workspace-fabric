@@ -795,6 +795,27 @@ def overlay_profile_ollama_base_url(
     return result
 
 
+_ENV_SECRET_REF_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _env_secret_ref_name(ref: str | None) -> str | None:
+    """Return the host env var name a profile ``kind="env"`` secret lease reads from.
+
+    Mirrors ``node.secret_mounts`` ref parsing: an optional ``env/`` prefix is stripped
+    and the remainder must be a valid env identifier. Anything else (a path-style ref, a
+    malformed name, ``None``) yields ``None`` so the overlay treats it as unresolvable.
+    """
+
+    if ref is None:
+        return None
+    stripped = ref.strip()
+    if stripped.startswith("env/"):
+        stripped = stripped[len("env/") :]
+    if not _ENV_SECRET_REF_NAME_RE.fullmatch(stripped):
+        return None
+    return stripped
+
+
 def overlay_profile_provider_credentials(
     environ: Mapping[str, str],
     profile_snapshot: Mapping[str, Any] | None,
@@ -817,6 +838,10 @@ def overlay_profile_provider_credentials(
     reaches. Compose-style ``${NAME}`` placeholders are resolved against *environ*; a
     value resolving empty or to an unset required placeholder is treated as undeclared
     (the worker env is a best-effort approximation of the agent's Compose context).
+    A profile may instead supply the same credential as a ``kind="env"`` secret lease
+    (e.g. ``target="OPENAI_API_KEY"``, ``ref="env/HOST_OPENAI_KEY"``), which the launcher
+    merges into the agent env; such leases are reflected here too by resolving each lease's
+    host source against *environ* (``runtime.environment`` wins on conflict).
     A workspace without a resolved profile falls back to *environ* unchanged.
     """
 
@@ -832,6 +857,7 @@ def overlay_profile_provider_credentials(
         *(key for keys in _OPENCODE_PROVIDER_ENV_KEYS.values() for key in keys),
         *_OPENCODE_ENV_KEYS,
     )
+    runtime_overlaid: set[str] = set()
     for key in candidate_keys:
         raw = profile_env.get(key)
         if not raw:
@@ -842,6 +868,31 @@ def overlay_profile_provider_credentials(
             continue
         if expanded:
             result[key] = expanded
+            runtime_overlaid.add(key)
+    # A provider credential may instead be declared as a profile ``kind="env"`` secret
+    # lease (e.g. ``target="OPENAI_API_KEY"``, ``ref="env/HOST_OPENAI_KEY"``). The stack
+    # launcher merges the resolved lease environment into the agent env
+    # (``agent_environment_with_declared_secret_leases``), so the agent receives that
+    # credential — but it never appears in ``runtime.environment``. Reflect such leases
+    # here too, resolving each lease's host source against ``environ``, so admission does
+    # not block the workspace with ``OPENCODE_PROVIDER_AUTH_MISSING`` (or, for
+    # ``OLLAMA_API_KEY``, ``OPENCODE_OLLAMA_AUTH_MISSING``) before the lease is resolved.
+    # ``runtime.environment`` wins (the launcher merge is first-writer-wins), and a lease
+    # whose host source is absent/empty is treated as undeclared — the launcher omits an
+    # optional lease and fails a required one, but this best-effort overlay only surfaces a
+    # credential it can actually resolve from the worker environ.
+    candidate_set = frozenset(candidate_keys)
+    for secret in profile.secrets:
+        if secret.kind != "env" or secret.target not in candidate_set:
+            continue
+        if secret.target in runtime_overlaid:
+            continue
+        source_name = _env_secret_ref_name(secret.ref)
+        if source_name is None:
+            continue
+        value = environ.get(source_name, "").strip()
+        if value:
+            result[secret.target] = value
     return result
 
 

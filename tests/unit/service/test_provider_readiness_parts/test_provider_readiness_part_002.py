@@ -1154,6 +1154,120 @@ def test_overlay_profile_provider_credentials_no_profile_returns_environ_unchang
 
 
 @pytest.mark.unit
+def test_overlay_profile_provider_credentials_overlays_env_secret_lease() -> None:
+    """A provider key supplied through a profile ``kind="env"`` secret lease (target
+    ``OPENAI_API_KEY``, ``ref="env/HOST_OPENAI_KEY"``) reaches the agent via the launcher's
+    secret-lease environment merge, not ``runtime.environment``. The overlay must resolve
+    the lease's host source against ``environ`` too, so admission does not block such a
+    workspace with OPENCODE_PROVIDER_AUTH_MISSING before the lease is resolved."""
+    result = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-host-lease"},
+        {
+            "name": "opencode-openai-lease",
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "env/HOST_OPENAI_KEY",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert result["OPENAI_API_KEY"] == "sk-proj-host-lease"
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_overlays_ollama_cloud_env_lease() -> None:
+    """``OLLAMA_API_KEY`` supplied through a ``kind="env"`` secret lease is overlaid for the
+    same reason as the non-Ollama provider keys: a ``:cloud`` Ollama model whose sidecar is
+    unreachable from the worker needs the credential visible for the host-probe defer path."""
+    result = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OLLAMA_KEY": "ollama-cloud-host-lease"},
+        {
+            "name": "opencode-ollama-cloud-lease",
+            "secrets": [
+                {
+                    "name": "ollama-key",
+                    "kind": "env",
+                    "target": "OLLAMA_API_KEY",
+                    "ref": "env/HOST_OLLAMA_KEY",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert result["OLLAMA_API_KEY"] == "ollama-cloud-host-lease"
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_env_lease_runtime_wins() -> None:
+    """``runtime.environment`` is first-writer-wins over secret leases in the agent env
+    (``merge_agent_environment``), so when both declare the same target the overlay keeps
+    the runtime value rather than the lease's host source."""
+    result = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-host-lease"},
+        {
+            "name": "opencode-openai-both",
+            "runtime": {"environment": {"OPENAI_API_KEY": "sk-proj-runtime"}},
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "env/HOST_OPENAI_KEY",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert result["OPENAI_API_KEY"] == "sk-proj-runtime"
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_env_lease_missing_source_undeclared() -> None:
+    """An env secret lease whose host source is absent (or empty) from ``environ`` is treated
+    as undeclared — the launcher omits an optional lease and fails a required one, but the
+    best-effort admission overlay simply does not surface a credential it cannot resolve.
+    A non-provider lease target is ignored, and a non-``env`` lease kind is left alone."""
+    result = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {},
+        {
+            "name": "opencode-openai-missing",
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "env/HOST_OPENAI_KEY",
+                    "provider": "env",
+                },
+                {
+                    "name": "unrelated",
+                    "kind": "env",
+                    "target": "SOME_OTHER_VAR",
+                    "ref": "env/HOST_OTHER",
+                    "provider": "env",
+                },
+                {
+                    "name": "mounted-key",
+                    "kind": "mount",
+                    "target": "/run/secrets/openai",
+                    "ref": "local-file:/host/openai",
+                    "provider": "local-file",
+                },
+            ],
+        },
+    )
+
+    assert "OPENAI_API_KEY" not in result
+
+
+@pytest.mark.unit
 def test_provider_readiness_opencode_env_only_reason_when_ollama_reachable(
     tmp_path: Path,
 ) -> None:
