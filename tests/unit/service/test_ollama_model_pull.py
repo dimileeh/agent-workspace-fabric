@@ -21,6 +21,7 @@ from awf.service.provider_readiness_helpers import (
     _is_cloud_model,
     _ollama_pull_name,
     _ollama_pull_urls,
+    _opencode_model_is_local_ollama,
     ensure_ollama_model_available,
 )
 
@@ -747,3 +748,20 @@ def test_helpers_classify_cloud_and_pull_name_and_urls() -> None:
     assert _ollama_pull_name(None) == ""
     urls = _ollama_pull_urls({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"})
     assert urls == ("http://ollama.local:11434/api/pull",)
+
+
+@pytest.mark.unit
+def test_opencode_model_is_local_ollama_classifier() -> None:
+    # Bare and ``ollama/``-prefixed non-cloud models are authless local models.
+    assert _opencode_model_is_local_ollama("ollama/llama4:70b") is True
+    assert _opencode_model_is_local_ollama("llama4:70b") is True
+    # Cloud models are served remotely and still require the cloud credential.
+    assert _opencode_model_is_local_ollama("ollama/kimi-k2.7:cloud") is False
+    assert _opencode_model_is_local_ollama("gpt-oss:120b-cloud") is False
+    # Provider-qualified non-Ollama models are handled by the separate
+    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED carve-out, not this one.
+    assert _opencode_model_is_local_ollama("openai/gpt-oss") is False
+    assert _opencode_model_is_local_ollama("anthropic/claude-sonnet") is False
+    # No selected model is not a local Ollama model.
+    assert _opencode_model_is_local_ollama(None) is False
+    assert _opencode_model_is_local_ollama("   ") is False

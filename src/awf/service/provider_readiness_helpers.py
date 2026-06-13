@@ -513,6 +513,25 @@ def _is_cloud_model(model: str | None) -> bool:
     return tag == "cloud" or tag.endswith("-cloud")
 
 
+def _opencode_model_is_local_ollama(model: str | None) -> bool:
+    """Return whether an OpenCode model is an authless local Ollama model.
+
+    A bare or ``ollama/``-prefixed reference that is NOT an Ollama Cloud
+    (``:cloud``) model is served by the local host Ollama daemon, whose
+    ``/api/tags`` and ``/api/pull`` endpoints need no OpenCode/Ollama Cloud
+    credential. A provider-qualified non-Ollama model (handled separately by
+    ``OPENCODE_NON_OLLAMA_PROVIDER_SELECTED``) and a ``:cloud`` model both
+    return ``False`` — the latter is served remotely and still requires the
+    cloud credential.
+    """
+    raw = (model or "").strip()
+    if not raw:
+        return False
+    if _opencode_model_targets_non_ollama_provider(raw):
+        return False
+    return not _is_cloud_model(raw)
+
+
 def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
     raw = (
         environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
@@ -1201,6 +1220,7 @@ def _check_opencode(
     strict: bool,
     http_get: HttpGet,
     secrets: frozenset[str],
+    model: str | None = None,
 ) -> dict[str, Any]:
     opencode_config = (host_home / ".config" / "opencode").is_dir()
     ollama_files = [
@@ -1242,6 +1262,34 @@ def _check_opencode(
         )
 
     if not signals:
+        # Local-Ollama authless carve-out (symmetric to
+        # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED): a local ``ollama/``-prefixed
+        # model (NOT a ``:cloud`` model) is served by the host Ollama daemon,
+        # whose ``/api/tags`` and ``/api/pull`` endpoints need no OpenCode/Ollama
+        # Cloud credential. When that daemon is reachable, waive the credential
+        # requirement so ``_selected_launch_probe`` can report a pull-pending
+        # disposition and the executor pre-agent step can auto-pull. The waiver
+        # is conditional on daemon reachability: a ``:cloud`` model still needs
+        # the cloud credential, and an unreachable daemon with no credential
+        # still blocks with OPENCODE_OLLAMA_AUTH_MISSING below.
+        if _opencode_model_is_local_ollama(model):
+            version_urls = _ollama_version_urls(environ)
+            local_probe = _probe_ollama(version_urls, http_get=http_get, secrets=secrets)
+            if local_probe["ok"]:
+                return _provider_result(
+                    ok=True,
+                    strict=strict,
+                    reason="OPENCODE_OLLAMA_LOCAL_AUTHLESS",
+                    message=(
+                        "No OpenCode/Ollama Cloud credential is required: the selected "
+                        "local Ollama model is served by the reachable host daemon."
+                    ),
+                    signals=["OLLAMA_HOST_REACHABLE"],
+                    secrets=secrets,
+                    credential_scope="not_observed",
+                    isolation="none",
+                    warnings=[],
+                )
         return _provider_result(
             ok=False,
             strict=strict,
@@ -1327,6 +1375,7 @@ from awf.service.provider_readiness import (  # noqa: E402
     HttpStreamResponseLike,
     ProviderName,
     SubprocessRun,
+    _opencode_model_targets_non_ollama_provider,
 )
 
 # Re-exported so existing call sites (and tests) keep reaching the redaction

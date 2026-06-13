@@ -622,6 +622,137 @@ def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
 
 
 @pytest.mark.unit
+def test_selected_opencode_preflight_authless_local_model_reachable_daemon_allowed(
+    tmp_path: Path,
+) -> None:
+    # No ~/.config/opencode, no ~/.ollama auth files, no OLLAMA_API_KEY. A local
+    # ``ollama/``-prefixed model is served by the host daemon, whose /api/tags
+    # and /api/pull need no OpenCode/Ollama Cloud credential. With the daemon
+    # reachable the strict auth gate is waived (carve-out symmetric to
+    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED) so admission can proceed.
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"llama4:70b"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["auth_status"] == "ok"
+    # Authless: no credential source is observed, so the auth source falls back
+    # to the credential scope rather than naming a credential.
+    assert result["auth_source"] == "not_observed"
+    assert result["credential_scope"] == "not_observed"
+    # The model is already present locally, so launch is fully ready.
+    assert result["probe_status"] == "ok"
+    assert result["reason_code"] == "PROVIDER_READY"
+    assert result["override_required"] is False
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_local_absent_model_is_pull_pending(
+    tmp_path: Path,
+) -> None:
+    # Authless local model that is not yet present: the waived auth gate lets the
+    # pull-pending probe run, so admission is non-blocking and the executor
+    # pre-agent step can auto-pull rather than the workspace being rejected at
+    # create time with OPENCODE_OLLAMA_AUTH_MISSING.
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_http_get,
+    )
+
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "pending"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULL_PENDING"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_cloud_model_still_requires_creds(
+    tmp_path: Path,
+) -> None:
+    # The carve-out is for local models only: a ``:cloud`` model is served
+    # remotely and still requires the OpenCode/Ollama Cloud credential, so with
+    # no auth signal it must block with OPENCODE_OLLAMA_AUTH_MISSING without even
+    # probing the daemon.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/kimi-k2.6:cloud"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["auth_status"] == "fail"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blocks(
+    tmp_path: Path,
+) -> None:
+    # Authless local model but the daemon is unreachable: the waiver is
+    # conditional on daemon reachability, so with no credential present this
+    # still blocks with OPENCODE_OLLAMA_AUTH_MISSING. Only the cheap /api/version
+    # probe runs before the gate falls through.
+    seen: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        seen.append(url)
+        raise RuntimeError("connection refused")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/llama4:70b"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_http_get,
+    )
+
+    assert result["auth_status"] == "fail"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
+    assert result["blocks_launch"] is True
+    assert seen == ["http://ollama.local:11434/api/version"]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
 def test_selected_opencode_preflight_non_ollama_provider_model_skips_ollama_check(
     tmp_path: Path,

@@ -415,6 +415,11 @@ def selected_provider_readiness_preflight(
         http_get=resolved_http_get,
         secrets=secrets,
         probe_runtime_cli=False,
+        # Pass the effective model so the OpenCode/Ollama check can apply the
+        # local-Ollama authless carve-out at launch admission. Broad readiness
+        # callers (collect_agent_readiness / check_single_provider_readiness)
+        # have no selected model, so they keep the strict AUTH_MISSING gate.
+        model=identity.model,
     )
     probe = _selected_launch_probe(
         provider,
@@ -534,6 +539,7 @@ def _check_provider_readiness(
     http_get: HttpGet,
     secrets: frozenset[str],
     probe_runtime_cli: bool = True,
+    model: str | None = None,
 ) -> dict[str, Any]:
     if provider == "github":
         return _check_github(
@@ -587,6 +593,7 @@ def _check_provider_readiness(
             strict=strict,
             http_get=http_get,
             secrets=secrets,
+            model=model,
         )
     if provider == "grok":
         return _check_grok(
