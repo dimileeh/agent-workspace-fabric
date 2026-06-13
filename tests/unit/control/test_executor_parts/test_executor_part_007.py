@@ -1045,6 +1045,64 @@ class TestPlanningArtifactDeposits:
             assert ws is not None
             assert ws.status == WorkspaceStatus.cancelled.value
 
+    @pytest.mark.unit
+    async def test_cancel_during_baseline_coverage_skips_agent_run(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The baseline-coverage preflight runs the profile coverage command and
+        # can take a while. A cancel landing while it executes must be caught by
+        # the agent-run recheck that follows it, so the agent never starts and
+        # the executor records the stale skip against the ``agent_run`` action
+        # instead of overwriting the concurrent cancel.
+        ws_id = await _seed_ready_workspace(
+            factory,
+            agent="opencode",
+            resolved_profile={
+                "name": "covered",
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        async def _ensure_ok(*, workspace_id: str, ws: Any) -> bool:
+            del workspace_id, ws
+            return True
+
+        monkeypatch.setattr(executor, "_ensure_ollama_model_or_mark_failed", _ensure_ok)
+
+        async def _coverage_then_cancel(*, workspace_id: str, **_kwargs: Any) -> None:
+            # Simulate a cancel arriving while baseline coverage runs: flip the
+            # workspace out of ``running`` after the preflight recheck passed.
+            async with factory() as s:
+                row = await WorkspaceRepository(s).get(workspace_id)
+                assert row is not None
+                row.status = WorkspaceStatus.cancelled.value
+                await s.commit()
+
+        monkeypatch.setattr(executor, "_run_baseline_coverage_preflight", _coverage_then_cancel)
+
+        agent_calls: list[str] = []
+
+        async def _spy_agent(**_kwargs: Any) -> None:
+            agent_calls.append("ran")
+
+        monkeypatch.setattr(executor, "_run_agent_task_with_optional_planning", _spy_agent)
+
+        await executor.execute(ws_id)
+
+        # The agent-run recheck short-circuits after baseline coverage: the agent
+        # never starts and the stale skip is recorded against ``agent_run``.
+        assert agent_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.events[-1].payload["action"] == "agent_run"
+
     async def _queue_planning_through_post_agent_add(
         self,
         fake: FakeCommandRunner,
