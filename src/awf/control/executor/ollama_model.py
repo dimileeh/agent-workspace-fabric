@@ -18,6 +18,8 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any
 
+from pydantic import ValidationError
+
 from awf.adapters.opencode import OPENCODE_OLLAMA_CLOUD_MODELS
 from awf.control.executor.helpers import (
     _agent_defaults_for_workspace,
@@ -26,6 +28,7 @@ from awf.control.executor.helpers import (
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.models import WorkspaceProfile
 from awf.service.provider_readiness import (
     ensure_ollama_model_available,
     is_secret_env_key,
@@ -40,11 +43,47 @@ from awf.service.provider_readiness_helpers import (
 # Keep the persisted progress tail bounded; the live stream is logged in full.
 _PULL_PROGRESS_EVENT_LIMIT = 20
 
+# Agent-container env keys that select the Ollama daemon. The OpenCode launcher
+# resolves the base URL from these (``AWF_OPENCODE_OLLAMA_BASE_URL`` first, then
+# ``OLLAMA_HOST``) inside the rendered workspace container — mirror that here so
+# the pre-agent probe/pull targets the same daemon the agent will reach.
+_OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
+
 
 def _environ_secret_values(environ: Mapping[str, str]) -> frozenset[str]:
     return frozenset(
         value for key, value in environ.items() if is_secret_env_key(key) and len(value) >= 4
     )
+
+
+def _effective_ollama_environ(ws: Any) -> Mapping[str, str]:
+    """Return the worker env overlaid with the workspace's agent Ollama base URL.
+
+    The OpenCode launcher derives ``AWF_OPENCODE_OLLAMA_BASE_URL`` from the agent
+    container environment, where a profile's ``runtime.environment`` value wins
+    over the worker-env placeholder (``merge_agent_environment`` is
+    first-writer-wins). If this pre-agent step derived ``/api/tags`` and
+    ``/api/pull`` from the worker process env alone, AWF could probe/pull a
+    different Ollama daemon than the agent reaches — marking a workspace ready for
+    a model the agent cannot use, or failing before the agent's configured daemon
+    is even tried. Overlay the profile-declared base URL so both target the same
+    daemon. A workspace without a resolved profile falls back to the worker env.
+    """
+
+    environ: dict[str, str] = dict(os.environ)
+    snapshot = getattr(ws, "resolved_profile", None)
+    if not isinstance(snapshot, Mapping):
+        return environ
+    try:
+        profile = WorkspaceProfile.model_validate(dict(snapshot))
+    except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
+        return environ
+    profile_env = profile.runtime.environment
+    for key in _OLLAMA_BASE_URL_ENV_KEYS:
+        value = profile_env.get(key)
+        if value:
+            environ[key] = value
+    return environ
 
 
 def _targets_non_ollama_provider(model: str | None) -> bool:
@@ -108,7 +147,7 @@ async def _ensure_ollama_model_or_mark_failed(
             model=model,
         )
         return True
-    environ = os.environ
+    environ = _effective_ollama_environ(ws)
     secrets = _environ_secret_values(environ)
     # Bound the buffered tail: only the last ``_PULL_PROGRESS_EVENT_LIMIT`` lines
     # are ever persisted, so a long pull cannot grow this without limit.

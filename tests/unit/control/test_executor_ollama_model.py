@@ -317,6 +317,82 @@ async def test_opencode_non_ollama_provider_skips_preflight(
 
 
 @pytest.mark.unit
+async def test_ensure_derives_urls_from_profile_ollama_base_url(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe/pull URLs must come from the agent/profile Ollama base URL, not
+    the worker process env: a profile that sets ``AWF_OPENCODE_OLLAMA_BASE_URL``
+    for the agent points at a different daemon than the worker, and AWF must
+    probe/pull the daemon the agent will actually reach."""
+    workspace_id = await _seed_running(factory)
+    executor = _make_executor(factory, tmp_path)
+
+    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://worker-daemon:11434")
+
+    seen: dict[str, Any] = {}
+
+    def _stub(*, tags_urls: Any = None, pull_urls: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        seen["tags_urls"] = tags_urls
+        seen["pull_urls"] = pull_urls
+        return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+
+    monkeypatch.setattr(ollama_model, "ensure_ollama_model_available", _stub)
+
+    proceed = await executor._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=SimpleNamespace(
+            agent="opencode",
+            task_policy={"agent_model": "ollama/llama4:70b"},
+            resolved_profile={
+                "name": "ollama-sidecar",
+                "runtime": {
+                    "environment": {
+                        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434",
+                    }
+                },
+            },
+        ),
+    )
+
+    assert proceed is True
+    assert any("ollama-sidecar:11434" in url for url in seen["tags_urls"])
+    assert any("ollama-sidecar:11434" in url for url in seen["pull_urls"])
+    assert all("worker-daemon" not in url for url in seen["tags_urls"])
+
+
+@pytest.mark.unit
+async def test_ensure_without_resolved_profile_uses_worker_env(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a resolved profile the preflight falls back to the worker env so
+    the existing single-daemon behavior is preserved."""
+    workspace_id = await _seed_running(factory)
+    executor = _make_executor(factory, tmp_path)
+
+    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://worker-daemon:11434")
+
+    seen: dict[str, Any] = {}
+
+    def _stub(*, tags_urls: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        seen["tags_urls"] = tags_urls
+        return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+
+    monkeypatch.setattr(ollama_model, "ensure_ollama_model_available", _stub)
+
+    proceed = await executor._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=SimpleNamespace(agent="opencode", task_policy={"agent_model": "ollama/llama4:70b"}),
+    )
+
+    assert proceed is True
+    assert any("worker-daemon:11434" in url for url in seen["tags_urls"])
+
+
+@pytest.mark.unit
 def test_environ_secret_values_filters_secret_keys() -> None:
     secrets = ollama_model._environ_secret_values(
         {"OLLAMA_API_KEY": "abcd1234", "PATH": "/usr/bin", "X": "yy"}
