@@ -912,6 +912,16 @@ def overlay_profile_provider_credentials(
     for secret in profile.secrets:
         if secret.kind != "env" or secret.target not in candidate_set:
             continue
+        # The launcher only merges a ``kind="env"`` lease into the agent env when its
+        # provider routes through ``LocalSecretLeaseMountResolver``'s env path —
+        # ``provider: env`` (``node.secret_mounts._ENV_PROVIDERS``). A lease that omits
+        # ``provider`` is skipped (``_normalized_provider`` returns ``None``) and a
+        # non-env provider routes to a different handler (or is rejected), so neither
+        # injects this env key into the agent. Gate the overlay on the same ``provider:
+        # env`` semantics — otherwise admission would pass an ``openai``/... preflight on
+        # a host credential the agent container never receives.
+        if (secret.provider or "").strip().lower() != "env":
+            continue
         if secret.target in runtime_declared:
             continue
         source_name = _env_secret_ref_name(secret.ref)

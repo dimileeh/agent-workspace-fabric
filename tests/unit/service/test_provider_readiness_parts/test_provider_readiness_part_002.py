@@ -1377,3 +1377,48 @@ def test_overlay_profile_provider_credentials_env_lease_missing_source_undeclare
     )
 
     assert "OPENAI_API_KEY" not in result
+
+
+@pytest.mark.unit
+def test_overlay_profile_provider_credentials_env_lease_requires_provider_env() -> None:
+    """A ``kind="env"`` lease targeting a provider key only reaches the agent when it routes
+    through the launcher's env path (``provider: env`` ⇒ ``node.secret_mounts._ENV_PROVIDERS``).
+    A lease that omits ``provider`` is skipped by the launcher (``_normalized_provider`` returns
+    ``None``), and a non-``env`` provider routes to a different handler or is rejected — so
+    neither injects this env key into the agent. The overlay must gate on the same ``provider:
+    env`` semantics; otherwise create/retry preflight would admit an openai/... workspace on a
+    host credential the agent container never receives."""
+    omitted_provider = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-host-lease"},
+        {
+            "name": "opencode-openai-no-provider",
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "env/HOST_OPENAI_KEY",
+                }
+            ],
+        },
+    )
+
+    assert "OPENAI_API_KEY" not in omitted_provider
+
+    non_env_provider = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-host-lease"},
+        {
+            "name": "opencode-openai-github-provider",
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "env/HOST_OPENAI_KEY",
+                    "provider": "github",
+                }
+            ],
+        },
+    )
+
+    assert "OPENAI_API_KEY" not in non_env_provider
