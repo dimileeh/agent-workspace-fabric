@@ -589,10 +589,22 @@ def overlay_profile_ollama_base_url(
     except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
         return result
     profile_env = profile.runtime.environment
-    for key in _OLLAMA_BASE_URL_ENV_KEYS:
-        value = profile_env.get(key)
-        if value:
-            result[key] = value
+    declared = {key: profile_env[key] for key in _OLLAMA_BASE_URL_ENV_KEYS if profile_env.get(key)}
+    if not declared:
+        return result
+    # The profile owns the Ollama daemon selection. ``_ollama_api_urls`` (and the
+    # OpenCode launcher) resolve the daemon from the first non-empty key in
+    # precedence order, so a higher-precedence worker-env value the profile did
+    # *not* declare would shadow the profile's chosen daemon — e.g. a profile that
+    # declares only ``OLLAMA_HOST`` while the worker env carries
+    # ``AWF_OPENCODE_OLLAMA_BASE_URL``. Apply the profile's declared keys and clear
+    # any higher-precedence worker value so the profile-selected daemon wins.
+    top = next(i for i, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS) if key in declared)
+    for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS):
+        if key in declared:
+            result[key] = declared[key]
+        elif index < top:
+            result.pop(key, None)
     return result
 
 
