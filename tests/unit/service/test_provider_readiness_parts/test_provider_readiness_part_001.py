@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 import awf.service.provider_readiness as provider_readiness
@@ -624,7 +625,7 @@ def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
         if url == "http://localhost:11434/api/tags":
-            raise RuntimeError("connection refused")
+            raise httpx.ConnectError("connection refused")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
     result = selected_provider_readiness_preflight(
@@ -759,7 +760,7 @@ def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blo
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         seen.append(url)
-        raise RuntimeError("connection refused")
+        raise httpx.ConnectError("connection refused")
 
     result = selected_provider_readiness_preflight(
         _settings(tmp_path),
@@ -1151,11 +1152,11 @@ def test_selected_opencode_preflight_suppresses_recovered_tags_fallback_logs(
         assert timeout > 0
         urls.append(url)
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("version fallback recovered")
+            raise httpx.ConnectError("version fallback recovered")
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
         if url == "http://host.docker.internal:11434/api/tags":
-            raise RuntimeError("tags fallback recovered")
+            raise httpx.ConnectError("tags fallback recovered")
         if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,

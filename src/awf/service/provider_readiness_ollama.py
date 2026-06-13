@@ -51,7 +51,11 @@ def _probe_ollama(
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
-        except Exception as exc:
+        except httpx.HTTPError as exc:
+            # Only httpx transport failures become probe "exception" dispositions
+            # (mirroring ``_pull_ollama_model`` below); other exceptions are
+            # wrapper/programming bugs that must surface rather than be masked as a
+            # readiness failure.
             exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
@@ -123,7 +127,11 @@ def _probe_ollama_model(
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
-        except Exception as exc:
+        except httpx.HTTPError as exc:
+            # Only httpx transport failures become probe "exception" dispositions
+            # (mirroring ``_pull_ollama_model`` below); other exceptions are
+            # wrapper/programming bugs that must surface rather than be masked as a
+            # readiness failure.
             exceptions.append(exc)
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)

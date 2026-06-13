@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 import awf.service.provider_readiness as provider_readiness
@@ -647,7 +648,7 @@ def test_provider_readiness_opencode_ollama_unreachable_fails_when_strict(
 
     def _http_get(_url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        raise RuntimeError("connection refused")
+        raise httpx.ConnectError("connection refused")
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
@@ -726,7 +727,7 @@ def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhos
     def _http_get(url: str, *, timeout: float) -> Any:
         urls.append(url)
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("nodename nor servname provided")
+            raise httpx.ConnectError("nodename nor servname provided")
         return SimpleNamespace(status_code=200, text="ok")
 
     payload = collect_agent_readiness(
@@ -762,7 +763,7 @@ def test_ollama_http_probe_records_recovered_failures_as_redacted_debug(
         assert timeout > 0
         urls.append(url)
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("transport failed for sk-proj-ollama-fallback-secret")
+            raise httpx.ConnectError("transport failed for sk-proj-ollama-fallback-secret")
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text="ok")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
@@ -783,7 +784,7 @@ def test_ollama_http_probe_records_recovered_failures_as_redacted_debug(
                 {
                     "url": "http://host.docker.internal:11434/api/version",
                     "status": "exception",
-                    "detail": "RuntimeError: transport failed for <redacted>",
+                    "detail": "ConnectError: transport failed for <redacted>",
                 }
             ]
         },
@@ -878,7 +879,7 @@ def test_ollama_http_probe_terminal_mixed_failure_logs_only_http_terminal_detail
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("transport failed for sk-proj-ollama-terminal-secret")
+            raise httpx.ConnectError("transport failed for sk-proj-ollama-terminal-secret")
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=503, text="busy ghp_ollama_terminal_secret")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
@@ -898,15 +899,15 @@ def test_ollama_http_probe_terminal_mixed_failure_logs_only_http_terminal_detail
     )
 
     assert result["ok"] is False
-    assert "RuntimeError: transport failed for <redacted>" in result["detail"]
+    assert "ConnectError: transport failed for <redacted>" in result["detail"]
     assert "HTTP 503: busy <redacted>" in result["detail"]
     messages = [record.getMessage() for record in caplog.records]
     traceback_messages = [message for message in messages if "Traceback" in message]
     terminal_http_messages = [message for message in messages if "HTTP 503: busy" in message]
     assert len(traceback_messages) == 1
     assert len(terminal_http_messages) == 1
-    assert "RuntimeError: transport failed for <redacted>" in traceback_messages[0]
-    assert "RuntimeError: transport failed" not in terminal_http_messages[0]
+    assert "ConnectError: transport failed for <redacted>" in traceback_messages[0]
+    assert "ConnectError: transport failed" not in terminal_http_messages[0]
     assert "HTTP 503: busy <redacted>" in terminal_http_messages[0]
     assert "sk-proj-ollama-terminal-secret" not in caplog.text
     assert "ghp_ollama_terminal_secret" not in caplog.text
@@ -926,7 +927,7 @@ def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted
         assert timeout > 0
         urls.append(url)
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("transport failed for sk-proj-ollama-terminal-secret")
+            raise httpx.ConnectError("transport failed for sk-proj-ollama-terminal-secret")
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=503, text="busy ghp_ollama_terminal_secret")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
@@ -955,7 +956,7 @@ def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted
     assert "ghp_ollama_terminal_secret" not in serialized
     assert "provider_readiness.ollama_probe_exception" in caplog.text
     assert "Traceback" in caplog.text
-    assert "RuntimeError: transport failed for <redacted>" in caplog.text
+    assert "ConnectError: transport failed for <redacted>" in caplog.text
     assert "HTTP 503: busy <redacted>" in caplog.text
     assert "sk-proj-ollama-terminal-secret" not in caplog.text
     assert "ghp_ollama_terminal_secret" not in caplog.text
@@ -1204,7 +1205,7 @@ def test_ollama_http_probe_exception_logs_redacted_traceback(
 
     def _http_get(_url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        raise RuntimeError("transport failed for sk-proj-ollama-secret")
+        raise httpx.ConnectError("transport failed for sk-proj-ollama-secret")
 
     result = provider_readiness._probe_ollama(
         ("http://ollama.local:11434/api/version",),
@@ -1214,10 +1215,10 @@ def test_ollama_http_probe_exception_logs_redacted_traceback(
 
     serialized = json.dumps(result, sort_keys=True)
     assert result["ok"] is False
-    assert "RuntimeError: transport failed for <redacted>" in serialized
+    assert "ConnectError: transport failed for <redacted>" in serialized
     assert "provider_readiness.ollama_probe_exception" in caplog.text
     assert "Traceback" in caplog.text
-    assert "RuntimeError: transport failed for <redacted>" in caplog.text
+    assert "ConnectError: transport failed for <redacted>" in caplog.text
     assert "sk-proj-ollama-secret" not in serialized
     assert "sk-proj-ollama-secret" not in caplog.text
 
@@ -1243,7 +1244,7 @@ def test_ollama_model_probe_reports_missing_model_and_transport_failures() -> No
         assert timeout > 0
         calls.append(url)
         if url == "http://primary.local/api/tags":
-            raise RuntimeError("connect failed")
+            raise httpx.ConnectError("connect failed")
         return SimpleNamespace(status_code=503, text="busy sk-proj-ollama-secret")
 
     result = provider_readiness._probe_ollama_model(
@@ -1304,7 +1305,7 @@ def test_ollama_model_probe_records_recovered_failure_debug_when_available(
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         if url == "http://primary.local/api/tags":
-            raise RuntimeError("connect failed for sk-proj-ollama-secret")
+            raise httpx.ConnectError("connect failed for sk-proj-ollama-secret")
         return SimpleNamespace(status_code=200, text='{"models":[{"name":"llama3:latest"}]}')
 
     result = provider_readiness._probe_ollama_model(
@@ -1322,7 +1323,7 @@ def test_ollama_model_probe_records_recovered_failure_debug_when_available(
                 {
                     "url": "http://primary.local/api/tags",
                     "status": "exception",
-                    "detail": "RuntimeError: connect failed for <redacted>",
+                    "detail": "ConnectError: connect failed for <redacted>",
                 }
             ]
         },

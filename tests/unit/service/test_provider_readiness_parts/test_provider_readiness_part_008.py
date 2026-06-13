@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 import awf.service.provider_readiness as provider_readiness
@@ -132,7 +133,7 @@ def test_ollama_model_probe_logs_exception_after_missing_model_response(
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         if url == "http://primary.local/api/tags":
-            raise RuntimeError("connect failed for sk-proj-ollama-secret")
+            raise httpx.ConnectError("connect failed for sk-proj-ollama-secret")
         return SimpleNamespace(
             status_code=200,
             text='{"models":[{"name":"other-model:latest"}]}',
@@ -148,12 +149,12 @@ def test_ollama_model_probe_logs_exception_after_missing_model_response(
     assert result["status"] == "fail"
     assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
     assert (
-        "probe_failures=http://primary.local/api/tags: RuntimeError: connect failed for <redacted>"
+        "probe_failures=http://primary.local/api/tags: ConnectError: connect failed for <redacted>"
         in result["detail"]
     )
     assert "provider_readiness.ollama_model_probe_exception" in caplog.text
     assert "Traceback" in caplog.text
-    assert "RuntimeError: connect failed for <redacted>" in caplog.text
+    assert "ConnectError: connect failed for <redacted>" in caplog.text
     assert "sk-proj-ollama-secret" not in caplog.text
     assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
 
