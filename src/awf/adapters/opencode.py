@@ -103,6 +103,43 @@ def _is_ollama_model(model: str) -> bool:
     return provider == "ollama"
 
 
+def _ollama_base_url_prelude() -> str:
+    """Shell prelude that resolves ``AWF_OPENCODE_OLLAMA_BASE_URL`` for launch.
+
+    The agent's OpenCode config reads the daemon URL solely from
+    ``AWF_OPENCODE_OLLAMA_BASE_URL`` (the generated ``baseURL`` is
+    ``{env:AWF_OPENCODE_OLLAMA_BASE_URL}``). AWF's worker-side Ollama
+    preflight/auto-pull (``provider_readiness_helpers._ollama_api_urls``) also
+    honors ``OLLAMA_HOST`` as a fallback, so a profile that set only
+    ``OLLAMA_HOST`` would have AWF probe/pull one daemon while the agent talked to
+    the default ``host.docker.internal`` daemon — admitting the workspace against
+    the wrong model source. Mirror ``OLLAMA_HOST`` into the base URL here,
+    normalized to a scheme-qualified ``…/v1`` endpoint, so launch and preflight
+    resolve the same daemon. An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` still
+    wins; with neither set we fall back to the default.
+    """
+    return (
+        'if [ -z "${AWF_OPENCODE_OLLAMA_BASE_URL:-}" ]; then\n'
+        '  __awf_ollama_host="${OLLAMA_HOST:-}"\n'
+        '  if [ -n "$__awf_ollama_host" ]; then\n'
+        '    case "$__awf_ollama_host" in\n'
+        "      *://*) : ;;\n"
+        '      *) __awf_ollama_host="http://$__awf_ollama_host" ;;\n'
+        "    esac\n"
+        '    __awf_ollama_host="${__awf_ollama_host%/}"\n'
+        '    case "$__awf_ollama_host" in\n'
+        "      */v1) : ;;\n"
+        '      *) __awf_ollama_host="$__awf_ollama_host/v1" ;;\n'
+        "    esac\n"
+        '    AWF_OPENCODE_OLLAMA_BASE_URL="$__awf_ollama_host"\n'
+        "  else\n"
+        f'    AWF_OPENCODE_OLLAMA_BASE_URL="{DEFAULT_OLLAMA_OPENAI_BASE_URL}"\n'
+        "  fi\n"
+        "fi\n"
+        "export AWF_OPENCODE_OLLAMA_BASE_URL\n"
+    )
+
+
 def _opencode_launcher_script(*, effort: str | None, model: str | None = None) -> str:
     config = _opencode_config_for_effort(effort=effort, model=model)
     config_json = json.dumps(config, separators=(",", ":"))
@@ -134,11 +171,8 @@ def _opencode_launcher_script(*, effort: str | None, model: str | None = None) -
         "trap 'forward_signal INT 130' INT\n"
         "trap 'forward_signal TERM 143' TERM\n"
         'config_path="$(mktemp "${TMPDIR:-/tmp}/awf-opencode-config.XXXXXX.json")"\n'
-        "export AWF_OPENCODE_OLLAMA_BASE_URL="
-        '"${AWF_OPENCODE_OLLAMA_BASE_URL:-'
-        f"{DEFAULT_OLLAMA_OPENAI_BASE_URL}"
-        '}"\n'
-        "cat > \"$config_path\" <<'AWF_OPENCODE_CONFIG'\n"
+        + _ollama_base_url_prelude()
+        + "cat > \"$config_path\" <<'AWF_OPENCODE_CONFIG'\n"
         f"{config_json}\n"
         "AWF_OPENCODE_CONFIG\n"
         'export OPENCODE_CONFIG_CONTENT="$(cat "$config_path")"\n'

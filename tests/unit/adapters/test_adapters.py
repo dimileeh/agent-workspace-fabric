@@ -38,6 +38,7 @@ from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     OpenCodeAdapter,
     _config_model_key,
+    _ollama_base_url_prelude,
     _opencode_config_for_effort,
     _opencode_launcher_script,
     _qualified_model,
@@ -861,6 +862,60 @@ class TestOpenCodeAdapter:
         args = runner.calls[0].args
         assert "--model" in args
         assert "ollama/glm-5.1:cloud" in args
+
+    @staticmethod
+    async def _resolve_ollama_base_url(env_overrides: dict[str, str]) -> str:
+        """Execute the launcher prelude under ``sh`` and return the resolved URL."""
+        script = _ollama_base_url_prelude() + 'printf "%s" "$AWF_OPENCODE_OLLAMA_BASE_URL"\n'
+        env = {"PATH": os.environ.get("PATH", "")}
+        env.update(env_overrides)
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        assert proc.returncode == 0, stderr.decode()
+        return stdout.decode()
+
+    @pytest.mark.unit
+    async def test_launch_prelude_prefers_explicit_base_url(self) -> None:
+        """An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` wins over ``OLLAMA_HOST``."""
+        resolved = await self._resolve_ollama_base_url(
+            {
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://explicit.local:11434/v1",
+                "OLLAMA_HOST": "http://ollama.local:11434",
+            }
+        )
+        assert resolved == "http://explicit.local:11434/v1"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("ollama_host", "expected"),
+        [
+            ("ollama.local:11434", "http://ollama.local:11434/v1"),
+            ("http://ollama.local:11434", "http://ollama.local:11434/v1"),
+            ("http://ollama.local:11434/", "http://ollama.local:11434/v1"),
+            ("http://ollama.local:11434/v1", "http://ollama.local:11434/v1"),
+            ("https://ollama.local:11434", "https://ollama.local:11434/v1"),
+        ],
+    )
+    async def test_launch_prelude_mirrors_ollama_host(
+        self, ollama_host: str, expected: str
+    ) -> None:
+        """``OLLAMA_HOST``-only profiles get a normalized base URL so the agent
+        targets the same daemon AWF probes/pulls in the preflight."""
+        resolved = await self._resolve_ollama_base_url({"OLLAMA_HOST": ollama_host})
+        assert resolved == expected
+
+    @pytest.mark.unit
+    async def test_launch_prelude_falls_back_to_default(self) -> None:
+        """With neither variable set the prelude keeps the default daemon URL."""
+        resolved = await self._resolve_ollama_base_url({})
+        assert resolved == "http://host.docker.internal:11434/v1"
 
     @pytest.mark.unit
     async def test_default_opencode_invocation_omits_variant_without_effort(self) -> None:
