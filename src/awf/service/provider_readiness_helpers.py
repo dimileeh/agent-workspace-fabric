@@ -971,8 +971,11 @@ def ensure_ollama_model_available(
     The host Ollama daemon is the source of truth. Dispositions:
 
     - already in ``/api/tags`` → ``OLLAMA_MODEL_AVAILABLE`` (no pull);
-    - ``:cloud`` model → ``OLLAMA_MODEL_CLOUD`` (served remotely, no pull);
-    - daemon unreachable → ``OLLAMA_MODEL_PROBE_FAILED`` (no pull, no hang);
+    - daemon reachable + ``:cloud`` model → ``OLLAMA_MODEL_CLOUD`` (served
+      remotely, no pull; the daemon still proxies cloud requests, so it must be
+      up);
+    - daemon unreachable → ``OLLAMA_MODEL_PROBE_FAILED`` (no pull, no hang;
+      applies to cloud models too);
     - absent non-cloud → ``POST /api/pull`` with bounded ``timeout`` and streamed
       (redacted) progress, then re-check ``/api/tags``: success →
       ``OLLAMA_MODEL_PULLED``; daemon error / timeout / still-missing →
@@ -983,18 +986,18 @@ def ensure_ollama_model_available(
 
     pull_timeout = _OLLAMA_PULL_TIMEOUT_SECONDS if timeout is None else timeout
 
-    # An Ollama Cloud model is served remotely: it is never pulled and does not
-    # require local ``/api/tags`` membership, so short-circuit before any local
-    # daemon probe (cloud reachability/auth is validated by the create-time
-    # opencode readiness check).
-    if _is_cloud_model(model):
-        return {
-            "status": "ok",
-            "reason_code": "OLLAMA_MODEL_CLOUD",
-            "message": "Selected Ollama Cloud model is served remotely; no pull required.",
-        }
-
-    probe = _probe_ollama_model(tags_urls, model=model, http_get=http_get, secrets=secrets)
+    # An Ollama Cloud model is served remotely and is never pulled, but OpenCode
+    # still reaches it *through the local host Ollama daemon* (the adapter points
+    # ``provider.ollama`` at ``host.docker.internal:11434``). So the daemon must
+    # still be reachable at agent-launch time even for a cloud model. Probe
+    # ``/api/tags`` with ``allow_cloud`` — a daemon that answers resolves a cloud
+    # tag (absent from the local catalog) to ``OLLAMA_MODEL_CLOUD``, while a
+    # daemon that has gone down between create-time readiness and execution
+    # surfaces the clear ``OLLAMA_MODEL_PROBE_FAILED`` reason this pre-agent step
+    # exists to provide, instead of a confusing downstream ``AGENT_CLI_FAILED``.
+    probe = _probe_ollama_model(
+        tags_urls, model=model, http_get=http_get, secrets=secrets, allow_cloud=True
+    )
     reason = probe.get("reason_code")
     if reason == "OLLAMA_MODEL_AVAILABLE":
         return {
@@ -1002,6 +1005,9 @@ def ensure_ollama_model_available(
             "reason_code": "OLLAMA_MODEL_AVAILABLE",
             "message": "Selected Ollama model is already available from /api/tags.",
         }
+    if reason == "OLLAMA_MODEL_CLOUD":
+        # Daemon reachable; the selected cloud model is served remotely (no pull).
+        return dict(probe)
     if reason in {"MODEL_NOT_SELECTED", "OLLAMA_MODEL_PROBE_FAILED"}:
         # No selectable model, or the daemon never answered: do not pull.
         return dict(probe)

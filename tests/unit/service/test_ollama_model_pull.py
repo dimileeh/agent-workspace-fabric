@@ -176,6 +176,30 @@ def test_cloud_model_absent_from_tags_is_used_without_pull() -> None:
 
 
 @pytest.mark.unit
+def test_cloud_model_with_unreachable_daemon_probe_fails_without_pull() -> None:
+    # A cloud model is still reached through the local host Ollama daemon (the
+    # adapter points provider.ollama at host.docker.internal:11434). If the daemon
+    # is down at agent-launch time the pre-agent step must surface the clear
+    # OLLAMA_MODEL_PROBE_FAILED reason rather than short-circuit to a success that
+    # later collapses into a confusing AGENT_CLI_FAILED.
+    def _get(url: str, *, timeout: float) -> Any:
+        raise httpx.ConnectError("connection refused")
+
+    result = ensure_ollama_model_available(
+        model="ollama/kimi-k2.7:cloud",
+        tags_urls=_TAGS_URLS,
+        pull_urls=_PULL_URLS,
+        http_get=_get,
+        http_post_stream=_unexpected_post_stream,
+        secrets=frozenset(),
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
+    assert result["reason_code"] != "AGENT_CLI_FAILED"
+
+
+@pytest.mark.unit
 def test_pull_daemon_error_maps_to_pull_failed() -> None:
     post = _FakePostStream(
         _FakeStreamResponse(
