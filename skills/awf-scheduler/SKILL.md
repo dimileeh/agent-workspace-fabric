@@ -331,7 +331,7 @@ When the monitor hands a thread to the CLI, it expects one of these markers
 | `AWF-VERDICT: FIXED: <summary>` (or any output without a recognized marker) | CLI committed the fix locally | pushes after the burst settles, then resolves the thread |
 | `AWF-VERDICT: FALSE POSITIVE: <reason>` | CLI disagrees, replies inline | resolves with the reply posted |
 | `AWF-VERDICT: DEFER: <what to track>` | needs follow-up, not blocking | captures a tracking note, resolves |
-| `AWF-VERDICT: NEEDS_HUMAN: <what you need>` | CLI cannot proceed safely | **blocks merge, notifies a human** (also the sink for empty/garbled output) |
+| `AWF-VERDICT: NEEDS_HUMAN: <what you need>` | CLI cannot proceed safely | **blocks merge, notifies a human** (also the sink for empty/garbled output) — respond via `awf workspace guide` (§10, "Responding to a human escalation") |
 
 The CLI also posts the reply on GitHub itself; AWF's resolve happens after the
 reply is visible.
@@ -362,6 +362,28 @@ must never be auto-merged.
   required reviews), the monitor posts the ready-to-merge notification, **stays
   in `monitoring_pr`, and keeps re-polling** until a human merges/closes — it
   does not silently exit.
+
+#### Responding to a human escalation
+
+When the monitor emits `NEEDS_HUMAN` it posts a `⚠️ PR #N needs human attention …`
+comment and **stops auto-merging** — typically a `NotifyHuman` the CLI raised, an
+`OUT_OF_SCOPE_CHANGE`, or a security/policy decision the agent will not make on its
+own. Respond, do not restart:
+
+1. **Read it** — the `needs human attention` comment plus the cited review thread say
+   exactly what decision or input it needs.
+2. **Decide** — make the scope/security/policy call (or supply the missing answer).
+3. **Inject it** — `awf workspace guide <ws_id> --directive "<instruction>"` (the
+   directive is capped at 1024 chars; keep it tight). It reaches the agent on its next
+   monitor cycle; the agent acts on it, resolves the thread, and resumes toward merge.
+   Do **NOT** cancel+re-adopt, and do **NOT** push the fix from the worktree yourself
+   (§11) — `guide` is the sanctioned channel.
+
+`guide --directive` is also the lever for a review that **will not converge** (each fix
+drawing one more incremental bot comment over many commits): direct the monitor to
+resolve low-value/incremental comments via `DEFER`/`FALSE POSITIVE` *replies* instead
+of code edits (every edit triggers another CI + re-review cycle), and to defer anything
+needing files outside `owned_paths` — so it stops looping and merges on green CI.
 
 > Operational note: pushing directly to a branch the monitor is actively pushing
 > to (e.g. landing a small fix on `development` while a `development→main`
