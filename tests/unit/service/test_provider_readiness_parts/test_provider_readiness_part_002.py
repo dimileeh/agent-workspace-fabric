@@ -1079,6 +1079,30 @@ def test_overlay_profile_provider_credentials_overlays_profile_declared_key() ->
 
 
 @pytest.mark.unit
+def test_overlay_profile_provider_credentials_overlays_ollama_cloud_key() -> None:
+    """An ``OLLAMA_API_KEY`` declared solely in the profile env reaches the agent
+    container but not the worker. A ``:cloud`` Ollama model whose sidecar base URL is
+    unreachable from the worker needs that credential visible for the host-probe defer
+    path; without the overlay the credential gate would falsely block the workspace with
+    OPENCODE_OLLAMA_AUTH_MISSING. The overlay brings the profile-declared Ollama Cloud
+    key into the readiness environ alongside the non-Ollama provider keys."""
+    result = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {},
+        {
+            "name": "opencode-ollama-cloud",
+            "runtime": {
+                "environment": {
+                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434",
+                    "OLLAMA_API_KEY": "ollama-cloud-profile-only",
+                },
+            },
+        },
+    )
+
+    assert result["OLLAMA_API_KEY"] == "ollama-cloud-profile-only"
+
+
+@pytest.mark.unit
 def test_overlay_profile_provider_credentials_resolves_placeholder_against_environ() -> None:
     """Profile env values may carry Compose-style ``${NAME}`` placeholders resolved by
     the agent container. The worker-side overlay resolves them against ``environ``; an

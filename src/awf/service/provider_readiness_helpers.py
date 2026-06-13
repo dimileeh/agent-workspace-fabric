@@ -806,7 +806,12 @@ def overlay_profile_provider_credentials(
     key declared solely in a profile's ``runtime.environment`` (e.g. ``OPENAI_API_KEY``)
     reaches the *agent* container — not the worker process this admission check runs in.
     Without this overlay such a workspace would be blocked with
-    ``OPENCODE_PROVIDER_AUTH_MISSING`` despite the credential the agent would use.
+    ``OPENCODE_PROVIDER_AUTH_MISSING`` despite the credential the agent would use. The
+    OpenCode/Ollama Cloud credential (``OLLAMA_API_KEY``, ``_OPENCODE_ENV_KEYS``) is
+    overlaid for the same reason: a profile that points a ``:cloud`` Ollama model at a
+    sidecar daemon unreachable from the worker needs that key visible for the host-probe
+    defer path (``_opencode_ollama_host_probe_deferrable``); otherwise admission falls
+    through to ``_check_opencode`` and blocks with ``OPENCODE_OLLAMA_AUTH_MISSING``.
     Symmetric to ``overlay_profile_ollama_base_url``: bring the profile-declared provider
     key into the environ so create/retry admission sees the same credential the agent
     reaches. Compose-style ``${NAME}`` placeholders are resolved against *environ*; a
@@ -823,17 +828,20 @@ def overlay_profile_provider_credentials(
     except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
         return result
     profile_env = profile.runtime.environment
-    for keys in _OPENCODE_PROVIDER_ENV_KEYS.values():
-        for key in keys:
-            raw = profile_env.get(key)
-            if not raw:
-                continue
-            try:
-                expanded = compose_expand_value(raw, environ=environ).strip()
-            except ComposeEnvInterpolationError:
-                continue
-            if expanded:
-                result[key] = expanded
+    candidate_keys = (
+        *(key for keys in _OPENCODE_PROVIDER_ENV_KEYS.values() for key in keys),
+        *_OPENCODE_ENV_KEYS,
+    )
+    for key in candidate_keys:
+        raw = profile_env.get(key)
+        if not raw:
+            continue
+        try:
+            expanded = compose_expand_value(raw, environ=environ).strip()
+        except ComposeEnvInterpolationError:
+            continue
+        if expanded:
+            result[key] = expanded
     return result
 
 
