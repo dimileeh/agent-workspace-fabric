@@ -107,6 +107,7 @@ def _resolve_head_sha(result: CommandResult, *, ref: str) -> tuple[str | None, s
 def _is_under_ignored_path(path: str, ignored_paths: set[str]) -> bool:
     """Return whether `path` should be treated as part of an ignored root."""
     normalized_path = _normalize_porcelain_path(path)
+    path_is_dir_entry = path.endswith("/")
     for ignored_path in ignored_paths:
         # Normalize the ignored root too: roots may carry a trailing slash
         # (e.g. ``.claude/agent-memory/``), and git collapses a fully-untracked
@@ -114,7 +115,16 @@ def _is_under_ignored_path(path: str, ignored_paths: set[str]) -> bool:
         # matches the root itself as well as its descendants, while keeping the
         # sibling ``.claude/agent-memory-archive/`` excluded.
         normalized_ignored = _normalize_porcelain_path(ignored_path)
-        if normalized_path == normalized_ignored:
+        # The exemption is scoped to the ignored *directory* and its descendants.
+        # ``git status --untracked-files=all`` reports a regular file named exactly
+        # ``.claude/agent-memory`` (no trailing slash) as ``?? .claude/agent-memory``
+        # — a distinct path that must stay visible. Only suppress the equality case
+        # for an actual directory entry: the incoming path carries a trailing slash
+        # (git's collapsed root form / the empty-dir snapshot), or the ignored root
+        # itself was stored without one (a genuinely-ignored entry, file or dir alike).
+        if normalized_path == normalized_ignored and (
+            path_is_dir_entry or not ignored_path.endswith("/")
+        ):
             return True
         if normalized_path.startswith(f"{normalized_ignored}/"):
             return True

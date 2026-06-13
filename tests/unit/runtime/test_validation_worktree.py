@@ -66,9 +66,15 @@ def test_is_under_agent_runtime_root_matches_collapsed_root_directory() -> None:
     trailing slash, so without normalizing it the root entry itself fails to
     match while its descendants match — defeating the suppression. The sibling
     ``.claude/agent-memory-archive/`` must still NOT be suppressed.
+
+    The exemption is scoped to the ``.claude/agent-memory/`` *directory* and its
+    descendants. A regular *file* spelled exactly ``.claude/agent-memory`` (which
+    ``git status --untracked-files=all`` reports without a trailing slash) is a
+    distinct path that must stay visible, not be silently dropped as if it were
+    the ignored directory root.
     """
     assert validation_worktree.is_under_agent_runtime_root(".claude/agent-memory/") is True
-    assert validation_worktree.is_under_agent_runtime_root(".claude/agent-memory") is True
+    assert validation_worktree.is_under_agent_runtime_root(".claude/agent-memory") is False
     assert (
         validation_worktree.is_under_agent_runtime_root(".claude/agent-memory/bug-hunter/notes.md")
         is True
