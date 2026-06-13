@@ -670,6 +670,40 @@ def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
     return parts
 
 
+def _ollama_base_url_malformed(environ: Mapping[str, str]) -> bool:
+    """Return whether an *explicitly set* Ollama base URL is unparseable.
+
+    ``_parse_ollama_base_url`` normalizes a malformed value to the
+    ``host.docker.internal`` default so readiness never crashes. That is the right
+    disposition for a blank/missing value (which resolves to the always-valid
+    default), but not for an *explicit* ``AWF_OPENCODE_OLLAMA_BASE_URL`` /
+    ``OLLAMA_HOST`` that fails to parse: the OpenCode launcher passes the explicit
+    value through to the agent verbatim, so probing/pulling the default daemon would
+    admit a workspace — and even pull a model — against a daemon the agent never
+    uses, only for the agent to fail later against the invalid URL. Surface such
+    explicit-malformed config to the admission gate so it can fail-close instead.
+
+    Mirrors ``_parse_ollama_base_url``'s resolution/parse exactly (precedence,
+    scheme defaulting, and the lazy ``hostname`` / ``port`` accessors that raise on
+    an invalid IPv6 host or non-numeric port) but reports the malformed value rather
+    than swallowing it into the default.
+    """
+
+    raw = environ.get("AWF_OPENCODE_OLLAMA_BASE_URL") or environ.get("OLLAMA_HOST")
+    if raw is None or not raw.strip():
+        return False
+    candidate = raw.strip()
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+    try:
+        parts = urlsplit(candidate)
+        _ = parts.hostname
+        _ = parts.port
+    except ValueError:
+        return True
+    return False
+
+
 def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
     parts = _parse_ollama_base_url(environ)
     path = parts.path.rstrip("/")

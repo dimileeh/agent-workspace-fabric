@@ -1107,6 +1107,74 @@ def test_selected_opencode_preflight_non_ollama_provider_model_blocks_missing_cl
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("env_key", "env_value"),
+    [
+        # Unbalanced IPv6 brackets make ``urlsplit`` raise ``ValueError``.
+        ("OLLAMA_HOST", "http://[::1"),
+        ("AWF_OPENCODE_OLLAMA_BASE_URL", "http://[bad:11434"),
+        # A non-numeric port makes the lazy ``.port`` accessor raise ``ValueError``.
+        ("AWF_OPENCODE_OLLAMA_BASE_URL", "http://localhost:notaport"),
+    ],
+)
+def test_selected_opencode_preflight_explicit_malformed_ollama_url_blocks(
+    tmp_path: Path,
+    env_key: str,
+    env_value: str,
+) -> None:
+    # An explicit but malformed AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST must
+    # block create-time admission instead of silently normalizing to the
+    # ``host.docker.internal`` default: the OpenCode launcher passes the explicit
+    # value through to the agent verbatim, so probing/pulling the default daemon
+    # would admit a workspace (and even pull a model) against a daemon the agent
+    # never uses, only for the agent to fail later. The malformed config is caught
+    # before any daemon probe or runtime-CLI probe runs.
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "llama3.1"},
+        environ={env_key: env_value},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_BASE_URL_MALFORMED"
+    assert result["auth_status"] == "fail"
+    assert result["probe_status"] == "skipped"
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_non_ollama_model_ignores_malformed_ollama_url(
+    tmp_path: Path,
+) -> None:
+    # A provider-qualified non-Ollama model (``openai/...``) does not use the Ollama
+    # daemon URL, so a stray malformed OLLAMA_HOST must not block its admission — it
+    # is handled by the dedicated non-Ollama provider path before the Ollama URL is
+    # ever consulted.
+    (tmp_path / "home" / ".config" / "opencode").mkdir(parents=True)
+
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "openai/gpt-oss"},
+        environ={"OLLAMA_HOST": "http://localhost:notaport"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["reason_code"] == "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
 def test_opencode_provider_credentials_present_classifier(tmp_path: Path) -> None:
     # #554 credential detection: ~/.config/opencode satisfies any provider; a
     # provider-matched env key satisfies its provider; an unknown provider with

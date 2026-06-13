@@ -480,6 +480,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#opencode_ollama_auth_missing](#opencode_ollama_auth_missing)
 
+### OPENCODE_OLLAMA_BASE_URL_MALFORMED
+**Problem:** AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST is set to a malformed value.
+**Likely Cause:** An explicit Ollama base URL cannot be parsed, so worker-side readiness would probe a different daemon than the agent uses.
+**Operator Fix:** Fix the Ollama base URL (unbalanced IPv6 brackets or a non-numeric port), then retry.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#opencode_ollama_base_url_malformed](#opencode_ollama_base_url_malformed)
+
 ### OPENCODE_PROVIDER_AUTH_MISSING
 **Problem:** No OpenCode/provider auth signal was visible for a non-Ollama OpenCode model.
 **Likely Cause:** Missing OpenCode/provider credentials for a provider-qualified (non-Ollama) model.

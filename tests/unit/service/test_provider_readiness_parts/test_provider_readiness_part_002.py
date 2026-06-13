@@ -1015,6 +1015,43 @@ def test_ollama_url_helpers_normalize_malformed_base_url_to_default(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"OLLAMA_HOST": "http://[::1"},
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://[bad:11434"},
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:notaport"},
+    ],
+)
+def test_ollama_base_url_malformed_detects_explicit_unparseable_value(
+    env: dict[str, str],
+) -> None:
+    """An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` / ``OLLAMA_HOST`` that cannot be
+    parsed is reported as malformed so admission can fail-close, rather than being
+    silently normalized to the default the URL builders fall back to."""
+    assert provider_readiness_helpers._ollama_base_url_malformed(env) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "env",
+    [
+        # Blank/missing resolves to the always-valid default — never malformed.
+        {},
+        {"OLLAMA_HOST": ""},
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "   "},
+        # A well-formed explicit value (scheme implied or present) is not malformed.
+        {"OLLAMA_HOST": "ollama-sidecar:11434"},
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://host.docker.internal:11434/v1"},
+    ],
+)
+def test_ollama_base_url_malformed_accepts_blank_and_valid_values(
+    env: dict[str, str],
+) -> None:
+    assert provider_readiness_helpers._ollama_base_url_malformed(env) is False
+
+
+@pytest.mark.unit
 def test_overlay_profile_ollama_base_url_resolves_required_placeholder() -> None:
     """A profile may declare the Ollama endpoint via Compose's required form
     (``${OLLAMA_URL:?set OLLAMA_URL}``). When the variable is present in the worker

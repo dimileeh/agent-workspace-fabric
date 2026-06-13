@@ -1010,6 +1010,14 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "docs/REASON_CATALOG.md#opencode_provider_auth_missing",
     ),
+    "OPENCODE_OLLAMA_BASE_URL_MALFORMED": _ReasonText(
+        "AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST is set to a malformed value.",
+        "Fix the Ollama base URL (unbalanced IPv6 brackets or a non-numeric port), then retry.",
+        "An explicit Ollama base URL cannot be parsed, so worker-side readiness would "
+        "probe a different daemon than the agent uses.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#opencode_ollama_base_url_malformed",
+    ),
     "GROK_AUTH_MISSING": _ReasonText(
         "No Grok Build auth signal was visible.",
         "Mount ~/.grok or set XAI_API_KEY in the AWF service environment.",

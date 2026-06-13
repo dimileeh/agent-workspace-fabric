@@ -443,6 +443,45 @@ def selected_provider_readiness_preflight(
             checked_at=checked,
             secrets=secrets,
         )
+    if provider == "opencode" and _ollama_base_url_malformed(env):
+        # An explicit AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST that fails to parse
+        # must block admission rather than silently normalize to the
+        # host.docker.internal default (which the URL builders/reachability classifier
+        # fall back to so they never crash mid-readiness). The OpenCode launcher passes
+        # the explicit value through to the agent verbatim, so probing/pulling the
+        # default daemon would admit a workspace — and even pull a model — against a
+        # daemon the agent never uses, only for the agent to fail later. A non-Ollama
+        # provider model never reaches here (it returns above) and does not use the
+        # Ollama URL, so this gate is scoped to Ollama-served OpenCode models. No probe
+        # runs (mirroring how OPENCODE_OLLAMA_AUTH_MISSING blocks before any probe).
+        malformed_message = (
+            "AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST is set to a malformed value "
+            "(unbalanced IPv6 brackets or a non-numeric port). Fix the Ollama base URL "
+            "so worker-side readiness probes the same daemon the agent will use."
+        )
+        provider_result = _provider_result(
+            ok=False,
+            strict=True,
+            reason="OPENCODE_OLLAMA_BASE_URL_MALFORMED",
+            message=malformed_message,
+            secrets=secrets,
+            credential_scope="not_observed",
+            isolation="none",
+        )
+        return _launch_preflight_payload(
+            agent=runtime.value,
+            provider=provider,
+            model=identity.model,
+            model_source=identity.model_source,
+            provider_result=provider_result,
+            probe={"status": "skipped", "reason_code": "OPENCODE_OLLAMA_BASE_URL_MALFORMED"},
+            reason_code="OPENCODE_OLLAMA_BASE_URL_MALFORMED",
+            message=malformed_message,
+            override=override,
+            override_reason=override_reason,
+            checked_at=checked,
+            secrets=secrets,
+        )
     if (
         provider == "opencode"
         and not _ollama_url_host_reachable_from_worker(env)
@@ -991,6 +1030,7 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _http_get,
     _http_post_stream,
     _is_cloud_model,
+    _ollama_base_url_malformed,
     _ollama_pull_urls,
     _ollama_tags_urls,
     _ollama_url_host_reachable_from_worker,
