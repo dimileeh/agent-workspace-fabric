@@ -431,6 +431,19 @@ async def execute(
                 ws=ws,
             ):
                 return
+            # The git-writability preflight and the Ollama pull above can take a
+            # long time (an absent model pull is bounded only by the pull
+            # deadline, up to ~30 minutes). Recheck the status before the
+            # baseline-coverage preflight — which itself runs the profile
+            # coverage command — so a workspace cancelled during the pull stops
+            # promptly instead of running baseline coverage before the agent-run
+            # recheck below notices.
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.running,
+                action="baseline_coverage_preflight",
+            ):
+                return
             baseline_coverage = await self._run_baseline_coverage_preflight(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
