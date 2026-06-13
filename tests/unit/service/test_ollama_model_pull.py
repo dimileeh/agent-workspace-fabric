@@ -464,7 +464,13 @@ def test_pull_all_urls_fail_reports_each_failure() -> None:
 @pytest.mark.unit
 def test_helpers_classify_cloud_and_pull_name_and_urls() -> None:
     assert _is_cloud_model("ollama/kimi-k2.7:cloud") is True
+    # Size-qualified ``-cloud`` tags are also Ollama Cloud models served
+    # remotely (e.g. the ``gemma4:31b-cloud`` fallback entry).
+    assert _is_cloud_model("ollama/gemma4:31b-cloud") is True
+    assert _is_cloud_model("gpt-oss:120b-cloud") is True
     assert _is_cloud_model("llama4:70b") is False
+    # A model name ending in ``-cloud`` without a tag is not a cloud model.
+    assert _is_cloud_model("my-cloud") is False
     assert _is_cloud_model(None) is False
     assert _ollama_pull_name("ollama/llama4:70b") == "llama4:70b"
     assert _ollama_pull_name("llama4:70b") == "llama4:70b"

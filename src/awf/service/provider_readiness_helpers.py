@@ -675,8 +675,17 @@ def _ollama_pull_name(model: str | None) -> str:
 
 
 def _is_cloud_model(model: str | None) -> bool:
-    """Return whether the model is an Ollama Cloud model (served remotely)."""
-    return _ollama_pull_name(model).endswith(":cloud")
+    """Return whether the model is an Ollama Cloud model (served remotely).
+
+    Ollama Cloud models carry a ``cloud`` tag in either form the daemon
+    publishes: the bare ``:cloud`` tag (e.g. ``glm-5.1:cloud``) or a
+    size-qualified tag ending in ``-cloud`` (e.g. ``gpt-oss:120b-cloud``,
+    ``gemma4:31b-cloud``). Match on the tag portion so both are treated as
+    served-remotely (no local ``/api/pull``).
+    """
+    pull_name = _ollama_pull_name(model)
+    tag = pull_name.rpartition(":")[2] if ":" in pull_name else ""
+    return tag == "cloud" or tag.endswith("-cloud")
 
 
 def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
