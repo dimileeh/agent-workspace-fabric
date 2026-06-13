@@ -1005,6 +1005,10 @@ def ensure_ollama_model_available(
     if reason in {"MODEL_NOT_SELECTED", "OLLAMA_MODEL_PROBE_FAILED"}:
         # No selectable model, or the daemon never answered: do not pull.
         return dict(probe)
+    if reason != "OLLAMA_MODEL_NOT_AVAILABLE":
+        # Unexpected probe disposition (e.g. a future non-pull reason code): do
+        # not pull; surface the raw probe result rather than fall through.
+        return dict(probe)
 
     # reason == OLLAMA_MODEL_NOT_AVAILABLE: the daemon answered but lacks it.
     pull_name = _ollama_pull_name(model)

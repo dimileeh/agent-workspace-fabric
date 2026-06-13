@@ -337,6 +337,35 @@ def test_no_model_selected_is_not_pulled() -> None:
 
 
 @pytest.mark.unit
+def test_unexpected_probe_disposition_is_not_pulled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A probe reason code that is neither available/not-selected/probe-failed nor
+    # the pullable NOT_AVAILABLE (e.g. a future non-pull disposition) must surface
+    # the raw probe result instead of implicitly falling through to a pull.
+    probe = {
+        "status": "fail",
+        "reason_code": "OLLAMA_MODEL_FUTURE_DISPOSITION",
+        "message": "hypothetical future non-pull disposition",
+    }
+    monkeypatch.setattr(
+        "awf.service.provider_readiness_helpers._probe_ollama_model",
+        lambda *_args, **_kwargs: dict(probe),
+    )
+
+    result = ensure_ollama_model_available(
+        model="ollama/llama4:70b",
+        tags_urls=_TAGS_URLS,
+        pull_urls=_PULL_URLS,
+        http_get=_http_get_returning(("other:latest",)),
+        http_post_stream=_unexpected_post_stream,
+        secrets=frozenset(),
+    )
+
+    assert result == probe
+
+
+@pytest.mark.unit
 def test_pull_output_and_progress_are_redacted() -> None:
     secret = "ollama-secret-token-value"
     post = _FakePostStream(
