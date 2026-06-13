@@ -358,11 +358,14 @@ def selected_provider_readiness_preflight(
         )
         if not creds_present:
             target_provider = (identity.model or "").strip().partition("/")[0].lower()
+            provider_env_hint = (
+                " / ".join(_OPENCODE_PROVIDER_ENV_KEYS.get(target_provider, ()))
+                or "the provider API key"
+            )
             auth_missing_message = (
                 f"OpenCode model {identity.model!r} targets the {target_provider!r} "
                 "provider but no OpenCode/provider credentials were visible. Mount "
-                "~/.config/opencode or set the provider API key (e.g. OPENAI_API_KEY / "
-                "ANTHROPIC_API_KEY)."
+                f"~/.config/opencode or set {provider_env_hint}."
             )
             provider_result = _provider_result(
                 ok=False,
@@ -1531,6 +1534,7 @@ def _check_gemini(
 
 
 from awf.service.provider_readiness_helpers import (  # noqa: E402
+    _OPENCODE_PROVIDER_ENV_KEYS,
     _check_docker_provider,
     _check_grok,
     _check_opencode,

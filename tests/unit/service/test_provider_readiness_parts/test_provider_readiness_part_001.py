@@ -885,6 +885,42 @@ def test_selected_opencode_preflight_non_ollama_provider_model_missing_creds_blo
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("model", "expected_hint"),
+    [
+        ("openai/gpt-oss", "OPENAI_API_KEY / OPENAI_API_TOKEN"),
+        ("anthropic/claude-sonnet", "ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN"),
+        ("google/gemini-pro", "GEMINI_API_KEY / GOOGLE_API_KEY"),
+        ("xai/grok", "XAI_API_KEY"),
+        ("mystery/model", "the provider API key"),
+    ],
+)
+def test_selected_opencode_preflight_non_ollama_auth_missing_hint_is_provider_accurate(
+    tmp_path: Path,
+    model: str,
+    expected_hint: str,
+) -> None:
+    # The auth-missing fix message must name the provider's own credential env
+    # var(s) (GEMINI_API_KEY for google/..., XAI_API_KEY for xai/...) rather than
+    # a hardcoded openai/anthropic example, so the operator follows the right fix.
+    # An unknown provider prefix falls back to a generic "the provider API key".
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": model},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["reason_code"] == "OPENCODE_PROVIDER_AUTH_MISSING"
+    assert f"set {expected_hint}." in result["message"]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("model", ["openai/gpt-oss", "anthropic/claude-sonnet"])
 def test_selected_opencode_preflight_non_ollama_provider_model_with_config_creds_defers(
     tmp_path: Path,
