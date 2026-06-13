@@ -1416,74 +1416,9 @@ def _check_opencode(
     )
 
 
-def _check_grok(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    auth_json = host_home / ".grok" / "auth.json"
-    if auth_json.is_file():
-        file_sources = [
-            _credential_source(
-                type_="path",
-                signal="~/.grok/auth.json",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-        ]
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GROK_FILE_AUTH_PRESENT",
-            message="Grok Build auth files are visible for per-workspace isolated copies.",
-            signals=[source["signal"] for source in file_sources],
-            secrets=secrets,
-            credential_sources=file_sources,
-            credential_scope="isolated_workspace",
-            isolation="per_workspace_copy",
-            warnings=[],
-        )
-
-    signal = _first_present_env(environ, _XAI_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GROK_ENV_AUTH_PRESENT",
-            message="Grok Build auth is visible through service environment variables.",
-            signals=[signal],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="env",
-                    signal=signal,
-                    credential_scope="static_env_token",
-                    isolation="service_env",
-                )
-            ],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=_static_env_warnings(
-                provider_label="Grok Build",
-                signals=[signal],
-            ),
-        )
-
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="GROK_AUTH_MISSING",
-        message="No Grok Build auth signal was visible. Mount ~/.grok or set XAI_API_KEY.",
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
-
-
 from awf.service.provider_readiness_helpers import (  # noqa: E402
     _check_docker_provider,
+    _check_grok,
     _codex_file_sources,
     _credential_source,
     _existing_credential_sources,
