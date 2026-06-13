@@ -247,6 +247,38 @@ async def test_ensure_resolves_executor_config_model_override(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "model",
+    ["openai/gpt-oss", "anthropic/claude-sonnet"],
+)
+async def test_opencode_non_ollama_provider_skips_preflight(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+) -> None:
+    """A provider-qualified non-Ollama model must skip the Ollama preflight so
+    OpenCode can use the selected provider instead of failing with an Ollama
+    reason after a bogus pull from the local daemon."""
+    workspace_id = await _seed_running(factory)
+    executor = _make_executor(factory, tmp_path)
+
+    def _must_not_run(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("ensure_ollama_model_available must not run for non-Ollama provider")
+
+    monkeypatch.setattr(ollama_model, "ensure_ollama_model_available", _must_not_run)
+
+    proceed = await executor._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=SimpleNamespace(agent="opencode", task_policy={"agent_model": model}),
+    )
+
+    assert proceed is True
+    snap = await _get_status(factory, workspace_id)
+    assert snap.status == WorkspaceStatus.running.value
+
+
+@pytest.mark.unit
 def test_environ_secret_values_filters_secret_keys() -> None:
     secrets = ollama_model._environ_secret_values(
         {"OLLAMA_API_KEY": "abcd1234", "PATH": "/usr/bin", "X": "yy"}

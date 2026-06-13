@@ -46,6 +46,22 @@ def _environ_secret_values(environ: Mapping[str, str]) -> frozenset[str]:
     )
 
 
+def _targets_non_ollama_provider(model: str | None) -> bool:
+    """Return whether the resolved OpenCode model names a non-Ollama provider.
+
+    Mirrors ``OpenCodeAdapter.get_provider``: a provider-qualified model such as
+    ``openai/gpt-oss`` or ``anthropic/claude-sonnet`` carries a ``<provider>/``
+    prefix, while a bare or ``ollama/``-prefixed reference targets the local
+    Ollama daemon. Only the latter should be probed/pulled against Ollama; a
+    non-Ollama provider model must skip the Ollama preflight so OpenCode can use
+    the selected provider instead of failing with an Ollama reason code.
+    """
+
+    raw = (model or "").strip()
+    provider, slash, _remainder = raw.partition("/")
+    return bool(slash) and provider != "ollama"
+
+
 async def _ensure_ollama_model_or_mark_failed(
     self: Any,
     *,
@@ -72,6 +88,18 @@ async def _ensure_ollama_model_or_mark_failed(
     model = _agent_run_model_for_workspace(ws) or (
         adapter_defaults.model if adapter_defaults is not None else None
     )
+    # OpenCode can run a provider-qualified non-Ollama model (e.g. ``openai/...``
+    # or ``anthropic/...``). The Ollama preflight only knows how to probe/pull
+    # against the local daemon, so running it for such a model would probe a
+    # name the daemon never has and fail the workspace with an Ollama reason
+    # before OpenCode could use the selected provider. Skip the preflight there.
+    if _targets_non_ollama_provider(model):
+        _log.info(
+            "executor.ollama_model_skip_non_ollama_provider",
+            workspace_id=workspace_id,
+            model=model,
+        )
+        return True
     environ = os.environ
     secrets = _environ_secret_values(environ)
     # Bound the buffered tail: only the last ``_PULL_PROGRESS_EVENT_LIMIT`` lines
