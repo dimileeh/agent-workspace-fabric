@@ -85,6 +85,9 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorPolicyBlockedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
+from awf.runtime.validation_worktree import (
+    is_under_agent_runtime_root,
+)
 
 
 async def _pre_existing_dirty_repair_worktree_result(
@@ -96,8 +99,15 @@ async def _pre_existing_dirty_repair_worktree_result(
 ) -> _GitPushResult | None:
     if not worktree_path.exists():
         return None
+    # ``--untracked-files=all`` is load-bearing here: with git's default
+    # ``normal`` mode a *fully*-untracked ``.claude/`` (no tracked content under
+    # it) collapses all the way to a single ``?? .claude/`` entry, which is NOT
+    # under the ``.claude/agent-memory/`` ignored root and would therefore stay
+    # in ``paths`` and refuse repair in the common case this guard unblocks.
+    # Enumerating leaf paths lets the agent-runtime filter below see and drop the
+    # memory files. Mirrors ``check_validation_worktree_clean``.
     status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
     )
     if not status.ok:
         stderr = status.stderr[:400]
@@ -124,7 +134,18 @@ async def _pre_existing_dirty_repair_worktree_result(
     if not status.stdout.strip():
         return None
 
-    paths = sorted(_changed_paths_from_porcelain(status.stdout))
+    # AWF-agent-runtime artifacts (reviewer subagent memory) written into the
+    # repair worktree are not part of the PR, so drop UNTRACKED memory paths
+    # before deciding the worktree is dirty. Tracked-modified memory (and every
+    # other path) stays visible/blocking. If nothing else remains, the worktree
+    # is effectively clean — return None, same as the empty-status path above.
+    all_paths = _changed_paths_from_porcelain(status.stdout)
+    untracked = set(_untracked_paths_from_porcelain(status.stdout))
+    paths = sorted(
+        path for path in all_paths if not (path in untracked and is_under_agent_runtime_root(path))
+    )
+    if not paths:
+        return None
     _log.warning(
         "monitor.repair_worktree_pre_existing_dirty",
         workspace_id=workspace_id,

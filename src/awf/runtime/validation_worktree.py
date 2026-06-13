@@ -17,6 +17,9 @@ from awf.runtime.git_porcelain import (
     untracked_paths_from_porcelain as _untracked_paths_from_porcelain,
 )
 from awf.runtime.validation_worktree_constants import (
+    AWF_AGENT_RUNTIME_IGNORED_ROOTS as _AWF_AGENT_RUNTIME_IGNORED_ROOTS,
+)
+from awf.runtime.validation_worktree_constants import (
     VALIDATION_INFRASTRUCTURE_ERROR as _VALIDATION_INFRASTRUCTURE_ERROR,
 )
 from awf.runtime.validation_worktree_constants import (
@@ -37,6 +40,7 @@ VALIDATION_WORKTREE_PRE_EXISTING_DIRTY: str = _VALIDATION_WORKTREE_PRE_EXISTING_
 VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED: str = _VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED
 VALIDATION_WORKTREE_STATUS_FAILED: str = _VALIDATION_WORKTREE_STATUS_FAILED
 VALIDATION_INFRASTRUCTURE_ERROR: str = _VALIDATION_INFRASTRUCTURE_ERROR
+AWF_AGENT_RUNTIME_IGNORED_ROOTS: tuple[str, ...] = _AWF_AGENT_RUNTIME_IGNORED_ROOTS
 
 GitRunner = Callable[[list[str]], Awaitable[CommandResult]]
 
@@ -103,14 +107,33 @@ def _resolve_head_sha(result: CommandResult, *, ref: str) -> tuple[str | None, s
 def _is_under_ignored_path(path: str, ignored_paths: set[str]) -> bool:
     """Return whether `path` should be treated as part of an ignored root."""
     normalized_path = _normalize_porcelain_path(path)
+    path_is_dir_entry = path.endswith("/")
     for ignored_path in ignored_paths:
-        if normalized_path == ignored_path:
+        # Normalize the ignored root too: roots may carry a trailing slash
+        # (e.g. ``.claude/agent-memory/``), and git collapses a fully-untracked
+        # directory to that exact root entry. Comparing normalized-to-normalized
+        # matches the root itself as well as its descendants, while keeping the
+        # sibling ``.claude/agent-memory-archive/`` excluded.
+        normalized_ignored = _normalize_porcelain_path(ignored_path)
+        # The exemption is scoped to the ignored *directory* and its descendants.
+        # ``git status --untracked-files=all`` reports a regular file named exactly
+        # ``.claude/agent-memory`` (no trailing slash) as ``?? .claude/agent-memory``
+        # — a distinct path that must stay visible. Only suppress the equality case
+        # for an actual directory entry: the incoming path carries a trailing slash
+        # (git's collapsed root form / the empty-dir snapshot), or the ignored root
+        # itself was stored without one (a genuinely-ignored entry, file or dir alike).
+        if normalized_path == normalized_ignored and (
+            path_is_dir_entry or not ignored_path.endswith("/")
+        ):
             return True
-        if ignored_path.endswith("/") and normalized_path.startswith(ignored_path):
-            return True
-        if not ignored_path.endswith("/") and normalized_path.startswith(f"{ignored_path}/"):
+        if normalized_path.startswith(f"{normalized_ignored}/"):
             return True
     return False
+
+
+def is_under_agent_runtime_root(path: str) -> bool:
+    """Return whether ``path`` is an AWF-agent-runtime artifact root/descendant."""
+    return _is_under_ignored_path(path, set(AWF_AGENT_RUNTIME_IGNORED_ROOTS))
 
 
 def _untracked_cleanup_parent_dirs(path: str, ignored_paths: set[str]) -> tuple[str, ...]:
@@ -359,6 +382,11 @@ async def check_validation_worktree_clean(
     ignored_paths_to_ignore = (
         {_normalize_porcelain_path(path) for path in ignored_paths} if ignore_all_ignored else set()
     )
+    # AWF-agent-runtime artifacts (reviewer subagent memory) never belong to the
+    # PR, so suppress them as untracked/ignored UNCONDITIONALLY — independent of
+    # the target repo's .gitignore and of the ``ignore_all_ignored`` flag. Only
+    # untracked entries are suppressed below; tracked memory stays visible.
+    ignored_paths_to_ignore |= set(AWF_AGENT_RUNTIME_IGNORED_ROOTS)
     changed_paths = _changed_paths_from_porcelain(status_stdout)
     untracked_paths_from_status = _untracked_paths_from_porcelain(
         status_stdout,
@@ -366,7 +394,11 @@ async def check_validation_worktree_clean(
     )
     empty_untracked_dirs = _snapshot_empty_untracked_dirs(
         worktree_path=worktree_path,
-        ignored_paths=ignored_paths,
+        # The snapshot appends its results unfiltered below, so it must skip the
+        # AWF-agent-runtime roots itself — an empty ``.claude/agent-memory/<agent>/``
+        # (created before any file is written) would otherwise surface the root
+        # and its parents as dirty, escaping the unconditional suppression above.
+        ignored_paths=(*ignored_paths, *AWF_AGENT_RUNTIME_IGNORED_ROOTS),
     )
     # Ignored roots only suppress untracked or ignored artifacts; tracked files
     # below those roots must stay visible so cleanup can restore them.
