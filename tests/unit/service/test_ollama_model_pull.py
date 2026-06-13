@@ -246,6 +246,49 @@ def test_pull_timeout_maps_to_pull_failed() -> None:
 
 
 @pytest.mark.unit
+def test_pull_stream_never_terminating_is_bounded_by_wall_clock() -> None:
+    # A daemon whose /api/pull keeps streaming progress lines but never emits a
+    # terminal status must not hang the executor thread forever: httpx's timeout
+    # only bounds each read (it resets on every NDJSON line), so a total
+    # wall-clock deadline has to surface OLLAMA_MODEL_PULL_FAILED after the bound.
+    def _endless_lines() -> Iterator[str]:
+        while True:
+            yield json.dumps({"status": "downloading", "completed": 1, "total": 100})
+
+    class _EndlessResponse:
+        status_code = 200
+
+        def iter_lines(self) -> Iterator[str]:
+            return _endless_lines()
+
+    class _EndlessPost:
+        def __call__(self, url: str, *, json: Mapping[str, Any], timeout: float) -> _Ctx:
+            return _Ctx(_EndlessResponse())  # type: ignore[arg-type]
+
+    # A monotonic clock that advances one second per call: the deadline of
+    # ``timeout`` seconds is crossed after a bounded number of progress lines.
+    ticks = iter(range(10_000))
+
+    def _monotonic() -> float:
+        return float(next(ticks))
+
+    result = ensure_ollama_model_available(
+        model="ollama/llama4:70b",
+        tags_urls=_TAGS_URLS,
+        pull_urls=_PULL_URLS,
+        http_get=_http_get_returning(("other:latest",)),
+        http_post_stream=_EndlessPost(),
+        secrets=frozenset(),
+        timeout=3.0,
+        monotonic=_monotonic,
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULL_FAILED"
+    assert "timeout" in result["detail"].lower()
+
+
+@pytest.mark.unit
 def test_pull_non_transport_exception_propagates() -> None:
     # A non-transport error (e.g. a programming bug, not an httpx transport
     # failure) must surface rather than being masked as OLLAMA_MODEL_PULL_FAILED

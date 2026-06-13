@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 import traceback
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
@@ -965,6 +966,7 @@ def ensure_ollama_model_available(
     secrets: frozenset[str],
     timeout: float | None = None,
     on_progress: Callable[[str], None] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Discover, classify, and (if needed) auto-pull the requested Ollama model.
 
@@ -1025,6 +1027,7 @@ def ensure_ollama_model_available(
         secrets=secrets,
         timeout=pull_timeout,
         on_progress=on_progress,
+        monotonic=monotonic,
     )
     if not pull_result["ok"]:
         return {
@@ -1057,6 +1060,7 @@ def _pull_ollama_model(
     secrets: frozenset[str],
     timeout: float,
     on_progress: Callable[[str], None] | None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     # The documented /api/pull body field is ``model``; ``name`` is the
     # deprecated alias still accepted by current daemons. Send both so newer
@@ -1064,6 +1068,11 @@ def _pull_ollama_model(
     # both resolve the model to pull. See https://docs.ollama.com/api/pull.
     body: dict[str, Any] = {"model": name, "name": name, "stream": True}
     failures: list[str] = []
+    # ``timeout`` reaches httpx as a per-read deadline that resets on every
+    # NDJSON progress line, so it is not a total bound. Hold a single wall-clock
+    # deadline across all URL attempts so a daemon that streams progress forever
+    # without terminating still surfaces OLLAMA_MODEL_PULL_FAILED on time.
+    deadline = monotonic() + timeout
     for url in urls:
         try:
             with http_post_stream(url, json=body, timeout=timeout) as response:
@@ -1076,6 +1085,8 @@ def _pull_ollama_model(
                     response,
                     secrets=secrets,
                     on_progress=on_progress,
+                    deadline=deadline,
+                    monotonic=monotonic,
                 )
             if stream_error is not None:
                 failures.append(f"{url}: {stream_error}" if len(urls) > 1 else stream_error)
@@ -1104,10 +1115,23 @@ def _consume_pull_stream(
     *,
     secrets: frozenset[str],
     on_progress: Callable[[str], None] | None,
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> str | None:
-    """Drain a ``/api/pull`` NDJSON stream; return a redacted error if any."""
+    """Drain a ``/api/pull`` NDJSON stream; return a redacted error if any.
+
+    ``deadline`` is an absolute ``monotonic`` wall-clock bound on the total time
+    spent draining the stream. httpx's per-read timeout resets on every progress
+    line, so without this check a daemon that keeps streaming progress but never
+    terminates would keep this loop running indefinitely; the between-lines check
+    surfaces a bounded timeout error instead.
+    """
     error_detail: str | None = None
     for line in response.iter_lines():
+        if monotonic() >= deadline:
+            return _truncate(
+                _redact("pull stream exceeded the bounded wall-clock timeout", secrets)
+            )
         text = line.strip() if isinstance(line, str) else ""
         if not text:
             continue
