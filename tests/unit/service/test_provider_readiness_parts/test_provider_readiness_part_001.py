@@ -54,9 +54,18 @@ def _unexpected_subprocess(args: list[str], **_kwargs: object) -> Any:
 
 def _ollama_ok(url: str, *, timeout: float) -> Any:
     assert timeout > 0
-    if url == "http://ollama.local:11434/api/version":
+    # Answer both a non-worker-reachable DNS host (``ollama.local``) and the
+    # worker-reachable ``localhost`` so callers that need the create-time daemon
+    # probe to actually run can point at a host that is not deferred away.
+    if url in {
+        "http://ollama.local:11434/api/version",
+        "http://localhost:11434/api/version",
+    }:
         return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-    if url == "http://ollama.local:11434/api/tags":
+    if url in {
+        "http://ollama.local:11434/api/tags",
+        "http://localhost:11434/api/tags",
+    }:
         return SimpleNamespace(
             status_code=200,
             text='{"models":[{"name":"kimi-k2.6:cloud"}]}',
@@ -263,7 +272,9 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     (home / ".gemini").mkdir()
     (home / ".config" / "opencode").mkdir(parents=True)
     env = {
-        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+        # ``localhost`` is worker-reachable so the OpenCode create-time daemon probe
+        # runs for the ``:cloud`` model rather than being deferred as non-reachable.
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1",
         "CURSOR_API_KEY": "cursor_secret",
         "XAI_API_KEY": "xai-selected-grok-secret",
     }
@@ -522,12 +533,16 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
     (home / ".config" / "opencode").mkdir(parents=True)
     urls: list[str] = []
 
+    # ``localhost`` is worker-reachable, so the create-time daemon probe runs and
+    # exercises the cloud-absent-from-tags disposition. (A ``:cloud`` model at a
+    # daemon URL the worker cannot reach defers instead — see
+    # ``test_selected_opencode_preflight_cloud_model_with_creds_non_worker_reachable_url_defers``.)
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         urls.append(url)
-        if url == "http://ollama.local:11434/api/version":
+        if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://ollama.local:11434/api/tags":
+        if url == "http://localhost:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -538,7 +553,7 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/kimi-k2.6:cloud"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -553,8 +568,8 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
     assert result["blocks_launch"] is False
     # Preflight never pulls — only the cheap version + tags probes run.
     assert urls == [
-        "http://ollama.local:11434/api/version",
-        "http://ollama.local:11434/api/tags",
+        "http://localhost:11434/api/version",
+        "http://localhost:11434/api/tags",
     ]
 
 
@@ -819,6 +834,67 @@ def test_selected_opencode_preflight_authless_local_non_worker_reachable_url_def
     assert result["reason_code"] == "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
     assert result["probe_status"] == "unavailable"
     assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_cloud_model_with_creds_non_worker_reachable_url_defers(
+    tmp_path: Path,
+) -> None:
+    # PRRT_kwDOSJAM6s6JV_Rl: a ``:cloud`` Ollama model (e.g. ``glm-5.1:cloud``) with
+    # valid OpenCode credentials and a sidecar daemon URL the worker cannot reach must
+    # also defer the worker-side /api/version probe to the agent container. The defer
+    # was previously gated on a *local* model, so a cloud model fell through to
+    # _check_opencode and blocked with OLLAMA_HOST_UNREACHABLE before the executor's
+    # sidecar skip (which already defers for any non-host-reachable URL) could run.
+    # Credentials are present here, so the cloud auth gate is satisfied.
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed for a sidecar URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "glm-5.1:cloud"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_runtime_cli_ok("opencode"),
+        http_get=_no_http,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == "glm-5.1:cloud"
+    assert result["reason_code"] == "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
+    assert result["probe_status"] == "unavailable"
+    assert result["auth_status"] == "ok"
+    assert result["override_required"] is False
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_cloud_model_without_creds_non_worker_reachable_url_blocks(
+    tmp_path: Path,
+) -> None:
+    # The ``:cloud`` defer is gated on visible OpenCode/Ollama credentials: a cloud
+    # model is served remotely and still needs the cloud credential. With none, the
+    # worker must NOT defer and must NOT probe the unreachable sidecar — admission
+    # blocks with OPENCODE_OLLAMA_AUTH_MISSING (the host probe never runs because the
+    # credential gate fails first).
+    def _no_http(url: str, *, timeout: float) -> Any:
+        raise AssertionError(f"daemon must not be probed when creds are missing: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "glm-5.1:cloud"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama-sidecar:11434"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_no_http,
+    )
+
+    assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
+    assert result["auth_status"] == "fail"
+    assert result["blocks_launch"] is True
 
 
 @pytest.mark.unit

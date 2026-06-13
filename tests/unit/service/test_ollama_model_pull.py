@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,6 +24,8 @@ from awf.service.provider_readiness_helpers import (
     _ollama_pull_urls,
     _ollama_url_host_reachable_from_worker,
     _opencode_model_is_local_ollama,
+    _opencode_ollama_credentials_present,
+    _opencode_ollama_host_probe_deferrable,
     ensure_ollama_model_available,
 )
 
@@ -771,6 +774,40 @@ def test_opencode_model_is_local_ollama_classifier() -> None:
     # No selected model is not a local Ollama model.
     assert _opencode_model_is_local_ollama(None) is False
     assert _opencode_model_is_local_ollama("   ") is False
+
+
+@pytest.mark.unit
+def test_opencode_ollama_credentials_present(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    # No OpenCode/Ollama credential signal of any kind.
+    assert _opencode_ollama_credentials_present({}, home) is False
+    # The OLLAMA_API_KEY env satisfies the gate.
+    assert _opencode_ollama_credentials_present({"OLLAMA_API_KEY": "k"}, home) is True
+    # A mounted ~/.ollama auth file satisfies the gate.
+    (home / ".ollama").mkdir()
+    (home / ".ollama" / "config.json").write_text("{}", encoding="utf-8")
+    assert _opencode_ollama_credentials_present({}, home) is True
+    # OpenCode's own credential store satisfies the gate.
+    other = tmp_path / "other"
+    (other / ".config" / "opencode").mkdir(parents=True)
+    assert _opencode_ollama_credentials_present({}, other) is True
+
+
+@pytest.mark.unit
+def test_opencode_ollama_host_probe_deferrable(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    # A local Ollama model is authless and always defers, with or without creds.
+    assert _opencode_ollama_host_probe_deferrable("ollama/llama4:70b", {}, home) is True
+    # A provider-qualified non-Ollama model has its own carve-out and never defers here.
+    assert _opencode_ollama_host_probe_deferrable("openai/gpt-oss", {}, home) is False
+    # A :cloud model defers only once the Cloud credential is visible.
+    assert _opencode_ollama_host_probe_deferrable("glm-5.1:cloud", {}, home) is False
+    assert (
+        _opencode_ollama_host_probe_deferrable("glm-5.1:cloud", {"OLLAMA_API_KEY": "k"}, home)
+        is True
+    )
 
 
 @pytest.mark.unit

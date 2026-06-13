@@ -585,6 +585,57 @@ def _opencode_model_is_local_ollama(model: str | None) -> bool:
     return not _is_cloud_model(raw)
 
 
+def _opencode_ollama_credentials_present(
+    environ: Mapping[str, str],
+    host_home: Path,
+) -> bool:
+    """Return whether an OpenCode/Ollama Cloud credential is visible to the worker.
+
+    Mirrors the credential-signal detection in ``_check_opencode``: OpenCode's own
+    credential store (``~/.config/opencode``), mounted ``~/.ollama`` auth files, or
+    the ``OLLAMA_API_KEY`` env. A ``:cloud`` Ollama model is served remotely and
+    needs one of these (unlike a local model, which is authless), so the
+    non-worker-reachable host-probe defer is gated on this for cloud models.
+    """
+
+    if (host_home / ".config" / "opencode").is_dir():
+        return True
+    if any((host_home / ".ollama" / filename).is_file() for filename in _OLLAMA_AUTH_FILES):
+        return True
+    return _first_present_env(environ, _OPENCODE_ENV_KEYS) is not None
+
+
+def _opencode_ollama_host_probe_deferrable(
+    model: str | None,
+    environ: Mapping[str, str],
+    host_home: Path,
+) -> bool:
+    """Return whether the worker-side Ollama daemon probe can be deferred.
+
+    Used by create/retry admission when the resolved Ollama base URL is not
+    reachable from the worker (a workspace Compose service DNS name such as
+    ``http://ollama-sidecar:11434``). The probe defers to the agent container —
+    where the sidecar daemon IS reachable — for an Ollama-served model:
+
+    - a local model is authless, so it always defers (see
+      ``_opencode_model_is_local_ollama``);
+    - a ``:cloud`` model is served remotely *through* the daemon and still needs the
+      OpenCode/Ollama Cloud credential, so it defers only once that credential is
+      visible. Without it the caller falls through to ``_check_opencode``, which
+      blocks with ``OPENCODE_OLLAMA_AUTH_MISSING`` (no host probe) — the correct
+      create-time disposition.
+
+    A provider-qualified non-Ollama model is handled by the dedicated
+    ``OPENCODE_NON_OLLAMA_PROVIDER_SELECTED`` path and never reaches here.
+    """
+
+    if _opencode_model_is_local_ollama(model):
+        return True
+    if _opencode_model_targets_non_ollama_provider(model):
+        return False
+    return _is_cloud_model(model) and _opencode_ollama_credentials_present(environ, host_home)
+
+
 def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
     raw = (
         environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")

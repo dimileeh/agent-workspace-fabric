@@ -451,8 +451,8 @@ def selected_provider_readiness_preflight(
         )
     if (
         provider == "opencode"
-        and _opencode_model_is_local_ollama(identity.model)
         and not _ollama_url_host_reachable_from_worker(env)
+        and _opencode_ollama_host_probe_deferrable(identity.model, env, host_home)
     ):
         # #569 symmetry: this create/retry admission path runs in the worker/service
         # process off ``awf_net`` and cannot reach a workspace Compose service DNS
@@ -460,11 +460,13 @@ def selected_provider_readiness_preflight(
         # / ``/api/tags`` probe of such a host would falsely reject the workspace
         # with ``OLLAMA_HOST_UNREACHABLE`` (auth visible) or ``OPENCODE_OLLAMA_AUTH_
         # MISSING`` (authless local, daemon reachability cannot be verified to waive)
-        # before the executor pre-agent step — which already skips the same probe —
-        # could defer it. Skip the Ollama auth/daemon preflight here too and defer to
-        # the agent container where the sidecar daemon IS reachable. Gated on a
-        # *local* Ollama model so the ``:cloud`` credential gate and the non-Ollama
-        # provider gate (both handled above / via ``_check_opencode``) still apply.
+        # before the executor pre-agent step — which already skips the same probe for
+        # *any* non-host-reachable URL — could defer it. Skip the Ollama auth/daemon
+        # preflight here too and defer to the agent container where the sidecar daemon
+        # IS reachable. ``_opencode_ollama_host_probe_deferrable`` covers a local model
+        # (authless) and a ``:cloud`` model whose Cloud credential is already visible,
+        # while a credential-less cloud model and the non-Ollama provider model (both
+        # handled above / via ``_check_opencode``) still fall through to their gates.
         return _opencode_local_ollama_host_deferred_preflight(
             settings,
             runtime=runtime,
@@ -1549,7 +1551,7 @@ from awf.service.provider_readiness_helpers import (  # noqa: E402
     _ollama_pull_urls,
     _ollama_tags_urls,
     _ollama_url_host_reachable_from_worker,
-    _opencode_model_is_local_ollama,
+    _opencode_ollama_host_probe_deferrable,
     _opencode_provider_credentials_present,
     _ordered_names,
     _primary_credential_scope,
