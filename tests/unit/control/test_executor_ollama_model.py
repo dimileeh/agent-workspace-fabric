@@ -440,6 +440,55 @@ async def test_ensure_profile_ollama_host_overrides_worker_base_url(
 
 
 @pytest.mark.unit
+async def test_ensure_expands_profile_ollama_placeholder_against_environ(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile that declares the Ollama endpoint through a Compose-style
+    ``${NAME}`` placeholder must be resolved against the worker environ before the
+    probe/pull URLs are built. The agent container expands such placeholders via
+    Docker Compose host-env substitution, but the worker-side probe does not pass
+    through Compose — so a literal ``${OLLAMA_URL}`` would otherwise be probed as
+    ``http://${OLLAMA_URL}/api/tags`` and block/fail the workspace before launch."""
+    workspace_id = await _seed_running(factory)
+    executor = _make_executor(factory, tmp_path)
+
+    monkeypatch.setenv("OLLAMA_URL", "http://ollama-sidecar:11434")
+
+    seen: dict[str, Any] = {}
+
+    def _stub(*, tags_urls: Any = None, pull_urls: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        seen["tags_urls"] = tags_urls
+        seen["pull_urls"] = pull_urls
+        return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+
+    monkeypatch.setattr(ollama_model, "ensure_ollama_model_available", _stub)
+
+    proceed = await executor._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=SimpleNamespace(
+            agent="opencode",
+            task_policy={"agent_model": "ollama/llama4:70b"},
+            resolved_profile={
+                "name": "ollama-sidecar",
+                "runtime": {
+                    "environment": {
+                        "AWF_OPENCODE_OLLAMA_BASE_URL": "${OLLAMA_URL}",
+                    }
+                },
+            },
+        ),
+    )
+
+    assert proceed is True
+    assert any("ollama-sidecar:11434" in url for url in seen["tags_urls"])
+    assert any("ollama-sidecar:11434" in url for url in seen["pull_urls"])
+    assert all("${" not in url for url in seen["tags_urls"])
+    assert all("${" not in url for url in seen["pull_urls"])
+
+
+@pytest.mark.unit
 def test_environ_secret_values_filters_secret_keys() -> None:
     secrets = ollama_model._environ_secret_values(
         {"OLLAMA_API_KEY": "abcd1234", "PATH": "/usr/bin", "X": "yy"}

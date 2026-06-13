@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
 from awf.profiles.models import WorkspaceProfile
 from awf.service.config import ServiceSettings
+from awf.service.environment import compose_expand_value
 
 # Env keys that select the Ollama daemon. The OpenCode launcher resolves the
 # base URL from these (``AWF_OPENCODE_OLLAMA_BASE_URL`` first, then ``OLLAMA_HOST``)
@@ -589,7 +590,20 @@ def overlay_profile_ollama_base_url(
     except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
         return result
     profile_env = profile.runtime.environment
-    declared = {key: profile_env[key] for key in _OLLAMA_BASE_URL_ENV_KEYS if profile_env.get(key)}
+    # Profile env values may carry Compose-style ``${NAME}`` placeholders that the
+    # agent container resolves via Docker Compose host-env substitution. The
+    # worker-side probe/pull does not pass through Compose, so resolve each declared
+    # value against ``environ`` here — otherwise a literal ``${OLLAMA_HOST}`` would
+    # be probed as ``http://${OLLAMA_HOST}/api/tags`` and block/fail the workspace
+    # before launch. A placeholder that resolves to empty is treated as undeclared.
+    declared: dict[str, str] = {}
+    for key in _OLLAMA_BASE_URL_ENV_KEYS:
+        raw = profile_env.get(key)
+        if not raw:
+            continue
+        expanded = compose_expand_value(raw, environ=environ).strip()
+        if expanded:
+            declared[key] = expanded
     if not declared:
         return result
     # The profile owns the Ollama daemon selection. ``_ollama_api_urls`` (and the
