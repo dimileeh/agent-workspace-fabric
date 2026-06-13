@@ -956,6 +956,45 @@ class TestOpenCodeAdapter:
         assert '"foo:bar"' in script
 
     @pytest.mark.unit
+    async def test_cli_model_normalizes_surrounding_whitespace(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(
+            runner=runner,
+            default_model="  ollama/foo:bar  ",
+            default_effort="xhigh",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        model_index = args.index("--model")
+        # The ``--model`` flag is normalized once, so it never carries stray
+        # whitespace that the stripped config key would disagree with.
+        assert args[model_index + 1] == "ollama/foo:bar"
+        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
+        script = args[sh_start + 2]
+        assert '"foo:bar"' in script
+
+    @pytest.mark.unit
+    async def test_cli_model_falls_back_when_only_whitespace(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(runner=runner, default_model="   ")
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        model_index = args.index("--model")
+        assert args[model_index + 1] == f"ollama/{OPENCODE_OLLAMA_CLOUD_MODELS[0]}"
+
+    @pytest.mark.unit
     async def test_opencode_launcher_forwards_termination_and_cleans_temp_files(
         self,
         tmp_path: Path,
