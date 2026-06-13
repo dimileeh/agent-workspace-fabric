@@ -575,7 +575,7 @@ def test_unexpected_probe_disposition_is_not_pulled(
         "message": "hypothetical future non-pull disposition",
     }
     monkeypatch.setattr(
-        "awf.service.provider_readiness_helpers._probe_ollama_model",
+        "awf.service.provider_readiness_ollama._probe_ollama_model",
         lambda *_args, **_kwargs: dict(probe),
     )
 
