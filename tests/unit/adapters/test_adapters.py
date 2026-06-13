@@ -918,6 +918,16 @@ class TestOpenCodeAdapter:
         assert "ollama/llama4:70b" not in models
 
     @pytest.mark.unit
+    def test_opencode_config_omits_non_ollama_provider_model(self) -> None:
+        # A provider-qualified model that belongs to another provider must not
+        # leak into the ``ollama`` block — those entries would misroute runs.
+        config = _opencode_config_for_effort(effort=None, model="openai/gpt-x")
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert "openai/gpt-x" not in models
+        # The default Ollama fallback set is preserved untouched.
+        assert set(models) == set(OPENCODE_OLLAMA_CLOUD_MODELS)
+
+    @pytest.mark.unit
     def test_opencode_config_default_fallback_when_no_model(self) -> None:
         config = _opencode_config_for_effort(effort=None, model=None)
         models = config["provider"]["ollama"]["models"]  # type: ignore[index]

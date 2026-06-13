@@ -159,7 +159,11 @@ def _opencode_config_for_effort(
     model_keys = list(OPENCODE_OLLAMA_CLOUD_MODELS)
     if model:
         selected_key = _config_model_key(model)
-        if selected_key and selected_key not in model_keys:
+        # Only Ollama-served models belong in the ``ollama`` provider block. A
+        # provider-qualified name (e.g. ``openai/...``) keeps its ``/`` after
+        # key normalization and is left for its own provider, not misrouted
+        # through Ollama.
+        if selected_key and "/" not in selected_key and selected_key not in model_keys:
             model_keys.append(selected_key)
     models = {key: {**model_config, "name": key} for key in model_keys}
     return {
