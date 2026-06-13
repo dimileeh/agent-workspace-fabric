@@ -480,6 +480,13 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#opencode_ollama_auth_missing](#opencode_ollama_auth_missing)
 
+### OPENCODE_PROVIDER_AUTH_MISSING
+**Problem:** No OpenCode/provider auth signal was visible for a non-Ollama OpenCode model.
+**Likely Cause:** Missing OpenCode/provider credentials for a provider-qualified (non-Ollama) model.
+**Operator Fix:** Mount ~/.config/opencode or set the provider API key (e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY).
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#opencode_provider_auth_missing](#opencode_provider_auth_missing)
+
 ### OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED
 **Problem:** AWF could not recover the open PR for a preserved workspace because the open-PR resolver only supports GitHub.
 **Likely Cause:** The workspace is on a supported non-GitHub forge (e.g. Bitbucket Cloud), but the GitHub-only open-PR resolver cannot look up its open PR by branch yet, so worker recovery fails fast instead of querying the branch as a same-slug GitHub repo.
