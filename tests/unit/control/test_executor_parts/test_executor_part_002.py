@@ -23,6 +23,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
+    ollama_model,
 )
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
@@ -625,7 +626,16 @@ class TestHappyPathPart001:
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # The pre-agent Ollama preflight probes the host daemon, which is
+        # unreachable under test; stub it so the cloud model is treated as
+        # served remotely and the adapter actually runs (issue #552).
+        monkeypatch.setattr(
+            ollama_model,
+            "ensure_ollama_model_available",
+            lambda **_kwargs: {"status": "ok", "reason_code": "OLLAMA_MODEL_CLOUD"},
+        )
         ws_id = await _seed_ready_workspace(
             factory,
             agent="opencode",
@@ -705,7 +715,16 @@ class TestHappyPathPart001:
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # The pre-agent Ollama preflight probes the host daemon, which is
+        # unreachable under test; stub it so the cloud model is treated as
+        # served remotely and the adapter/monitor actually run (issue #552).
+        monkeypatch.setattr(
+            ollama_model,
+            "ensure_ollama_model_available",
+            lambda **_kwargs: {"status": "ok", "reason_code": "OLLAMA_MODEL_CLOUD"},
+        )
         captured: list[tuple[str | None, str | None, str | None]] = []
 
         class Monitor:
