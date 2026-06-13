@@ -17,6 +17,10 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from awf.control.executor.helpers import (
+    _agent_defaults_for_workspace,
+    _agent_run_model_for_workspace,
+)
 from awf.control.executor.quality_gates import _log
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -30,7 +34,6 @@ from awf.service.provider_readiness_helpers import (
     _ollama_pull_urls,
     _ollama_tags_urls,
 )
-from awf.service.workspace_observability import effective_agent_identity_for_workspace
 
 # Keep the persisted progress tail bounded; the live stream is logged in full.
 _PULL_PROGRESS_EVENT_LIMIT = 20
@@ -55,10 +58,19 @@ async def _ensure_ollama_model_or_mark_failed(
     workspace failed. A no-op (returns ``True``) for non-OpenCode runtimes.
     """
 
-    if AgentRuntime(ws.agent) is not AgentRuntime.opencode:
+    agent = AgentRuntime(ws.agent)
+    if agent is not AgentRuntime.opencode:
         return True
 
-    model = effective_agent_identity_for_workspace(ws).model
+    # Resolve the model through the exact path the adapter uses so ``ensure``
+    # validates/pulls what the agent will actually run. ``effective_agent_identity``
+    # only consults the static ``DEFAULT_AGENT_DEFAULTS`` and would ignore any
+    # ``ExecutorConfig`` model/defaults overrides, letting this step probe or
+    # skip-pull the wrong model when no explicit ``agent_model`` is in task policy.
+    adapter_defaults = _agent_defaults_for_workspace(ws, self._defaults_for(agent))
+    model = _agent_run_model_for_workspace(ws) or (
+        adapter_defaults.model if adapter_defaults is not None else None
+    )
     environ = os.environ
     secrets = _environ_secret_values(environ)
     progress: list[str] = []

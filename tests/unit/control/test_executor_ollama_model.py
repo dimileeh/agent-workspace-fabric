@@ -23,7 +23,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
     ollama_model,
 )
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_creator import PullRequestCreator
@@ -40,6 +40,8 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 def _make_executor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    *,
+    default_models: dict[Any, str] | None = None,
 ) -> WorkspaceExecutor:
     fake = FakeCommandRunner()
     return WorkspaceExecutor(
@@ -51,6 +53,7 @@ def _make_executor(
         config=ExecutorConfig(
             worktrees_root=tmp_path / "work" / "worktrees",
             compose_projects_root=tmp_path / "work" / "compose",
+            default_models=default_models,
         ),
     )
 
@@ -209,6 +212,38 @@ async def test_opencode_probe_failure_without_detail_marks_failed(
     snap = await _get_status(factory, workspace_id)
     assert snap.status == WorkspaceStatus.failed.value
     assert "OLLAMA_MODEL_PROBE_FAILED" in [reason for _, reason in snap.events]
+
+
+@pytest.mark.unit
+async def test_ensure_resolves_executor_config_model_override(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no explicit ``agent_model``, ensure validates the ExecutorConfig
+    default-model override the adapter will actually run, not the static default."""
+    workspace_id = await _seed_running(factory)
+    executor = _make_executor(
+        factory,
+        tmp_path,
+        default_models={AgentRuntime.opencode: "ollama/custom-glm:32b"},
+    )
+
+    seen: dict[str, Any] = {}
+
+    def _stub(*, model: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        seen["model"] = model
+        return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+
+    monkeypatch.setattr(ollama_model, "ensure_ollama_model_available", _stub)
+
+    proceed = await executor._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=SimpleNamespace(agent="opencode", task_policy={}),
+    )
+
+    assert proceed is True
+    assert seen["model"] == "ollama/custom-glm:32b"
 
 
 @pytest.mark.unit
