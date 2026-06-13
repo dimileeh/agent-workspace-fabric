@@ -364,7 +364,7 @@ def test_expired_deadline_skips_fallback_url() -> None:
 
         def __call__(self, url: str, *, json: Mapping[str, Any], timeout: float) -> _Ctx:
             self.calls.append(url)
-            if url.startswith("http://host.docker.internal"):
+            if url == "http://host.docker.internal:11434/api/pull":
                 return _Ctx(_EndlessResponse())  # type: ignore[arg-type]
             raise AssertionError("fallback URL must not be opened after deadline")
 
