@@ -1229,6 +1229,55 @@ def test_overlay_profile_provider_credentials_env_lease_runtime_wins() -> None:
 
 
 @pytest.mark.unit
+def test_overlay_profile_provider_credentials_env_lease_unresolvable_runtime_wins() -> None:
+    """``runtime.environment`` owns the key even when its value cannot be resolved here.
+
+    When ``runtime.environment`` declares the provider key with an unset required
+    placeholder (``${MISSING:?set}``) — or one resolving empty — the launcher's
+    first-writer-wins merge keeps the failing runtime placeholder and drops the lease, so
+    the agent never receives the lease's host credential. The overlay must not surface the
+    lease's value, otherwise create/retry preflight would admit a workspace with credentials
+    the agent will not actually receive."""
+    required = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-host-lease"},
+        {
+            "name": "opencode-openai-required-placeholder",
+            "runtime": {"environment": {"OPENAI_API_KEY": "${MISSING_KEY:?set MISSING_KEY}"}},
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "env/HOST_OPENAI_KEY",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert "OPENAI_API_KEY" not in required
+
+    empty = provider_readiness_helpers.overlay_profile_provider_credentials(
+        {"HOST_OPENAI_KEY": "sk-proj-host-lease"},
+        {
+            "name": "opencode-openai-empty-placeholder",
+            "runtime": {"environment": {"OPENAI_API_KEY": "${MISSING_KEY}"}},
+            "secrets": [
+                {
+                    "name": "openai-key",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "ref": "env/HOST_OPENAI_KEY",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert "OPENAI_API_KEY" not in empty
+
+
+@pytest.mark.unit
 def test_overlay_profile_provider_credentials_env_lease_missing_source_undeclared() -> None:
     """An env secret lease whose host source is absent (or empty) from ``environ`` is treated
     as undeclared — the launcher omits an optional lease and fails a required one, but the

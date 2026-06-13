@@ -857,18 +857,26 @@ def overlay_profile_provider_credentials(
         *(key for keys in _OPENCODE_PROVIDER_ENV_KEYS.values() for key in keys),
         *_OPENCODE_ENV_KEYS,
     )
-    runtime_overlaid: set[str] = set()
+    runtime_declared: set[str] = set()
     for key in candidate_keys:
         raw = profile_env.get(key)
         if not raw:
             continue
+        # ``runtime.environment`` wins over secret leases in the launcher's agent-env
+        # merge (``merge_agent_environment`` is first-writer-wins), so a key declared
+        # here owns the agent's slot even when its value cannot be resolved from the
+        # worker environ — an unset required placeholder (``${MISSING:?set}``) or one
+        # resolving empty. Record the declaration *before* attempting expansion so the
+        # lease loop below never overlays a host credential the launcher would drop in
+        # favour of the failing runtime placeholder, which would admit a workspace whose
+        # agent never actually receives a usable credential.
+        runtime_declared.add(key)
         try:
             expanded = compose_expand_value(raw, environ=environ).strip()
         except ComposeEnvInterpolationError:
             continue
         if expanded:
             result[key] = expanded
-            runtime_overlaid.add(key)
     # A provider credential may instead be declared as a profile ``kind="env"`` secret
     # lease (e.g. ``target="OPENAI_API_KEY"``, ``ref="env/HOST_OPENAI_KEY"``). The stack
     # launcher merges the resolved lease environment into the agent env
@@ -877,15 +885,18 @@ def overlay_profile_provider_credentials(
     # here too, resolving each lease's host source against ``environ``, so admission does
     # not block the workspace with ``OPENCODE_PROVIDER_AUTH_MISSING`` (or, for
     # ``OLLAMA_API_KEY``, ``OPENCODE_OLLAMA_AUTH_MISSING``) before the lease is resolved.
-    # ``runtime.environment`` wins (the launcher merge is first-writer-wins), and a lease
-    # whose host source is absent/empty is treated as undeclared — the launcher omits an
-    # optional lease and fails a required one, but this best-effort overlay only surfaces a
-    # credential it can actually resolve from the worker environ.
+    # ``runtime.environment`` wins (the launcher merge is first-writer-wins), so a lease
+    # whose target is declared in ``runtime.environment`` is skipped — even when that
+    # runtime declaration could not be resolved here — because the launcher keeps the
+    # runtime value and drops the lease. A lease whose host source is absent/empty is also
+    # treated as undeclared: the launcher omits an optional lease and fails a required one,
+    # but this best-effort overlay only surfaces a credential it can actually resolve from
+    # the worker environ.
     candidate_set = frozenset(candidate_keys)
     for secret in profile.secrets:
         if secret.kind != "env" or secret.target not in candidate_set:
             continue
-        if secret.target in runtime_overlaid:
+        if secret.target in runtime_declared:
             continue
         source_name = _env_secret_ref_name(secret.ref)
         if source_name is None:
