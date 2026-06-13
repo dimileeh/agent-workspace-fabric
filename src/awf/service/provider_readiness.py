@@ -351,31 +351,54 @@ def selected_provider_readiness_preflight(
         # local Ollama daemon. ``_check_opencode`` only knows how to probe Ollama
         # auth/host, so running it here would reject the workspace with an Ollama
         # reason code at create time — before the executor's pre-agent step could
-        # skip it. Apply the same skip here so admission defers provider auth to
-        # OpenCode instead of blocking on an Ollama check that does not apply.
-        message = (
+        # skip it. Skip only the Ollama auth/daemon checks; the OpenCode CLI must
+        # still be present in the runtime image regardless of which provider serves
+        # the model, so keep the generic runtime-CLI availability probe — otherwise
+        # a runtime image missing the ``opencode`` binary would be admitted as
+        # ready here and only fail later as an agent command failure.
+        deferred_message = (
             f"OpenCode model {identity.model!r} targets a non-Ollama provider; the "
             "Ollama auth/daemon preflight does not apply and is skipped."
         )
+        provider_result = _provider_result(
+            ok=True,
+            strict=True,
+            reason="OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            message=deferred_message,
+            secrets=secrets,
+            credential_scope="deferred_to_provider",
+            isolation="none",
+        )
+        cli_probe = _probe_agent_runtime_cli(
+            settings,
+            executable="opencode",
+            provider=provider,
+            environ=env,
+            run_subprocess=resolved_run,
+            secrets=secrets,
+        )
+        if cli_probe.get("status") == "ok":
+            probe: dict[str, Any] = {
+                "status": "unavailable",
+                "reason_code": "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            }
+            reason_code = "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED"
+            message = deferred_message
+        else:
+            probe = cli_probe
+            reason_code = str(cli_probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+            message = str(
+                cli_probe.get("message")
+                or "OpenCode runtime CLI is not available in the configured runtime image."
+            )
         return _launch_preflight_payload(
             agent=runtime.value,
             provider=provider,
             model=identity.model,
             model_source=identity.model_source,
-            provider_result=_provider_result(
-                ok=True,
-                strict=True,
-                reason="OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
-                message=message,
-                secrets=secrets,
-                credential_scope="deferred_to_provider",
-                isolation="none",
-            ),
-            probe={
-                "status": "unavailable",
-                "reason_code": "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
-            },
-            reason_code="OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            provider_result=provider_result,
+            probe=probe,
+            reason_code=reason_code,
             message=message,
             override=override,
             override_reason=override_reason,
