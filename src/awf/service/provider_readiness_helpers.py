@@ -610,12 +610,18 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
 # Hostnames that resolve to the host the worker runs on (Docker host gateway
 # aliases and localhost). An Ollama base URL pointing at one of these — or any
 # loopback IP — is reachable from the worker; anything else (a workspace Compose
-# service DNS name, a routable LAN IP) is not.
+# service DNS name, a routable LAN IP) is not. ``0.0.0.0`` is a valid Ollama bind
+# address (``OLLAMA_HOST=0.0.0.0:11434``) that, as a *connection* target, routes
+# to the loopback just like ``localhost``; classify it reachable so a broken
+# host-bound daemon is still caught at create time rather than silently skipped
+# (``ip_address("0.0.0.0").is_loopback`` is ``False`` — the unspecified address is
+# not a loopback IP — so it would otherwise fall through to the conservative skip).
 _WORKER_HOST_REACHABLE_HOSTNAMES = frozenset(
     {
         "host.docker.internal",
         "gateway.docker.internal",
         "localhost",
+        "0.0.0.0",
     }
 )
 

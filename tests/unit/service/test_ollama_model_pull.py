@@ -783,6 +783,11 @@ def test_opencode_model_is_local_ollama_classifier() -> None:
         ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"}, True),
         ({"OLLAMA_HOST": "http://127.0.0.1:11434"}, True),
         ({"OLLAMA_HOST": "http://[::1]:11434"}, True),
+        # ``0.0.0.0`` is a valid Ollama bind address that, as a connection target,
+        # routes to the loopback like ``localhost`` — reachable from the worker even
+        # though it is not itself a loopback IP (``is_loopback`` is ``False``).
+        ({"OLLAMA_HOST": "http://0.0.0.0:11434"}, True),
+        ({"AWF_OPENCODE_OLLAMA_BASE_URL": "0.0.0.0:11434"}, True),
         # A bare host:port without scheme still classifies on the hostname.
         ({"OLLAMA_HOST": "host.docker.internal:11434"}, True),
         # A workspace Compose service DNS name is NOT reachable from the worker.
