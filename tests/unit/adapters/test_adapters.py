@@ -927,6 +927,16 @@ class TestOpenCodeAdapter:
         assert set(models) == set(OPENCODE_OLLAMA_CLOUD_MODELS)
 
     @pytest.mark.unit
+    def test_opencode_config_declares_slash_bearing_ollama_model(self) -> None:
+        # A daemon-served model such as ``ollama/hf.co/...`` normalizes to a key
+        # that still contains a ``/``; it must still be declared in the
+        # ``ollama`` block so OpenCode does not reject the selected model.
+        config = _opencode_config_for_effort(effort=None, model="ollama/hf.co/unsloth/model:Q4_K_M")
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert "hf.co/unsloth/model:Q4_K_M" in models
+        assert models["hf.co/unsloth/model:Q4_K_M"]["name"] == "hf.co/unsloth/model:Q4_K_M"
+
+    @pytest.mark.unit
     def test_opencode_config_default_fallback_when_no_model(self) -> None:
         config = _opencode_config_for_effort(effort=None, model=None)
         models = config["provider"]["ollama"]["models"]  # type: ignore[index]

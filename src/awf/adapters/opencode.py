@@ -88,6 +88,21 @@ def _config_model_key(model: str) -> str:
     return raw
 
 
+def _is_ollama_model(model: str) -> bool:
+    """Return whether ``model`` is served by the Ollama provider.
+
+    A bare reference (no provider prefix) defaults to Ollama, as does an
+    explicit ``ollama/`` prefix — even when the remainder itself contains a
+    ``/`` (e.g. ``ollama/hf.co/user/model`` for a daemon-served HF model). Any
+    other provider prefix (e.g. ``openai/...``) belongs to that provider.
+    """
+    raw = model.strip()
+    if "/" not in raw:
+        return True
+    provider, _ = raw.split("/", 1)
+    return provider == "ollama"
+
+
 def _opencode_launcher_script(*, effort: str | None, model: str | None = None) -> str:
     config = _opencode_config_for_effort(effort=effort, model=model)
     config_json = json.dumps(config, separators=(",", ":"))
@@ -160,10 +175,12 @@ def _opencode_config_for_effort(
     if model:
         selected_key = _config_model_key(model)
         # Only Ollama-served models belong in the ``ollama`` provider block. A
-        # provider-qualified name (e.g. ``openai/...``) keeps its ``/`` after
-        # key normalization and is left for its own provider, not misrouted
-        # through Ollama.
-        if selected_key and "/" not in selected_key and selected_key not in model_keys:
+        # provider-qualified name (e.g. ``openai/...``) is left for its own
+        # provider, not misrouted through Ollama. Decide by the original
+        # provider prefix, not by whether the normalized key contains a ``/`` —
+        # a daemon-served ``ollama/hf.co/...`` model keeps a ``/`` in its key
+        # and must still be declared.
+        if selected_key and _is_ollama_model(model) and selected_key not in model_keys:
             model_keys.append(selected_key)
     models = {key: {**model_config, "name": key} for key in model_keys}
     return {
