@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.bitbucket_client import BITBUCKET_AUTH_NOT_CONFIGURED, BitbucketClientError
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor.constants import (
+    _PR_ADOPTION_SKIP_AGENT_REASON_CODE,
     PR_MONITOR_SETUP_FAILED_REASON_CODE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EVENT_TYPE,
     SETUP_DEPENDENCY_NETWORK_RETRY_EXHAUSTED_EVENT_TYPE,
@@ -153,6 +154,42 @@ class _CancellingHandoffSetupValidation:
             )
             await session.commit()
         return ValidationResult()
+
+
+class _StatusAtSetupValidation(_RecordingValidation):
+    """Records the workspace status observed at the moment profile setup runs.
+
+    Locks the #574 ordering invariant: the ``existing_github_pr`` adoption must
+    run the profile ``("setup", "pre_agent")`` phase *while the workspace is
+    still ``running``* — i.e. before the ``PR_ADOPTION_SKIP_AGENT``
+    (``validating``) transition — so the lint/test toolchain is installed before
+    the monitor's first comment-repair runs pre-push validation. Reordering
+    setup after the skip-agent transition (or dropping it) reintroduces #574's
+    ``PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING`` death.
+    """
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        super().__init__()
+        self._factory = factory
+        self.status_at_setup: list[str] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...],
+        **kwargs: Any,
+    ) -> ValidationResult:
+        if phase_names == ("setup", "pre_agent"):
+            async with self._factory() as session:
+                workspace = await WorkspaceRepository(session).get(workspace_id)
+                assert workspace is not None
+                self.status_at_setup.append(workspace.status)
+        return await super().run_profile_phases(
+            workspace_id=workspace_id,
+            phase_names=phase_names,
+            **kwargs,
+        )
 
 
 class _ProfilePreflightFailureValidation(_RecordingValidation):
@@ -497,6 +534,88 @@ class TestExecutorMonitorHandoffSetup:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_adoption_runs_setup_before_skip_agent_transition(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        # Regression for #574: an adopt-pr (auto_merge=True) monitor died
+        # infrastructure_failure / PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING on its
+        # first comment-repair because the existing_github_pr handoff transitioned
+        # running -> validating (PR_ADOPTION_SKIP_AGENT) -> monitoring_pr WITHOUT
+        # running the profile setup phase that installs the toolchain.
+        # PR_ADOPTION_SKIP_AGENT must skip only the AGENT RUN, never profile setup,
+        # so setup runs *before* that transition (while still ``running``) and the
+        # toolchain is present when the monitor later runs pre-push validation.
+        #
+        # NB: ``auto_merge=True`` here reflects the typical real-world configuration
+        # for ``existing_github_pr`` adoptions; it is NOT a code-path branch. The
+        # executor never reads ``workspace.auto_merge`` in the sync_feature_pr
+        # dispatch chain — the existing_github_pr handoff is selected solely by the
+        # presence of ``pr_adoption`` in ``task_policy``. The distinct value this
+        # test adds over test_sync_feature_pr_handoff_runs_profile_setup_before_monitor
+        # is asserting the workspace *status* at setup time (via
+        # _StatusAtSetupValidation), not the auto_merge flag.
+        monitor_runs: list[str] = []
+        validation = _StatusAtSetupValidation(factory)
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            auto_merge=True,
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_runs.append(workspace_id)
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        # Setup ran exactly once, for the ("setup","pre_agent") phases...
+        assert validation.calls == [("setup", "pre_agent")]
+        # ...while the workspace was still ``running`` — i.e. *before* the
+        # PR_ADOPTION_SKIP_AGENT -> validating transition (the #574 ordering
+        # invariant). If setup is reordered after the skip-agent transition or
+        # dropped, this records ``validating`` / nothing and the test fails.
+        assert validation.status_at_setup == [WorkspaceStatus.running.value]
+        assert monitor_runs == [ws_id]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            # PR_ADOPTION_SKIP_AGENT is still emitted (only the AGENT RUN is
+            # skipped) and lands strictly after the setup call ran.
+            skip_agent_events = [
+                event
+                for event in ws.events
+                if event.reason_code == _PR_ADOPTION_SKIP_AGENT_REASON_CODE
+            ]
+            assert len(skip_agent_events) == 1
+            assert skip_agent_events[0].payload["source"] == "existing_github_pr"
 
     @pytest.mark.unit
     async def test_sync_feature_pr_handoff_bitbucket_auth_error_preserves_reason_code(
