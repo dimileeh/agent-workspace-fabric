@@ -248,9 +248,13 @@ def _first_present_env(environ: Mapping[str, str], keys: Iterable[str]) -> str |
 # Provider prefix -> env keys that satisfy that provider for OpenCode. All of
 # these are already in ``KNOWN_SECRET_ENV_KEYS``, so detection keeps redaction
 # intact. A provider prefix absent from this map is satisfied only by the
-# OpenCode credential store (``~/.config/opencode``).
+# OpenCode credential store (``~/.config/opencode``). Only list keys OpenCode
+# actually reads: its OpenAI path uses the AI SDK OpenAI provider, whose apiKey
+# default is ``OPENAI_API_KEY`` — the Codex-style ``OPENAI_API_TOKEN`` is *not*
+# consumed, so admitting it would pass preflight only for the agent to launch
+# without the credential OpenCode reads and fail later.
 _OPENCODE_PROVIDER_ENV_KEYS: Mapping[str, tuple[str, ...]] = {
-    "openai": ("OPENAI_API_KEY", "OPENAI_API_TOKEN"),
+    "openai": ("OPENAI_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
     "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "xai": ("XAI_API_KEY",),

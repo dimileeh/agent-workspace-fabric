@@ -965,7 +965,7 @@ def test_selected_opencode_preflight_non_ollama_provider_model_missing_creds_blo
 @pytest.mark.parametrize(
     ("model", "expected_hint"),
     [
-        ("openai/gpt-oss", "OPENAI_API_KEY / OPENAI_API_TOKEN"),
+        ("openai/gpt-oss", "OPENAI_API_KEY"),
         ("anthropic/claude-sonnet", "ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN"),
         ("google/gemini-pro", "GEMINI_API_KEY / GOOGLE_API_KEY"),
         ("xai/grok", "XAI_API_KEY"),
@@ -1135,6 +1135,13 @@ def test_opencode_provider_credentials_present_classifier(tmp_path: Path) -> Non
     # The matching provider key must be present, not just any provider key.
     assert _opencode_provider_credentials_present(
         "openai/gpt-oss", {"ANTHROPIC_API_KEY": "sk-ant-x"}, bare_home
+    ) == (False, None)
+    # The Codex-style OPENAI_API_TOKEN is not a credential OpenCode reads (its
+    # OpenAI path uses the AI SDK provider, whose apiKey default is
+    # OPENAI_API_KEY), so it must not satisfy the openai gate — otherwise
+    # preflight admits a workspace whose agent launches without a usable key.
+    assert _opencode_provider_credentials_present(
+        "openai/gpt-oss", {"OPENAI_API_TOKEN": "sk-proj-token"}, bare_home
     ) == (False, None)
 
 
