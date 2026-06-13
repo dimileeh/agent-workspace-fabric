@@ -978,6 +978,52 @@ def test_ollama_url_helpers_preserve_host_gateway_fallback_port() -> None:
 
 
 @pytest.mark.unit
+def test_overlay_profile_ollama_base_url_resolves_required_placeholder() -> None:
+    """A profile may declare the Ollama endpoint via Compose's required form
+    (``${OLLAMA_URL:?set OLLAMA_URL}``). When the variable is present in the worker
+    environ the overlay resolves it like any other placeholder."""
+    result = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        {"OLLAMA_URL": "http://ollama-sidecar:11434"},
+        {
+            "name": "ollama-sidecar",
+            "runtime": {
+                "environment": {
+                    "AWF_OPENCODE_OLLAMA_BASE_URL": "${OLLAMA_URL:?set OLLAMA_URL}",
+                }
+            },
+        },
+    )
+
+    assert result["AWF_OPENCODE_OLLAMA_BASE_URL"] == "http://ollama-sidecar:11434"
+
+
+@pytest.mark.unit
+def test_overlay_profile_ollama_base_url_treats_unset_required_placeholder_as_undeclared() -> None:
+    """The required form raises ``ComposeEnvInterpolationError`` when the variable is
+    absent. This overlay runs during create/retry admission before provider readiness
+    — paths that only translate profile/readiness exceptions — so an unhandled raise
+    would escape as a 500. The worker environ is a best-effort approximation of the
+    agent's Compose context, so an unresolvable required placeholder is treated as
+    undeclared (the supplied environ is returned unchanged), not surfaced as an error."""
+    environ = {"OLLAMA_HOST": "http://worker-daemon:11434"}
+
+    result = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        environ,
+        {
+            "name": "ollama-required",
+            "runtime": {
+                "environment": {
+                    "AWF_OPENCODE_OLLAMA_BASE_URL": "${OLLAMA_URL:?set OLLAMA_URL}",
+                }
+            },
+        },
+    )
+
+    assert result == environ
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in result
+
+
+@pytest.mark.unit
 def test_provider_readiness_opencode_env_only_reason_when_ollama_reachable(
     tmp_path: Path,
 ) -> None:

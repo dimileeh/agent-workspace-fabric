@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
 from awf.profiles.models import WorkspaceProfile
 from awf.service.config import ServiceSettings
-from awf.service.environment import compose_expand_value
+from awf.service.environment import ComposeEnvInterpolationError, compose_expand_value
 
 # Env keys that select the Ollama daemon. The OpenCode launcher resolves the
 # base URL from these (``AWF_OPENCODE_OLLAMA_BASE_URL`` first, then ``OLLAMA_HOST``)
@@ -596,12 +596,22 @@ def overlay_profile_ollama_base_url(
     # value against ``environ`` here — otherwise a literal ``${OLLAMA_HOST}`` would
     # be probed as ``http://${OLLAMA_HOST}/api/tags`` and block/fail the workspace
     # before launch. A placeholder that resolves to empty is treated as undeclared.
+    # The required-interpolation form (``${OLLAMA_URL:?set OLLAMA_URL}``) raises when
+    # the variable is absent from ``environ``; since this overlay runs during
+    # create/retry admission before provider readiness — paths that only translate
+    # profile/readiness exceptions — an unhandled raise would escape as a 500. The
+    # worker environ is a best-effort approximation of the agent's Compose context
+    # (the agent container may still resolve the variable), so treat an unresolvable
+    # required placeholder the same as one resolving to empty: undeclared, fall back.
     declared: dict[str, str] = {}
     for key in _OLLAMA_BASE_URL_ENV_KEYS:
         raw = profile_env.get(key)
         if not raw:
             continue
-        expanded = compose_expand_value(raw, environ=environ).strip()
+        try:
+            expanded = compose_expand_value(raw, environ=environ).strip()
+        except ComposeEnvInterpolationError:
+            continue
         if expanded:
             declared[key] = expanded
     if not declared:
