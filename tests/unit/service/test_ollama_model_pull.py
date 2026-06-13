@@ -226,6 +226,43 @@ def test_pull_daemon_error_maps_to_pull_failed() -> None:
 
 
 @pytest.mark.unit
+def test_pull_recoverable_error_before_success_is_not_failure() -> None:
+    # A recoverable error line followed by a terminal success must not be
+    # treated as a failed pull: the daemon finished successfully.
+    responses = iter(
+        [
+            _tags_response(("other:latest",)),
+            _tags_response(("llama4:70b",)),
+        ]
+    )
+
+    def _get(url: str, *, timeout: float) -> Any:
+        return next(responses)
+
+    post = _FakePostStream(
+        _FakeStreamResponse(
+            lines=(
+                json.dumps({"status": "pulling manifest"}),
+                json.dumps({"error": "max retries exceeded, retrying"}),
+                json.dumps({"status": "success"}),
+            )
+        )
+    )
+
+    result = ensure_ollama_model_available(
+        model="ollama/llama4:70b",
+        tags_urls=_TAGS_URLS,
+        pull_urls=_PULL_URLS,
+        http_get=_get,
+        http_post_stream=post,
+        secrets=frozenset(),
+    )
+
+    assert result["status"] == "ok"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULLED"
+
+
+@pytest.mark.unit
 def test_pull_timeout_maps_to_pull_failed() -> None:
     post = _FakePostStream(raise_exc=httpx.TimeoutException("pull read timed out"))
 

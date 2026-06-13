@@ -1146,6 +1146,11 @@ def _consume_pull_stream(
             err = payload.get("error")
             if isinstance(err, str) and err:
                 error_detail = _truncate(_redact(err, secrets))
+            elif payload.get("status") == "success":
+                # A terminal success supersedes any earlier recoverable error
+                # line: the daemon finished the pull, so a stale error from a
+                # retried-then-recovered step must not be reported as a failure.
+                error_detail = None
     return error_detail
 
 
