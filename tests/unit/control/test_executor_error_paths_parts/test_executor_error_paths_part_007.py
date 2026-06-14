@@ -64,6 +64,15 @@ from tests.unit.control.executor_paths import _test_worktrees_root
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
+def _queue_validate_toolchain_probe(fake: FakeCommandRunner) -> None:
+    # Issue #574: after a green adopt-pr/release handoff setup, the executor probes
+    # each ``validate`` command's executable via one in-container compose-exec. The
+    # default seeded profile carries a ``pytest -q`` validate command, so the probe
+    # fires; an ``OK``-only response (no ``MISSING`` lines) reports nothing missing
+    # and the handoff proceeds exactly as before the probe existed.
+    fake.queue_result(returncode=0, stdout="OK pytest\n")  # validate-toolchain probe
+
+
 def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
@@ -840,6 +849,7 @@ class TestSyncReleasePrHandoff:
 
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # rev-list --count
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # post-setup rev-list --count
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
@@ -911,6 +921,7 @@ class TestSyncReleasePrHandoff:
 
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # rev-list --count
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # post-setup rev-list --count
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
@@ -966,6 +977,7 @@ class TestSyncReleasePrHandoff:
 
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # rev-list --count
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="3\n")  # post-setup rev-list --count
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> none
@@ -1053,6 +1065,7 @@ class TestSyncReleasePrHandoff:
 
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list --count
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # post-setup rev-list --count
         fake.queue_result(
@@ -1158,6 +1171,7 @@ class TestSyncReleasePrHandoff:
     ) -> None:
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # post-setup git rev-list --count
         fake.queue_result(returncode=1, stderr="gh: not authorized")  # gh pr list fails
@@ -1192,6 +1206,7 @@ class TestSyncReleasePrHandoff:
     ) -> None:
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # post-setup git rev-list --count
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list -> no existing PR
@@ -1318,6 +1333,7 @@ class TestSyncReleasePrHandoff:
         monitor_runs: list[str] = []
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # rev-list
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # post-setup rev-list
         fake.queue_result(returncode=0, stdout="[]")  # gh pr list

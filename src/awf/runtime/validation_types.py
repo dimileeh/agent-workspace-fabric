@@ -37,6 +37,35 @@ class ProfileValidationToolPreflightFinding:
 
 
 @dataclass(frozen=True)
+class ValidateCommandProbeTarget:
+    """A ``validate``-phase command's leading executable plus the command itself.
+
+    ``tool`` is the executable token the command would exec (e.g. ``ruff`` for
+    ``ruff check .``, ``python`` for ``python -m ruff``); ``command`` is the
+    representative source command, kept so an operator message can name the
+    failing command that needs the missing tool.
+    """
+
+    tool: str
+    command: str
+
+
+@dataclass(frozen=True)
+class ValidateToolProbeResult:
+    """Outcome of probing whether ``validate`` tools resolve on PATH after setup.
+
+    ``missing`` carries the deduped targets whose executable did not resolve in
+    the workspace container. ``probe_errored`` is set when the probe itself could
+    not run cleanly (compose-exec failure / timeout / OSError) — it must never be
+    conflated with a genuine profile gap, so the caller proceeds in that case
+    rather than failing the adoption.
+    """
+
+    missing: tuple[ValidateCommandProbeTarget, ...] = ()
+    probe_errored: bool = False
+
+
+@dataclass(frozen=True)
 class SetupDependencyNetworkClassification:
     """A transient dependency/index network failure detected in setup output."""
 
