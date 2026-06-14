@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.enums import (
     SERVICE_GC_REQUEST_STATUS_COMPLETED,
+    SERVICE_GC_REQUEST_STATUS_EXPIRED,
     SERVICE_GC_REQUEST_STATUS_FAILED,
 )
 from awf.db.models import ServiceGCRequest, WorkerHeartbeat
@@ -96,6 +97,16 @@ async def _poll_for_outcome(
                 return WorkerReclaimOutcome.reclaim_failed(
                     request.error_message or "worker gc reclaim failed",
                     report=dict(request.result) if request.result else None,
+                )
+            if request.status == SERVICE_GC_REQUEST_STATUS_EXPIRED:
+                # The worker swept this row to the terminal ``expired`` state once its
+                # ``deadline_at`` elapsed (expire-on-timeout, #590); it will never
+                # complete. The poll's monotonic budget starts after the heartbeat +
+                # pending-write I/O, so it outlasts ``deadline_at`` — stop sleeping on a
+                # terminal row and surface the timeout now (PRRT_kwDOSJAM6s6JbNTB).
+                return WorkerReclaimOutcome.delegation_timeout(
+                    "worker gc reclaim expired after its deadline elapsed before the "
+                    "worker completed it"
                 )
         remaining = budget - (time.monotonic() - start)
         if remaining <= 0:

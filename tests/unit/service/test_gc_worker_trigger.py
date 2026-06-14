@@ -182,6 +182,33 @@ async def test_poll_returns_failed_without_report_uses_default_message() -> None
         assert outcome.report is None
 
 
+async def test_poll_returns_timeout_when_request_is_expired() -> None:
+    # The worker sweeps a past-deadline row to the terminal ``expired`` state; the
+    # poll must recognize it as terminal and return the timeout outcome at once
+    # rather than sleeping out its (longer) monotonic budget on a row that will
+    # never complete (PRRT_kwDOSJAM6s6JbNTB).
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            request = await repo.create_pending(
+                node_id=_NODE_ID,
+                requested_at=now - timedelta(seconds=10),
+                deadline_at=now - timedelta(seconds=5),
+            )
+            request_id = request.id
+            await repo.expire_stale_requests(node_id=_NODE_ID, now=now)
+            await session.commit()
+        # A generous budget — if ``expired`` were not terminal this would block for
+        # the full 5s instead of returning immediately.
+        outcome = await _poll_for_outcome(
+            factory, request_id=request_id, deadline_seconds=5, poll_interval_seconds=0.02
+        )
+        assert outcome.status == "timeout"
+        assert outcome.reason_code == "SERVICE_GC_WORKER_DELEGATION_TIMEOUT"
+
+
 async def test_poll_times_out_when_request_stays_pending() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
