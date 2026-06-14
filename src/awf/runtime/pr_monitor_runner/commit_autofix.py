@@ -14,10 +14,14 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_porcelain,
     _split_porcelain_rename_paths,
     _unquote_porcelain_path,
+    _untracked_paths_from_porcelain,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.precommit_autofix import (
     monitor_precommit_autofix_repair_paths,
+)
+from awf.runtime.validation_worktree import (
+    is_under_agent_runtime_root,
 )
 
 
@@ -70,7 +74,19 @@ async def _retry_monitor_precommit_autofix_commit_once(
     if not repair_paths:
         return None
 
-    dirty_status = await runner.run(git_worktree_command(worktree_path, "status", "--porcelain"))
+    # ``--untracked-files=all`` is load-bearing, exactly as in the commit path's
+    # stage-status read: with git's default ``normal`` mode a fully-untracked
+    # ``.claude/agent-memory/`` collapses to a single ``?? .claude/`` entry whose
+    # parent is *not* under the agent-runtime root, so it escapes
+    # ``is_under_agent_runtime_root`` and is wrongly counted as dirt outside the
+    # operation scope — aborting the retry. Enumerating leaf paths lets the same
+    # filter drop the memory files, leaving only the hook-autofixed in-scope
+    # changes to evaluate. The commit path already scoped ``operation_dirty_paths``
+    # to the filtered ``stage_paths``; this keeps the retry's own status read in
+    # lockstep with it.
+    dirty_status = await runner.run(
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
+    )
     if not dirty_status.ok:
         _log.warning(
             "monitor.dirty_commit_autofix_status_failed",
@@ -79,7 +95,12 @@ async def _retry_monitor_precommit_autofix_commit_once(
         )
         return None
 
-    dirty_paths = tuple(_changed_paths_from_porcelain(dirty_status.stdout))
+    dirty_untracked = set(_untracked_paths_from_porcelain(dirty_status.stdout))
+    dirty_paths = tuple(
+        path
+        for path in _changed_paths_from_porcelain(dirty_status.stdout)
+        if not (path in dirty_untracked and is_under_agent_runtime_root(path))
+    )
     if not dirty_paths:
         _log.info(
             "monitor.dirty_commit_autofix_retry_skipped_clean",
