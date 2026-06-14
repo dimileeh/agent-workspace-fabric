@@ -209,6 +209,14 @@ def fold_worker_reclaim(
         folded["total_estimated_bytes"] = _as_int(
             base.get("total_estimated_bytes")
         ) + _worker_only_estimated_bytes(base, outcome.report or {})
+        # The fold reconciles the headline (``deleted_paths``, ``delete_errors``,
+        # status, nested ``claude_base_reap``), but the already-serialized
+        # ``candidates[*].paths.auth`` entry still reads ``status: skipped,
+        # deleted: false`` from the API-side skip. Rewrite each candidate auth entry
+        # the worker actually removed so consumers auditing per-candidate outcomes
+        # are not told a reclaimed auth dir was preserved (PRRT_kwDOSJAM6s6JbLTR).
+        reclaimed = _worker_reclaimed_paths(outcome)
+        _reconcile_worker_reclaimed_auth_candidates(folded, reclaimed)
         if outcome.worker_partial:
             # The worker's own reap was partial — it leaked disk it could not
             # reclaim, so a previously-clean run must not still read as success and
@@ -223,7 +231,7 @@ def fold_worker_reclaim(
             # stale: drop those specific skips so the CLI does not warn the dir was
             # preserved although it was reclaimed, while keeping the run partial for
             # the unrelated failure that drove the worker partial.
-            _drop_worker_reclaimed_auth_skips(folded, _worker_reclaimed_paths(outcome))
+            _drop_worker_reclaimed_auth_skips(folded, reclaimed)
             return folded
         _reconcile_worker_reclaimed_skips(folded)
         return folded
@@ -365,6 +373,70 @@ def _drop_worker_reclaimed_auth_skips(
             and error.get("path") in reclaimed_paths
         )
     ]
+
+
+def _reconcile_worker_reclaimed_auth_candidates(
+    folded: dict[str, object], reclaimed_paths: frozenset[str]
+) -> None:
+    """Rewrite per-candidate ``auth`` path entries a worker reclaim proved deleted.
+
+    The fold merges the worker-reclaimed auth dirs into the headline
+    ``deleted_paths`` and drops the stale auth-unmount ``delete_errors``, but each
+    ``candidates[*].paths.auth`` entry was serialized API-side as ``status:
+    skipped, deleted: false`` (the capability-less API container could not unmount
+    the overlay). Left as-is, a consumer auditing per-candidate outcomes is told the
+    reclaimed auth dir was preserved while the headline says it was deleted. For
+    every candidate whose ``auth`` path the worker actually removed, rewrite that
+    entry to a deleted outcome (and mark ``reconciled_by_worker``, mirroring the
+    nested claude-base reconciliation). Candidates are copied before mutation so the
+    caller's ``base`` stays untouched; entries the worker did not reclaim, and all
+    non-auth paths, are left verbatim.
+    """
+    if not reclaimed_paths:
+        return
+    candidates = folded.get("candidates")
+    if not isinstance(candidates, list):
+        return
+    reconciled: list[object] = []
+    changed = False
+    for candidate in candidates:
+        updated = _reconcile_candidate_auth(candidate, reclaimed_paths)
+        changed = changed or updated is not candidate
+        reconciled.append(updated)
+    if changed:
+        folded["candidates"] = reconciled
+
+
+def _reconcile_candidate_auth(candidate: object, reclaimed_paths: frozenset[str]) -> object:
+    """Return a candidate with its ``auth`` entry reconciled, or the original unchanged.
+
+    Returns the same object when there is nothing to reconcile (not a mapping, no
+    ``auth`` path, already deleted, or the worker did not reclaim that path) so the
+    caller can detect whether a fresh list is needed.
+    """
+    if not isinstance(candidate, Mapping):
+        return candidate
+    paths = candidate.get("paths")
+    if not isinstance(paths, Mapping):
+        return candidate
+    auth = paths.get("auth")
+    if not isinstance(auth, Mapping):
+        return candidate
+    if auth.get("deleted") or str(auth.get("path")) not in reclaimed_paths:
+        return candidate
+    new_auth = dict(auth)
+    new_auth["deleted"] = True
+    new_auth["status"] = "deleted"
+    new_auth["reason_code"] = SERVICE_GC_WORKER_RECLAIMED
+    new_auth["reconciled_by_worker"] = True
+    # The unmount error is stale now that the worker removed the dir; drop it so the
+    # per-candidate entry does not still carry the "could not unmount" message.
+    new_auth.pop("error", None)
+    new_paths = dict(paths)
+    new_paths["auth"] = new_auth
+    new_candidate = dict(candidate)
+    new_candidate["paths"] = new_paths
+    return new_candidate
 
 
 def _has_unreconciled_failure(

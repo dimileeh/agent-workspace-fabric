@@ -578,6 +578,134 @@ def test_fold_drops_reclaimed_auth_skip_when_worker_partial_for_unrelated_step()
     assert folded["delete_errors"] == []
 
 
+def _candidate_with_skipped_auth(workspace_id: str, auth_path: str) -> dict[str, object]:
+    # Mirrors the API-side serialization of a candidate whose auth dir the
+    # capability-less API container could not unmount: the per-path entry reads
+    # ``status: skipped, deleted: false`` with the unmount reason/error.
+    return {
+        "workspace_id": workspace_id,
+        "status": "completed",
+        "paths": {
+            "auth": {
+                "path": auth_path,
+                "exists": True,
+                "estimated_bytes": 1_700_000_000,
+                "deleted": False,
+                "status": "skipped",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "cannot verify Claude auth overlay teardown without CAP_SYS_ADMIN",
+            },
+            "worktree": {
+                "path": f"/work/worktrees/{workspace_id}",
+                "deleted": True,
+                "status": "deleted",
+            },
+        },
+    }
+
+
+def test_fold_reconciles_candidate_auth_entry_after_worker_success() -> None:
+    # PRRT_kwDOSJAM6s6JbLTR: the fold reconciles the headline (deleted_paths,
+    # delete_errors, status) when the worker reclaims an auth dir the API skipped,
+    # but the per-candidate ``paths.auth`` entry stays ``skipped/deleted:false``.
+    # Consumers auditing per-candidate outcomes would be told the reclaimed auth dir
+    # was preserved. The candidate entry must be rewritten to a deleted outcome.
+    candidate = _candidate_with_skipped_auth("ws-1", "/work/_shared/auth/ws-1")
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        deleted_path_count=0,
+        deleted_paths=[],
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "path": "/work/_shared/auth/ws-1",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+        candidates=[candidate],
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "succeeded",
+            "deleted_path_count": 1,
+            "deleted_paths": ["/work/_shared/auth/ws-1"],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    folded_candidates = folded["candidates"]
+    assert isinstance(folded_candidates, list)
+    auth = folded_candidates[0]["paths"]["auth"]
+    assert auth["deleted"] is True
+    assert auth["status"] == "deleted"
+    assert auth["reason_code"] == SERVICE_GC_WORKER_RECLAIMED
+    assert auth["reconciled_by_worker"] is True
+    # The stale "could not unmount" error is dropped from the per-candidate entry.
+    assert "error" not in auth
+    # The base candidate is not mutated in place.
+    assert candidate["paths"]["auth"]["deleted"] is False
+    assert candidate["paths"]["auth"]["status"] == "skipped"
+    assert "reconciled_by_worker" not in candidate["paths"]["auth"]
+
+
+def test_fold_reconciles_candidate_auth_entry_on_partial_worker_reap() -> None:
+    # A partial worker reap still proves (via ``deleted_paths``) which auth dirs it
+    # removed; those candidate entries must be reconciled too, while the run stays
+    # partial for the unrelated failure.
+    candidate = _candidate_with_skipped_auth("ws-1", "/work/_shared/auth/ws-1")
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        candidates=[candidate],
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "deleted_path_count": 1,
+            "deleted_paths": ["/work/_shared/auth/ws-1"],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    folded_candidates = folded["candidates"]
+    assert isinstance(folded_candidates, list)
+    assert folded_candidates[0]["paths"]["auth"]["deleted"] is True
+    assert folded_candidates[0]["paths"]["auth"]["status"] == "deleted"
+
+
+def test_fold_leaves_candidate_auth_entry_worker_did_not_reclaim() -> None:
+    # An auth dir the worker did NOT remove keeps its skipped per-candidate entry —
+    # only paths in the worker's ``deleted_paths`` are reconciled.
+    candidate = _candidate_with_skipped_auth("ws-2", "/work/_shared/auth/ws-2")
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        candidates=[candidate],
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "partial",
+            "deleted_path_count": 1,
+            "deleted_paths": ["/work/_shared/auth/ws-1"],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    folded_candidates = folded["candidates"]
+    assert isinstance(folded_candidates, list)
+    auth = folded_candidates[0]["paths"]["auth"]
+    assert auth["deleted"] is False
+    assert auth["status"] == "skipped"
+    assert "reconciled_by_worker" not in auth
+
+
 def test_fold_keeps_auth_skip_when_worker_partial_did_not_reclaim_it() -> None:
     # A partial worker reap whose ``deleted_paths`` do NOT include the auth dir
     # leaves the auth-unmount skip in place: the worker genuinely failed to reclaim
