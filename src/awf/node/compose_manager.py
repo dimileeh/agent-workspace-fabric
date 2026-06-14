@@ -442,10 +442,16 @@ class ComposeManager:
             ),
         )
 
-    async def down(self, spec: WorkspaceComposeSpec, *, remove_volumes: bool = True) -> None:
-        """Stop + remove the stack. Idempotent — absent projects are not errors."""
+    async def down(self, spec: WorkspaceComposeSpec, *, remove_volumes: bool = True) -> bool:
+        """Stop + remove the stack. Idempotent — absent projects are not errors.
+
+        Returns ``True`` when the compose ``down`` actually ran, ``False`` when
+        the rendered compose file was absent and the call short-circuited as a
+        noop (mirroring :meth:`down_project`). Callers use the flag to decide
+        whether a label-scoped fallback is still required.
+        """
         paths = self._paths_for(spec)
-        await self.down_project(
+        return await self.down_project(
             project_name=spec.project_name(),
             compose_file=paths.compose_file,
             workspace_id=spec.workspace_id,
