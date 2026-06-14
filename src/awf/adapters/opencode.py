@@ -280,6 +280,54 @@ def _ollama_base_url_prelude() -> str:
         "      esac\n"
         "      ;;\n"
         "  esac\n"
+        # Reduce a *hex-compressed* IPv4-mapped IPv6 literal -- one with no embedded
+        # dotted quad, e.g. ``::ffff:7f00:1`` (== ``::ffff:127.0.0.1``) or its fully
+        # expanded ``0:0:0:0:0:ffff:7f00:1`` form -- to ``::1`` / ``::`` so the host-local
+        # match below catches a mapped loopback/unspecified target. Python's
+        # ``ipaddress.ip_address`` decodes the trailing two 16-bit groups as the embedded
+        # IPv4 and reports the same loopback/unspecified status, but the dotted-quad
+        # reduction above only matches the ``.``-bearing spelling and the IPv6
+        # canonicalization bails on the non-zero ``ffff`` group -- so without this the
+        # launcher leaves ``::ffff:7f00:1`` pointed at the agent container while preflight
+        # normalizes it to the host gateway (issue #579). Require an all-zero prefix, then
+        # a case-insensitive ``ffff`` group, then split the final two groups: a high group
+        # in ``7f00..7fff`` (always four hex digits ``7f`` + two more) is a ``127.0.0.0/8``
+        # loopback for *any* low group, and both groups all-zero is the unspecified
+        # ``0.0.0.0``; every other embedded IPv4 -- a routable address (``c0a8:101`` ==
+        # 192.168.1.1, ``8000:1`` == 128.0.0.1), an off-by-one ``7eff:ffff`` ==
+        # 126.255.255.255, or a not-quite-unspecified ``0:1`` == 0.0.0.1 -- is left
+        # untouched, matching ``_normalize_host_local_host`` (host-local iff ``ipaddress``
+        # says loopback/unspecified). The dotted form is already reduced above, so skip a
+        # host that still carries a ``.``.
+        '  case "$__awf_ollama_hl_host" in\n'
+        "    *.*) : ;;\n"
+        "    *:*:*)\n"
+        '      __awf_v4m_lo="${__awf_ollama_hl_host##*:}"\n'
+        '      __awf_v4m_rest="${__awf_ollama_hl_host%:*}"\n'
+        '      __awf_v4m_hi="${__awf_v4m_rest##*:}"\n'
+        '      __awf_v4m_prefix="${__awf_v4m_rest%:*}"\n'
+        '      case "$__awf_v4m_prefix" in\n'
+        "        *:[Ff][Ff][Ff][Ff])\n"
+        '          __awf_v4m_zeros="${__awf_v4m_prefix%:[Ff][Ff][Ff][Ff]}"\n'
+        '          case "$__awf_v4m_zeros" in\n'
+        "            *[!0:]*) : ;;\n"
+        "            *)\n"
+        '              case "$__awf_v4m_hi" in\n'
+        '                7[Ff][0-9A-Fa-f][0-9A-Fa-f]) __awf_ollama_hl_host="::1" ;;\n'
+        "                *[!0]*) : ;;\n"
+        "                *)\n"
+        '                  case "$__awf_v4m_lo" in\n'
+        "                    *[!0]*) : ;;\n"
+        '                    *) __awf_ollama_hl_host="::" ;;\n'
+        "                  esac\n"
+        "                  ;;\n"
+        "              esac\n"
+        "              ;;\n"
+        "          esac\n"
+        "          ;;\n"
+        "      esac\n"
+        "      ;;\n"
+        "  esac\n"
         # ``localhost`` is matched case-insensitively (POSIX bracket expansion, no
         # bashism) because the Python side lowercases the host (``urlsplit().hostname``
         # plus ``host.lower() == "localhost"``), so a value like ``http://LocalHost``

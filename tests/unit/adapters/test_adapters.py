@@ -1057,6 +1057,37 @@ class TestOpenCodeAdapter:
             "http://[::ffff:192.168.1.1]:11434",
             "http://[::127.0.0.1]:11434",
             "http://[64:ff9b::127.0.0.1]:11434",
+            # IPv4-mapped IPv6 literals also have a *hex-compressed* spelling with no
+            # embedded dotted quad (``::ffff:7f00:1`` == ``::ffff:127.0.0.1``).
+            # ``ipaddress`` decodes the trailing two 16-bit groups as the mapped IPv4
+            # and reports the same loopback/unspecified status, but the dotted-quad
+            # reduction never matches the dot-less form and the IPv6 canonicalizer bails
+            # on the non-zero ``ffff`` group -- so the prelude must reduce the hex form
+            # too or launch keeps ``::ffff:7f00:1`` (the agent container itself) while
+            # preflight normalizes to the gateway (issue #579 / comment 4492637683). A
+            # mapped loopback (high group ``7f00..7fff``, any low group) and the mapped
+            # unspecified (both groups zero) normalize; a mapped routable IPv4
+            # (``c0a8:101`` == 192.168.1.1, ``8000:1`` == 128.0.0.1) and the
+            # not-quite-loopback ``0:1`` (== 0.0.0.1) / ``7eff:ffff`` (== 126.255.255.255)
+            # pass through unchanged.
+            "http://[::ffff:7f00:1]:11434",
+            "http://[::ffff:7f00:0]:11434",
+            "http://[::ffff:7fff:ffff]:11434",
+            "http://[::FFFF:7f00:1]:11434",
+            "http://[::ffff:7f00:0001]:11434",
+            "http://[0:0:0:0:0:ffff:7f00:1]:11434",
+            "http://[0000:0000:0000:0000:0000:ffff:7f00:1]:11434",
+            "http://[::ffff:7f00:1%lo]:11434",
+            "http://[::ffff:0:0]:11434",
+            "http://[::ffff:0000:0000]:11434",
+            "http://[::ffff:0:1]:11434",
+            "http://[::ffff:7eff:ffff]:11434",
+            "http://[::ffff:8000:1]:11434",
+            "http://[::ffff:c0a8:101]:11434",
+            "http://[::ffff:007f:1]:11434",
+            "http://[1::ffff:7f00:1]:11434",
+            "http://[::ffff:ffff:7f00:1]:11434",
+            "http://[::ffaf:7f00:1]:11434",
             # IPv6 zone/scope ids: ``ipaddress`` accepts the scoped form and keeps the
             # underlying loopback/link-local classification, so the prelude must strip
             # the zone and agree -- a scoped loopback normalizes, a scoped link-local
