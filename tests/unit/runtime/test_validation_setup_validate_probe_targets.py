@@ -45,6 +45,20 @@ class TestLeadingExecutable:
             "export PATH=/x",
             "FOO=bar",  # only assignments, no executable
             'ruff "check',  # unbalanced quote -> shlex parse failure
+            # Shell keywords / builtins leading a compound command: the command
+            # cannot be reduced to a single probeable tool, so it fails open
+            # rather than treating the keyword (``for``, ``if``) as a fake tool.
+            "if [ -f x ]; then ruff; fi",
+            "for f in *.py; do ruff $f; done",
+            "while read -r line; do echo $line; done",
+            "until make; do sleep 1; done",
+            "case $x in a) ruff;; esac",
+            "exit 0",
+            "pwd",
+            "printf '%s\\n' done",
+            "read -r answer",
+            "function lint { ruff; }",
+            "command ruff check .",
         ],
     )
     def test_unprobeable_leading_token_returns_none(self, command: str) -> None:

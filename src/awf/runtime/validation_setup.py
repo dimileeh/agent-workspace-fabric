@@ -311,10 +311,14 @@ def _shell_tokens(command: str) -> list[str] | None:
 
 # Shell builtins / keywords whose leading token is not a PATH-resolvable
 # executable. A ``validate`` command starting with one of these (``cd build``,
-# ``:`` no-op, ``echo done``) cannot be reduced to a single probeable tool, so
-# the probe skips it (fail-open) rather than emit a false UNPROVISIONED gap.
+# ``:`` no-op, ``echo done``, a ``for``/``if`` compound) cannot be reduced to a
+# single probeable tool, so the probe skips it (fail-open) rather than treat the
+# keyword as a fake tool or emit a false UNPROVISIONED gap. Reserved words and
+# builtins are included even where ``command -v`` happens to resolve them in a
+# given shell: they are never the project toolchain the probe exists to check.
 _VALIDATE_PROBE_SHELL_BUILTINS = frozenset(
     {
+        # Builtins / simple-command leading tokens.
         "cd",
         "export",
         ":",
@@ -328,6 +332,29 @@ _VALIDATE_PROBE_SHELL_BUILTINS = frozenset(
         "test",
         "[",
         "echo",
+        "exit",
+        "pwd",
+        "printf",
+        "read",
+        "return",
+        "local",
+        "command",
+        "break",
+        "continue",
+        # Reserved words introducing compound commands.
+        "if",
+        "then",
+        "elif",
+        "else",
+        "fi",
+        "for",
+        "while",
+        "until",
+        "do",
+        "done",
+        "case",
+        "esac",
+        "function",
     }
 )
 
