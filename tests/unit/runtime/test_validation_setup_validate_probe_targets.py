@@ -168,6 +168,17 @@ class TestLeadingExecutable:
             # program, so there is no tool to probe.
             "env",
             "env FOO=bar",
+            # A top-level pipeline's exit status under ``sh -lc`` (no ``pipefail``)
+            # is that of its *last* stage only, so a missing left-hand tool
+            # (``pytest -q | tee pytest.log`` with ``pytest`` off PATH) is masked by
+            # a succeeding final stage and the command still passes. Probing the
+            # leading tool would falsely report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED,
+            # so the whole pipeline fails open. Both the spaced and the ``shlex``-glued
+            # forms of the pipe are recognised.
+            "pytest -q | tee pytest.log",
+            "cat data.json | jq .",
+            "pytest -q|tee pytest.log",
+            "a | b | c",
         ],
     )
     def test_unprobeable_leading_token_returns_none(self, command: str) -> None:
@@ -269,6 +280,30 @@ class TestLeadingExecutables:
         # ``echo a#b`` it stays part of the word, so the ``&&`` after it is a real
         # split point and the (builtin) leading ``echo`` still fails open.
         assert _leading_executables("echo a#b && ruff check .") == []
+
+    def test_top_level_pipeline_fails_open(self) -> None:
+        # ``pytest -q | tee pytest.log`` exits with ``tee``'s status under
+        # ``sh -lc`` (no ``pipefail``), so a missing ``pytest`` is masked and the
+        # command still passes. Probing ``pytest`` would falsely report
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a passing profile.
+        assert _leading_executables("pytest -q | tee pytest.log") == []
+
+    def test_pipeline_skips_only_itself_in_a_semicolon_list(self) -> None:
+        # A piped statement fails open, but the pipe does not affect how a later
+        # ``;``-separated command resolves, so the following tool is still probed.
+        assert _leading_executables("pytest -q | tee log; ruff check .") == ["ruff"]
+
+    def test_pipeline_in_and_chain_skips_only_the_pipe(self) -> None:
+        # ``pytest -q | tee log && ruff check .``: the pipeline's exit (``tee``'s)
+        # gates ``ruff``, whose ``127`` would fail the command, so ``ruff`` is
+        # required while the masked piped ``pytest`` fails open.
+        assert _leading_executables("pytest -q | tee log && ruff check .") == ["ruff"]
+
+    def test_pipe_after_a_required_tool_still_probes_that_tool(self) -> None:
+        # ``ruff check . && pytest -q | tee log``: ``ruff`` runs first and its
+        # absence fails the ``&&`` chain, so it is probed; the trailing pipeline
+        # fails open because its leading ``pytest`` is masked by ``tee``.
+        assert _leading_executables("ruff check . && pytest -q | tee log") == ["ruff"]
 
     def test_env_wrapped_chained_tools_probe_each_real_program(self) -> None:
         # Each ``&&``-chained ``env`` wrapper is unwrapped to the program it
@@ -382,6 +417,18 @@ class TestValidateCommandProbeTargets:
             ("pytest", "env PYTHONPATH=src pytest -q"),
             ("mypy", "mypy src"),
         ]
+
+    def test_skips_top_level_pipeline_commands(self) -> None:
+        # A validate command that pipes its tool into a logger
+        # (``pytest -q | tee pytest.log``) exits with the final stage's status
+        # under ``sh -lc`` (no ``pipefail``), so a missing ``pytest`` is masked
+        # and the command still passes. It fails open rather than failing the
+        # handoff with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED; the plain command
+        # still probes.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["pytest -q | tee pytest.log", "ruff check ."])
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
 
     def test_probes_tool_after_leading_comment_line(self) -> None:
         # A YAML block command opening with a shell comment line (``# run lint``)

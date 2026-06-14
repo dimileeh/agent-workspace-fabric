@@ -432,8 +432,11 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
     start a new command. Each pair carries the operator that *terminated* the
     statement so the caller can tell an AND-chain from an OR-list: ``";"`` for a
     ``;`` or newline, ``"&&"``, ``"||"``, or ``""`` for the trailing statement.
-    Pipes (``|``) and background (``&``) are *not* split points: the leading
-    token of a pipeline/job is still the tool to probe.
+    Pipes (``|``) and background (``&``) are *not* split points, so a pipeline or
+    job stays within one statement. :func:`_statement_leading_executable` then
+    fails open on a top-level pipeline — under ``sh -lc`` (no ``pipefail``) only
+    its last stage sets the exit status, so probing the leading tool would
+    misreport a masked failure.
 
     A ``#`` that begins a word (at the start, or after unquoted whitespace)
     starts a comment that ``sh -lc`` ignores to end of line, so the splitter
@@ -495,6 +498,44 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
     return statements
 
 
+def _contains_top_level_pipe(statement: str) -> bool:
+    """True if ``statement`` contains a pipe (``|``) outside quotes/escapes.
+
+    The top-level splitter has already broken on ``;``/newline/``&&``/``||``, so a
+    bare ``|`` that survives here joins a pipeline. Under ``sh -lc`` (no
+    ``pipefail``) a pipeline's exit status is that of its *last* stage only, so a
+    missing left-hand tool (``pytest -q | tee pytest.log`` with ``pytest`` off
+    PATH) is masked by a succeeding final stage. Scanning the raw string —
+    matching the quote/escape handling of :func:`_split_top_level_statements` —
+    catches both the spaced (``a | b``) and the ``shlex``-glued (``a|b``) forms,
+    which a token-level check would miss.
+    """
+    quote: str | None = None
+    index = 0
+    length = len(statement)
+    while index < length:
+        char = statement[index]
+        if quote is not None:
+            if char == "\\" and quote == '"' and index + 1 < length:
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            index += 2
+            continue
+        if char == "|":
+            return True
+        index += 1
+    return False
+
+
 # Per-statement classification outcomes for :func:`_statement_leading_executable`.
 # ``_SKIP_STATEMENT`` -- the statement names no tool (a shell guard, or a
 # blank/comment/env-only line); look at the next statement. ``_STOP_PROBE`` --
@@ -522,6 +563,16 @@ def _statement_leading_executable(statement: str) -> str | object:
     if not tokens:
         # A blank or comment-only statement (e.g. the ``# run lint`` line above a
         # command) names no tool; skip it and look at the next.
+        return _SKIP_STATEMENT
+    if _contains_top_level_pipe(statement):
+        # A top-level pipeline's exit status under ``sh -lc`` (no ``pipefail``) is
+        # that of its *last* stage only, so a missing left-hand tool
+        # (``pytest -q | tee pytest.log`` with ``pytest`` off PATH) is masked by a
+        # succeeding final stage and the command still passes. Probing the leading
+        # tool would falsely report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED, so the
+        # whole pipeline fails open — like a ``|| true``-masked OR-list member.
+        # ``_SKIP_STATEMENT`` (not ``_STOP_PROBE``) because a pipe never changes how
+        # a later statement resolves, so the walk keeps probing the rest.
         return _SKIP_STATEMENT
     index = _first_non_assignment_token_index(tokens)
     if _assignment_prefix_sets_path(tokens[:index]):
