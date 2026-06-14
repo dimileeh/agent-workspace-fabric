@@ -903,6 +903,22 @@ class TestOpenCodeAdapter:
             ("ollama-sidecar", "http://ollama-sidecar:11434/v1"),
             ("https://ollama-sidecar/v1", "https://ollama-sidecar:11434/v1"),
             ("http://[::1]/v1", "http://[::1]:11434/v1"),
+            # A port-less value carrying userinfo credentials still inherits the
+            # default daemon port (11434): the colon in ``user:pass`` is part of
+            # the credentials, not a port, so it must not suppress defaulting.
+            (
+                "http://user:pass@ollama.local/v1",
+                "http://user:pass@ollama.local:11434/v1",
+            ),
+            (
+                "http://user:pass@[::1]/v1",
+                "http://user:pass@[::1]:11434/v1",
+            ),
+            # Userinfo with an explicit port is left intact.
+            (
+                "http://user:pass@ollama.local:9999/v1",
+                "http://user:pass@ollama.local:9999/v1",
+            ),
             # An explicit value that already carries a port is left intact.
             ("http://explicit.local:9999/v1", "http://explicit.local:9999/v1"),
         ],

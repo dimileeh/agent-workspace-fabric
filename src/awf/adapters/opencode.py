@@ -141,7 +141,12 @@ def _ollama_base_url_prelude() -> str:
         '  __awf_ollama_rest="${__awf_ollama_host#*://}"\n'
         '  __awf_ollama_authority="${__awf_ollama_rest%%/*}"\n'
         '  __awf_ollama_path="${__awf_ollama_rest#"$__awf_ollama_authority"}"\n'
-        '  case "$__awf_ollama_authority" in\n'
+        # Strip any userinfo (``user:pass@``) before deciding whether a port is
+        # present, so a colon inside credentials is not mistaken for a port
+        # separator (which would leave the value at the scheme default port 80
+        # while the worker-side probe/pull builder defaults it to :11434).
+        '  __awf_ollama_hostport="${__awf_ollama_authority##*@}"\n'
+        '  case "$__awf_ollama_hostport" in\n'
         "    '['*']') __awf_ollama_authority=\"$__awf_ollama_authority:11434\" ;;\n"
         "    '['*']:'*) : ;;\n"
         "    *:*) : ;;\n"
