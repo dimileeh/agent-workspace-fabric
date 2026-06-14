@@ -45,6 +45,8 @@ from awf.control.worker.constants import (
     _CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE,
     _CLAUDE_BASE_REAP_SWEEP_FAILED_REASON_CODE,
     _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE,
+    _PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
+    _PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
@@ -159,6 +161,144 @@ async def _maybe_release_terminal_runtime(self: Any) -> None:
 
     interval = max(0.0, self._config.terminal_runtime_release_scan_interval_seconds)
     self._next_terminal_runtime_release_scan_at = monotonic() + interval
+
+
+async def _load_terminal_runtime_candidate(
+    self: Any,
+    workspace_id: str,
+) -> _TerminalRuntimeCandidate | None:
+    """Build a single terminal-runtime release candidate for one workspace.
+
+    Used by the prompt release fired on a terminal transition (#583, #584).
+    Returns ``None`` (a clean no-op for the prompt path) when the workspace row
+    is missing, is not in a terminal-release status, carries no ``repo_url``, or
+    is owned by another node (``node_id`` neither this worker's nor ``NULL`` —
+    mirroring ``_list_terminal_runtime_candidates``' single-node fallback so we
+    never release a runtime another node may still own).
+
+    Unlike ``_list_terminal_runtime_candidates`` this deliberately does **not**
+    gate on the effective-release marker. A ``--stop-stack`` cancel pre-emits a
+    ``terminal_runtime_released`` event in the service after only a ``docker
+    stop`` (containers Exited, ``-net`` network still present), so gating here
+    would skip the real ``compose down`` and re-leak #583. Idempotency is provided
+    downstream instead: the cleaner's ``down`` is a no-op on an already-down stack,
+    and ``_record_terminal_runtime_released`` early-returns when a release event
+    already exists, so re-invocation never double-records.
+    """
+    worker_node_id = effective_worker_config_node_id(self._config)
+    stmt = (
+        select(
+            Workspace.status,
+            Workspace.repo_url,
+            Workspace.compose_project_name,
+            Workspace.compose_file_path,
+            Workspace.node_id,
+        )
+        .where(Workspace.id == workspace_id)
+        .limit(1)
+    )
+
+    async def _operation(session: AsyncSession) -> Any:
+        result = await session.execute(stmt)
+        return result.one_or_none()
+
+    row = await run_db_operation_with_retry(
+        self._session_factory,
+        _operation,
+        on_retry=self._log_transient_db_retry,
+    )
+    if row is None:
+        return None
+    status_val, repo_url, compose_project_name, compose_file_path, node_id = row
+    if status_val not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
+        return None
+    if not repo_url:
+        return None
+    if node_id is not None and node_id != worker_node_id:
+        return None
+    return _TerminalRuntimeCandidate(
+        workspace_id=workspace_id,
+        status=WorkspaceStatus(status_val),
+        repo_url=repo_url,
+        compose_project_name=compose_project_name,
+        compose_file_path=compose_file_path,
+    )
+
+
+async def _release_terminal_runtime_promptly(self: Any, workspace_id: str) -> None:
+    """Eagerly release a workspace's terminal runtime on its terminal transition.
+
+    Reuses the *existing* per-candidate teardown
+    (``_release_terminal_runtime_for_candidate``: ``compose down`` removing the
+    agent+postgres containers and the per-ws ``-net`` network, then the Claude
+    auth-overlay umount, then the idempotent ``terminal_runtime_released`` event)
+    that the periodic ``_maybe_release_terminal_runtime`` interval otherwise
+    drives. Firing it here, right after a terminal transition, reclaims the
+    runtime promptly instead of up to an interval (~1h) later — fixing the
+    cancel/stop-stack container+network leak (#583) and the per-ws auth-overlay
+    pile-up (#584). The periodic interval stays in place as the unchanged backstop.
+
+    A no-op when no runtime cleaner is wired or the workspace is not (yet) a
+    release candidate (non-terminal, missing, or foreign-node — see
+    :func:`_load_terminal_runtime_candidate`). The preservation policy is
+    unchanged: this only changes *when* the existing release fires, never *what*
+    it preserves, so failed-workspace auth-dir preservation (owned by the terminal
+    GC reaper) is honored automatically.
+
+    The teardown runs through the shield-and-reawait pattern used by
+    ``_release_execution_claim_after_cancellation`` so a ``CancelledError`` from
+    worker shutdown / task-cancel cannot tear a ``compose down`` apart mid-flight
+    and re-leak the stack; the ``CancelledError`` is re-raised after the teardown
+    completes. Any other failure is swallowed and logged — a prompt-release
+    failure must never break the terminal transition itself, and the interval
+    backstop reclaims any miss.
+    """
+    if self._runtime_cleaner is None:
+        return
+
+    async def _body() -> None:
+        candidate = await self._load_terminal_runtime_candidate(workspace_id)
+        if candidate is None:
+            return
+        await self._release_terminal_runtime_for_candidate(candidate)
+
+    body_task = asyncio.create_task(
+        _body(),
+        name=f"awf-prompt-terminal-runtime-release-{workspace_id}",
+    )
+    observed_cancel = False
+    while not body_task.done():
+        try:
+            await asyncio.shield(body_task)
+        except asyncio.CancelledError:
+            # An external cancel (worker shutdown) landed on the shield, not on the
+            # shielded teardown. Record it and re-await so the ``compose down`` /
+            # overlay umount still run to completion, then re-raise below.
+            observed_cancel = True
+        except Exception:
+            # The teardown raised; ``body_task`` is now done. Fall through to the
+            # swallow-and-log below — never propagate, so the terminal transition
+            # is not broken.
+            break
+    # ``body_task.exception()`` *raises* ``CancelledError`` (rather than returning
+    # it) when the teardown coroutine self-cancels internally — e.g. a
+    # ``CancelledError`` propagated out of
+    # ``_release_terminal_runtime_for_candidate``'s ``except asyncio.CancelledError:
+    # raise`` guards marks ``body_task`` as cancelled, not failed. Guard with
+    # ``cancelled()`` first so such an edge case is treated as the swallow-and-log
+    # path (the cancel is still re-raised below via ``observed_cancel``) instead of
+    # propagating unintentionally and shadowing the caller's original exception.
+    failure = None if body_task.cancelled() else body_task.exception()
+    if failure is not None:
+        _log.warning(
+            _PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
+            workspace_id=workspace_id,
+            reason_code=_PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+            error_type=type(failure).__name__,
+            error=str(failure)[:240],
+        )
+    if observed_cancel:
+        raise asyncio.CancelledError
 
 
 async def _maybe_reconcile_orphan_dirs(self: Any) -> None:
@@ -935,6 +1075,31 @@ async def _record_terminal_runtime_released(
         if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
             return False
         if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
+            # The release event already exists — e.g. a ``cancel --stop-stack`` pre-emits
+            # ``terminal_runtime_released`` in the service after only a ``docker stop``
+            # (#583/#584), yet the prompt path still ran ``compose down`` + the overlay
+            # umount above. When that umount failed we must still seed the deferred-retry
+            # ``pending`` marker; the bare early-return previously dropped it, so the
+            # deferred re-sweep had no candidate and the ~1.7 GB overlay leaked despite the
+            # prompt cleanup. Idempotent: skip when any pending/terminal overlay marker
+            # already exists for the current release cycle so the deferred sweep keeps
+            # owning the attempt lifecycle (and the umount count never inflates).
+            if (
+                auth_overlay_unmounted is False
+                and not await self._has_current_cycle_terminal_auth_overlay_unmount_marker(
+                    session, candidate.workspace_id
+                )
+            ):
+                await repo.add_event(
+                    ws,
+                    event_type=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                    reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+                    payload={
+                        "compose_project_name": candidate.compose_project_name,
+                        "workspace_status": candidate.status.value,
+                        "attempt": 1,
+                    },
+                )
             return False
         await repo.add_event(
             ws,
