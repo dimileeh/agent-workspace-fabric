@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -107,7 +108,7 @@ class TestGrokAdapter:
         argv_copy = tmp_path / "argv.json"
         fake_grok.write_text(
             "#!/bin/sh\n"
-            "python - <<'PY' \"$@\"\n"
+            '"$AWF_TEST_PYTHON" - <<\'PY\' "$@"\n'
             "import json, os, sys\n"
             "with open(os.environ['AWF_FAKE_GROK_ARGV'], 'w', encoding='utf-8') as fh:\n"
             "    json.dump(sys.argv[1:], fh)\n"
@@ -115,7 +116,13 @@ class TestGrokAdapter:
         )
         fake_grok.chmod(0o755)
         env = os.environ.copy()
-        env.update({"PATH": f"{bin_dir}:{env['PATH']}", "AWF_FAKE_GROK_ARGV": str(argv_copy)})
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "AWF_FAKE_GROK_ARGV": str(argv_copy),
+                "AWF_TEST_PYTHON": sys.executable,
+            }
+        )
         proc = await asyncio.create_subprocess_exec(
             "sh",
             "-c",
