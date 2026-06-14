@@ -379,6 +379,64 @@ class TestCleanup:
         compose.remove_project_by_label.assert_awaited_once()
 
     @pytest.mark.unit
+    async def test_null_compose_file_successful_down_skips_label_removal(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+    ) -> None:
+        # When the null-file ``down`` actually runs (returns True) it has already
+        # stopped the containers and freed the host port, so the redundant
+        # label-scoped pass is skipped. Otherwise a transient label-scoped Docker
+        # failure would flip an otherwise-successful compose_down to failed and
+        # make /stop and cancel skip terminal_runtime_released even though the
+        # stack was already torn down.
+        git, compose, wc = cleaner
+        compose.down.return_value = True
+
+        result = await wc.cleanup(
+            workspace_id="ws_null_ok",
+            repo_url="git@x:y.git",
+            compose_project_name="awf_ws_null_ok",
+            compose_file_path=None,
+            remove_worktree=False,
+        )
+
+        assert result.ok
+        compose.down.assert_awaited_once()
+        compose.remove_project_by_label.assert_not_awaited()
+        compose_step = next(step for step in result.steps if step.name == "compose_down")
+        assert compose_step.status == "succeeded"
+
+    @pytest.mark.unit
+    async def test_null_compose_file_down_noop_falls_back_to_label(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+    ) -> None:
+        # When the default compose file is absent ``down`` noops (returns False);
+        # the project's containers/network/host port may still be live, so fall
+        # back to label-scoped removal (mirroring the persisted-file vanished
+        # fallback) and still record compose_down as succeeded.
+        git, compose, wc = cleaner
+        compose.down.return_value = False
+
+        result = await wc.cleanup(
+            workspace_id="ws_null_noop",
+            repo_url="git@x:y.git",
+            compose_project_name="awf_ws_null_noop",
+            compose_file_path=None,
+            remove_worktree=False,
+        )
+
+        assert result.ok
+        compose.down.assert_awaited_once()
+        compose.remove_project_by_label.assert_awaited_once_with(
+            project_name="awf_ws_null_noop",
+            workspace_id="ws_null_noop",
+            remove_volumes=True,
+        )
+        compose_step = next(step for step in result.steps if step.name == "compose_down")
+        assert compose_step.status == "succeeded"
+
+    @pytest.mark.unit
     async def test_remove_worktree_false_skips_worktree_removal(
         self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
     ) -> None:

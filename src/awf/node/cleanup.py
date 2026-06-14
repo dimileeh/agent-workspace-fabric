@@ -229,7 +229,7 @@ class WorkspaceCleaner:
                     )
             else:
                 try:
-                    await self._compose.down(spec, remove_volumes=remove_volumes)
+                    down_ran = await self._compose.down(spec, remove_volumes=remove_volumes)
                 except ComposeOperationError as down_exc:
                     # No persisted compose file, so ``down`` resolves the default
                     # ``awf_<workspace_id>`` compose path. If that default file
@@ -247,11 +247,34 @@ class WorkspaceCleaner:
                         reason_code=down_exc.reason_code,
                         stderr=down_exc.stderr[:1000],
                     )
-                await self._compose.remove_project_by_label(
-                    project_name=project_name,
-                    workspace_id=workspace_id,
-                    remove_volumes=remove_volumes,
-                )
+                    await self._compose.remove_project_by_label(
+                        project_name=project_name,
+                        workspace_id=workspace_id,
+                        remove_volumes=remove_volumes,
+                    )
+                else:
+                    if not down_ran:
+                        # The default compose file was absent so ``down``
+                        # short-circuited as a noop (returned False). Fall back
+                        # to the label-scoped removal so a project whose compose
+                        # file vanished but whose containers/network/host port
+                        # are still live is still torn down (mirroring the
+                        # persisted-file vanished fallback above). When ``down``
+                        # actually ran we skip the redundant label-scoped pass:
+                        # it already freed the port, and a transient label-scoped
+                        # Docker failure must not flip an otherwise-successful
+                        # ``compose_down`` to failed and skip
+                        # ``terminal_runtime_released``.
+                        _log.warning(
+                            "cleanup.compose_down_vanished_label_fallback",
+                            workspace_id=workspace_id,
+                            project_name=project_name,
+                        )
+                        await self._compose.remove_project_by_label(
+                            project_name=project_name,
+                            workspace_id=workspace_id,
+                            remove_volumes=remove_volumes,
+                        )
             steps.append(
                 WorkspaceCleanupStepResult(
                     name="compose_down",
