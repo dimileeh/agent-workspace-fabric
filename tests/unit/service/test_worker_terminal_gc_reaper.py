@@ -468,6 +468,54 @@ async def test_worker_terminal_gc_exhausted_budget_makes_second_pass_noop(
 
 
 @pytest.mark.unit
+async def test_worker_terminal_gc_reaper_honours_operator_scope_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Override ``min_age_hours``/``limit`` flow into both GC passes (#590).
+
+    An on-demand ``awf service gc --execute`` delegation hands the worker the
+    operator-resolved scope; the capability-gated auth-overlay/claude-base reap must
+    run at that scope (here ``min_age_hours=1.0``, ``limit=9``) rather than the
+    worker's configured retention/batch defaults, so the two paths stay in lockstep.
+    The first pass selects 2 candidates, so the shared-budget second pass receives
+    ``9 - 2 = 7`` while both passes use the override retention.
+    """
+    created: dict[str, Any] = {}
+
+    class _ControlWorker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["terminal_gc_reaper"] = kwargs["terminal_gc_reaper"]
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    _patch_runtime_constructors(monkeypatch)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+
+    calls: list[tuple[float | None, int | None]] = []
+
+    async def _fake_gc(_session_factory: object, **kwargs: Any) -> _FakeGCResult:
+        calls.append((kwargs.get("min_age_hours"), kwargs.get("limit")))
+        return _FakeGCResult(2 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(worker_mod, "run_service_workspace_gc", _fake_gc)
+
+    settings = dataclasses.replace(
+        _settings(tmp_path, completed_workspace_retention_hours=24.0),
+        workspace_cleanup_batch_limit=5,
+    )
+    worker_mod.build_worker_runtime(settings)
+    reaper = created["terminal_gc_reaper"]
+
+    await reaper(min_age_hours=1.0, limit=9)
+
+    # Both passes use the override retention; the second pass shares the override
+    # budget (9 - 2 selected = 7), not the configured default of 5.
+    assert calls == [(1.0, 9), (1.0, 7)]
+
+
+@pytest.mark.unit
 def test_combine_terminal_gc_reports_concatenates_and_sums() -> None:
     """A clean default pass + clean discarded pass fold into one ``succeeded`` summary."""
     default_report: dict[str, Any] = {

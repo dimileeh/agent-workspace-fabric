@@ -95,7 +95,7 @@ class ControlWorker(WorkerDelegatesMixin):
         orphan_dir_reconciler: Callable[[], Awaitable[OrphanDirReconcileResult]] | None = None,
         classified_orphan_reaper: Callable[[], Awaitable[OrphanReapResult]] | None = None,
         claude_base_reaper: Callable[[], Awaitable[dict[str, object]]] | None = None,
-        terminal_gc_reaper: Callable[[], Awaitable[dict[str, object]]] | None = None,
+        terminal_gc_reaper: Callable[..., Awaitable[dict[str, object]]] | None = None,
         auth_overlay_work_dir: Path | None = None,
         config: WorkerConfig,
     ) -> None:

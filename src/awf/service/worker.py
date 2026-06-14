@@ -363,7 +363,11 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             execute=True,
         )
 
-    async def _reap_terminal_workspace_gc() -> dict[str, object]:
+    async def _reap_terminal_workspace_gc(
+        *,
+        min_age_hours: float | None = None,
+        limit: int | None = None,
+    ) -> dict[str, object]:
         """Reap per-workspace terminal-workspace auth dirs from the worker (#513).
 
         The per-workspace ``auth/<id>/`` dirs (~1.7 GB each) of completed/cancelled/
@@ -399,13 +403,24 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         pass's completed-merged / failed-preservation / superseded age-cap nuance. The
         global claude-base reap and companion-image prune already ran in the first pass,
         so the second pass leaves them off. Both reports are folded into one summary.
+
+        An on-demand ``awf service gc --execute`` delegation forwards the operator's
+        resolved ``min_age_hours``/``limit`` so this capability-gated reap matches the
+        scope of the API-side worktree/compose pass the operator just ran instead of
+        diverging onto the worker's server defaults (#590). The periodic backstop and
+        the test wiring call with neither override, falling back to the configured
+        retention/batch defaults.
         """
+        retention_hours = (
+            settings.completed_workspace_retention_hours if min_age_hours is None else min_age_hours
+        )
+        batch_limit = settings.workspace_cleanup_batch_limit if limit is None else limit
         default_result = await run_service_workspace_gc(
             session_factory,
             work_dir=work_dir,
             execute=True,
-            min_age_hours=settings.completed_workspace_retention_hours,
-            limit=settings.workspace_cleanup_batch_limit,
+            min_age_hours=retention_hours,
+            limit=batch_limit,
             cleanup_enabled=settings.workspace_cleanup_enabled,
             companion_image_cache_enabled=settings.companion_image_cache_enabled,
             companion_image_retention_hours=settings.companion_image_retention_hours,
@@ -414,21 +429,21 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             compose_manager=compose,
         )
         # Share one cleanup-batch budget across both passes. ``plan_terminal_workspace_gc``
-        # caps each call to ``workspace_cleanup_batch_limit`` candidates (the
-        # "maximum cleanup candidates per batch" invariant), but giving the
-        # discarded-status pass the full limit again would let a single sweep reclaim
-        # up to ~2x the configured guard. Subtract the first pass's selected candidates
-        # so the combined sweep never exceeds one batch budget; a fully-spent budget
-        # makes the second pass a no-op (``limit=0`` selects nothing).
+        # caps each call to the batch limit candidates (the "maximum cleanup candidates
+        # per batch" invariant), but giving the discarded-status pass the full limit
+        # again would let a single sweep reclaim up to ~2x the budget. Subtract the
+        # first pass's selected candidates so the combined sweep never exceeds one batch
+        # budget; a fully-spent budget makes the second pass a no-op (``limit=0`` selects
+        # nothing).
         discarded_limit = max(
-            settings.workspace_cleanup_batch_limit - len(default_result.plan.candidates),
+            batch_limit - len(default_result.plan.candidates),
             0,
         )
         discarded_result = await run_service_workspace_gc(
             session_factory,
             work_dir=work_dir,
             execute=True,
-            min_age_hours=settings.completed_workspace_retention_hours,
+            min_age_hours=retention_hours,
             limit=discarded_limit,
             cleanup_enabled=settings.workspace_cleanup_enabled,
             include_statuses=(

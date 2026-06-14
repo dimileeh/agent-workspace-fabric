@@ -58,6 +58,7 @@ async def _seed_pending(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     node_id: str | None = _NODE_ID,
+    params: dict[str, object] | None = None,
 ) -> str:
     now = datetime.now(UTC)
     async with session_factory() as session:
@@ -65,7 +66,7 @@ async def _seed_pending(
             node_id=node_id,
             requested_at=now,
             deadline_at=now + timedelta(seconds=30),
-            params={"execute": True},
+            params=params if params is not None else {"execute": True},
         )
         await session.commit()
         return request.id
@@ -110,6 +111,51 @@ async def test_consume_runs_terminal_reaper_once_and_completes(
         assert finished.status == "completed"
         assert finished.result == report
         assert finished.error_code is None
+
+
+async def test_consume_threads_operator_params_into_reaper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The operator's stored ``min_age_hours``/``limit`` flow into the reaper (#590).
+
+    The API resolves the run's scope (CLI ``--min-age-hours``/``--limit``) and
+    persists it in ``service_gc_requests.params``; the worker reap of the
+    capability-gated auth overlays + claude-base must honour that same scope rather
+    than silently falling back to its server defaults.
+    """
+    await _seed_pending(
+        session_factory,
+        params={"execute": True, "min_age_hours": 1.5, "limit": 7},
+    )
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"min_age_hours": 1.5, "limit": 7}
+
+
+async def test_consume_omits_absent_params_so_reaper_uses_defaults(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Params lacking ``min_age_hours``/``limit`` leave the reaper on its defaults (#590)."""
+    await _seed_pending(session_factory, params={"execute": True})
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {}
 
 
 async def test_consume_is_noop_without_reaper(

@@ -577,7 +577,7 @@ async def _maybe_consume_service_gc_trigger(self: Any) -> None:
         return
 
     try:
-        request_id = await self._claim_service_gc_trigger()
+        claimed = await self._claim_service_gc_trigger()
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -586,23 +586,32 @@ async def _maybe_consume_service_gc_trigger(self: Any) -> None:
             reason_code=_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE,
         )
         return
-    if request_id is None:
+    if claimed is None:
         return
 
-    await self._run_claimed_service_gc_trigger(request_id)
+    request_id, params = claimed
+    await self._run_claimed_service_gc_trigger(request_id, params)
 
 
-async def _claim_service_gc_trigger(self: Any) -> str | None:
-    """Atomically claim the oldest pending gc-trigger row for this node, if any."""
+async def _claim_service_gc_trigger(self: Any) -> tuple[str, dict[str, Any]] | None:
+    """Atomically claim the oldest pending gc-trigger row for this node, if any.
+
+    Returns the claimed row's ``id`` together with the operator-supplied ``params``
+    the API persisted for this run (``min_age_hours``/``limit``) so the worker reap
+    honours the same scope the operator just ran on the API side rather than the
+    worker's server defaults (#590).
+    """
     node_id = effective_worker_config_node_id(self._config)
     now = datetime.now(UTC)
 
-    async def _operation(session: AsyncSession) -> str | None:
+    async def _operation(session: AsyncSession) -> tuple[str, dict[str, Any]] | None:
         request = await ServiceGCRequestRepository(session).claim_oldest_pending(
             node_id=node_id,
             now=now,
         )
-        return request.id if request is not None else None
+        if request is None:
+            return None
+        return request.id, dict(request.params or {})
 
     return await run_db_operation_with_retry(
         self._session_factory,
@@ -612,16 +621,30 @@ async def _claim_service_gc_trigger(self: Any) -> str | None:
     )
 
 
-async def _run_claimed_service_gc_trigger(self: Any, request_id: str) -> None:
+async def _run_claimed_service_gc_trigger(
+    self: Any, request_id: str, params: dict[str, Any]
+) -> None:
     """Run the reaper for a claimed trigger row and persist its terminal outcome.
 
     The claim and the (potentially multi-GB, multi-second) reap are in separate
-    transactions so the row lock is not held across the reap. ``CancelledError``
-    propagates; any reaper failure is recorded on the row so the polling API does
-    not hang and never reports false success.
+    transactions so the row lock is not held across the reap. The operator-supplied
+    ``min_age_hours``/``limit`` (resolved by the API and stored in ``params``) are
+    forwarded to the reaper so the auth-overlay/claude-base reclaim matches the scope
+    of the API-side pass the operator just ran (#590); absent keys leave the reaper on
+    its server defaults (e.g. the periodic backstop). ``CancelledError`` propagates;
+    any reaper failure is recorded on the row so the polling API does not hang and
+    never reports false success.
     """
+    reaper_kwargs: dict[str, Any] = {}
+    min_age_hours = params.get("min_age_hours")
+    if min_age_hours is not None:
+        reaper_kwargs["min_age_hours"] = min_age_hours
+    limit = params.get("limit")
+    if limit is not None:
+        reaper_kwargs["limit"] = limit
+
     try:
-        report = await self._terminal_gc_reaper()
+        report = await self._terminal_gc_reaper(**reaper_kwargs)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
