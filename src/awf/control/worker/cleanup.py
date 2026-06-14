@@ -590,7 +590,23 @@ async def _maybe_consume_service_gc_trigger(self: Any) -> None:
         return
 
     request_id, params = claimed
-    await self._run_claimed_service_gc_trigger(request_id, params)
+    # The run-and-finish path is guarded too, not just the claim above: the reaper
+    # itself records its own failure on the row, but the terminal result-write
+    # (``_finish_service_gc_trigger``) is otherwise unguarded — if its retries are
+    # exhausted it would propagate through ``run_once`` and abort the whole poll
+    # cycle, violating the swallow-and-log contract this docstring guarantees. Mirror
+    # the sibling ``_maybe_reap_*`` methods: swallow-and-log here, re-raise only
+    # ``CancelledError`` for cooperative shutdown.
+    try:
+        await self._run_claimed_service_gc_trigger(request_id, params)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.exception(
+            "worker.service_gc_trigger_consume_failed",
+            reason_code=_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE,
+            request_id=request_id,
+        )
 
 
 async def _claim_service_gc_trigger(self: Any) -> tuple[str, dict[str, Any]] | None:

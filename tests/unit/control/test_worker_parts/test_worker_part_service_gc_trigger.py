@@ -315,6 +315,53 @@ async def test_consume_propagates_cancellation_during_reap(
         assert row.status == "running"
 
 
+async def test_consume_swallows_finish_write_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A result-write failure after a successful reap is swallowed, not propagated (#590).
+
+    ``_run_claimed_service_gc_trigger`` is reached *after* a row is claimed; if the
+    terminal-outcome write (``_finish_service_gc_trigger``) exhausts its retries and
+    raises, the swallow-and-log contract the docstring guarantees requires the
+    exception not escape ``_maybe_consume_service_gc_trigger`` — otherwise it aborts
+    the whole poll cycle and skips provisioning/dispatch for that round.
+    """
+    await _seed_pending(session_factory)
+
+    async def _terminal_reaper() -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    async def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("result-write retries exhausted")
+
+    worker._finish_service_gc_trigger = _boom  # type: ignore[method-assign]  # noqa: SLF001
+
+    # Must not raise — one failed consume cannot break provisioning/dispatch.
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+
+async def test_consume_propagates_cancellation_during_finish(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """``CancelledError`` from the finish path still propagates for cooperative shutdown."""
+    await _seed_pending(session_factory)
+
+    async def _terminal_reaper() -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    async def _cancel(*_args: object, **_kwargs: object) -> None:
+        raise asyncio.CancelledError
+
+    worker._finish_service_gc_trigger = _cancel  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+
 async def test_consume_claims_one_row_second_call_noops(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
