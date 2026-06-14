@@ -291,10 +291,21 @@ def _ollama_base_url_prelude() -> str:
         # host while this prelude would rewrite them to the gateway, diverging launch from
         # preflight (the worker would then classify the target as non-host-reachable and
         # skip the probe/pull even though the agent reaches it via the host gateway).
-        # Require ``127.`` followed by exactly three all-numeric octets and nothing else:
-        # reject any non-digit/dot character (a DNS label), reject five or more octets,
-        # then accept three non-empty numeric groups. Mirrors ``_normalize_host_local_host``
-        # (loopback iff ``ipaddress`` parses a ``127.0.0.0/8`` literal).
+        # Require ``127.`` followed by exactly three dot-separated octets, each a
+        # canonical decimal in ``0..255`` with no leading zeros -- precisely what
+        # ``ipaddress.ip_address`` accepts for a ``127.0.0.0/8`` literal. A looser
+        # ``127.[0-9]*.[0-9]*.[0-9]*`` glob still over-matches: it treats digit/dot
+        # strings that ``ipaddress`` rejects as loopback -- over-range octets
+        # (``127.0.0.256``), leading-zero octets (``127.00.0.1``), or embedded empty
+        # octets (``127.0..1``) -- and the launcher would then rewrite them to the
+        # gateway while ``_normalize_host_local_host`` leaves them pointed at their real
+        # host, diverging launch from preflight (the worker would classify the target as
+        # non-host-reachable and skip the probe/pull even though the agent reaches it via
+        # the host gateway). So reject non-digit/dot characters (a DNS label) and five or
+        # more octets up front, then validate each of the three trailing octets against
+        # the same ``0..255``/no-leading-zero grammar Python enforces. Mirrors
+        # ``_normalize_host_local_host`` (loopback iff ``ipaddress`` parses a
+        # ``127.0.0.0/8`` literal).
         "  __awf_ollama_hl_match=\n"
         '  case "$__awf_ollama_hl_host" in\n'
         "    [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|0.0.0.0|::|::1)\n"
@@ -304,7 +315,23 @@ def _ollama_base_url_prelude() -> str:
         '      case "$__awf_ollama_hl_host" in\n'
         "        *[!0-9.]*) : ;;\n"
         "        127.*.*.*.*) : ;;\n"
-        "        127.[0-9]*.[0-9]*.[0-9]*) __awf_ollama_hl_match=1 ;;\n"
+        "        127.*.*.*)\n"
+        '          __awf_v4_rest="${__awf_ollama_hl_host#127.}"\n'
+        '          __awf_v4_o1="${__awf_v4_rest%%.*}"\n'
+        '          __awf_v4_rest="${__awf_v4_rest#*.}"\n'
+        '          __awf_v4_o2="${__awf_v4_rest%%.*}"\n'
+        '          __awf_v4_o3="${__awf_v4_rest#*.}"\n'
+        "          __awf_v4_ok=1\n"
+        '          for __awf_v4_oct in "$__awf_v4_o1" "$__awf_v4_o2" "$__awf_v4_o3"; do\n'
+        '            case "$__awf_v4_oct" in\n'
+        "              0|[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]) : ;;\n"
+        "              *) __awf_v4_ok= ;;\n"
+        "            esac\n"
+        "          done\n"
+        '          if [ -n "$__awf_v4_ok" ]; then\n'
+        "            __awf_ollama_hl_match=1\n"
+        "          fi\n"
+        "          ;;\n"
         "      esac\n"
         "      ;;\n"
         "  esac\n"

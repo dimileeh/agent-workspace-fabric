@@ -1078,6 +1078,19 @@ class TestOpenCodeAdapter:
             "127.0.0.1.nip.io:11434",
             "127.foo:11434",
             "127.0.0.1.2:11434",
+            # Digit/dot-only ``127.*`` strings that are still not valid ``127.0.0.0/8``
+            # literals: ``ipaddress.ip_address`` rejects an over-range octet, a
+            # leading-zero octet, or an embedded empty octet, so the Python side leaves
+            # them pointed at their real host. The launcher's octet validation must agree
+            # and not rewrite them to the gateway (PRRT_kwDOSJAM6s6JYpBt).
+            "127.0.0.256:11434",
+            "127.00.0.1:11434",
+            "127.0.0.01:11434",
+            "127.0..1:11434",
+            "127.0.0.:11434",
+            # Boundary loopback literals that *are* valid and must normalize.
+            "127.255.255.255:11434",
+            "127.0.0.0:11434",
         ],
     )
     async def test_launch_prelude_matches_python_preflight_resolution(
