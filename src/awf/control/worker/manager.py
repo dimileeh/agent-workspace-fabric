@@ -199,13 +199,21 @@ class ControlWorker(WorkerDelegatesMixin):
 
         await self._reconcile_stale_monitor_execution_tasks()
 
+        # Service the budget-bound on-demand gc trigger *before* the periodic
+        # backstop reaps. The API starts its worker-delegation deadline the moment
+        # it writes the pending ``service_gc_requests`` row; if the claim queued
+        # behind ``_maybe_reap_terminal_workspace_gc`` (which can ``await`` a full
+        # multi-GB terminal GC sweep) the deadline could elapse before the worker
+        # ever claims the row, yielding a false SERVICE_GC_WORKER_DELEGATION_TIMEOUT
+        # even with a healthy worker (#590).
+        await self._maybe_consume_service_gc_trigger()
+
         await self._maybe_expire_due_secret_leases()
         await self._maybe_release_terminal_runtime()
         await self._maybe_reconcile_orphan_dirs()
         await self._maybe_reap_classified_orphans()
         await self._maybe_reap_superseded_claude_bases()
         await self._maybe_reap_terminal_workspace_gc()
-        await self._maybe_consume_service_gc_trigger()
 
         if self._executor is not None:
             # Preserved-active-validation redispatches enqueued during recovery

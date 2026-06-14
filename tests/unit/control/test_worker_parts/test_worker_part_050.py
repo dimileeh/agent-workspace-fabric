@@ -263,6 +263,39 @@ async def test_run_once_invokes_terminal_gc_reap_loop() -> None:
     assert calls == 1
 
 
+async def test_run_once_consumes_gc_trigger_before_terminal_reap() -> None:
+    """The budget-bound on-demand gc trigger is claimed before the periodic reap (#590).
+
+    The API starts its worker-delegation deadline the moment it writes the pending
+    ``service_gc_requests`` row. If the worker claimed that row only *after*
+    ``_maybe_reap_terminal_workspace_gc`` (which can ``await`` a full multi-GB
+    terminal GC sweep), a long periodic reap could push the claim past the deadline
+    and surface a false SERVICE_GC_WORKER_DELEGATION_TIMEOUT with a healthy worker.
+    Assert the on-demand consume runs first in the poll cycle.
+    """
+    order: list[str] = []
+
+    worker = _make_worker(lambda: _ok_report(), terminal_workspace_gc_enabled=True)
+    worker._next_secret_lease_expiration_scan_at = float("inf")  # noqa: SLF001
+    worker._next_terminal_runtime_release_scan_at = float("inf")  # noqa: SLF001
+    worker._next_orphan_reconcile_scan_at = float("inf")  # noqa: SLF001
+    worker._next_classified_orphan_reap_scan_at = float("inf")  # noqa: SLF001
+    worker._next_claude_base_reap_scan_at = float("inf")  # noqa: SLF001
+
+    async def _consume() -> None:
+        order.append("consume")
+
+    async def _reap() -> None:
+        order.append("reap")
+
+    worker._maybe_consume_service_gc_trigger = _consume  # type: ignore[method-assign]  # noqa: SLF001
+    worker._maybe_reap_terminal_workspace_gc = _reap  # type: ignore[method-assign]  # noqa: SLF001
+
+    await worker.run_once()
+
+    assert order.index("consume") < order.index("reap")
+
+
 async def test_cancelled_error_propagates() -> None:
     """A cooperative-shutdown ``CancelledError`` propagates and does not reschedule."""
     import asyncio
