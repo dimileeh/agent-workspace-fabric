@@ -1122,6 +1122,24 @@ class TestOpenCodeAdapter:
             # Boundary loopback literals that *are* valid and must normalize.
             "127.255.255.255:11434",
             "127.0.0.0:11434",
+            # Malformed / whitespace-padded inputs: ``_parse_ollama_base_url`` strips
+            # the value and forces ``urlsplit``'s lazy ``hostname`` / ``port`` accessors,
+            # routing an unbalanced IPv6 bracket, a non-numeric / out-of-range port, and
+            # a hostless value to ``DEFAULT_OLLAMA_OPENAI_BASE_URL``. The launcher prelude
+            # must trim and fail closed the same way or it would forward a garbled base
+            # URL while preflight probes the default daemon (comment 4492678514).
+            " http://localhost:11434 ",
+            "  127.0.0.1:11434  ",
+            "\thttp://ollama-sidecar:11434\n",
+            "http://",
+            "://",
+            "http://:11434",
+            "http://[::1",
+            "http://::1]:11434",
+            "http://localhost:abc",
+            "http://localhost:99999",
+            "http://[::1]:notaport",
+            "   ",
         ],
     )
     async def test_launch_prelude_matches_python_preflight_resolution(

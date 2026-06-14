@@ -140,12 +140,32 @@ def _ollama_base_url_prelude() -> str:
 
     An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` still wins over ``OLLAMA_HOST``; with
     neither set we fall back to the default.
+
+    The resolved value is trimmed of surrounding whitespace and fails closed on a
+    malformed authority/port the same way the Python source of truth does: a
+    whitespace-padded value is stripped before parsing, and an unbalanced IPv6 literal,
+    a non-numeric / out-of-range port, or a missing host all resolve to the default
+    daemon URL (``_parse_ollama_base_url`` normalizes the same shapes via ``urlsplit``'s
+    lazy ``hostname`` / ``port`` accessors). Without this the launcher would forward a
+    garbled base URL while preflight probes the default daemon, reopening the
+    launch/preflight split.
     """
     return (
         '__awf_ollama_host="${AWF_OPENCODE_OLLAMA_BASE_URL:-}"\n'
         'if [ -z "$__awf_ollama_host" ]; then\n'
         '  __awf_ollama_host="${OLLAMA_HOST:-}"\n'
         "fi\n"
+        # Trim surrounding whitespace exactly as the Python source of truth does
+        # (``_parse_ollama_base_url`` calls ``.strip()`` on the resolved value before
+        # parsing). A padded ``OLLAMA_HOST`` / ``AWF_OPENCODE_OLLAMA_BASE_URL`` such as
+        # ``" http://localhost:11434 "`` must not leak the surrounding spaces into the
+        # scheme/authority -- otherwise launch exports a garbled base URL while
+        # preflight resolves the trimmed daemon (the launch/preflight split this prelude
+        # exists to close). The precedence fallthrough above runs on the raw value (like
+        # Python's ``get(A) or get(B)``), so a whitespace-only explicit value stays
+        # selected and trims to empty here, routing to the default below.
+        '__awf_ollama_host="${__awf_ollama_host#"${__awf_ollama_host%%[![:space:]]*}"}"\n'
+        '__awf_ollama_host="${__awf_ollama_host%"${__awf_ollama_host##*[![:space:]]}"}"\n'
         'if [ -n "$__awf_ollama_host" ]; then\n'
         '  case "$__awf_ollama_host" in\n'
         "    *://*) : ;;\n"
@@ -163,6 +183,58 @@ def _ollama_base_url_prelude() -> str:
         # separator (which would leave the value at the scheme default port 80
         # while the worker-side probe/pull builder defaults it to :11434).
         '  __awf_ollama_hostport="${__awf_ollama_authority##*@}"\n'
+        # Fail closed on a malformed authority/port exactly as the Python source of
+        # truth does. ``_parse_ollama_base_url`` parses the resolved value with
+        # ``urlsplit`` and forces the lazy ``.hostname`` / ``.port`` accessors: an
+        # unbalanced IPv6 literal (``http://[::1``) makes ``urlsplit`` raise, a
+        # non-numeric or out-of-range port (``localhost:abc`` / ``:99999``) makes
+        # ``.port`` raise, and a hostless value (``http://`` / ``http://:11434``) yields
+        # an empty ``.hostname`` -- all three normalize to
+        # ``DEFAULT_OLLAMA_OPENAI_BASE_URL``. Detect the same shapes here from the
+        # userinfo-stripped host:port (before the port is defaulted) and mark the value
+        # invalid so the tail below exports the default instead of forwarding a garbled
+        # base URL the worker preflight would never probe (issue #579). A bracket that
+        # did not match one of the balanced ``[..]`` / ``[..]:port`` forms is an
+        # unbalanced IPv6 literal; an empty host or a non-digit / >65535 port is the
+        # ``.hostname`` / ``.port`` failure.
+        "  __awf_ollama_invalid=\n"
+        '  case "$__awf_ollama_hostport" in\n'
+        "    '['*']')\n"
+        "      __awf_ollama_chk_host=\"${__awf_ollama_hostport#'['}\"\n"
+        '      __awf_ollama_chk_host="${__awf_ollama_chk_host%]}"\n'
+        "      __awf_ollama_chk_port=\n"
+        "      ;;\n"
+        "    '['*']:'*)\n"
+        '      __awf_ollama_chk_host="${__awf_ollama_hostport%%]:*}"\n'
+        "      __awf_ollama_chk_host=\"${__awf_ollama_chk_host#'['}\"\n"
+        '      __awf_ollama_chk_port="${__awf_ollama_hostport##*]:}"\n'
+        "      ;;\n"
+        "    *'['* | *']'*)\n"
+        "      __awf_ollama_invalid=1\n"
+        "      __awf_ollama_chk_host=\n"
+        "      __awf_ollama_chk_port=\n"
+        "      ;;\n"
+        "    *:*)\n"
+        '      __awf_ollama_chk_host="${__awf_ollama_hostport%:*}"\n'
+        '      __awf_ollama_chk_port="${__awf_ollama_hostport##*:}"\n'
+        "      ;;\n"
+        "    *)\n"
+        '      __awf_ollama_chk_host="$__awf_ollama_hostport"\n'
+        "      __awf_ollama_chk_port=\n"
+        "      ;;\n"
+        "  esac\n"
+        '  if [ -z "$__awf_ollama_chk_host" ]; then\n'
+        "    __awf_ollama_invalid=1\n"
+        "  fi\n"
+        '  case "$__awf_ollama_chk_port" in\n'
+        "    '') : ;;\n"
+        "    *[!0-9]*) __awf_ollama_invalid=1 ;;\n"
+        "    *)\n"
+        '      if [ "$__awf_ollama_chk_port" -gt 65535 ]; then\n'
+        "        __awf_ollama_invalid=1\n"
+        "      fi\n"
+        "      ;;\n"
+        "  esac\n"
         '  case "$__awf_ollama_hostport" in\n'
         "    '['*']') __awf_ollama_authority=\"$__awf_ollama_authority:11434\" ;;\n"
         "    '['*']:'*) : ;;\n"
@@ -396,6 +468,13 @@ def _ollama_base_url_prelude() -> str:
         "    */v1) : ;;\n"
         '    *) __awf_ollama_host="$__awf_ollama_host/v1" ;;\n'
         "  esac\n"
+        # A value flagged malformed above resolves to the default daemon URL -- the
+        # same fail-closed disposition ``_parse_ollama_base_url`` gives it. The port /
+        # host-local normalization above ran on the garbled authority, but its result
+        # is discarded here.
+        '  if [ -n "$__awf_ollama_invalid" ]; then\n'
+        f'    __awf_ollama_host="{DEFAULT_OLLAMA_OPENAI_BASE_URL}"\n'
+        "  fi\n"
         '  AWF_OPENCODE_OLLAMA_BASE_URL="$__awf_ollama_host"\n'
         "else\n"
         f'  AWF_OPENCODE_OLLAMA_BASE_URL="{DEFAULT_OLLAMA_OPENAI_BASE_URL}"\n'
