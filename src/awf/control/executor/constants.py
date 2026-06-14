@@ -58,6 +58,13 @@ _PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
 
 PR_MONITOR_SETUP_FAILED_REASON_CODE = "PR_MONITOR_SETUP_FAILED"
 
+# Adopt-pr handoff skips the coding agent (PR_ADOPTION_SKIP_AGENT), so the
+# profile's ``setup`` phase is the only thing that provisions the workspace. If
+# a ``validate``-phase command's executable is still not on PATH after setup,
+# fail the adoption early and clearly here instead of letting the first validate
+# command die ``127`` later at ``sync_base_push`` (PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING).
+PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE = "PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED"
+
 _PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
 
 _PR_ADOPTION_METADATA_MISSING_REASON_CODE = "PR_ADOPTION_METADATA_MISSING"

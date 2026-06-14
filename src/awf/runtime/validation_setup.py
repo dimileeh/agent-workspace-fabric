@@ -24,6 +24,24 @@ from awf.common.logging import get_logger
 from awf.profiles.models import (
     WorkspaceProfile,
 )
+from awf.runtime.validation_command_probe import (
+    _ENV_ASSIGNMENT_RE,
+)
+from awf.runtime.validation_command_probe import (
+    _first_non_assignment_token_index as _first_non_assignment_token_index,
+)
+from awf.runtime.validation_command_probe import (
+    _leading_executable as _leading_executable,
+)
+from awf.runtime.validation_command_probe import (
+    _leading_executables as _leading_executables,
+)
+from awf.runtime.validation_command_probe import (
+    _shell_tokens as _shell_tokens,
+)
+from awf.runtime.validation_command_probe import (
+    validate_command_probe_targets as validate_command_probe_targets,
+)
 from awf.runtime.validation_coverage import (
     _command_token_name,
     _execution_command_metadata,
@@ -301,13 +319,6 @@ def _uv_tokens_include_dev_scope(tokens: list[str]) -> bool:
     return False
 
 
-def _shell_tokens(command: str) -> list[str] | None:
-    try:
-        return shlex.split(command)
-    except ValueError:
-        return None
-
-
 _SETUP_DEPENDENCY_COMMAND_VERBS: dict[str, frozenset[str]] = {
     "bun": frozenset({"add", "i", "install", "update", "upgrade"}),
     "bundle": frozenset({"install", "update"}),
@@ -383,7 +394,6 @@ _UV_SETUP_DEPENDENCY_NESTED_SUBCOMMAND_TOKENS = {
     "pip": frozenset({"compile", "install", "sync"}),
     "tool": frozenset({"install", "upgrade"}),
 }
-_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _SHELL_COMPOUND_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "|&", "&"})
 _SETUP_DEPENDENCY_SIMPLE_INDEX_RE = re.compile(r"(?i)/simple(?:[/?#:\s]|$)")
 _SETUP_DEPENDENCY_KNOWN_INDEX_HOSTS = frozenset(
@@ -788,13 +798,6 @@ def _python_module_pip_dependency_setup_command_match(
             continue
         return None
     return None
-
-
-def _first_non_assignment_token_index(tokens: list[str]) -> int:
-    index = 0
-    while index < len(tokens) and _ENV_ASSIGNMENT_RE.fullmatch(tokens[index]):
-        index += 1
-    return index
 
 
 def _next_dependency_tool_subcommand_index(tokens: list[str], *, start: int) -> int | None:

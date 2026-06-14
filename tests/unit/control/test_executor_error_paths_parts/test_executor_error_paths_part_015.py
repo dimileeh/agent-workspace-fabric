@@ -28,6 +28,7 @@ from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 from tests.unit.control.test_executor_error_paths_parts.test_executor_error_paths_part_007 import (
     _make_executor,
+    _queue_validate_toolchain_probe,
     _release_sync_policy,
     _seed_ready,
 )
@@ -64,6 +65,7 @@ class TestSyncReleasePrHandoffForgeGate:
         # uncaught and strand the workspace in ``running``.
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # post-setup git rev-list --count
 
@@ -117,6 +119,7 @@ class TestSyncReleasePrHandoffForgeGate:
         # and strand the workspace in ``running``.
         fake.queue_result(returncode=0)  # git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # git rev-list --count
+        _queue_validate_toolchain_probe(fake)  # adopt-pr validate-toolchain probe (#574)
         fake.queue_result(returncode=0)  # post-setup git fetch
         fake.queue_result(returncode=0, stdout="2\n")  # post-setup git rev-list --count
 
