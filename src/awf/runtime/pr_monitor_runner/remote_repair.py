@@ -326,8 +326,6 @@ async def _commit_dirty_worktree(
         )
         if repaired_status is None:
             return False
-        status = repaired_status
-        changed_paths = tuple(_changed_paths_from_porcelain(status.stdout))
 
     # The pre-existing-dirty guard (``_pre_existing_dirty_repair_worktree_result``)
     # lets a repair run when the only dirt is UNTRACKED AWF-agent-runtime memory
@@ -409,13 +407,19 @@ async def _commit_dirty_worktree(
             raise _MonitorAgentRuntimeOwnershipRepairFailedError(
                 AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
             )
+        # Scope the autofix retry to the paths we actually staged. ``stage_paths``
+        # is the leaf-enumerated (``--untracked-files=all``), agent-runtime-filtered
+        # set computed above, so it never carries untracked ``.claude/agent-memory/``
+        # leftovers or a collapsed ``?? .claude/`` directory entry into
+        # ``operation_dirty_paths`` — which would otherwise widen the retry's
+        # in-scope check beyond what this operation committed.
         retry = await _retry_monitor_precommit_autofix_commit_once(
             runner=self._deps.runner,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             message=message,
             commit_result=commit,
-            operation_dirty_paths=changed_paths,
+            operation_dirty_paths=stage_paths,
         )
         if retry is None:
             _log.warning(
