@@ -178,12 +178,12 @@ def _ollama_base_url_prelude() -> str:
         '  case "$__awf_ollama_hostport" in\n'
         "    '['*']:'*)\n"
         '      __awf_ollama_hl_port="${__awf_ollama_hostport##*]:}"\n'
-        "      __awf_ollama_hl_host=\"${__awf_ollama_hostport%%']:'*}\"\n"
+        '      __awf_ollama_hl_host="${__awf_ollama_hostport%%]:*}"\n'
         "      __awf_ollama_hl_host=\"${__awf_ollama_hl_host#'['}\"\n"
         "      ;;\n"
         "    '['*']')\n"
         "      __awf_ollama_hl_host=\"${__awf_ollama_hostport#'['}\"\n"
-        "      __awf_ollama_hl_host=\"${__awf_ollama_hl_host%']'}\"\n"
+        '      __awf_ollama_hl_host="${__awf_ollama_hl_host%]}"\n'
         "      __awf_ollama_hl_port=\n"
         "      ;;\n"
         "    *:*)\n"
