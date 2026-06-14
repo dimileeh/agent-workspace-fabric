@@ -176,7 +176,7 @@ class WorkspaceCleaner:
             if compose_file_path is not None:
                 if compose_file_path.exists():
                     try:
-                        await self._compose.down_project(
+                        down_ran = await self._compose.down_project(
                             project_name=project_name,
                             compose_file=compose_file_path,
                             workspace_id=workspace_id,
@@ -200,6 +200,27 @@ class WorkspaceCleaner:
                             workspace_id=workspace_id,
                             remove_volumes=remove_volumes,
                         )
+                    else:
+                        if not down_ran:
+                            # The compose file existed at the check above but
+                            # vanished before ``down`` ran its own existence check
+                            # (e.g. a concurrent GC removed the compose directory).
+                            # ``down_project`` silently noops and returns False in
+                            # that case, which would skip the teardown and let the
+                            # service cancel/stop path emit terminal_runtime_released
+                            # while the project's containers/network/host port are
+                            # still live, so fall back to the label-scoped removal
+                            # (mirroring ``ComposeManager.teardown_project``).
+                            _log.warning(
+                                "cleanup.compose_down_vanished_label_fallback",
+                                workspace_id=workspace_id,
+                                project_name=project_name,
+                            )
+                            await self._compose.remove_project_by_label(
+                                project_name=project_name,
+                                workspace_id=workspace_id,
+                                remove_volumes=remove_volumes,
+                            )
                 else:
                     await self._compose.remove_project_by_label(
                         project_name=project_name,

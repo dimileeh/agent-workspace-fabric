@@ -242,6 +242,42 @@ class TestCleanup:
         )
 
     @pytest.mark.unit
+    async def test_present_compose_file_vanished_during_down_falls_back_to_label(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+        tmp_path: Path,
+    ) -> None:
+        # The persisted compose file exists at the check but vanishes before
+        # ``down_project`` runs its own existence check, so ``down_project``
+        # noops and returns False rather than raising. Cleanup must branch on
+        # that False return and run the label-scoped removal (mirroring
+        # ComposeManager.teardown_project) so the containers/network/host port
+        # are released instead of leaving a live stack behind, while still
+        # recording compose_down as succeeded.
+        git, compose, wc = cleaner
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+        compose.down_project.return_value = False
+
+        result = await wc.cleanup(
+            workspace_id="ws_vanished",
+            repo_url="git@x:y.git",
+            compose_project_name="awf_ws_vanished",
+            compose_file_path=compose_file,
+            remove_worktree=False,
+        )
+
+        assert result.ok
+        compose.down_project.assert_awaited_once()
+        compose.remove_project_by_label.assert_awaited_once_with(
+            project_name="awf_ws_vanished",
+            workspace_id="ws_vanished",
+            remove_volumes=True,
+        )
+        compose_step = next(step for step in result.steps if step.name == "compose_down")
+        assert compose_step.status == "succeeded"
+
+    @pytest.mark.unit
     async def test_present_compose_file_records_failure_when_label_fallback_also_fails(
         self,
         cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
