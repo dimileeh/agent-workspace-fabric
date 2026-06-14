@@ -437,6 +437,40 @@ class TestCleanup:
         assert compose_step.status == "succeeded"
 
     @pytest.mark.unit
+    async def test_null_compose_file_non_default_project_uses_label_cleanup(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+    ) -> None:
+        # A legacy row may persist a ``compose_project_name`` that differs from
+        # the default ``awf_<workspace_id>`` while leaving ``compose_file_path``
+        # unset. ``ComposeManager.down`` rebuilds the default spec project name,
+        # so driving it would reap the (non-existent) default-named project and
+        # report success while the actually-stored project keeps running and
+        # holding its host port. Skip the spec ``down`` entirely and tear the
+        # persisted project down via the label-scoped pass so cancel/stop do not
+        # emit terminal_runtime_released over a still-live stack.
+        git, compose, wc = cleaner
+        compose.down.return_value = True
+
+        result = await wc.cleanup(
+            workspace_id="ws_legacy_proj",
+            repo_url="git@x:y.git",
+            compose_project_name="legacy_custom_project",
+            compose_file_path=None,
+            remove_worktree=False,
+        )
+
+        assert result.ok
+        compose.down.assert_not_awaited()
+        compose.remove_project_by_label.assert_awaited_once_with(
+            project_name="legacy_custom_project",
+            workspace_id="ws_legacy_proj",
+            remove_volumes=True,
+        )
+        compose_step = next(step for step in result.steps if step.name == "compose_down")
+        assert compose_step.status == "succeeded"
+
+    @pytest.mark.unit
     async def test_remove_worktree_false_skips_worktree_removal(
         self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
     ) -> None:

@@ -228,8 +228,23 @@ class WorkspaceCleaner:
                         remove_volumes=remove_volumes,
                     )
             else:
+                # No persisted compose file. ``down`` resolves the default
+                # ``awf_<workspace_id>`` compose path and tears the stack down
+                # under ``spec.project_name()``. A legacy row may persist a
+                # ``compose_project_name`` that differs from that default; using
+                # ``down`` would then reap the default-named project (a noop) and
+                # report success while the actually-stored Docker project keeps
+                # running and holding its host port. Only drive the compose
+                # ``down`` when the resolved project name is the spec default;
+                # otherwise skip it and fall through to the label-scoped pass
+                # keyed on the persisted project name.
+                project_is_default = project_name == spec.project_name()
                 try:
-                    down_ran = await self._compose.down(spec, remove_volumes=remove_volumes)
+                    down_ran = (
+                        await self._compose.down(spec, remove_volumes=remove_volumes)
+                        if project_is_default
+                        else False
+                    )
                 except ComposeOperationError as down_exc:
                     # No persisted compose file, so ``down`` resolves the default
                     # ``awf_<workspace_id>`` compose path. If that default file
@@ -254,11 +269,14 @@ class WorkspaceCleaner:
                     )
                 else:
                     if not down_ran:
-                        # The default compose file was absent so ``down``
-                        # short-circuited as a noop (returned False). Fall back
-                        # to the label-scoped removal so a project whose compose
-                        # file vanished but whose containers/network/host port
-                        # are still live is still torn down (mirroring the
+                        # Either the default compose file was absent so ``down``
+                        # short-circuited as a noop (returned False), or the
+                        # persisted project name differs from the spec default so
+                        # ``down`` was skipped entirely. Fall back to the
+                        # label-scoped removal so a project whose compose file
+                        # vanished — or whose stored name never matched the spec
+                        # default — but whose containers/network/host port are
+                        # still live is still torn down (mirroring the
                         # persisted-file vanished fallback above). When ``down``
                         # actually ran we skip the redundant label-scoped pass:
                         # it already freed the port, and a transient label-scoped
