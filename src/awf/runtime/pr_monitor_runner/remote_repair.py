@@ -264,8 +264,19 @@ async def _commit_dirty_worktree(
     worktree_path = self._worktrees_root / workspace_id
     if not worktree_path.exists():
         return False
+    # Decide dirtiness with the SAME untracked AWF-agent-runtime exclusion the
+    # pre-existing-dirty guard and the staging filter below apply. A worktree
+    # dirtied only by reviewer subagent memory (untracked ``.claude/agent-memory/...``)
+    # must short-circuit here, BEFORE any commit-side effects — supply-chain policy
+    # refresh, agent-runtime ownership repair, and protected-scope repair (which can
+    # launch the agent CLI) — exactly as the guard and staging logic intentionally
+    # skip it. ``--untracked-files=all`` is load-bearing: with git's default
+    # ``normal`` mode a fully-untracked ``.claude/`` collapses to a single
+    # ``?? .claude/`` entry that is NOT under ``.claude/agent-memory/`` and so would
+    # escape the agent-runtime filter, letting memory-only dirt fall through into the
+    # side-effecting path. Enumerating leaf paths lets the filter drop the memory files.
     status = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "status", "--porcelain")
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
     )
     if not status.ok:
         _log.warning(
@@ -274,10 +285,15 @@ async def _commit_dirty_worktree(
             stderr=status.stderr[:400],
         )
         return False
-    if not status.stdout.strip():
+    untracked = set(_untracked_paths_from_porcelain(status.stdout))
+    changed_paths = tuple(
+        path
+        for path in _changed_paths_from_porcelain(status.stdout)
+        if not (path in untracked and is_under_agent_runtime_root(path))
+    )
+    if not changed_paths:
         return False
 
-    changed_paths = tuple(_changed_paths_from_porcelain(status.stdout))
     policy_message = await self._refresh_supply_chain_policy_before_push(
         workspace_id=workspace_id,
         command_evidence=command_evidence,

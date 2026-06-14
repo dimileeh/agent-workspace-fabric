@@ -712,25 +712,27 @@ class TestMiscMonitorHelpers:
         assert not any(arg.startswith(".claude/agent-memory") for arg in add_args)
 
     @pytest.mark.unit
-    async def test_commit_dirty_worktree_memory_only_makes_no_commit(
+    async def test_commit_dirty_worktree_memory_only_skips_commit_side_effects(
         self,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """A worktree dirtied only by reviewer memory yields no PR commit.
+        """Memory-only dirt short-circuits before any commit-side effects.
 
-        With nothing PR-worthy left after excluding the untracked agent-runtime
-        artifact, the commit path returns False and never stages or commits
-        (PRRT_kwDOSJAM6s6JXd4I).
+        The initial dirty check runs with ``--untracked-files=all`` and drops the
+        untracked agent-runtime artifact, so a worktree dirtied only by reviewer
+        subagent memory returns False after a single ``git status`` — never entering
+        the supply-chain policy refresh, agent-runtime ownership repair, or
+        protected-scope repair (which can launch the agent CLI) that the
+        pre-existing-dirty guard and staging logic intentionally skip. Cursor BUGBOT
+        follow-up to PRRT_kwDOSJAM6s6JXd4I: the plain ``--porcelain`` check used here
+        previously let memory-only dirt fall through into those side effects.
         """
         workspace_id = "ws_memory_only"
         fake = FakeCommandRunner()
-        dirty = "?? .claude/agent-memory/reviewer/bug.md\n"
-        for result in (
-            {"returncode": 0, "stdout": dirty},  # status --porcelain
-            {"returncode": 0, "stdout": dirty},  # status --untracked-files=all
-        ):
-            fake.queue_result(**result)
+        # ``--untracked-files=all`` enumerates the leaf path; the agent-runtime filter
+        # then drops it, leaving nothing PR-worthy.
+        fake.queue_result(returncode=0, stdout="?? .claude/agent-memory/reviewer/bug.md\n")
         runner = _monitor_runner(tmp_path, fake, session_factory=factory)
         (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
 
@@ -740,6 +742,10 @@ class TestMiscMonitorHelpers:
         )
 
         assert committed is False
+        # Exactly one git command — the initial ``--untracked-files=all`` dirty
+        # check — runs: no second status, no add, no commit, no protected-scope work.
+        assert len(fake.calls) == 1
+        assert fake.calls[0].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
         assert not any("add" in call.args for call in fake.calls)
         assert not any("commit" in call.args for call in fake.calls)
 

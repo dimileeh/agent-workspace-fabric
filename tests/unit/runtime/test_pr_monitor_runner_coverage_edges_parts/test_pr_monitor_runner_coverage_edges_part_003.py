@@ -577,8 +577,9 @@ async def test_dirty_worktree_helper_returns_false_for_non_commit_cases(
     missing_result, missing_calls = await run_case(workspace_exists=False, queued=[])
     status_result, status_calls = await run_case(queued=[(1, "", "status failed")])
     clean_result, clean_calls = await run_case(queued=[(0, "", "")])
-    # A second status (``--untracked-files=all``) enumerates leaf paths so the
-    # commit path can exclude untracked agent-runtime memory before staging.
+    # Both the initial dirty check and the later staging scan run with
+    # ``--untracked-files=all`` so untracked agent-runtime memory is excluded
+    # before any commit-side effects and before staging.
     add_result, add_calls = await run_case(
         queued=[(0, " M a.py\n", ""), (0, " M a.py\n", ""), (1, "", "add failed")]
     )
@@ -601,17 +602,21 @@ async def test_dirty_worktree_helper_returns_false_for_non_commit_cases(
     assert missing_result is False
     assert missing_calls == []
     assert status_result is False
-    assert [args[-2:] for args in status_calls] == [["status", "--porcelain"]]
+    assert [args[-3:] for args in status_calls] == [
+        ["status", "--porcelain", "--untracked-files=all"]
+    ]
     assert clean_result is False
-    assert [args[-2:] for args in clean_calls] == [["status", "--porcelain"]]
+    assert [args[-3:] for args in clean_calls] == [
+        ["status", "--porcelain", "--untracked-files=all"]
+    ]
     assert add_result is False
-    assert add_calls[0][-2:] == ["status", "--porcelain"]
+    assert add_calls[0][-3:] == ["status", "--porcelain", "--untracked-files=all"]
     assert add_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
     assert "add" in add_calls[2] and "a.py" in add_calls[2]
     assert stage_status_result is False
     assert stage_status_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
     assert cached_result is False
-    assert cached_calls[0][-2:] == ["status", "--porcelain"]
+    assert cached_calls[0][-3:] == ["status", "--porcelain", "--untracked-files=all"]
     assert cached_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
     assert "add" in cached_calls[2]
     assert cached_calls[3][-3:] == ["diff", "--cached", "--quiet"]
