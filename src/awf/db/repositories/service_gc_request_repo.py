@@ -208,10 +208,20 @@ class ServiceGCRequestRepository:
         error_message: str,
         now: datetime,
     ) -> ServiceGCRequest | None:
-        """Mark the request ``failed`` with a structured reason code for the API."""
+        """Mark the request ``failed`` with a structured reason code for the API.
+
+        Refuses to overwrite a terminal ``expired`` row (#590), mirroring
+        :meth:`mark_completed`: expire-on-timeout has already told the operator the
+        trigger timed out, so a late error finish from an abandoned reap must not
+        replace ``expired`` with ``failed`` (which would surface
+        ``SERVICE_GC_WORKER_RECLAIM_FAILED`` instead of the timeout). The expired
+        state wins and the row is returned unchanged.
+        """
         request = await self.get(request_id)
         if request is None:
             return None
+        if request.status == SERVICE_GC_REQUEST_STATUS_EXPIRED:
+            return request
         request.status = SERVICE_GC_REQUEST_STATUS_FAILED
         request.finished_at = now
         request.error_code = error_code

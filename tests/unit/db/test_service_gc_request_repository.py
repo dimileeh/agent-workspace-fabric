@@ -134,6 +134,53 @@ async def test_mark_failed_records_reason_code() -> None:
             assert failed.error_message == "boom"
 
 
+async def test_mark_failed_does_not_overwrite_expired() -> None:
+    """A late error finish must not clobber the terminal ``expired`` state (#590).
+
+    Symmetric with :func:`test_mark_completed_does_not_overwrite_expired`: after
+    expire-on-timeout retires a past-deadline row to ``expired``, a reap from an
+    abandoned incarnation that finishes with an error must leave the row ``expired``
+    rather than re-record it as ``failed`` (which would surface
+    ``SERVICE_GC_WORKER_RECLAIM_FAILED`` instead of the timeout).
+    """
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            created = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now - timedelta(seconds=60),
+                deadline_at=now - timedelta(seconds=30),
+            )
+            request_id = created.id
+            # Claim it (running), then expire-on-timeout retires it terminally.
+            await repo.claim_oldest_pending(node_id="node-a", now=now - timedelta(seconds=40))
+            expired = await repo.expire_stale_requests(node_id="node-a", now=now)
+            assert expired == [request_id]
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            result = await repo.mark_failed(
+                request_id=request_id,
+                error_code="SERVICE_GC_WORKER_RECLAIM_FAILED",
+                error_message="boom",
+                now=now + timedelta(seconds=2),
+            )
+            assert result is not None
+            assert result.status == "expired"
+            assert result.error_code is None
+            assert result.error_message is None
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            fetched = await repo.get(request_id)
+            assert fetched is not None
+            assert fetched.status == "expired"
+
+
 async def test_claim_oldest_pending_orders_by_requested_at() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
