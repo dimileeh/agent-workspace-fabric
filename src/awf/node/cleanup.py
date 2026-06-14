@@ -175,12 +175,31 @@ class WorkspaceCleaner:
         try:
             if compose_file_path is not None:
                 if compose_file_path.exists():
-                    await self._compose.down_project(
-                        project_name=project_name,
-                        compose_file=compose_file_path,
-                        workspace_id=workspace_id,
-                        remove_volumes=remove_volumes,
-                    )
+                    try:
+                        await self._compose.down_project(
+                            project_name=project_name,
+                            compose_file=compose_file_path,
+                            workspace_id=workspace_id,
+                            remove_volumes=remove_volumes,
+                        )
+                    except ComposeOperationError as down_exc:
+                        # The compose file still exists but is stale/unusable, so
+                        # ``docker compose down`` failed. Fall back to label-scoped
+                        # removal (mirroring ``ComposeManager.teardown_project``) so
+                        # the containers, network, and host port are still released
+                        # instead of leaving a stopped-only stack behind. Only a
+                        # failing fallback records a failed ``compose_down``.
+                        _log.warning(
+                            "cleanup.compose_down_label_fallback",
+                            workspace_id=workspace_id,
+                            reason_code=down_exc.reason_code,
+                            stderr=down_exc.stderr[:1000],
+                        )
+                        await self._compose.remove_project_by_label(
+                            project_name=project_name,
+                            workspace_id=workspace_id,
+                            remove_volumes=remove_volumes,
+                        )
                 else:
                     await self._compose.remove_project_by_label(
                         project_name=project_name,

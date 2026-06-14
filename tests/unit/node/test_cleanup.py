@@ -206,6 +206,75 @@ class TestCleanup:
         git.remove_worktree.assert_awaited_once()
 
     @pytest.mark.unit
+    async def test_stale_present_compose_file_down_failure_falls_back_to_label(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+        tmp_path: Path,
+    ) -> None:
+        # A persisted compose file that still exists but whose ``docker compose
+        # down`` fails (stale/unusable) must fall back to label-scoped removal so
+        # /stop and cancel?stop_stack=true still stop the containers and free the
+        # host port, mirroring ComposeManager.teardown_project.
+        git, compose, wc = cleaner
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+        compose.down_project.side_effect = ComposeOperationError(
+            operation="down",
+            returncode=1,
+            stdout="",
+            stderr="stale compose file",
+        )
+
+        failures = await wc.cleanup(
+            workspace_id="ws_stale",
+            repo_url="git@x:y.git",
+            compose_project_name="awf_ws_stale",
+            compose_file_path=compose_file,
+            remove_worktree=False,
+        )
+
+        assert failures == []
+        compose.down_project.assert_awaited_once()
+        compose.remove_project_by_label.assert_awaited_once_with(
+            project_name="awf_ws_stale",
+            workspace_id="ws_stale",
+            remove_volumes=True,
+        )
+
+    @pytest.mark.unit
+    async def test_present_compose_file_records_failure_when_label_fallback_also_fails(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+        tmp_path: Path,
+    ) -> None:
+        # When the compose-file down fails AND the label-scoped fallback also
+        # fails, the compose_down step is recorded failed carrying the fallback's
+        # error, so the teardown failure is surfaced rather than swallowed.
+        git, compose, wc = cleaner
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+        compose.down_project.side_effect = ComposeOperationError(
+            operation="down", returncode=1, stdout="", stderr="stale compose file"
+        )
+        compose.remove_project_by_label.side_effect = ComposeOperationError(
+            operation="rm", returncode=1, stdout="", stderr="docker unavailable"
+        )
+
+        result = await wc.cleanup(
+            workspace_id="ws_stale_both",
+            repo_url="git@x:y.git",
+            compose_project_name="awf_ws_stale_both",
+            compose_file_path=compose_file,
+            remove_worktree=False,
+        )
+
+        assert "compose_down" in result
+        compose_step = next(step for step in result.steps if step.name == "compose_down")
+        assert compose_step.status == "failed"
+        assert compose_step.error == "docker unavailable"
+        compose.remove_project_by_label.assert_awaited_once()
+
+    @pytest.mark.unit
     async def test_remove_worktree_false_skips_worktree_removal(
         self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
     ) -> None:
