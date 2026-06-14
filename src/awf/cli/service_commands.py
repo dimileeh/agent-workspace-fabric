@@ -559,12 +559,18 @@ def service_gc(
     if execute:
         # #582: ``execute`` delegates the capability-gated reclaim (per-workspace
         # auth overlays + claude-base) to the worker and waits for it. Give the
-        # server the same budget as the CLI timeout, and bump the HTTP read timeout
-        # by a buffer so the server's structured timeout response always arrives
-        # before the client's own socket timeout fires.
+        # server the same budget as the CLI timeout for that worker phase.
         body["worker_delegation_timeout_seconds"] = timeout_seconds
 
-    http_timeout = timeout_seconds + 30.0 if execute else timeout_seconds
+    # #590: an ``execute`` request runs *two* sequential server phases -- the
+    # API-side worktree/compose reclaim (itself minutes for large reclaims) and
+    # only *then* the worker-delegation deadline (``timeout_seconds``). Budgeting
+    # just ``timeout_seconds + 30`` covered only the worker phase, so an API-side
+    # phase longer than 30s let httpx abort before the server could return its
+    # structured worker-timeout response -- exactly the false timeout the buffer
+    # exists to avoid. Allow each phase the full ``timeout_seconds`` plus a final
+    # 30s settle margin so the structured response always arrives first.
+    http_timeout = 2.0 * timeout_seconds + 30.0 if execute else timeout_seconds
     response = _call(
         "POST",
         "/v1/service/gc",

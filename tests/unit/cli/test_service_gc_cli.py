@@ -165,10 +165,11 @@ def test_service_gc_uses_long_default_timeout() -> None:
         result = _runner.invoke(app, ["service", "gc", "--execute"])
 
     assert result.exit_code == 0, result.output
-    # #582: the execute HTTP timeout carries a buffer above the worker-delegation
-    # budget so the server's structured timeout response arrives before the client
-    # socket timeout; the worker budget itself is the unbuffered 900s default.
-    assert mock.call_args.kwargs["timeout"] == 930.0
+    # #590: the execute HTTP timeout must budget *both* server phases. The API-side
+    # worktree/compose reclaim runs first and only then starts the worker-delegation
+    # deadline, so the client allows each phase the full --timeout-seconds plus a 30s
+    # settle margin (2 * 900 + 30); the worker budget itself is the unbuffered 900s.
+    assert mock.call_args.kwargs["timeout"] == 1830.0
     body = mock.call_args.kwargs["json"]
     assert body["worker_delegation_timeout_seconds"] == 900.0
 
@@ -183,7 +184,8 @@ def test_service_gc_honors_timeout_override() -> None:
         )
 
     assert result.exit_code == 0, result.output
-    assert mock.call_args.kwargs["timeout"] == 3630.0
+    # #590: both phases get the override budget, plus the 30s settle margin.
+    assert mock.call_args.kwargs["timeout"] == 7230.0
     assert mock.call_args.kwargs["json"]["worker_delegation_timeout_seconds"] == 3600.0
 
 
