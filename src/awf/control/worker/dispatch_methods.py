@@ -315,6 +315,11 @@ async def _safely_provision_claimed(self: Any, workspace_id: str) -> None:
         # and the epoch pop so a second cancellation (worker shutdown) landing
         # mid-write cannot skip them and leak the DB lease or the epoch entry.
         await self._release_execution_claim_after_cancellation(workspace_id)
+        # Promptly release the terminal runtime when provisioning ended terminal
+        # (provision failure → ``failed``), reclaiming the compose stack + per-ws
+        # auth overlay immediately rather than on the ~1h interval (#583, #584). A
+        # no-op for non-terminal exits and idempotent against the periodic backstop.
+        await self._release_terminal_runtime_promptly(workspace_id)
 
 
 async def _safely_execute(self: Any, workspace_id: str) -> None:
@@ -345,6 +350,12 @@ async def _safely_execute_claimed(self: Any, workspace_id: str) -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
         await self._release_execution_claim(workspace_id)
+        # Promptly release the terminal runtime when this execution ended terminal
+        # (completed / failed, or a running ws cancelled while we executed it), so
+        # the compose stack + per-ws auth overlay are reclaimed immediately instead
+        # of on the ~1h interval (#583, #584). A no-op for non-terminal exits and
+        # idempotent against the periodic backstop, which stays in place.
+        await self._release_terminal_runtime_promptly(workspace_id)
 
 
 async def _safely_resume_pr_monitor(

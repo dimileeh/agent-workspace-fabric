@@ -651,6 +651,49 @@ async def _has_terminal_auth_overlay_unmount_terminal_event(
     return (await session.execute(stmt)).scalar_one_or_none() is not None
 
 
+async def _has_current_cycle_terminal_auth_overlay_unmount_marker(
+    self: Any,
+    session: AsyncSession,
+    workspace_id: str,
+) -> bool:
+    """Return True if any current-cycle overlay-umount marker (pending/resolved/exhausted) exists.
+
+    Used by the prompt-path *duplicate-release* branch in
+    :func:`awf.control.worker.cleanup._record_terminal_runtime_released` to seed the
+    *first* ``pending`` marker idempotently. A ``cancel --stop-stack`` pre-emits
+    ``terminal_runtime_released`` in the service after only a ``docker stop``, so the
+    prompt path's ``compose down`` + failed overlay umount reaches that branch with the
+    release event already present; without a seeded ``pending`` marker the deferred
+    re-sweep would have no candidate and the ~1.7 GB overlay would leak. Any marker
+    already present for the current release cycle means the deferred sweep is already
+    tracking (or has concluded) this overlay, so no fresh seed is owed. Scoped to the
+    current effective-release cycle (markers at or after the latest
+    ``terminal_runtime_released`` order) so a stale earlier-cycle marker never suppresses
+    the seed a genuinely new release owes (issue #399).
+    """
+    _ = self
+    release_cycle_floor = func.coalesce(
+        latest_terminal_runtime_release_event_order_expr(workspace_id=workspace_id),
+        literal(-1),
+    )
+    stmt = (
+        select(WorkspaceEvent.id)
+        .where(WorkspaceEvent.workspace_id == workspace_id)
+        .where(
+            WorkspaceEvent.event_type.in_(
+                (
+                    _TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                    _TERMINAL_AUTH_OVERLAY_UNMOUNT_RESOLVED_EVENT_TYPE,
+                    _TERMINAL_AUTH_OVERLAY_UNMOUNT_EXHAUSTED_EVENT_TYPE,
+                )
+            )
+        )
+        .where(_current_release_cycle_event_order_matches(release_cycle_floor))
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
 def _log_terminal_auth_overlay_unmount_release_revoked(
     candidate: _TerminalRuntimeCandidate,
     *,
