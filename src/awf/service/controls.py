@@ -259,7 +259,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
                 message=failure_message,
             )
         compose_down_succeeded = any(
-            step.name == "compose_down" and step.ok for step in cleanup_result.completed_steps
+            step.name == "compose_down" for step in cleanup_result.completed_steps
         )
         if (
             workspace.compose_project_name is not None
