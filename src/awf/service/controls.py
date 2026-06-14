@@ -191,7 +191,11 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
             return _control_response(
                 workspace=workspace,
                 operation=replay,
-                message="workspace cancellation requested",
+                message=_stack_release_replay_message(
+                    replay,
+                    success_message="workspace cancellation requested",
+                    failure_message="workspace cancelled but stack teardown failed",
+                ),
             )
 
         operation = await operations.create(
@@ -308,7 +312,11 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
             return _control_response(
                 workspace=workspace,
                 operation=replay,
-                message="workspace stack stopped",
+                message=_stack_release_replay_message(
+                    replay,
+                    success_message="workspace stack stopped",
+                    failure_message="workspace stack stop failed",
+                ),
             )
 
         operation = await operations.create(
@@ -1337,6 +1345,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _payload_matches_idempotency_identity,
     _remonitor_current_head_sha,
     _reset_failed_workspace_for_remonitor,
+    _stack_release_replay_message,
     _with_secret_lease_evidence,
     _with_secret_lease_result,
     _workspace_pr_operation_context,

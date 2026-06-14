@@ -318,6 +318,101 @@ async def test_stop_compose_down_failure_is_surfaced(
 
 
 @pytest.mark.unit
+async def test_cancel_failed_stack_release_replay_keeps_failure_message(
+    session: AsyncSession,
+) -> None:
+    """Idempotent retry of a failed cancel teardown must not claim success.
+
+    The first call records a ``failed`` operation (compose down failed) and
+    returns the failure message. A retry with the same idempotency key is served
+    from the stored failed operation, so the replay message must stay the
+    failure string rather than the hard-coded success string — otherwise a
+    client sees ``operation_status: failed`` with a message saying the
+    cancellation was requested.
+    """
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    cleaner = RecordingCleaner(result=compose_down_failed_result(error="compose down denied"))
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    first = await service.cancel_workspace(
+        workspace.id,
+        reason="operator cancel",
+        stop_stack=True,
+        idempotency_key="cancel-key",
+    )
+    replay = await service.cancel_workspace(
+        workspace.id,
+        reason="operator cancel",
+        stop_stack=True,
+        idempotency_key="cancel-key",
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert len(operations) == 1
+    assert first.operation_status == OperationStatus.failed.value
+    assert first.message == "workspace cancelled but stack teardown failed"
+    assert replay.operation_id == first.operation_id
+    assert replay.operation_status == OperationStatus.failed.value
+    assert replay.message == "workspace cancelled but stack teardown failed"
+
+
+@pytest.mark.unit
+async def test_stop_failed_stack_release_replay_keeps_failure_message(
+    session: AsyncSession,
+) -> None:
+    """Idempotent retry of a failed stop teardown must echo the failure message."""
+    workspace = await _workspace(session, status=WorkspaceStatus.running)
+    cleaner = RecordingCleaner(result=compose_down_failed_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    first = await service.stop_workspace(
+        workspace.id,
+        reason="halt",
+        idempotency_key="stop-key",
+    )
+    replay = await service.stop_workspace(
+        workspace.id,
+        reason="halt",
+        idempotency_key="stop-key",
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert len(operations) == 1
+    assert first.operation_status == OperationStatus.failed.value
+    assert first.message == "workspace stack stop failed"
+    assert replay.operation_id == first.operation_id
+    assert replay.operation_status == OperationStatus.failed.value
+    assert replay.message == "workspace stack stop failed"
+
+
+@pytest.mark.unit
+async def test_stop_succeeded_stack_release_replay_keeps_success_message(
+    session: AsyncSession,
+) -> None:
+    """A successful teardown still replays the success message on retry."""
+    workspace = await _workspace(session, status=WorkspaceStatus.running)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    first = await service.stop_workspace(
+        workspace.id,
+        reason="halt",
+        idempotency_key="stop-ok-key",
+    )
+    replay = await service.stop_workspace(
+        workspace.id,
+        reason="halt",
+        idempotency_key="stop-ok-key",
+    )
+
+    assert first.operation_status == OperationStatus.succeeded.value
+    assert first.message == "workspace stack stopped"
+    assert replay.operation_id == first.operation_id
+    assert replay.operation_status == OperationStatus.succeeded.value
+    assert replay.message == "workspace stack stopped"
+
+
+@pytest.mark.unit
 async def test_destroy_still_removes_worktree_unlike_cancel_stop(
     session: AsyncSession,
 ) -> None:
