@@ -100,10 +100,14 @@ async def test_create_preflight_probes_profile_ollama_daemon(
     probe so admission targets the same daemon the executor's pre-agent step
     reaches — not the worker env's daemon (regression for PRRT_kwDOSJAM6s6JU0zF).
 
-    Both URLs are worker-reachable loopback hosts so the create-time daemon probe
-    actually runs for the ``:cloud`` model: a non-worker-reachable sidecar URL now
-    defers the probe to the agent container (PRRT_kwDOSJAM6s6JV_Rl), which would
-    leave nothing to assert the overlay against."""
+    Both URLs are worker-reachable host-gateway aliases so the create-time daemon
+    probe actually runs for the ``:cloud`` model: a non-worker-reachable sidecar URL
+    now defers the probe to the agent container (PRRT_kwDOSJAM6s6JV_Rl), which would
+    leave nothing to assert the overlay against. The two distinct gateway aliases are
+    used rather than ``localhost`` / ``127.0.0.1`` because host-local targets now both
+    normalize to ``host.docker.internal`` (issue #579), which would make the
+    profile-vs-worker daemon indistinguishable here; ``gateway.docker.internal`` is
+    worker-reachable and not collapsed by that normalization."""
     settings = _settings_with_host_home(tmp_path)
 
     payload = _request(provider_readiness_override=False).model_dump(mode="python")
@@ -115,7 +119,7 @@ async def test_create_preflight_probes_profile_ollama_daemon(
             "name": "ollama-profile-host",
             "runtime": {
                 "environment": {
-                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434",
+                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434",
                 },
             },
         },
@@ -135,7 +139,7 @@ async def test_create_preflight_probes_profile_ollama_daemon(
             settings=settings,
             provider_environ={
                 "OLLAMA_API_KEY": "ollama_secret",
-                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://127.0.0.1:11434",
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://host.docker.internal:11434",
             },
             run_subprocess=_docker_ok,
             http_get=_capturing_http_get,
@@ -144,8 +148,8 @@ async def test_create_preflight_probes_profile_ollama_daemon(
     preflight = workspace.task_policy["provider_readiness_preflight"]
     assert preflight["provider"] == "opencode"
     assert probed, "expected the create-time readiness probe to hit the Ollama daemon"
-    assert all("localhost:11434" in url for url in probed)
-    assert all("127.0.0.1" not in url for url in probed)
+    assert all("gateway.docker.internal:11434" in url for url in probed)
+    assert all("host.docker.internal" not in url for url in probed)
 
 
 async def test_create_with_provider_readiness_override_records_policy_and_event(
@@ -282,10 +286,13 @@ async def test_retry_preflight_probes_source_profile_ollama_daemon(
     pre-agent step reaches — not the worker env's daemon (regression for
     PRRT_kwDOSJAM6s6JU4FX).
 
-    Both URLs are worker-reachable loopback hosts so the retry daemon probe
+    Both URLs are worker-reachable host-gateway aliases so the retry daemon probe
     actually runs for the ``:cloud`` model: a non-worker-reachable sidecar URL now
     defers the probe to the agent container (PRRT_kwDOSJAM6s6JV_Rl), which would
-    leave nothing to assert the overlay against."""
+    leave nothing to assert the overlay against. The two distinct gateway aliases are
+    used rather than ``localhost`` / ``127.0.0.1`` because host-local targets now both
+    normalize to ``host.docker.internal`` (issue #579), which would make the
+    source-profile-vs-retry-env daemon indistinguishable here."""
     settings = _settings_with_host_home(tmp_path)
 
     payload = _request(provider_readiness_override=False).model_dump(mode="python")
@@ -297,7 +304,7 @@ async def test_retry_preflight_probes_source_profile_ollama_daemon(
             "name": "ollama-profile-host",
             "runtime": {
                 "environment": {
-                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434",
+                    "AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434",
                 },
             },
         },
@@ -311,7 +318,7 @@ async def test_retry_preflight_probes_source_profile_ollama_daemon(
             settings=settings,
             provider_environ={
                 "OLLAMA_API_KEY": "ollama_secret",
-                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434",
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434",
             },
             run_subprocess=_docker_ok,
             http_get=_ollama_ok,
@@ -332,15 +339,15 @@ async def test_retry_preflight_probes_source_profile_ollama_daemon(
             settings=settings,
             provider_environ={
                 "OLLAMA_API_KEY": "ollama_secret",
-                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://127.0.0.1:11434",
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://host.docker.internal:11434",
             },
             run_subprocess=_docker_ok,
             http_get=_capturing_http_get,
         )
 
     assert probed, "expected the retry readiness probe to hit the Ollama daemon"
-    assert all("localhost:11434" in url for url in probed)
-    assert all("127.0.0.1" not in url for url in probed)
+    assert all("gateway.docker.internal:11434" in url for url in probed)
+    assert all("host.docker.internal" not in url for url in probed)
 
 
 async def test_retry_with_provider_readiness_override_records_source_and_target(

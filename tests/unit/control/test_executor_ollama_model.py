@@ -326,12 +326,15 @@ async def test_ensure_derives_urls_from_profile_ollama_base_url(
     the worker process env: a profile that sets ``AWF_OPENCODE_OLLAMA_BASE_URL``
     for the agent points at a different daemon than the worker, and AWF must
     probe/pull the daemon the agent will actually reach. Both daemons are
-    host-reachable loopback hosts so the #569 worker-skip does not apply and the
-    URL-derivation wiring is still exercised."""
+    worker-reachable host-gateway aliases so the #569 worker-skip does not apply and
+    the URL-derivation wiring is still exercised; the two distinct aliases are used
+    rather than two ``127.*`` loopback hosts because host-local targets now both
+    normalize to ``host.docker.internal`` (issue #579), which would make the
+    profile-vs-worker daemon indistinguishable here."""
     workspace_id = await _seed_running(factory)
     executor = _make_executor(factory, tmp_path)
 
-    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://127.0.0.2:11434")
+    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 
     seen: dict[str, Any] = {}
 
@@ -351,7 +354,7 @@ async def test_ensure_derives_urls_from_profile_ollama_base_url(
                 "name": "ollama-profile-daemon",
                 "runtime": {
                     "environment": {
-                        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://127.0.0.1:11434",
+                        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434",
                     }
                 },
             },
@@ -359,9 +362,10 @@ async def test_ensure_derives_urls_from_profile_ollama_base_url(
     )
 
     assert proceed is True
-    assert any("127.0.0.1:11434" in url for url in seen["tags_urls"])
-    assert any("127.0.0.1:11434" in url for url in seen["pull_urls"])
-    assert all("127.0.0.2" not in url for url in seen["tags_urls"])
+    assert any("gateway.docker.internal:11434" in url for url in seen["tags_urls"])
+    assert any("gateway.docker.internal:11434" in url for url in seen["pull_urls"])
+    assert all("host.docker.internal" not in url for url in seen["tags_urls"])
+    assert all("host.docker.internal" not in url for url in seen["pull_urls"])
 
 
 @pytest.mark.unit
@@ -371,12 +375,14 @@ async def test_ensure_without_resolved_profile_uses_worker_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Without a resolved profile the preflight falls back to the worker env so
-    the existing single-daemon behavior is preserved. The worker daemon is a
-    host-reachable loopback host so the #569 worker-skip does not apply."""
+    the existing single-daemon behavior is preserved. The worker daemon is the
+    worker-reachable host gateway so the #569 worker-skip does not apply;
+    ``gateway.docker.internal`` (not the default ``host.docker.internal``) proves the
+    explicit worker-env value drives the probe."""
     workspace_id = await _seed_running(factory)
     executor = _make_executor(factory, tmp_path)
 
-    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://gateway.docker.internal:11434")
 
     seen: dict[str, Any] = {}
 
@@ -392,7 +398,7 @@ async def test_ensure_without_resolved_profile_uses_worker_env(
     )
 
     assert proceed is True
-    assert any("127.0.0.1:11434" in url for url in seen["tags_urls"])
+    assert any("gateway.docker.internal:11434" in url for url in seen["tags_urls"])
 
 
 @pytest.mark.unit
@@ -404,12 +410,15 @@ async def test_ensure_profile_ollama_host_overrides_worker_base_url(
     """A profile that declares only ``OLLAMA_HOST`` must win over a stale worker
     ``AWF_OPENCODE_OLLAMA_BASE_URL``: ``_ollama_api_urls`` prefers the base URL,
     so the worker value would otherwise shadow the profile-selected daemon and
-    AWF would probe/pull the wrong host. Both daemons are host-reachable loopback
-    hosts so the #569 worker-skip does not apply."""
+    AWF would probe/pull the wrong host. Both daemons are worker-reachable
+    host-gateway aliases so the #569 worker-skip does not apply; the two distinct
+    aliases are used rather than two ``127.*`` loopback hosts because host-local
+    targets now both normalize to ``host.docker.internal`` (issue #579), which would
+    make the profile-vs-worker daemon indistinguishable here."""
     workspace_id = await _seed_running(factory)
     executor = _make_executor(factory, tmp_path)
 
-    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://127.0.0.2:11434")
+    monkeypatch.setenv("AWF_OPENCODE_OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 
     seen: dict[str, Any] = {}
 
@@ -429,7 +438,7 @@ async def test_ensure_profile_ollama_host_overrides_worker_base_url(
                 "name": "ollama-profile-daemon",
                 "runtime": {
                     "environment": {
-                        "OLLAMA_HOST": "http://127.0.0.1:11434",
+                        "OLLAMA_HOST": "http://gateway.docker.internal:11434",
                     }
                 },
             },
@@ -437,10 +446,10 @@ async def test_ensure_profile_ollama_host_overrides_worker_base_url(
     )
 
     assert proceed is True
-    assert any("127.0.0.1:11434" in url for url in seen["tags_urls"])
-    assert any("127.0.0.1:11434" in url for url in seen["pull_urls"])
-    assert all("127.0.0.2" not in url for url in seen["tags_urls"])
-    assert all("127.0.0.2" not in url for url in seen["pull_urls"])
+    assert any("gateway.docker.internal:11434" in url for url in seen["tags_urls"])
+    assert any("gateway.docker.internal:11434" in url for url in seen["pull_urls"])
+    assert all("host.docker.internal" not in url for url in seen["tags_urls"])
+    assert all("host.docker.internal" not in url for url in seen["pull_urls"])
 
 
 @pytest.mark.unit
@@ -455,12 +464,14 @@ async def test_ensure_expands_profile_ollama_placeholder_against_environ(
     Docker Compose host-env substitution, but the worker-side probe does not pass
     through Compose — so a literal ``${OLLAMA_URL}`` would otherwise be probed as
     ``http://${OLLAMA_URL}/api/tags`` and block/fail the workspace before launch.
-    The resolved daemon is a host-reachable loopback host so the #569 worker-skip
-    does not apply and the placeholder-expansion wiring is still exercised."""
+    The resolved daemon is the worker-reachable host gateway so the #569 worker-skip
+    does not apply and the placeholder-expansion wiring is still exercised;
+    ``gateway.docker.internal`` is used rather than a ``127.*`` loopback host because
+    host-local targets now normalize to ``host.docker.internal`` (issue #579)."""
     workspace_id = await _seed_running(factory)
     executor = _make_executor(factory, tmp_path)
 
-    monkeypatch.setenv("OLLAMA_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("OLLAMA_URL", "http://gateway.docker.internal:11434")
 
     seen: dict[str, Any] = {}
 
@@ -488,8 +499,8 @@ async def test_ensure_expands_profile_ollama_placeholder_against_environ(
     )
 
     assert proceed is True
-    assert any("127.0.0.1:11434" in url for url in seen["tags_urls"])
-    assert any("127.0.0.1:11434" in url for url in seen["pull_urls"])
+    assert any("gateway.docker.internal:11434" in url for url in seen["tags_urls"])
+    assert any("gateway.docker.internal:11434" in url for url in seen["pull_urls"])
     assert all("${" not in url for url in seen["tags_urls"])
     assert all("${" not in url for url in seen["pull_urls"])
 

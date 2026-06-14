@@ -120,15 +120,52 @@ def _ollama_base_url_prelude() -> str:
     — else the agent would collapse to the scheme default port 80 while AWF probed
     ``:11434``). A port-less host (a sidecar service name like ``ollama-sidecar``, or
     the bare default-host form) inherits Ollama's default daemon port (11434); a value
-    that already carries a port is left intact. An explicit
-    ``AWF_OPENCODE_OLLAMA_BASE_URL`` still wins over ``OLLAMA_HOST``; with neither set
-    we fall back to the default.
+    that already carries a port is left intact.
+
+    A host-local connection target -- IPv4 loopback (``127.0.0.0/8``), IPv6 loopback
+    (``[::1]``), ``localhost``, or the IPv4/IPv6 unspecified addresses (``0.0.0.0`` /
+    ``[::]``) -- is then translated to the Docker host gateway
+    (``host.docker.internal``), keeping the resolved port and dropping any userinfo:
+    inside the agent container such an address points at the container *itself*, not
+    the host Ollama daemon (issue #579). This mirrors the Python source of truth
+    ``provider_readiness_helpers._normalize_host_local_host`` so launch and preflight
+    resolve the same daemon. Routable hosts (a LAN IP, the configured hostname, a
+    Compose service name, the gateway aliases) pass through unchanged. The ``127.*``
+    shell glob is intentionally looser than the Python ``ipaddress`` check -- no real
+    loopback hostname literally starts ``127.`` -- and the parity test asserts the two
+    agree over the representative table. An expanded/uncompressed IPv6 loopback or
+    unspecified literal (``0:0:0:0:0:0:0:1``, ``[0000:...:0001]``, ``0::1``) is first
+    canonicalized to ``::1`` / ``::`` so it normalizes like the Python ``ipaddress``
+    check rather than leaking through as a routable host.
+
+    An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` still wins over ``OLLAMA_HOST``; with
+    neither set we fall back to the default.
+
+    The resolved value is trimmed of surrounding whitespace and fails closed on a
+    malformed authority/port the same way the Python source of truth does: a
+    whitespace-padded value is stripped before parsing, and an unbalanced IPv6 literal,
+    a non-numeric / out-of-range port, or a missing host all resolve to the default
+    daemon URL (``_parse_ollama_base_url`` normalizes the same shapes via ``urlsplit``'s
+    lazy ``hostname`` / ``port`` accessors). Without this the launcher would forward a
+    garbled base URL while preflight probes the default daemon, reopening the
+    launch/preflight split.
     """
     return (
         '__awf_ollama_host="${AWF_OPENCODE_OLLAMA_BASE_URL:-}"\n'
         'if [ -z "$__awf_ollama_host" ]; then\n'
         '  __awf_ollama_host="${OLLAMA_HOST:-}"\n'
         "fi\n"
+        # Trim surrounding whitespace exactly as the Python source of truth does
+        # (``_parse_ollama_base_url`` calls ``.strip()`` on the resolved value before
+        # parsing). A padded ``OLLAMA_HOST`` / ``AWF_OPENCODE_OLLAMA_BASE_URL`` such as
+        # ``" http://localhost:11434 "`` must not leak the surrounding spaces into the
+        # scheme/authority -- otherwise launch exports a garbled base URL while
+        # preflight resolves the trimmed daemon (the launch/preflight split this prelude
+        # exists to close). The precedence fallthrough above runs on the raw value (like
+        # Python's ``get(A) or get(B)``), so a whitespace-only explicit value stays
+        # selected and trims to empty here, routing to the default below.
+        '__awf_ollama_host="${__awf_ollama_host#"${__awf_ollama_host%%[![:space:]]*}"}"\n'
+        '__awf_ollama_host="${__awf_ollama_host%"${__awf_ollama_host##*[![:space:]]}"}"\n'
         'if [ -n "$__awf_ollama_host" ]; then\n'
         '  case "$__awf_ollama_host" in\n'
         "    *://*) : ;;\n"
@@ -146,6 +183,58 @@ def _ollama_base_url_prelude() -> str:
         # separator (which would leave the value at the scheme default port 80
         # while the worker-side probe/pull builder defaults it to :11434).
         '  __awf_ollama_hostport="${__awf_ollama_authority##*@}"\n'
+        # Fail closed on a malformed authority/port exactly as the Python source of
+        # truth does. ``_parse_ollama_base_url`` parses the resolved value with
+        # ``urlsplit`` and forces the lazy ``.hostname`` / ``.port`` accessors: an
+        # unbalanced IPv6 literal (``http://[::1``) makes ``urlsplit`` raise, a
+        # non-numeric or out-of-range port (``localhost:abc`` / ``:99999``) makes
+        # ``.port`` raise, and a hostless value (``http://`` / ``http://:11434``) yields
+        # an empty ``.hostname`` -- all three normalize to
+        # ``DEFAULT_OLLAMA_OPENAI_BASE_URL``. Detect the same shapes here from the
+        # userinfo-stripped host:port (before the port is defaulted) and mark the value
+        # invalid so the tail below exports the default instead of forwarding a garbled
+        # base URL the worker preflight would never probe (issue #579). A bracket that
+        # did not match one of the balanced ``[..]`` / ``[..]:port`` forms is an
+        # unbalanced IPv6 literal; an empty host or a non-digit / >65535 port is the
+        # ``.hostname`` / ``.port`` failure.
+        "  __awf_ollama_invalid=\n"
+        '  case "$__awf_ollama_hostport" in\n'
+        "    '['*']')\n"
+        "      __awf_ollama_chk_host=\"${__awf_ollama_hostport#'['}\"\n"
+        '      __awf_ollama_chk_host="${__awf_ollama_chk_host%]}"\n'
+        "      __awf_ollama_chk_port=\n"
+        "      ;;\n"
+        "    '['*']:'*)\n"
+        '      __awf_ollama_chk_host="${__awf_ollama_hostport%%]:*}"\n'
+        "      __awf_ollama_chk_host=\"${__awf_ollama_chk_host#'['}\"\n"
+        '      __awf_ollama_chk_port="${__awf_ollama_hostport##*]:}"\n'
+        "      ;;\n"
+        "    *'['* | *']'*)\n"
+        "      __awf_ollama_invalid=1\n"
+        "      __awf_ollama_chk_host=\n"
+        "      __awf_ollama_chk_port=\n"
+        "      ;;\n"
+        "    *:*)\n"
+        '      __awf_ollama_chk_host="${__awf_ollama_hostport%:*}"\n'
+        '      __awf_ollama_chk_port="${__awf_ollama_hostport##*:}"\n'
+        "      ;;\n"
+        "    *)\n"
+        '      __awf_ollama_chk_host="$__awf_ollama_hostport"\n'
+        "      __awf_ollama_chk_port=\n"
+        "      ;;\n"
+        "  esac\n"
+        '  if [ -z "$__awf_ollama_chk_host" ]; then\n'
+        "    __awf_ollama_invalid=1\n"
+        "  fi\n"
+        '  case "$__awf_ollama_chk_port" in\n'
+        "    '') : ;;\n"
+        "    *[!0-9]*) __awf_ollama_invalid=1 ;;\n"
+        "    *)\n"
+        '      if [ "$__awf_ollama_chk_port" -gt 65535 ]; then\n'
+        "        __awf_ollama_invalid=1\n"
+        "      fi\n"
+        "      ;;\n"
+        "  esac\n"
         '  case "$__awf_ollama_hostport" in\n'
         "    '['*']') __awf_ollama_authority=\"$__awf_ollama_authority:11434\" ;;\n"
         "    '['*']:'*) : ;;\n"
@@ -153,12 +242,239 @@ def _ollama_base_url_prelude() -> str:
         "    '') : ;;\n"
         '    *) __awf_ollama_authority="$__awf_ollama_authority:11434" ;;\n'
         "  esac\n"
+        # Translate a host-local authority (loopback / unspecified / ``localhost``) to
+        # the Docker host gateway so the agent container reaches the *host* Ollama
+        # daemon rather than itself (issue #579). Recompute host:port from the
+        # port-defaulted authority (``##*@`` drops userinfo), split bracketed IPv6
+        # ``[..]:port`` and plain ``host:port``, strip IPv6 brackets, then rewrite a
+        # host-local host to ``host.docker.internal`` keeping the resolved port and
+        # dropping userinfo. Mirrors ``_normalize_host_local_host`` on the Python side.
+        '  __awf_ollama_hostport="${__awf_ollama_authority##*@}"\n'
+        '  case "$__awf_ollama_hostport" in\n'
+        "    '['*']:'*)\n"
+        '      __awf_ollama_hl_port="${__awf_ollama_hostport##*]:}"\n'
+        '      __awf_ollama_hl_host="${__awf_ollama_hostport%%]:*}"\n'
+        "      __awf_ollama_hl_host=\"${__awf_ollama_hl_host#'['}\"\n"
+        "      ;;\n"
+        "    '['*']')\n"
+        "      __awf_ollama_hl_host=\"${__awf_ollama_hostport#'['}\"\n"
+        '      __awf_ollama_hl_host="${__awf_ollama_hl_host%]}"\n'
+        "      __awf_ollama_hl_port=\n"
+        "      ;;\n"
+        "    *:*)\n"
+        '      __awf_ollama_hl_host="${__awf_ollama_hostport%:*}"\n'
+        '      __awf_ollama_hl_port="${__awf_ollama_hostport##*:}"\n'
+        "      ;;\n"
+        "    *)\n"
+        '      __awf_ollama_hl_host="$__awf_ollama_hostport"\n'
+        "      __awf_ollama_hl_port=\n"
+        "      ;;\n"
+        "  esac\n"
+        # Drop an IPv6 zone/scope id (``%<zone>``, e.g. ``[::1%lo]`` or its percent-
+        # encoded ``[::1%25lo]`` form) before the loopback checks below. Python's
+        # ``ipaddress.ip_address`` reports ``::1%lo`` / ``::ffff:127.0.0.1%lo`` as
+        # loopback (the zone does not change loopback-ness) and ``urlsplit().hostname``
+        # keeps the zone, so the launcher must strip it too -- otherwise the IPv6
+        # canonicalization and IPv4-mapped reductions below both skip the ``%`` form and
+        # the host-local match leaves ``::1%lo`` pointed at the agent container while
+        # preflight probes the host gateway (issue #579). Only strip for IPv6 literals
+        # (host contains ``:``); a scope id is never valid on IPv4 or ``localhost``,
+        # which Python rejects, so leaving those untouched preserves parity. Mirrors
+        # ``_normalize_host_local_host`` (``ipaddress`` accepts the scoped form).
+        '  case "$__awf_ollama_hl_host" in\n'
+        '    *:*%*) __awf_ollama_hl_host="${__awf_ollama_hl_host%%%*}" ;;\n'
+        "  esac\n"
+        # Canonicalize an expanded/uncompressed IPv6 loopback (``::1``) or unspecified
+        # (``::``) literal to its compressed form so the host-local case below catches
+        # it. The Python source of truth uses ``ipaddress.ip_address()``, which treats
+        # every textual form (``0:0:0:0:0:0:0:1``, ``[0000:...:0001]``, ``0::1``) as
+        # loopback/unspecified, but a literal glob would only see ``::1``/``::`` -- so a
+        # valid expanded form would launch against the agent container while the worker
+        # probed the host gateway (issue #579). Collapse the single ``::`` position-
+        # preservingly into one zero group, strip each group's leading zeros, then the
+        # host is host-local iff every group but the last is all-zero and the last group
+        # is ``0`` (unspecified) or ``1`` (loopback). Mirrors ``_normalize_host_local_host``.
+        '  case "$__awf_ollama_hl_host" in\n'
+        "    *.* | *%*) : ;;\n"
+        "    *::*::*) : ;;\n"
+        "    *:*)\n"
+        '      __awf_ip6="$__awf_ollama_hl_host"\n'
+        '      case "$__awf_ip6" in\n'
+        '        ::) __awf_ip6="0" ;;\n'
+        '        ::*) __awf_ip6="0:${__awf_ip6#::}" ;;\n'
+        '        *::) __awf_ip6="${__awf_ip6%::}:0" ;;\n'
+        '        *::*) __awf_ip6="${__awf_ip6%%::*}:0:${__awf_ip6##*::}" ;;\n'
+        "      esac\n"
+        '      __awf_ip6_last="${__awf_ip6##*:}"\n'
+        '      case "$__awf_ip6" in\n'
+        '        *:*) __awf_ip6_prefix="${__awf_ip6%:*}" ;;\n'
+        "        *) __awf_ip6_prefix= ;;\n"
+        "      esac\n"
+        "      while : ; do\n"
+        '        case "$__awf_ip6_last" in\n'
+        '          0?*) __awf_ip6_last="${__awf_ip6_last#0}" ;;\n'
+        "          *) break ;;\n"
+        "        esac\n"
+        "      done\n"
+        '      case "$__awf_ip6_prefix" in\n'
+        "        *[!0:]*) : ;;\n"
+        "        *)\n"
+        '          case "$__awf_ip6_last" in\n'
+        "            '' | 0) __awf_ollama_hl_host=\"::\" ;;\n"
+        '            1) __awf_ollama_hl_host="::1" ;;\n'
+        "          esac\n"
+        "          ;;\n"
+        "      esac\n"
+        "      ;;\n"
+        "  esac\n"
+        # Reduce an IPv4-mapped IPv6 literal (``::ffff:127.0.0.1``) to its embedded IPv4
+        # so the host-local match below catches a mapped loopback/unspecified target.
+        # Python's ``ipaddress.ip_address`` reports ``::ffff:<v4>`` as loopback/unspecified
+        # when the embedded IPv4 is, but the IPv6 canonicalization above skips this form
+        # (it contains ``.``) -- without this rewrite the launcher would leave
+        # ``::ffff:127.0.0.1`` pointed at the agent container while preflight normalizes it
+        # to the host gateway (issue #579). Only a genuine IPv4-mapped prefix (all-zero
+        # groups then ``ffff``, matched case-insensitively) qualifies; an IPv4-compatible
+        # ``::127.0.0.1`` -- which Python does *not* treat as loopback -- is left untouched.
+        # Mirrors ``_normalize_host_local_host``.
+        '  case "$__awf_ollama_hl_host" in\n'
+        "    *:*.*.*.*)\n"
+        '      __awf_v4mapped_embedded="${__awf_ollama_hl_host##*:}"\n'
+        '      __awf_v4mapped_prefix="${__awf_ollama_hl_host%:*}"\n'
+        '      case "$__awf_v4mapped_prefix" in\n'
+        "        *:[Ff][Ff][Ff][Ff])\n"
+        '          __awf_v4mapped_rest="${__awf_v4mapped_prefix%:[Ff][Ff][Ff][Ff]}"\n'
+        '          case "$__awf_v4mapped_rest" in\n'
+        "            *[!0:]*) : ;;\n"
+        '            *) __awf_ollama_hl_host="$__awf_v4mapped_embedded" ;;\n'
+        "          esac\n"
+        "          ;;\n"
+        "      esac\n"
+        "      ;;\n"
+        "  esac\n"
+        # Reduce a *hex-compressed* IPv4-mapped IPv6 literal -- one with no embedded
+        # dotted quad, e.g. ``::ffff:7f00:1`` (== ``::ffff:127.0.0.1``) or its fully
+        # expanded ``0:0:0:0:0:ffff:7f00:1`` form -- to ``::1`` / ``::`` so the host-local
+        # match below catches a mapped loopback/unspecified target. Python's
+        # ``ipaddress.ip_address`` decodes the trailing two 16-bit groups as the embedded
+        # IPv4 and reports the same loopback/unspecified status, but the dotted-quad
+        # reduction above only matches the ``.``-bearing spelling and the IPv6
+        # canonicalization bails on the non-zero ``ffff`` group -- so without this the
+        # launcher leaves ``::ffff:7f00:1`` pointed at the agent container while preflight
+        # normalizes it to the host gateway (issue #579). Require an all-zero prefix, then
+        # a case-insensitive ``ffff`` group, then split the final two groups: a high group
+        # in ``7f00..7fff`` (always four hex digits ``7f`` + two more) is a ``127.0.0.0/8``
+        # loopback for *any* low group, and both groups all-zero is the unspecified
+        # ``0.0.0.0``; every other embedded IPv4 -- a routable address (``c0a8:101`` ==
+        # 192.168.1.1, ``8000:1`` == 128.0.0.1), an off-by-one ``7eff:ffff`` ==
+        # 126.255.255.255, or a not-quite-unspecified ``0:1`` == 0.0.0.1 -- is left
+        # untouched, matching ``_normalize_host_local_host`` (host-local iff ``ipaddress``
+        # says loopback/unspecified). The dotted form is already reduced above, so skip a
+        # host that still carries a ``.``.
+        '  case "$__awf_ollama_hl_host" in\n'
+        "    *.*) : ;;\n"
+        "    *:*:*)\n"
+        '      __awf_v4m_lo="${__awf_ollama_hl_host##*:}"\n'
+        '      __awf_v4m_rest="${__awf_ollama_hl_host%:*}"\n'
+        '      __awf_v4m_hi="${__awf_v4m_rest##*:}"\n'
+        '      __awf_v4m_prefix="${__awf_v4m_rest%:*}"\n'
+        '      case "$__awf_v4m_prefix" in\n'
+        "        *:[Ff][Ff][Ff][Ff])\n"
+        '          __awf_v4m_zeros="${__awf_v4m_prefix%:[Ff][Ff][Ff][Ff]}"\n'
+        '          case "$__awf_v4m_zeros" in\n'
+        "            *[!0:]*) : ;;\n"
+        "            *)\n"
+        '              case "$__awf_v4m_hi" in\n'
+        '                7[Ff][0-9A-Fa-f][0-9A-Fa-f]) __awf_ollama_hl_host="::1" ;;\n'
+        "                *[!0]*) : ;;\n"
+        "                *)\n"
+        '                  case "$__awf_v4m_lo" in\n'
+        "                    *[!0]*) : ;;\n"
+        '                    *) __awf_ollama_hl_host="::" ;;\n'
+        "                  esac\n"
+        "                  ;;\n"
+        "              esac\n"
+        "              ;;\n"
+        "          esac\n"
+        "          ;;\n"
+        "      esac\n"
+        "      ;;\n"
+        "  esac\n"
+        # ``localhost`` is matched case-insensitively (POSIX bracket expansion, no
+        # bashism) because the Python side lowercases the host (``urlsplit().hostname``
+        # plus ``host.lower() == "localhost"``), so a value like ``http://LocalHost``
+        # must normalize on both sides or launch and preflight disagree on the daemon.
+        # Restrict the IPv4 loopback rewrite to genuine ``127.0.0.0/8`` literals. A bare
+        # ``127.*`` glob also matches DNS names that merely *begin* with ``127.`` (e.g.
+        # ``127.0.0.1.nip.io`` or ``127.foo``), which ``ipaddress.ip_address`` rejects as
+        # a literal -- so ``_normalize_host_local_host`` leaves them pointed at their real
+        # host while this prelude would rewrite them to the gateway, diverging launch from
+        # preflight (the worker would then classify the target as non-host-reachable and
+        # skip the probe/pull even though the agent reaches it via the host gateway).
+        # Require ``127.`` followed by exactly three dot-separated octets, each a
+        # canonical decimal in ``0..255`` with no leading zeros -- precisely what
+        # ``ipaddress.ip_address`` accepts for a ``127.0.0.0/8`` literal. A looser
+        # ``127.[0-9]*.[0-9]*.[0-9]*`` glob still over-matches: it treats digit/dot
+        # strings that ``ipaddress`` rejects as loopback -- over-range octets
+        # (``127.0.0.256``), leading-zero octets (``127.00.0.1``), or embedded empty
+        # octets (``127.0..1``) -- and the launcher would then rewrite them to the
+        # gateway while ``_normalize_host_local_host`` leaves them pointed at their real
+        # host, diverging launch from preflight (the worker would classify the target as
+        # non-host-reachable and skip the probe/pull even though the agent reaches it via
+        # the host gateway). So reject non-digit/dot characters (a DNS label) and five or
+        # more octets up front, then validate each of the three trailing octets against
+        # the same ``0..255``/no-leading-zero grammar Python enforces. Mirrors
+        # ``_normalize_host_local_host`` (loopback iff ``ipaddress`` parses a
+        # ``127.0.0.0/8`` literal).
+        "  __awf_ollama_hl_match=\n"
+        '  case "$__awf_ollama_hl_host" in\n'
+        "    [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|0.0.0.0|::|::1)\n"
+        "      __awf_ollama_hl_match=1\n"
+        "      ;;\n"
+        "    127.*)\n"
+        '      case "$__awf_ollama_hl_host" in\n'
+        "        *[!0-9.]*) : ;;\n"
+        "        127.*.*.*.*) : ;;\n"
+        "        127.*.*.*)\n"
+        '          __awf_v4_rest="${__awf_ollama_hl_host#127.}"\n'
+        '          __awf_v4_o1="${__awf_v4_rest%%.*}"\n'
+        '          __awf_v4_rest="${__awf_v4_rest#*.}"\n'
+        '          __awf_v4_o2="${__awf_v4_rest%%.*}"\n'
+        '          __awf_v4_o3="${__awf_v4_rest#*.}"\n'
+        "          __awf_v4_ok=1\n"
+        '          for __awf_v4_oct in "$__awf_v4_o1" "$__awf_v4_o2" "$__awf_v4_o3"; do\n'
+        '            case "$__awf_v4_oct" in\n'
+        "              0|[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]) : ;;\n"
+        "              *) __awf_v4_ok= ;;\n"
+        "            esac\n"
+        "          done\n"
+        '          if [ -n "$__awf_v4_ok" ]; then\n'
+        "            __awf_ollama_hl_match=1\n"
+        "          fi\n"
+        "          ;;\n"
+        "      esac\n"
+        "      ;;\n"
+        "  esac\n"
+        '  if [ -n "$__awf_ollama_hl_match" ]; then\n'
+        '    if [ -n "$__awf_ollama_hl_port" ]; then\n'
+        '      __awf_ollama_authority="host.docker.internal:$__awf_ollama_hl_port"\n'
+        "    else\n"
+        '      __awf_ollama_authority="host.docker.internal"\n'
+        "    fi\n"
+        "  fi\n"
         '  __awf_ollama_host="$__awf_ollama_scheme://$__awf_ollama_authority$__awf_ollama_path"\n'
         '  __awf_ollama_host="${__awf_ollama_host%/}"\n'
         '  case "$__awf_ollama_host" in\n'
         "    */v1) : ;;\n"
         '    *) __awf_ollama_host="$__awf_ollama_host/v1" ;;\n'
         "  esac\n"
+        # A value flagged malformed above resolves to the default daemon URL -- the
+        # same fail-closed disposition ``_parse_ollama_base_url`` gives it. The port /
+        # host-local normalization above ran on the garbled authority, but its result
+        # is discarded here.
+        '  if [ -n "$__awf_ollama_invalid" ]; then\n'
+        f'    __awf_ollama_host="{DEFAULT_OLLAMA_OPENAI_BASE_URL}"\n'
+        "  fi\n"
         '  AWF_OPENCODE_OLLAMA_BASE_URL="$__awf_ollama_host"\n'
         "else\n"
         f'  AWF_OPENCODE_OLLAMA_BASE_URL="{DEFAULT_OLLAMA_OPENAI_BASE_URL}"\n'

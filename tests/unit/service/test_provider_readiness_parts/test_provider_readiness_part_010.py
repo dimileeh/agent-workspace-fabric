@@ -6,6 +6,8 @@ first-party file line limit (see ``test_core_decomposition_maintainability``).
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import pytest
 
 import awf.service.provider_readiness as provider_readiness
@@ -37,29 +39,56 @@ def test_ollama_url_helpers_preserve_host_gateway_fallback_port() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("env", "expected_primary"),
+    ("env", "expected"),
     [
-        # A port-less host inherits Ollama's daemon port (11434) so the worker probe
-        # resolves the same daemon as the OpenCode launcher prelude — not the scheme
-        # default (port 80).
-        ({"OLLAMA_HOST": "localhost"}, "http://localhost:11434/api/version"),
-        ({"OLLAMA_HOST": "0.0.0.0"}, "http://0.0.0.0:11434/api/version"),
-        ({"OLLAMA_HOST": "ollama-sidecar"}, "http://ollama-sidecar:11434/api/version"),
+        # A host-local port-less host both inherits Ollama's daemon port (11434) and
+        # normalizes to the Docker host gateway (issue #579), so the worker resolves
+        # the same daemon as the OpenCode launcher prelude — and the normalized
+        # ``host.docker.internal`` host gains the ``localhost`` fallback in
+        # ``_ollama_api_urls``, yielding two probe URLs.
+        (
+            {"OLLAMA_HOST": "localhost"},
+            (
+                "http://host.docker.internal:11434/api/version",
+                "http://localhost:11434/api/version",
+            ),
+        ),
+        (
+            {"OLLAMA_HOST": "0.0.0.0"},
+            (
+                "http://host.docker.internal:11434/api/version",
+                "http://localhost:11434/api/version",
+            ),
+        ),
+        # A port-less IPv6 loopback literal normalizes to the gateway and defaults
+        # the port too.
+        (
+            {"OLLAMA_HOST": "http://[::1]"},
+            (
+                "http://host.docker.internal:11434/api/version",
+                "http://localhost:11434/api/version",
+            ),
+        ),
+        # Non-host-local port-less hosts keep their host and resolve to a single URL
+        # (no ``localhost`` fallback): a Compose service name and a routable hostname.
+        (
+            {"OLLAMA_HOST": "ollama-sidecar"},
+            ("http://ollama-sidecar:11434/api/version",),
+        ),
         (
             {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local/v1"},
-            "http://ollama.local:11434/api/version",
+            ("http://ollama.local:11434/api/version",),
         ),
-        # A port-less IPv6 literal re-brackets and defaults the port too.
-        ({"OLLAMA_HOST": "http://[::1]"}, "http://[::1]:11434/api/version"),
     ],
 )
 def test_ollama_url_helpers_default_portless_host_to_daemon_port(
-    env: dict[str, str], expected_primary: str
+    env: dict[str, str], expected: tuple[str, ...]
 ) -> None:
     """A port-less ``OLLAMA_HOST`` / ``AWF_OPENCODE_OLLAMA_BASE_URL`` must resolve to
     Ollama's daemon port (11434), mirroring the OpenCode launcher prelude, so the
-    worker probe/pull does not hit port 80 while the agent talks to 11434."""
-    assert provider_readiness_helpers._ollama_version_urls(env) == (expected_primary,)
+    worker probe/pull does not hit port 80 while the agent talks to 11434. A
+    host-local host additionally normalizes to ``host.docker.internal``."""
+    assert provider_readiness_helpers._ollama_version_urls(env) == expected
 
 
 @pytest.mark.unit
@@ -71,6 +100,91 @@ def test_ollama_url_helpers_default_portless_host_gateway_to_daemon_port() -> No
         "http://host.docker.internal:11434/api/version",
         "http://localhost:11434/api/version",
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "host",
+    [
+        # IPv4 loopback (any ``127.0.0.0/8``), the IPv4/IPv6 unspecified addresses,
+        # ``localhost`` (case-insensitive), and the IPv6 loopback are all host-local
+        # connection targets translated to the Docker host gateway (issue #579). The
+        # bracketed IPv6 form is normalized defensively even though ``urlsplit``
+        # already unbrackets ``.hostname``.
+        "127.0.0.1",
+        "127.5.5.5",
+        "0.0.0.0",
+        "localhost",
+        "LocalHost",
+        "::1",
+        "::",
+        "[::1]",
+        # IPv4-mapped IPv6 literals (``::ffff:<v4>``) carry the embedded IPv4's
+        # loopback/unspecified status, so a mapped loopback/unspecified is host-local
+        # too. The shell launcher prelude mirrors this; these anchor the Python source
+        # of truth the prelude is held against (issue #579).
+        "::ffff:127.0.0.1",
+        "::ffff:0.0.0.0",
+    ],
+)
+def test_normalize_host_local_host_maps_host_local_to_gateway(host: str) -> None:
+    assert provider_readiness_helpers._normalize_host_local_host(host) == "host.docker.internal"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "host",
+    [
+        # A Compose service DNS name, a routable LAN IP, the configured host's own
+        # hostname, and the gateway aliases themselves are not host-local — they do
+        # not point the agent container at itself, so they pass through unchanged.
+        "ollama-sidecar",
+        "192.168.1.10",
+        "ollama.local",
+        "host.docker.internal",
+        "gateway.docker.internal",
+        # A mapped *routable* IPv4 is not host-local, and an IPv4-*compatible*
+        # ``::127.0.0.1`` is not reported as loopback by ``ipaddress`` -- both pass
+        # through unchanged, matching the shell prelude.
+        "::ffff:192.168.1.1",
+        "::127.0.0.1",
+    ],
+)
+def test_normalize_host_local_host_passes_through_routable(host: str) -> None:
+    assert provider_readiness_helpers._normalize_host_local_host(host) == host
+
+
+@pytest.mark.unit
+def test_normalize_host_local_authority_rebuilds_host_local_keeping_port() -> None:
+    """A host-local authority rebuilds to the gateway, keeping the resolved port and
+    dropping userinfo (the host gateway needs no credentials)."""
+    normalized = provider_readiness_helpers._normalize_host_local_authority(
+        urlsplit("http://user:pass@127.0.0.1:11434/v1")
+    )
+    assert normalized.hostname == "host.docker.internal"
+    assert normalized.port == 11434
+    assert normalized.username is None
+
+
+@pytest.mark.unit
+def test_normalize_host_local_authority_rebuilds_host_local_without_port() -> None:
+    """Defensive: a host-local authority with no port (``_default_ollama_port`` always
+    supplies one upstream) rebuilds to the bare gateway host."""
+    normalized = provider_readiness_helpers._normalize_host_local_authority(
+        urlsplit("http://localhost/v1")
+    )
+    assert normalized.netloc == "host.docker.internal"
+    assert normalized.port is None
+
+
+@pytest.mark.unit
+def test_normalize_host_local_authority_passes_through_non_host_local_and_hostless() -> None:
+    """A non-host-local authority and a hostless authority are returned unchanged so
+    the #577 userinfo-port behavior survives for routable hosts."""
+    routable = urlsplit("http://user:pass@ollama.local:11434/v1")
+    assert provider_readiness_helpers._normalize_host_local_authority(routable) is routable
+    hostless = urlsplit("http://")
+    assert provider_readiness_helpers._normalize_host_local_authority(hostless) is hostless
 
 
 @pytest.mark.unit

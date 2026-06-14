@@ -56,16 +56,20 @@ def _unexpected_subprocess(args: list[str], **_kwargs: object) -> Any:
 def _ollama_ok(url: str, *, timeout: float) -> Any:
     assert timeout > 0
     # Answer both a non-worker-reachable DNS host (``ollama.local``) and the
-    # worker-reachable ``localhost`` so callers that need the create-time daemon
-    # probe to actually run can point at a host that is not deferred away.
+    # worker-reachable host gateway (``gateway.docker.internal``) so callers that
+    # need the create-time daemon probe to actually run can point at a host that is
+    # not deferred away. ``gateway.docker.internal`` is used rather than ``localhost``
+    # because a host-local target now normalizes to ``host.docker.internal`` (issue
+    # #579) — which carries a ``localhost`` probe fallback — whereas the gateway alias
+    # resolves to a single probe URL, keeping these single-URL assertions intact.
     if url in {
         "http://ollama.local:11434/api/version",
-        "http://localhost:11434/api/version",
+        "http://gateway.docker.internal:11434/api/version",
     }:
         return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
     if url in {
         "http://ollama.local:11434/api/tags",
-        "http://localhost:11434/api/tags",
+        "http://gateway.docker.internal:11434/api/tags",
     }:
         return SimpleNamespace(
             status_code=200,
@@ -273,9 +277,10 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
     (home / ".gemini").mkdir()
     (home / ".config" / "opencode").mkdir(parents=True)
     env = {
-        # ``localhost`` is worker-reachable so the OpenCode create-time daemon probe
-        # runs for the ``:cloud`` model rather than being deferred as non-reachable.
-        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1",
+        # ``gateway.docker.internal`` is worker-reachable so the OpenCode create-time
+        # daemon probe runs for the ``:cloud`` model rather than being deferred as
+        # non-reachable.
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1",
         "CURSOR_API_KEY": "cursor_secret",
         "XAI_API_KEY": "xai-selected-grok-secret",
     }
@@ -534,16 +539,16 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
     (home / ".config" / "opencode").mkdir(parents=True)
     urls: list[str] = []
 
-    # ``localhost`` is worker-reachable, so the create-time daemon probe runs and
+    # ``gateway.docker.internal`` is worker-reachable, so the create-time daemon probe runs and
     # exercises the cloud-absent-from-tags disposition. (A ``:cloud`` model at a
     # daemon URL the worker cannot reach defers instead — see
     # ``test_selected_opencode_preflight_cloud_model_with_creds_non_worker_reachable_url_defers``.)
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         urls.append(url)
-        if url == "http://localhost:11434/api/version":
+        if url == "http://gateway.docker.internal:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://localhost:11434/api/tags":
+        if url == "http://gateway.docker.internal:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -554,7 +559,7 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/kimi-k2.6:cloud"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -569,8 +574,8 @@ def test_selected_opencode_preflight_cloud_model_absent_from_tags_is_non_blockin
     assert result["blocks_launch"] is False
     # Preflight never pulls — only the cheap version + tags probes run.
     assert urls == [
-        "http://localhost:11434/api/version",
-        "http://localhost:11434/api/tags",
+        "http://gateway.docker.internal:11434/api/version",
+        "http://gateway.docker.internal:11434/api/tags",
     ]
 
 
@@ -581,14 +586,14 @@ def test_selected_opencode_preflight_absent_non_cloud_model_is_pull_pending(
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
 
-    # ``localhost`` is worker-reachable, so the create-time daemon probe runs (the
+    # ``gateway.docker.internal`` is worker-reachable, so the create-time daemon probe runs (the
     # #569 host-unreachable skip does not apply); a sidecar DNS name is covered by
     # ``test_selected_opencode_preflight_local_model_non_worker_reachable_url_defers``.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://localhost:11434/api/version":
+        if url == "http://gateway.docker.internal:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://localhost:11434/api/tags":
+        if url == "http://gateway.docker.internal:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -599,7 +604,7 @@ def test_selected_opencode_preflight_absent_non_cloud_model_is_pull_pending(
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -618,13 +623,13 @@ def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
     home = tmp_path / "home"
     (home / ".config" / "opencode").mkdir(parents=True)
 
-    # A worker-reachable URL (``localhost``) whose daemon is down still blocks: the
+    # A worker-reachable URL (``gateway.docker.internal``) whose daemon is down still blocks: the
     # #569 skip only defers a daemon URL the worker cannot reach at all.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://localhost:11434/api/version":
+        if url == "http://gateway.docker.internal:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://localhost:11434/api/tags":
+        if url == "http://gateway.docker.internal:11434/api/tags":
             raise httpx.ConnectError("connection refused")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
@@ -632,7 +637,7 @@ def test_selected_opencode_preflight_blocks_when_daemon_unreachable(
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -650,13 +655,14 @@ def test_selected_opencode_preflight_authless_local_model_reachable_daemon_allow
     # ``ollama/``-prefixed model is served by the host daemon, whose /api/tags
     # and /api/pull need no OpenCode/Ollama Cloud credential. With the daemon
     # reachable the strict auth gate is waived (carve-out symmetric to
-    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED) so admission can proceed. ``localhost``
-    # is worker-reachable, so the daemon probe runs rather than the #569 skip.
+    # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED) so admission can proceed.
+    # ``gateway.docker.internal`` is worker-reachable, so the daemon probe runs rather
+    # than the #569 skip.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://localhost:11434/api/version":
+        if url == "http://gateway.docker.internal:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://localhost:11434/api/tags":
+        if url == "http://gateway.docker.internal:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"llama4:70b"}]}',
@@ -667,7 +673,7 @@ def test_selected_opencode_preflight_authless_local_model_reachable_daemon_allow
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -696,9 +702,9 @@ def test_selected_opencode_preflight_authless_local_absent_model_is_pull_pending
     # reachable, so the carve-out daemon probe runs rather than the #569 skip.
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        if url == "http://localhost:11434/api/version":
+        if url == "http://gateway.docker.internal:11434/api/version":
             return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
-        if url == "http://localhost:11434/api/tags":
+        if url == "http://gateway.docker.internal:11434/api/tags":
             return SimpleNamespace(
                 status_code=200,
                 text='{"models":[{"name":"other-model:latest"}]}',
@@ -709,7 +715,7 @@ def test_selected_opencode_preflight_authless_local_absent_model_is_pull_pending
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1"},
         run_subprocess=_runtime_cli_ok("opencode"),
         http_get=_http_get,
     )
@@ -749,7 +755,7 @@ def test_selected_opencode_preflight_authless_cloud_model_still_requires_creds(
 def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blocks(
     tmp_path: Path,
 ) -> None:
-    # Authless local model at a worker-reachable URL (``localhost``) whose daemon is
+    # Authless local model at a worker-reachable URL (``gateway.docker.internal``) whose daemon is
     # down: the waiver is conditional on daemon reachability, so with no credential
     # present this still blocks with OPENCODE_OLLAMA_AUTH_MISSING. Only the cheap
     # /api/version probe runs before the gate falls through. (A daemon URL the worker
@@ -766,7 +772,7 @@ def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blo
         _settings(tmp_path),
         agent="opencode",
         task_policy={"agent_model": "ollama/llama4:70b"},
-        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434/v1"},
         run_subprocess=_unexpected_subprocess,
         http_get=_http_get,
     )
@@ -774,7 +780,7 @@ def test_selected_opencode_preflight_authless_local_model_unreachable_daemon_blo
     assert result["auth_status"] == "fail"
     assert result["reason_code"] == "OPENCODE_OLLAMA_AUTH_MISSING"
     assert result["blocks_launch"] is True
-    assert seen == ["http://localhost:11434/api/version"]
+    assert seen == ["http://gateway.docker.internal:11434/api/version"]
 
 
 @pytest.mark.unit
