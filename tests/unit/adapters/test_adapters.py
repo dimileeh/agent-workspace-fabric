@@ -893,6 +893,30 @@ class TestOpenCodeAdapter:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        ("base_url", "expected"),
+        [
+            # A port-less explicit base URL must inherit Ollama's default daemon
+            # port (11434) so launch agrees with the worker probe/pull builder,
+            # which defaults the same key to :11434 before probing.
+            ("http://ollama-sidecar/v1", "http://ollama-sidecar:11434/v1"),
+            ("http://ollama-sidecar", "http://ollama-sidecar:11434/v1"),
+            ("ollama-sidecar", "http://ollama-sidecar:11434/v1"),
+            ("https://ollama-sidecar/v1", "https://ollama-sidecar:11434/v1"),
+            ("http://[::1]/v1", "http://[::1]:11434/v1"),
+            # An explicit value that already carries a port is left intact.
+            ("http://explicit.local:9999/v1", "http://explicit.local:9999/v1"),
+        ],
+    )
+    async def test_launch_prelude_normalizes_explicit_base_url(
+        self, base_url: str, expected: str
+    ) -> None:
+        """A port-less explicit base URL is normalized so the agent targets the
+        same daemon AWF probes/pulls in the preflight."""
+        resolved = await self._resolve_ollama_base_url({"AWF_OPENCODE_OLLAMA_BASE_URL": base_url})
+        assert resolved == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         ("ollama_host", "expected"),
         [
             ("ollama.local:11434", "http://ollama.local:11434/v1"),

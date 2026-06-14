@@ -109,50 +109,54 @@ def _ollama_base_url_prelude() -> str:
     The agent's OpenCode config reads the daemon URL solely from
     ``AWF_OPENCODE_OLLAMA_BASE_URL`` (the generated ``baseURL`` is
     ``{env:AWF_OPENCODE_OLLAMA_BASE_URL}``). AWF's worker-side Ollama
-    preflight/auto-pull (``provider_readiness_helpers._ollama_api_urls``) also
-    honors ``OLLAMA_HOST`` as a fallback, so a profile that set only
-    ``OLLAMA_HOST`` would have AWF probe/pull one daemon while the agent talked to
-    the default ``host.docker.internal`` daemon — admitting the workspace against
-    the wrong model source. Mirror ``OLLAMA_HOST`` into the base URL here,
-    normalized to a scheme-qualified ``…/v1`` endpoint, so launch and preflight
-    resolve the same daemon. A port-less host (a sidecar service name like
-    ``ollama-sidecar``, or the bare default-host form) inherits Ollama's default
-    daemon port (11434) rather than collapsing to the scheme default (port 80),
-    so the agent reaches the daemon instead of failing later against the wrong
-    base URL. An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` still wins; with
-    neither set we fall back to the default.
+    preflight/auto-pull (``provider_readiness_helpers._ollama_api_urls``) resolves
+    the same daemon from ``AWF_OPENCODE_OLLAMA_BASE_URL`` first, then ``OLLAMA_HOST``,
+    then the default — and defaults a port-less authority to ``:11434`` for *either*
+    key. Normalize the resolved value here through the same scheme/port/``/v1`` rules
+    so launch and preflight always agree on the daemon: a profile that set only
+    ``OLLAMA_HOST`` (else the agent would talk to the default ``host.docker.internal``
+    daemon while AWF probes the profile one), *and* an explicit
+    ``AWF_OPENCODE_OLLAMA_BASE_URL`` that omits a port (e.g. ``http://ollama-sidecar/v1``
+    — else the agent would collapse to the scheme default port 80 while AWF probed
+    ``:11434``). A port-less host (a sidecar service name like ``ollama-sidecar``, or
+    the bare default-host form) inherits Ollama's default daemon port (11434); a value
+    that already carries a port is left intact. An explicit
+    ``AWF_OPENCODE_OLLAMA_BASE_URL`` still wins over ``OLLAMA_HOST``; with neither set
+    we fall back to the default.
     """
     return (
-        'if [ -z "${AWF_OPENCODE_OLLAMA_BASE_URL:-}" ]; then\n'
+        '__awf_ollama_host="${AWF_OPENCODE_OLLAMA_BASE_URL:-}"\n'
+        'if [ -z "$__awf_ollama_host" ]; then\n'
         '  __awf_ollama_host="${OLLAMA_HOST:-}"\n'
-        '  if [ -n "$__awf_ollama_host" ]; then\n'
-        '    case "$__awf_ollama_host" in\n'
-        "      *://*) : ;;\n"
-        '      *) __awf_ollama_host="http://$__awf_ollama_host" ;;\n'
-        "    esac\n"
+        "fi\n"
+        'if [ -n "$__awf_ollama_host" ]; then\n'
+        '  case "$__awf_ollama_host" in\n'
+        "    *://*) : ;;\n"
+        '    *) __awf_ollama_host="http://$__awf_ollama_host" ;;\n'
+        "  esac\n"
         # Default the Ollama daemon port (11434) when the authority omits one,
-        # so a port-less OLLAMA_HOST does not resolve to port 80.
-        '    __awf_ollama_scheme="${__awf_ollama_host%%://*}"\n'
-        '    __awf_ollama_rest="${__awf_ollama_host#*://}"\n'
-        '    __awf_ollama_authority="${__awf_ollama_rest%%/*}"\n'
-        '    __awf_ollama_path="${__awf_ollama_rest#"$__awf_ollama_authority"}"\n'
-        '    case "$__awf_ollama_authority" in\n'
-        "      '['*']') __awf_ollama_authority=\"$__awf_ollama_authority:11434\" ;;\n"
-        "      '['*']:'*) : ;;\n"
-        "      *:*) : ;;\n"
-        "      '') : ;;\n"
-        '      *) __awf_ollama_authority="$__awf_ollama_authority:11434" ;;\n'
-        "    esac\n"
-        '    __awf_ollama_host="$__awf_ollama_scheme://$__awf_ollama_authority$__awf_ollama_path"\n'
-        '    __awf_ollama_host="${__awf_ollama_host%/}"\n'
-        '    case "$__awf_ollama_host" in\n'
-        "      */v1) : ;;\n"
-        '      *) __awf_ollama_host="$__awf_ollama_host/v1" ;;\n'
-        "    esac\n"
-        '    AWF_OPENCODE_OLLAMA_BASE_URL="$__awf_ollama_host"\n'
-        "  else\n"
-        f'    AWF_OPENCODE_OLLAMA_BASE_URL="{DEFAULT_OLLAMA_OPENAI_BASE_URL}"\n'
-        "  fi\n"
+        # so a port-less explicit base URL or OLLAMA_HOST does not resolve to
+        # port 80 while the worker-side probe/pull builder targets :11434.
+        '  __awf_ollama_scheme="${__awf_ollama_host%%://*}"\n'
+        '  __awf_ollama_rest="${__awf_ollama_host#*://}"\n'
+        '  __awf_ollama_authority="${__awf_ollama_rest%%/*}"\n'
+        '  __awf_ollama_path="${__awf_ollama_rest#"$__awf_ollama_authority"}"\n'
+        '  case "$__awf_ollama_authority" in\n'
+        "    '['*']') __awf_ollama_authority=\"$__awf_ollama_authority:11434\" ;;\n"
+        "    '['*']:'*) : ;;\n"
+        "    *:*) : ;;\n"
+        "    '') : ;;\n"
+        '    *) __awf_ollama_authority="$__awf_ollama_authority:11434" ;;\n'
+        "  esac\n"
+        '  __awf_ollama_host="$__awf_ollama_scheme://$__awf_ollama_authority$__awf_ollama_path"\n'
+        '  __awf_ollama_host="${__awf_ollama_host%/}"\n'
+        '  case "$__awf_ollama_host" in\n'
+        "    */v1) : ;;\n"
+        '    *) __awf_ollama_host="$__awf_ollama_host/v1" ;;\n'
+        "  esac\n"
+        '  AWF_OPENCODE_OLLAMA_BASE_URL="$__awf_ollama_host"\n'
+        "else\n"
+        f'  AWF_OPENCODE_OLLAMA_BASE_URL="{DEFAULT_OLLAMA_OPENAI_BASE_URL}"\n'
         "fi\n"
         "export AWF_OPENCODE_OLLAMA_BASE_URL\n"
     )
