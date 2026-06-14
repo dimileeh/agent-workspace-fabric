@@ -515,6 +515,120 @@ async def test_worker_terminal_gc_reaper_honours_operator_scope_overrides(
     assert calls == [(1.0, 9), (1.0, 7)]
 
 
+async def _status_scopes_for_gc(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+    **reaper_kwargs: Any,
+) -> list[tuple[Any, Any]]:
+    """Build the reaper, invoke it, and return the (include, exclude) statuses per GC pass."""
+    created: dict[str, Any] = {}
+
+    class _ControlWorker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["terminal_gc_reaper"] = kwargs["terminal_gc_reaper"]
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    _patch_runtime_constructors(monkeypatch)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+
+    scopes: list[tuple[Any, Any]] = []
+
+    async def _fake_gc(_session_factory: object, **kwargs: Any) -> _FakeGCResult:
+        scopes.append((kwargs.get("include_statuses"), kwargs.get("exclude_statuses")))
+        return _FakeGCResult(1 if len(scopes) == 1 else 0)
+
+    monkeypatch.setattr(worker_mod, "run_service_workspace_gc", _fake_gc)
+
+    settings = dataclasses.replace(
+        _settings(tmp_path, completed_workspace_retention_hours=24.0),
+        workspace_cleanup_batch_limit=5,
+    )
+    worker_mod.build_worker_runtime(settings)
+    reaper = created["terminal_gc_reaper"]
+    await reaper(**reaper_kwargs)
+    return scopes
+
+
+@pytest.mark.unit
+async def test_worker_terminal_gc_explicit_status_scope_skips_discarded_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An explicit ``--status`` scope runs one pass with exactly that scope (#590).
+
+    When the operator pins ``--status completed`` the single scoped pass already covers
+    exactly the requested terminal statuses, so the cancelled/destroyed augmentation pass
+    must not run — otherwise the worker would reclaim cancelled/destroyed auth dirs the
+    operator never asked for.
+    """
+    scopes = await _status_scopes_for_gc(
+        monkeypatch,
+        tmp_path,
+        session_factory,
+        statuses=("completed",),
+    )
+
+    assert scopes == [(("completed",), None)]
+
+
+@pytest.mark.unit
+async def test_worker_terminal_gc_exclude_status_narrows_both_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """``--exclude-status`` removes a status from the default and augmentation passes (#590).
+
+    With no ``--status`` pin the default-policy pass still runs (carrying the operator's
+    exclude), and the augmentation pass that reaps cancelled/destroyed must drop the
+    excluded ``cancelled`` so the worker never reclaims an auth dir the operator excluded.
+    """
+    scopes = await _status_scopes_for_gc(
+        monkeypatch,
+        tmp_path,
+        session_factory,
+        exclude_statuses=("cancelled",),
+    )
+
+    assert scopes == [(None, ("cancelled",)), (("destroyed",), None)]
+
+
+@pytest.mark.unit
+async def test_worker_terminal_gc_excluding_all_discarded_skips_augmentation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Excluding both cancelled and destroyed leaves only the default-policy pass (#590)."""
+    scopes = await _status_scopes_for_gc(
+        monkeypatch,
+        tmp_path,
+        session_factory,
+        exclude_statuses=("cancelled", "destroyed"),
+    )
+
+    assert scopes == [(None, ("cancelled", "destroyed"))]
+
+
+@pytest.mark.unit
+async def test_worker_terminal_gc_no_status_scope_runs_full_two_pass_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """No status filters keeps the default two-pass sweep (default policy + cancelled/destroyed)."""
+    scopes = await _status_scopes_for_gc(
+        monkeypatch,
+        tmp_path,
+        session_factory,
+    )
+
+    assert scopes == [(None, None), (("cancelled", "destroyed"), None)]
+
+
 @pytest.mark.unit
 def test_combine_terminal_gc_reports_concatenates_and_sums() -> None:
     """A clean default pass + clean discarded pass fold into one ``succeeded`` summary."""

@@ -158,6 +158,61 @@ async def test_consume_omits_absent_params_so_reaper_uses_defaults(
     assert captured == {}
 
 
+async def test_consume_threads_status_filters_into_reaper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Operator ``--status``/``--exclude-status`` filters flow into the reaper (#590).
+
+    The API persists the resolved safety-scoping status filters in
+    ``service_gc_requests.params``; the worker's capability-gated reap must honour the
+    same scope so it never reclaims auth dirs the operator's flags excluded.
+    """
+    await _seed_pending(
+        session_factory,
+        params={
+            "execute": True,
+            "statuses": ["completed"],
+            "exclude_statuses": ["cancelled"],
+        },
+    )
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"statuses": ["completed"], "exclude_statuses": ["cancelled"]}
+
+
+async def test_consume_omits_empty_status_filters(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Empty ``statuses``/``exclude_statuses`` lists are not forwarded (#590).
+
+    An empty filter list means "no scoping", so it must leave the reaper on its default
+    two-pass sweep rather than being passed through as an empty include set.
+    """
+    await _seed_pending(
+        session_factory,
+        params={"execute": True, "statuses": [], "exclude_statuses": []},
+    )
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {}
+
+
 async def test_consume_is_noop_without_reaper(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

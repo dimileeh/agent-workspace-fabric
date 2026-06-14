@@ -19,6 +19,7 @@ from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import ServiceGCRequest, ServiceGCResponse
 from awf.service.config import resolve_service_settings
 from awf.service.gc import run_service_workspace_gc
+from awf.service.gc_time import normalize_statuses
 from awf.service.gc_worker_delegation import fold_worker_reclaim
 from awf.service.gc_worker_trigger import delegate_service_gc_to_worker
 from awf.service.node_identity import effective_service_node_id
@@ -95,14 +96,27 @@ async def trigger_service_gc(
         if payload.worker_delegation_timeout_seconds is not None
         else _DEFAULT_WORKER_DELEGATION_TIMEOUT_SECONDS
     )
+    # Persist the operator's safety-scoping filters alongside the resolved
+    # retention/limit so the worker's capability-gated auth-overlay/claude-base reap
+    # honours the same scope the API-side pass just applied — otherwise ``--status`` /
+    # ``--exclude-status`` would silently not reach the worker reaper (#590). Store the
+    # normalized string values (``superseded`` stays a plain string) so the JSON ``params``
+    # round-trip is stable. Omit empty filters so the worker keeps its default two-pass sweep.
+    worker_params: dict[str, object] = {
+        "execute": True,
+        "min_age_hours": retention_hours,
+        "limit": candidate_limit,
+    }
+    if payload.statuses:
+        worker_params["statuses"] = sorted(normalize_statuses(payload.statuses) or set())
+    if payload.exclude_statuses:
+        worker_params["exclude_statuses"] = sorted(
+            normalize_statuses(payload.exclude_statuses) or set()
+        )
     outcome = await delegate_service_gc_to_worker(
         session_factory,
         node_id=effective_service_node_id(settings),
         deadline_seconds=deadline_seconds,
-        params={
-            "execute": True,
-            "min_age_hours": retention_hours,
-            "limit": candidate_limit,
-        },
+        params=worker_params,
     )
     return ServiceGCResponse.model_validate(fold_worker_reclaim(base_payload, outcome))

@@ -93,7 +93,9 @@ async def _run_worker_consumer(
     """Background task that consumes any pending gc trigger with a stub reaper."""
     factory = make_session_factory(engine)
 
-    async def _terminal_reaper() -> dict[str, object]:
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        # Tolerate the operator-scope kwargs (``min_age_hours``/``limit``/``statuses``/
+        # ``exclude_statuses``) the API now forwards through ``params`` (#590).
         return report
 
     worker = ControlWorker(
@@ -239,6 +241,76 @@ async def test_route_handler_folds_outcome_directly(
     assert response.reason_code == "SERVICE_GC_WORKER_UNAVAILABLE"
     assert response.worker_reclaim is not None
     assert response.worker_reclaim.status == "unavailable"
+
+
+async def _single_request_params(engine: AsyncEngine) -> dict[str, object]:
+    """Return the ``params`` of the single persisted ``service_gc_requests`` row."""
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        from sqlalchemy import select
+
+        from awf.db.models import ServiceGCRequest
+
+        request = (await session.execute(select(ServiceGCRequest))).scalar_one()
+        return dict(request.params or {})
+
+
+@pytest.mark.unit
+async def test_execute_persists_status_filters_in_worker_params(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_api_side_reclaim: None,
+) -> None:
+    """``--status``/``--exclude-status`` are persisted so the worker reap honours them (#590).
+
+    The API-side pass applies the operator's safety-scoping status filters, but the
+    capability-gated auth-overlay/claude-base reclaim is the worker's job; the filters
+    must be threaded into ``service_gc_requests.params`` (as normalized string values) so
+    the worker reaper does not silently fall back to its default two-pass sweep.
+    """
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    await _seed_fresh_heartbeat(engine)
+    # No worker consumer runs, so the pending row survives for inspection (times out).
+
+    response = await client.post(
+        "/v1/service/gc",
+        json={
+            "execute": True,
+            "statuses": ["completed", "superseded"],
+            "exclude_statuses": ["cancelled"],
+            "worker_delegation_timeout_seconds": 0.2,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    params = await _single_request_params(engine)
+    assert params["statuses"] == ["completed", "superseded"]
+    assert params["exclude_statuses"] == ["cancelled"]
+
+
+@pytest.mark.unit
+async def test_execute_omits_absent_status_filters_from_worker_params(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_api_side_reclaim: None,
+) -> None:
+    """A run without status filters writes no ``statuses`` keys (worker keeps its sweep) (#590)."""
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    await _seed_fresh_heartbeat(engine)
+
+    response = await client.post(
+        "/v1/service/gc",
+        json={"execute": True, "worker_delegation_timeout_seconds": 0.2},
+    )
+
+    assert response.status_code == 200, response.text
+    params = await _single_request_params(engine)
+    assert "statuses" not in params
+    assert "exclude_statuses" not in params
 
 
 @pytest.mark.unit

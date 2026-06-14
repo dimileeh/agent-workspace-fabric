@@ -628,12 +628,12 @@ async def _run_claimed_service_gc_trigger(
 
     The claim and the (potentially multi-GB, multi-second) reap are in separate
     transactions so the row lock is not held across the reap. The operator-supplied
-    ``min_age_hours``/``limit`` (resolved by the API and stored in ``params``) are
-    forwarded to the reaper so the auth-overlay/claude-base reclaim matches the scope
-    of the API-side pass the operator just ran (#590); absent keys leave the reaper on
-    its server defaults (e.g. the periodic backstop). ``CancelledError`` propagates;
-    any reaper failure is recorded on the row so the polling API does not hang and
-    never reports false success.
+    ``min_age_hours``/``limit`` and ``statuses``/``exclude_statuses`` filters (resolved
+    by the API and stored in ``params``) are forwarded to the reaper so the
+    auth-overlay/claude-base reclaim matches the scope of the API-side pass the operator
+    just ran (#590); absent keys leave the reaper on its server defaults (e.g. the
+    periodic backstop). ``CancelledError`` propagates; any reaper failure is recorded on
+    the row so the polling API does not hang and never reports false success.
     """
     reaper_kwargs: dict[str, Any] = {}
     min_age_hours = params.get("min_age_hours")
@@ -642,6 +642,12 @@ async def _run_claimed_service_gc_trigger(
     limit = params.get("limit")
     if limit is not None:
         reaper_kwargs["limit"] = limit
+    statuses = params.get("statuses")
+    if statuses:
+        reaper_kwargs["statuses"] = statuses
+    exclude_statuses = params.get("exclude_statuses")
+    if exclude_statuses:
+        reaper_kwargs["exclude_statuses"] = exclude_statuses
 
     try:
         report = await self._terminal_gc_reaper(**reaper_kwargs)

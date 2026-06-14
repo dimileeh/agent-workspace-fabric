@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -136,6 +136,31 @@ def _combine_terminal_gc_reports(
         combined["status"] = "partial"
         combined["reason_code"] = CLEANUP_EXECUTION_PARTIAL
     return combined
+
+
+def _terminal_gc_discarded_statuses(
+    requested_statuses: tuple[str, ...] | None,
+    excluded_statuses: tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    """Cancelled/destroyed statuses the default-policy pass omits, honouring operator scope.
+
+    The conservative default policy only classifies completed/failed/superseded, so the
+    worker runs a second explicit pass to reap the discarded cancelled/destroyed rows whose
+    ~1.7 GB auth dirs would otherwise leak (#513). Two ``awf service gc`` scope cases narrow
+    that augmentation so the worker never reclaims auth dirs the operator's flags excluded
+    (#590): an explicit ``--status`` set means the first pass already covers exactly the
+    requested terminal statuses (cancelled/destroyed included when asked for), so no
+    augmentation is needed and this returns empty; ``--exclude-status`` removes those
+    statuses from the augmentation set.
+    """
+    if requested_statuses is not None:
+        return ()
+    excluded = set(excluded_statuses or ())
+    return tuple(
+        status
+        for status in (WorkspaceStatus.cancelled.value, WorkspaceStatus.destroyed.value)
+        if status not in excluded
+    )
 
 
 def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
@@ -367,6 +392,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         *,
         min_age_hours: float | None = None,
         limit: int | None = None,
+        statuses: Sequence[str] | None = None,
+        exclude_statuses: Sequence[str] | None = None,
     ) -> dict[str, object]:
         """Reap per-workspace terminal-workspace auth dirs from the worker (#513).
 
@@ -405,22 +432,29 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         so the second pass leaves them off. Both reports are folded into one summary.
 
         An on-demand ``awf service gc --execute`` delegation forwards the operator's
-        resolved ``min_age_hours``/``limit`` so this capability-gated reap matches the
-        scope of the API-side worktree/compose pass the operator just ran instead of
-        diverging onto the worker's server defaults (#590). The periodic backstop and
-        the test wiring call with neither override, falling back to the configured
-        retention/batch defaults.
+        resolved ``min_age_hours``/``limit`` and ``--status``/``--exclude-status`` filters
+        so this capability-gated reap matches the scope of the API-side worktree/compose
+        pass the operator just ran instead of diverging onto the worker's server defaults
+        (#590). An explicit ``--status`` set scopes the first pass directly (so the
+        augmentation pass is skipped — see ``_terminal_gc_discarded_statuses``);
+        ``--exclude-status`` removes statuses from both passes so an excluded auth dir is
+        never reclaimed. The periodic backstop and the test wiring call with no overrides,
+        falling back to the configured retention/batch defaults and the full two-pass sweep.
         """
         retention_hours = (
             settings.completed_workspace_retention_hours if min_age_hours is None else min_age_hours
         )
         batch_limit = settings.workspace_cleanup_batch_limit if limit is None else limit
+        requested_statuses = tuple(statuses) if statuses else None
+        excluded_statuses = tuple(exclude_statuses) if exclude_statuses else None
         default_result = await run_service_workspace_gc(
             session_factory,
             work_dir=work_dir,
             execute=True,
             min_age_hours=retention_hours,
             limit=batch_limit,
+            include_statuses=requested_statuses,
+            exclude_statuses=excluded_statuses,
             cleanup_enabled=settings.workspace_cleanup_enabled,
             companion_image_cache_enabled=settings.companion_image_cache_enabled,
             companion_image_retention_hours=settings.companion_image_retention_hours,
@@ -428,6 +462,14 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             reap_claude_bases=settings.claude_base_gc_enabled,
             compose_manager=compose,
         )
+        # The conservative default policy never classifies cancelled/destroyed rows, so a
+        # second explicit pass reaps those discarded auth dirs that would otherwise leak
+        # (#513) — but only for the statuses the first pass did not already cover and the
+        # operator did not exclude (#590). When that set is empty (an explicit ``--status``
+        # scope, or both discarded statuses excluded) the first pass is the whole sweep.
+        discarded_statuses = _terminal_gc_discarded_statuses(requested_statuses, excluded_statuses)
+        if not discarded_statuses:
+            return _combine_terminal_gc_reports(default_result.to_dict(), {})
         # Share one cleanup-batch budget across both passes. ``plan_terminal_workspace_gc``
         # caps each call to the batch limit candidates (the "maximum cleanup candidates
         # per batch" invariant), but giving the discarded-status pass the full limit
@@ -446,10 +488,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             min_age_hours=retention_hours,
             limit=discarded_limit,
             cleanup_enabled=settings.workspace_cleanup_enabled,
-            include_statuses=(
-                WorkspaceStatus.cancelled.value,
-                WorkspaceStatus.destroyed.value,
-            ),
+            include_statuses=discarded_statuses,
             compose_manager=compose,
         )
         return _combine_terminal_gc_reports(default_result.to_dict(), discarded_result.to_dict())
