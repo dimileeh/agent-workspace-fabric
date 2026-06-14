@@ -17,6 +17,7 @@ pulling in the node/control runtime stack.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import cast
 
 from awf.db.enums import WorkspaceStatus
@@ -80,7 +81,69 @@ def combine_terminal_gc_reports(
     combined["total_estimated_bytes"] = cast(
         "int", default_report.get("total_estimated_bytes") or 0
     ) + cast("int", discarded_report.get("total_estimated_bytes") or 0)
+    default_reap = default_report.get("claude_base_reap")
+    discarded_reap = discarded_report.get("claude_base_reap")
+    if default_reap is not None or discarded_reap is not None:
+        combined["claude_base_reap"] = _merge_claude_base_reaps(default_reap, discarded_reap)
     if "partial" in (default_report.get("status"), discarded_report.get("status")):
         combined["status"] = "partial"
         combined["reason_code"] = CLEANUP_EXECUTION_PARTIAL
     return combined
+
+
+def _merge_claude_base_reaps(
+    default_reap: object, discarded_reap: object
+) -> dict[str, object] | None:
+    """Fold the two passes' ``claude_base_reap`` sub-reports into one (#590).
+
+    Both terminal-GC passes now run the shared-base reaper: the default pass frees
+    bases pinned only by its completed/failed/superseded candidates, and the discarded
+    pass frees bases pinned only by the cancelled/destroyed auth dirs it deletes — a
+    base pinned solely by a discarded workspace stays protected through the first pass
+    and is reaped only after the second deletes that pin (PRRT_kwDOSJAM6s6JbT1B).
+    ``combine_terminal_gc_reports`` keeps the default pass's payload via
+    ``dict(default_report)``, so without this fold the discarded pass's reaped/planned
+    bases vanish from the summary and the operator-facing ``deleted_path_count``
+    (which counts reaped bases — PRRT_kwDOSJAM6s6JbAow) under-reports the GB-scale
+    reclaim. The two passes act on disjoint signatures (the first removes what it can
+    before the second runs), so each list concatenates; a signature the second pass
+    reaped or planned is dropped from the first pass's ``protected`` (its pin was still
+    on disk during the first pass). A ``partial`` in either reap wins; otherwise a pass
+    that actually reaped/planned a base supersedes a no-op ``skipped`` sibling.
+    """
+    if not isinstance(default_reap, Mapping):
+        return dict(discarded_reap) if isinstance(discarded_reap, Mapping) else None
+    if not isinstance(discarded_reap, Mapping):
+        return dict(default_reap)
+    merged: dict[str, object] = dict(default_reap)
+    for key in ("scanned", "reaped", "planned", "unverifiable", "errors"):
+        merged[key] = [*_as_list(default_reap.get(key)), *_as_list(discarded_reap.get(key))]
+    reclaimed = {*_as_list(merged["reaped"]), *_as_list(merged["planned"])}
+    protected = [
+        *_as_list(default_reap.get("protected")),
+        *_as_list(discarded_reap.get("protected")),
+    ]
+    merged["protected"] = [signature for signature in protected if signature not in reclaimed]
+    default_status = default_reap.get("status")
+    discarded_status = discarded_reap.get("status")
+    if "partial" in (default_status, discarded_status):
+        merged["status"] = "partial"
+        merged["reason_code"] = (
+            default_reap.get("reason_code")
+            if default_status == "partial"
+            else discarded_reap.get("reason_code")
+        )
+    elif default_status == "skipped":
+        # The first pass reaped/planned nothing, so the discarded pass's outcome (a
+        # reaped/planned base, or another no-op) is the whole picture — adopt its
+        # status/reason rather than report ``skipped`` next to a non-empty ``reaped``.
+        merged["status"] = discarded_status
+        merged["reason_code"] = discarded_reap.get("reason_code")
+    # else: the first pass already reaped/planned a base (``ok``); the discarded pass
+    # only adds more of the same, so the first pass's ``ok`` status/reason stand.
+    return merged
+
+
+def _as_list(value: object) -> list[object]:
+    """Return ``value`` as a list, or an empty list when it is not one."""
+    return value if isinstance(value, list) else []

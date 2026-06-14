@@ -31,6 +31,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.service import worker as worker_mod
+from awf.service.gc_terminal_passes import _merge_claude_base_reaps
 from tests.unit.service.test_worker import (
     _in_process_merge_coordinator,
     _settings,
@@ -355,6 +356,88 @@ async def test_worker_terminal_gc_reaper_reaps_cancelled_and_destroyed(
     assert str(destroyed_auth) in deleted
     candidate_ids = {c["workspace_id"] for c in report["candidates"]}
     assert {cancelled_id, destroyed_id} <= candidate_ids
+
+
+@pytest.mark.unit
+async def test_worker_terminal_gc_reaps_base_pinned_only_by_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The second pass reaps a claude-base pinned only by a cancelled ws (PRRT_kwDOSJAM6s6JbT1B).
+
+    A superseded ``_shared/claude-base/<sig>`` pinned solely by a cancelled workspace's
+    ``base.signature`` stays protected through the first (default-policy) pass — which
+    never classifies cancelled rows, so that pin is still on disk when the first pass's
+    reaper runs. Only the second discarded-status pass deletes the auth dir (and its
+    pin), so the base becomes reapable then: the reaper must run on that pass too, or
+    the GB-scale base leaks until a later GC.
+    """
+    from awf.node.auth_mounts import _shared_claude_base_dir
+
+    created: dict[str, Any] = {}
+
+    class _ControlWorker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["terminal_gc_reaper"] = kwargs["terminal_gc_reaper"]
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    _patch_runtime_constructors(monkeypatch)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    from unittest.mock import AsyncMock
+
+    from awf.service.gc import WorkspaceGCWorktreeRemoveResult
+
+    monkeypatch.setattr(
+        "awf.service.gc._default_worktree_remover",
+        AsyncMock(
+            return_value=WorkspaceGCWorktreeRemoveResult(
+                status="succeeded", reason_code="WORKTREE_REMOVE_SUCCEEDED"
+            )
+        ),
+    )
+    monkeypatch.setattr("awf.node.auth_mounts_claude._has_cap_sys_admin", lambda: True)
+    # The claude-base reaper's own capability probe must also read as capable so an
+    # unpinned superseded base is classified as reapable rather than conservatively
+    # protected behind the live-mount-unverifiable guard.
+    monkeypatch.setattr("awf.service.gc_claude_base._has_cap_sys_admin", lambda: True)
+
+    settings = dataclasses.replace(
+        _settings(tmp_path, completed_workspace_retention_hours=24.0),
+        claude_base_gc_enabled=True,
+        companion_image_cache_enabled=False,
+    )
+    work_dir = Path(settings.work_dir).resolve()
+    old = datetime.now(UTC) - timedelta(hours=200)
+    _cancelled_id, cancelled_auth = await _terminal_workspace_with_auth_overlay(
+        session_factory,
+        work_dir=work_dir,
+        status=WorkspaceStatus.cancelled,
+        updated_at=old,
+    )
+    # The cancelled workspace is the sole pin on a superseded shared base; ``host_home``
+    # has no ``~/.claude`` so the signature is not the current one and is reapable once
+    # unpinned.
+    signature = "sigsuperseded000"
+    base = _shared_claude_base_dir(work_dir, signature)
+    base.mkdir(parents=True)
+    (base / "blob").write_text("x" * 512, encoding="utf-8")
+    (cancelled_auth / "claude" / "base.signature").write_text(signature, encoding="utf-8")
+    assert cancelled_auth.is_dir()
+    assert base.parent.is_dir()
+
+    worker_mod.build_worker_runtime(settings)
+    reaper = created["terminal_gc_reaper"]
+
+    report = await reaper()
+
+    # The cancelled auth dir (its pin) is reaped, and the now-unpinned base is reclaimed
+    # in the same on-demand run — not left until a later GC.
+    assert not cancelled_auth.exists()
+    assert not base.parent.exists()
+    assert report["status"] == "succeeded"
+    assert report["claude_base_reap"]["reaped"] == [signature]
 
 
 class _FakeGCPlan:
@@ -733,3 +816,124 @@ def test_combine_terminal_gc_reports_partial_in_either_pass_wins() -> None:
     assert combined["status"] == "partial"
     assert combined["reason_code"] == CLEANUP_EXECUTION_PARTIAL
     assert combined["delete_errors"] == [{"kind": "auth", "error": "boom"}]
+
+
+def _reap(status: str, reason_code: str, **lists: Any) -> dict[str, Any]:
+    """Build a minimal ``claude_base_reap`` sub-report for merge tests."""
+    payload: dict[str, Any] = {
+        "status": status,
+        "reason_code": reason_code,
+        "base_root": "/work/auth/_shared/claude-base",
+    }
+    payload.update(lists)
+    return payload
+
+
+@pytest.mark.unit
+def test_merge_claude_base_reaps_returns_discarded_when_default_absent() -> None:
+    """No first-pass reap (e.g. it was skipped): the discarded pass's reap is the whole picture."""
+    discarded = _reap("ok", "CLAUDE_BASE_SUPERSEDED_REAPED", reaped=["sigA"])
+
+    merged = _merge_claude_base_reaps(None, discarded)
+
+    assert merged == discarded
+    # A fresh dict, so mutating the result never bleeds into the caller's payload.
+    assert merged is not discarded
+
+
+@pytest.mark.unit
+def test_merge_claude_base_reaps_returns_none_when_both_absent() -> None:
+    """Neither pass produced a reap (base GC disabled): the merged reap is ``None``."""
+    assert _merge_claude_base_reaps(None, None) is None
+
+
+@pytest.mark.unit
+def test_merge_claude_base_reaps_returns_default_when_discarded_absent() -> None:
+    """The single-pass case (``discarded == {}``) keeps the default pass's reap verbatim."""
+    default = _reap("ok", "CLAUDE_BASE_SUPERSEDED_REAPED", reaped=["sigA"])
+
+    merged = _merge_claude_base_reaps(default, None)
+
+    assert merged == default
+    assert merged is not default
+
+
+@pytest.mark.unit
+def test_merge_claude_base_reaps_folds_reaped_and_deconflicts_protected() -> None:
+    """A base the discarded pass reaped is folded in and dropped from the default ``protected``.
+
+    The default pass kept ``sigA`` protected (its cancelled-workspace pin was still on
+    disk); the discarded pass deleted that pin and reaped ``sigA``. The merge surfaces
+    the reaped base and removes it from ``protected`` so the summary is not internally
+    contradictory, and adopts the discarded pass's ``ok`` status over the default pass's
+    no-op ``skipped`` (PRRT_kwDOSJAM6s6JbT1B).
+    """
+    default = _reap(
+        "skipped", "CLAUDE_BASE_GC_NOOP", scanned=["sigA"], protected=["sigA"], reaped=[]
+    )
+    discarded = _reap(
+        "ok", "CLAUDE_BASE_SUPERSEDED_REAPED", scanned=["sigA"], protected=[], reaped=["sigA"]
+    )
+
+    merged = _merge_claude_base_reaps(default, discarded)
+
+    assert merged is not None
+    assert merged["reaped"] == ["sigA"]
+    assert merged["protected"] == []
+    assert merged["status"] == "ok"
+    assert merged["reason_code"] == "CLAUDE_BASE_SUPERSEDED_REAPED"
+
+
+@pytest.mark.unit
+def test_merge_claude_base_reaps_partial_in_discarded_pass_wins() -> None:
+    """A ``partial`` discarded reap drives the merged reap ``partial`` with its reason."""
+    default = _reap("ok", "CLAUDE_BASE_SUPERSEDED_REAPED", reaped=["sigA"])
+    discarded = _reap(
+        "partial",
+        "CLAUDE_BASE_REAP_PARTIAL",
+        reaped=[],
+        errors=[{"signature": "sigB", "reason_code": "CLAUDE_BASE_REAP_PERMISSION_DENIED"}],
+    )
+
+    merged = _merge_claude_base_reaps(default, discarded)
+
+    assert merged is not None
+    assert merged["status"] == "partial"
+    assert merged["reason_code"] == "CLAUDE_BASE_REAP_PARTIAL"
+    # The default pass's reclaimed base is still carried alongside the discarded failure.
+    assert merged["reaped"] == ["sigA"]
+    assert merged["errors"] == [
+        {"signature": "sigB", "reason_code": "CLAUDE_BASE_REAP_PERMISSION_DENIED"}
+    ]
+
+
+@pytest.mark.unit
+def test_merge_claude_base_reaps_partial_in_default_pass_keeps_default_reason() -> None:
+    """A ``partial`` first-pass reap keeps its own reason even when the discarded pass is clean."""
+    default = _reap(
+        "partial",
+        "CLAUDE_BASE_REAP_PARTIAL",
+        reaped=[],
+        errors=[{"signature": "sigA", "reason_code": "CLAUDE_BASE_REAP_PERMISSION_DENIED"}],
+    )
+    discarded = _reap("ok", "CLAUDE_BASE_SUPERSEDED_REAPED", reaped=["sigB"])
+
+    merged = _merge_claude_base_reaps(default, discarded)
+
+    assert merged is not None
+    assert merged["status"] == "partial"
+    assert merged["reason_code"] == "CLAUDE_BASE_REAP_PARTIAL"
+    assert merged["reaped"] == ["sigB"]
+
+
+@pytest.mark.unit
+def test_merge_claude_base_reaps_keeps_default_ok_when_both_reaped() -> None:
+    """Two clean passes that each reaped a base keep the first pass's ``ok`` and union ``reaped``."""
+    default = _reap("ok", "CLAUDE_BASE_SUPERSEDED_REAPED", reaped=["sigA"])
+    discarded = _reap("ok", "CLAUDE_BASE_SUPERSEDED_REAPED", reaped=["sigB"])
+
+    merged = _merge_claude_base_reaps(default, discarded)
+
+    assert merged is not None
+    assert merged["status"] == "ok"
+    assert merged["reaped"] == ["sigA", "sigB"]

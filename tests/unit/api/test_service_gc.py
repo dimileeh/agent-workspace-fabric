@@ -183,6 +183,57 @@ async def test_service_gc_dry_run_explicit_status_skips_augmentation(
 
 
 @pytest.mark.unit
+async def test_service_gc_dry_run_previews_claude_base_reap_for_discarded_pass(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dry-run discarded preview pass also runs the claude-base reaper (PRRT_kwDOSJAM6s6JbT1B).
+
+    ``--execute``'s second pass now reaps shared bases unpinned once the
+    cancelled/destroyed auth dirs are deleted, so the plan-before-delete preview must
+    run the base reaper on the augmentation pass too — otherwise the plan would label a
+    base ``protected`` that ``--execute`` reaps, breaking the plan/execute parity
+    (PRRT_kwDOSJAM6s6JbN6x).
+    """
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    calls: list[dict[str, object]] = []
+
+    def _payload(candidate_count: int) -> dict[str, object]:
+        return {
+            "dry_run": True,
+            "status": "dry_run",
+            "reason_code": "CLEANUP_DRY_RUN",
+            "candidate_count": candidate_count,
+            "candidates": [],
+            "deleted_paths": [],
+            "delete_errors": [],
+            "preserved_count": 0,
+            "deleted_path_count": 0,
+            "total_estimated_bytes": 0,
+        }
+
+    async def _fake_entrypoint(_session_factory: object, **kwargs: object) -> _FakeGCResult:
+        calls.append(kwargs)
+        # The first (default) pass reports a candidate so the augmentation pass runs;
+        # the second pass is the one whose reap flags we assert.
+        return _FakeGCResult(_payload(1 if len(calls) == 1 else 0))
+
+    with patch(
+        "awf.api.routes.service.run_service_workspace_gc",
+        new=AsyncMock(side_effect=_fake_entrypoint),
+    ):
+        response = await client.post("/v1/service/gc", json={"min_age_hours": 24})
+
+    assert response.status_code == 200, response.text
+    assert len(calls) == 2
+    discarded_call = calls[1]
+    assert discarded_call["execute"] is False
+    assert discarded_call["reap_claude_bases"] is True
+    assert isinstance(discarded_call["host_home"], Path)
+
+
+@pytest.mark.unit
 async def test_service_gc_maps_request_params_to_entrypoint(
     client: AsyncClient,
     tmp_path: Path,

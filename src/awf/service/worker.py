@@ -379,8 +379,13 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         destroyed). Those discarded rows carry no merged-PR work to preserve, so a second
         explicit ``include_statuses`` pass reaps them by age without disturbing the first
         pass's completed-merged / failed-preservation / superseded age-cap nuance. The
-        global claude-base reap and companion-image prune already ran in the first pass,
-        so the second pass leaves them off. Both reports are folded into one summary.
+        companion-image prune already ran in the first pass, so the second pass leaves it
+        off — but the claude-base reap runs in *both* passes: a superseded
+        ``_shared/claude-base`` pinned only by a cancelled/destroyed workspace stays
+        protected through the first pass (its ``base.signature`` pin is still on disk
+        there) and becomes reapable only once this second pass deletes that auth dir, so
+        without a second reap the GB-scale base would leak until a later GC
+        (PRRT_kwDOSJAM6s6JbT1B). Both reports are folded into one summary.
 
         An on-demand ``awf service gc --execute`` delegation forwards the operator's
         resolved ``min_age_hours``/``limit`` and ``--status``/``--exclude-status`` filters
@@ -440,6 +445,14 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             limit=discarded_limit,
             cleanup_enabled=settings.workspace_cleanup_enabled,
             include_statuses=discarded_statuses,
+            # Re-run the claude-base reap on this pass. The reaper runs *after* the
+            # pass deletes its candidate auth dirs (and their ``base.signature`` pins),
+            # so a superseded base pinned only by a cancelled/destroyed workspace — kept
+            # protected through the first pass while its pin was still on disk — is reaped
+            # now instead of leaking until a later GC (PRRT_kwDOSJAM6s6JbT1B). The
+            # companion-image prune stays off (it already ran in the first pass).
+            host_home=host_home,
+            reap_claude_bases=settings.claude_base_gc_enabled,
             compose_manager=compose,
         )
         return _combine_terminal_gc_reports(default_result.to_dict(), discarded_result.to_dict())

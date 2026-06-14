@@ -128,6 +128,13 @@ async def trigger_service_gc(
             limit=discarded_limit,
             include_statuses=discarded_statuses,
             cleanup_enabled=settings.workspace_cleanup_enabled,
+            # The worker's ``--execute`` second pass now also reaps the claude-base
+            # bases unpinned once the cancelled/destroyed auth dirs are deleted
+            # (PRRT_kwDOSJAM6s6JbT1B), so preview that here too — otherwise the plan
+            # would label a base ``protected`` that ``--execute`` reaps, breaking the
+            # plan-before-delete contract (PRRT_kwDOSJAM6s6JbN6x).
+            host_home=Path(settings.host_home).expanduser(),
+            reap_claude_bases=settings.claude_base_gc_enabled,
         )
         combined = combine_terminal_gc_reports(base_payload, discarded_result.to_dict())
         return ServiceGCResponse.model_validate(combined)
