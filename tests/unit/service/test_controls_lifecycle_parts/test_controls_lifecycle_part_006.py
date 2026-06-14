@@ -183,9 +183,20 @@ async def test_stop_already_terminal_workspace_is_idempotent(
 
 
 @pytest.mark.unit
-async def test_stop_absent_stack_is_no_op_success(
+async def test_stop_absent_stack_records_runtime_released(
     session: AsyncSession,
 ) -> None:
+    """A both-null no-op cleanup success still records ``terminal_runtime_released``.
+
+    Even when neither ``compose_project_name`` nor ``compose_file_path`` was ever
+    stamped (e.g. a ``requested``/``provisioning`` workspace cancelled before
+    launch), the cleaner runs the default ``awf_<workspace_id>`` teardown and the
+    host-port conflict query treats a terminal null-runtime row carrying a
+    ``ResourceReservation`` (or a NULL ``node_id``) and no pre-launch-failure
+    marker as a possible port holder. Recording the release here mirrors the
+    worker terminal sweep (which includes null-runtime rows) and clears the port
+    promptly instead of leaving it blocked until a later worker sweep.
+    """
     workspace = await _workspace(session, status=WorkspaceStatus.ready)
     # No compose project/file was ever stamped (e.g. provisioning never started).
     workspace.compose_project_name = None
@@ -203,9 +214,13 @@ async def test_stop_absent_stack_is_no_op_success(
     assert cleaner.calls[0].compose_project_name is None
     assert cleaner.calls[0].compose_file_path is None
     assert operations[0].status == OperationStatus.succeeded.value
-    # No compose project means no host port to release, so no release event.
-    assert release_events == []
-    assert await has_terminal_runtime_released_event(session, workspace.id) is False
+    # The default-project teardown succeeded, so the release is recorded to clear
+    # any phantom host-port conflict — even with both locators null.
+    assert len(release_events) == 1
+    assert release_events[0].payload["compose_project_name"] is None
+    assert release_events[0].payload["compose_file_path"] is None
+    assert release_events[0].payload["source"] == "stop_workspace"
+    assert await has_terminal_runtime_released_event(session, workspace.id) is True
 
 
 @pytest.mark.unit
@@ -219,8 +234,9 @@ async def test_stop_compose_file_only_records_runtime_released(
     ``compose_file_path`` as runtime evidence. Without recording the release the
     host port would stay blocked until a later worker sweep, so the file-path-only
     successful cleanup must emit ``terminal_runtime_released`` — mirroring the
-    destroy/worker paths (contrast ``test_stop_absent_stack_is_no_op_success``
-    where both locators are null and there is nothing to release).
+    destroy/worker paths (the both-null no-op case is covered by
+    ``test_stop_absent_stack_records_runtime_released``, which records the release
+    for the same prompt-port-reclaim reason).
     """
     workspace = await _workspace(session, status=WorkspaceStatus.running)
     compose_file_path = workspace.compose_file_path

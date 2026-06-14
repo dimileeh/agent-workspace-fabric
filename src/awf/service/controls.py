@@ -244,14 +244,19 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
         being stranded in the host-port conflict set; a failed compose-down makes
         the result non-``succeeded`` and is handled by the failure branch above,
         so the event still genuinely means "runtime released". The release is
-        recorded whenever *either* ``compose_project_name`` *or*
-        ``compose_file_path`` is present, mirroring the destroy/worker paths: a
-        legacy/partially persisted workspace with a ``compose_file_path`` but a
-        null ``compose_project_name`` can still be torn down (the cleaner derives
-        the default ``awf_<workspace_id>`` project), and the host-port conflict
-        query treats a non-null ``compose_file_path`` as runtime evidence, so a
-        file-path-only cleanup that did not record the release would leave the
-        port blocked until a later worker sweep. On a compose-down
+        recorded on **any** successful terminal cleanup — including the
+        both-null no-op case where neither ``compose_project_name`` nor
+        ``compose_file_path`` was ever stamped — mirroring the worker terminal
+        release sweep, which includes null-runtime terminal rows and records the
+        release once the cleaner's default ``awf_<workspace_id>`` teardown
+        succeeds. Recording it here too matters because the host-port conflict
+        query still treats a terminal null-runtime row that carries a
+        ``ResourceReservation`` (or a NULL ``node_id``) and no pre-launch-failure
+        marker as a possible port holder: a ``requested``/``provisioning``
+        workspace that reserved a host port but was cancelled before launch
+        would otherwise stay in the conflict set until a later worker sweep
+        finally records the release, defeating the prompt-release intent. On a
+        compose-down
         failure no release event is emitted (the runtime was *not* released) and
         the operation is finished **failed** via the shared failed-operation
         helper so the teardown error is surfaced, not swallowed. The failure
@@ -274,8 +279,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
             )
         runtime_cleanup_succeeded = cleanup_result.status == "succeeded"
         if (
-            (workspace.compose_project_name is not None or workspace.compose_file_path is not None)
-            and workspace.status in HOST_PORT_TERMINAL_RELEASE_STATUSES
+            workspace.status in HOST_PORT_TERMINAL_RELEASE_STATUSES
             and runtime_cleanup_succeeded
             and not await has_terminal_runtime_released_event(self._session, workspace.id)
         ):
