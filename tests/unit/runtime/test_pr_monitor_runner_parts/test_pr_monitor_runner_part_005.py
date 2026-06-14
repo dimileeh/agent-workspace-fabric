@@ -580,7 +580,18 @@ class TestMiscMonitorHelpers:
                 "ws_add_failed",
                 [
                     {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 1, "stderr": "add failed"},
+                ],
+            )
+            is False
+        )
+        assert (
+            await run_case(
+                "ws_stage_status_failed",
+                [
+                    {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 1, "stderr": "status failed"},
                 ],
             )
             is False
@@ -589,6 +600,7 @@ class TestMiscMonitorHelpers:
             await run_case(
                 "ws_cached_clean",
                 [
+                    {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0},
                     {"returncode": 0},
@@ -601,6 +613,7 @@ class TestMiscMonitorHelpers:
                 "ws_commit_failed",
                 [
                     {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0},
                     {"returncode": 1},
                     {"returncode": 1, "stderr": "commit failed"},
@@ -612,6 +625,7 @@ class TestMiscMonitorHelpers:
             await run_case(
                 "ws_committed",
                 [
+                    {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0},
                     {"returncode": 1},
@@ -638,7 +652,8 @@ class TestMiscMonitorHelpers:
         fake = FakeCommandRunner()
         for result in (
             {"returncode": 0, "stdout": " M file.py\n"},  # status --porcelain (dirty)
-            {"returncode": 0},  # add -A
+            {"returncode": 0, "stdout": " M file.py\n"},  # status --untracked-files=all
+            {"returncode": 0},  # add -A -- <stage_paths>
             {"returncode": 1},  # diff --cached --quiet (staged changes present)
             {"returncode": 0},  # commit
         ):
@@ -656,6 +671,77 @@ class TestMiscMonitorHelpers:
         assert commit_calls, "expected a git commit invocation"
         message = commit_calls[-1].args[commit_calls[-1].args.index("-m") + 1]
         assert message == "PROJ-123 awf: monitor dirty worktree"
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_excludes_untracked_agent_runtime_memory(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Pre-existing reviewer subagent memory is never staged into the PR commit.
+
+        The pre-existing-dirty guard lets a repair run when the only dirt is an
+        untracked ``.claude/agent-memory/`` file; the commit path must apply the
+        same exclusion so ``git add`` never re-stages that memory alongside a real
+        fix (PRRT_kwDOSJAM6s6JXd4I).
+        """
+        workspace_id = "ws_memory_exclusion"
+        fake = FakeCommandRunner()
+        dirty = " M src/awf/foo.py\n?? .claude/agent-memory/reviewer/bug.md\n"
+        for result in (
+            {"returncode": 0, "stdout": dirty},  # status --porcelain
+            {"returncode": 0, "stdout": dirty},  # status --untracked-files=all
+            {"returncode": 0},  # add -A -- <stage_paths>
+            {"returncode": 1},  # diff --cached --quiet (staged changes present)
+            {"returncode": 0},  # commit
+        ):
+            fake.queue_result(**result)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+        )
+
+        assert committed is True
+        add_calls = [call for call in fake.calls if "add" in call.args]
+        assert add_calls, "expected a git add invocation"
+        add_args = add_calls[-1].args
+        assert "src/awf/foo.py" in add_args
+        assert not any(arg.startswith(".claude/agent-memory") for arg in add_args)
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_memory_only_makes_no_commit(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """A worktree dirtied only by reviewer memory yields no PR commit.
+
+        With nothing PR-worthy left after excluding the untracked agent-runtime
+        artifact, the commit path returns False and never stages or commits
+        (PRRT_kwDOSJAM6s6JXd4I).
+        """
+        workspace_id = "ws_memory_only"
+        fake = FakeCommandRunner()
+        dirty = "?? .claude/agent-memory/reviewer/bug.md\n"
+        for result in (
+            {"returncode": 0, "stdout": dirty},  # status --porcelain
+            {"returncode": 0, "stdout": dirty},  # status --untracked-files=all
+        ):
+            fake.queue_result(**result)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+        )
+
+        assert committed is False
+        assert not any("add" in call.args for call in fake.calls)
+        assert not any("commit" in call.args for call in fake.calls)
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_truncates_subject_to_72(
@@ -678,7 +764,8 @@ class TestMiscMonitorHelpers:
         fake = FakeCommandRunner()
         for result in (
             {"returncode": 0, "stdout": " M file.py\n"},  # status --porcelain (dirty)
-            {"returncode": 0},  # add -A
+            {"returncode": 0, "stdout": " M file.py\n"},  # status --untracked-files=all
+            {"returncode": 0},  # add -A -- <stage_paths>
             {"returncode": 1},  # diff --cached --quiet (staged changes present)
             {"returncode": 0},  # commit
         ):

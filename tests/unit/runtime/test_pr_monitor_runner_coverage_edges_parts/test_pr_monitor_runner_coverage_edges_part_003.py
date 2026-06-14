@@ -577,12 +577,25 @@ async def test_dirty_worktree_helper_returns_false_for_non_commit_cases(
     missing_result, missing_calls = await run_case(workspace_exists=False, queued=[])
     status_result, status_calls = await run_case(queued=[(1, "", "status failed")])
     clean_result, clean_calls = await run_case(queued=[(0, "", "")])
-    add_result, add_calls = await run_case(queued=[(0, " M a.py\n", ""), (1, "", "add failed")])
+    # A second status (``--untracked-files=all``) enumerates leaf paths so the
+    # commit path can exclude untracked agent-runtime memory before staging.
+    add_result, add_calls = await run_case(
+        queued=[(0, " M a.py\n", ""), (0, " M a.py\n", ""), (1, "", "add failed")]
+    )
+    stage_status_result, stage_status_calls = await run_case(
+        queued=[(0, " M a.py\n", ""), (1, "", "stage status failed")]
+    )
     cached_result, cached_calls = await run_case(
-        queued=[(0, " M a.py\n", ""), (0, "", ""), (0, "", "")]
+        queued=[(0, " M a.py\n", ""), (0, " M a.py\n", ""), (0, "", ""), (0, "", "")]
     )
     commit_result, commit_calls = await run_case(
-        queued=[(0, " M a.py\n", ""), (0, "", ""), (1, "", ""), (1, "", "commit failed")]
+        queued=[
+            (0, " M a.py\n", ""),
+            (0, " M a.py\n", ""),
+            (0, "", ""),
+            (1, "", ""),
+            (1, "", "commit failed"),
+        ]
     )
 
     assert missing_result is False
@@ -592,10 +605,16 @@ async def test_dirty_worktree_helper_returns_false_for_non_commit_cases(
     assert clean_result is False
     assert [args[-2:] for args in clean_calls] == [["status", "--porcelain"]]
     assert add_result is False
-    assert [args[-2:] for args in add_calls] == [["status", "--porcelain"], ["add", "-A"]]
+    assert add_calls[0][-2:] == ["status", "--porcelain"]
+    assert add_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert "add" in add_calls[2] and "a.py" in add_calls[2]
+    assert stage_status_result is False
+    assert stage_status_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
     assert cached_result is False
-    assert [args[-2:] for args in cached_calls[:2]] == [["status", "--porcelain"], ["add", "-A"]]
-    assert cached_calls[2][-3:] == ["diff", "--cached", "--quiet"]
+    assert cached_calls[0][-2:] == ["status", "--porcelain"]
+    assert cached_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert "add" in cached_calls[2]
+    assert cached_calls[3][-3:] == ["diff", "--cached", "--quiet"]
     assert commit_result is False
     assert commit_calls[-1][-3:] == ["commit", "-m", "fix: dirty"]
 
@@ -610,7 +629,8 @@ async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)  # git add
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
     cmd.queue_result(returncode=0)  # git commit
@@ -648,7 +668,7 @@ async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
     )
 
     assert result is True
-    assert repair_call_lengths == [1, 4]
+    assert repair_call_lengths == [1, 5]
 
 
 @pytest.mark.unit
@@ -669,7 +689,8 @@ async def test_commit_dirty_worktree_restages_precommit_autofix_and_retries_comm
         f"Fixing {fixed_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)  # initial git add -A
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -746,7 +767,8 @@ async def test_commit_dirty_worktree_autofix_retry_still_fails_returns_false(
         f"Fixing {fixed_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -810,7 +832,8 @@ async def test_commit_dirty_worktree_does_not_retry_unowned_autofix_dirty_paths(
         f"Fixing {fixed_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -879,7 +902,8 @@ async def test_commit_dirty_worktree_does_not_retry_unknown_autofix_hook(
         f"Fixing {fixed_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -941,7 +965,8 @@ async def test_commit_dirty_worktree_logs_commit_stderr_when_failed_commit_repai
     worktree.mkdir(parents=True)
     commit_stderr = "fatal: unable to create commit\n" + ("detail " * 100)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=1, stderr=commit_stderr)
@@ -1003,7 +1028,8 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=0)

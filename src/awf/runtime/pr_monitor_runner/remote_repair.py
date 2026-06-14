@@ -313,7 +313,38 @@ async def _commit_dirty_worktree(
         status = repaired_status
         changed_paths = tuple(_changed_paths_from_porcelain(status.stdout))
 
-    add = await self._deps.runner.run(git_worktree_command(worktree_path, "add", "-A"))
+    # The pre-existing-dirty guard (``_pre_existing_dirty_repair_worktree_result``)
+    # lets a repair run when the only dirt is UNTRACKED AWF-agent-runtime memory
+    # (reviewer subagent ``.claude/agent-memory/...`` files), which never belongs
+    # to the PR. The commit path must apply the SAME exclusion before staging, or a
+    # blind ``git add -A`` would stage that pre-existing memory back into the PR.
+    # ``--untracked-files=all`` is load-bearing here, exactly as in the guard: with
+    # git's default ``normal`` mode a fully-untracked ``.claude/`` collapses to a
+    # single ``?? .claude/`` entry that escapes the agent-runtime filter; enumerating
+    # leaf paths lets the filter drop the memory files. If nothing else remains to
+    # stage, there is no PR-worthy change — return False like the clean path above.
+    stage_status = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "status", "--porcelain", "--untracked-files=all")
+    )
+    if not stage_status.ok:
+        _log.warning(
+            "monitor.dirty_stage_status_failed",
+            workspace_id=workspace_id,
+            stderr=stage_status.stderr[:400],
+        )
+        return False
+    stage_untracked = set(_untracked_paths_from_porcelain(stage_status.stdout))
+    stage_paths = sorted(
+        path
+        for path in _changed_paths_from_porcelain(stage_status.stdout)
+        if not (path in stage_untracked and is_under_agent_runtime_root(path))
+    )
+    if not stage_paths:
+        return False
+
+    add = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "--literal-pathspecs", "add", "-A", "--", *stage_paths)
+    )
     if not add.ok:
         _log.warning(
             "monitor.dirty_add_failed",

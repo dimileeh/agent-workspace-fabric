@@ -120,7 +120,9 @@ async def test_commit_dirty_worktree_uses_refreshed_paths_for_protected_repair_a
         f"Fixing {repaired_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {initial_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {initial_path}\n")  # status --porcelain
+    # status --untracked-files=all enumerates the post-repair worktree before staging.
+    cmd.queue_result(returncode=0, stdout=f" M {repaired_path}\n")
     cmd.queue_result(returncode=0)  # initial git add -A after protected-scope repair
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
     cmd.queue_result(returncode=1, stderr=hook_stderr)

@@ -829,7 +829,8 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_post_commit_owne
     adapter.queue(returncode=1, stdout="tool crashed")
     workspace_id = "ws_post_commit_ownership"
     (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=0)
@@ -891,7 +892,8 @@ async def test_sync_base_conflict_invokes_agent_and_pushes_salvaged_resolution(
         (0, "", ""),
         (1, "", "merge conflict"),
         (0, "UU src/conflict.py\n", ""),
-        (0, " M src/conflict.py\n", ""),
+        (0, " M src/conflict.py\n", ""),  # status --porcelain (commit_dirty)
+        (0, " M src/conflict.py\n", ""),  # status --untracked-files=all (commit_dirty)
         (0, "", ""),
         (1, "", ""),
         (0, "", ""),
