@@ -147,3 +147,124 @@ def test_fold_partial_worker_reap_without_reason_code_falls_back() -> None:
 
     assert folded["status"] == "partial"
     assert folded["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+
+
+def test_fold_reconciles_auth_unmount_skip_after_worker_success() -> None:
+    # The API container lacks CAP_SYS_ADMIN, so the auth overlay unmount was
+    # recorded as a delete error and forced the run partial. A completed worker
+    # reclaim actually removed those auth dirs, so the headline must reconcile to
+    # success and the stale auth-unmount delete error must be dropped — otherwise
+    # the CLI warns the auth dir was preserved and exits non-zero (PRRT…JakrC).
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "cannot verify Claude auth overlay teardown without CAP_SYS_ADMIN",
+            }
+        ],
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {"status": "succeeded", "deleted_path_count": 3, "total_estimated_bytes": 1_700_000_000}
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "succeeded"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_SUCCEEDED"
+    # The stale auth-unmount delete error is dropped — the worker reclaimed it.
+    assert folded["delete_errors"] == []
+    assert folded["deleted_path_count"] == 5
+
+
+def test_fold_reconciles_claude_base_partial_after_worker_success() -> None:
+    # A partial API-side claude-base reap (live-mount view unverifiable without
+    # CAP_SYS_ADMIN) also drives the run partial; the worker reclaims claude-base,
+    # so a completed reclaim reconciles the headline to success.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        claude_base_reap={"status": "partial", "reason_code": "CLAUDE_BASE_REAP_PARTIAL"},
+    )
+    outcome = WorkerReclaimOutcome.from_report({"status": "succeeded", "deleted_path_count": 1})
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "succeeded"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_SUCCEEDED"
+
+
+def test_fold_preserves_unrelated_failure_while_dropping_auth_skip() -> None:
+    # The run is partial for two reasons: the reconcilable auth-unmount skip AND a
+    # genuine compose teardown failure the worker does not own. The worker reclaim
+    # drops the auth skip but the run stays partial for the real failure.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            },
+            {
+                "kind": "compose_teardown",
+                "reason_code": "COMPOSE_COMMAND_FAILED",
+                "error": "docker compose down failed",
+            },
+        ],
+    )
+    outcome = WorkerReclaimOutcome.from_report({"status": "succeeded", "deleted_path_count": 2})
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    # The auth skip is dropped; the unrelated compose failure is preserved.
+    remaining = folded["delete_errors"]
+    assert isinstance(remaining, list)
+    assert [error["kind"] for error in remaining] == ["compose_teardown"]
+
+
+def test_fold_does_not_touch_partial_unrelated_to_auth_or_base() -> None:
+    # A run partial only for a reservation release error has nothing for the worker
+    # reclaim to reconcile, so the headline stays partial and is left untouched.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[],
+        reservation_releases={"ws-1": {"error": "lease release failed"}},
+    )
+    outcome = WorkerReclaimOutcome.from_report({"status": "succeeded", "deleted_path_count": 1})
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+
+
+def test_fold_keeps_partial_when_worker_reap_partial_even_with_auth_skip() -> None:
+    # If the worker's own reap was partial it may not have reclaimed every auth
+    # dir, so the loud auth-unmount skip stays and the run stays partial — the
+    # reconcile only fires on a fully completed worker reclaim.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+    )
+    outcome = WorkerReclaimOutcome.from_report({"status": "partial", "deleted_path_count": 1})
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    remaining = folded["delete_errors"]
+    assert isinstance(remaining, list)
+    assert [error["kind"] for error in remaining] == ["auth_overlay_unmount"]

@@ -14,10 +14,25 @@ unit-testable; the route owns the DB polling and heartbeat checks.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from awf.service.gc import CLEANUP_EXECUTION_PARTIAL
+from awf.service.gc import CLEANUP_EXECUTION_PARTIAL, CLEANUP_EXECUTION_SUCCEEDED
+
+# API-side auth-overlay unmount skip reason codes. The API container lacks
+# ``CAP_SYS_ADMIN`` and so cannot release the worker's overlay mount; that records
+# a ``delete_errors`` entry which forces the whole run ``partial``. A *completed*
+# worker reclaim (the worker alone holds ``CAP_SYS_ADMIN``) actually removes those
+# auth dirs, so these specific failures become stale and are dropped on fold.
+# Kept as bare literals — mirrors the CLI's ``_OVERLAY_UNMOUNT_REASON_CODES`` —
+# so this pure helper does not import the node layer.
+_AUTH_OVERLAY_UNMOUNT_RECONCILED_REASON_CODES = frozenset(
+    {
+        "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+        "CLAUDE_AUTH_OVERLAY_UNMOUNT_FAILED",
+    }
+)
 
 # Worker delegation reason codes (operator-facing, surfaced on the gc response and
 # by ``awf service gc``). They flow API → ``worker_reclaim`` sub-object → CLI exit.
@@ -133,6 +148,13 @@ def fold_worker_reclaim(
     double-count those bytes (~1.7GB per workspace). The headline keeps the base
     plan total; the worker's own estimate stays visible on ``worker_reclaim``.
 
+    When the worker fully reclaimed the capability-gated auth overlays +
+    claude-base, the API-side skip failures for *those* paths are stale: the
+    auth-unmount ``delete_errors`` are dropped and a headline that was ``partial``
+    *solely* because of those skips is restored to ``succeeded`` — otherwise a
+    complete reclaim would still warn the auth dir was preserved and exit non-zero.
+    Unrelated API failures are preserved (see ``_reconcile_worker_reclaimed_skips``).
+
     On a non-success delegation (worker unavailable / timeout / reclaim failed)
     the headline status is downgraded to ``partial`` with the delegation reason
     code — the run never reports success — while the API-side worktree/compose
@@ -144,14 +166,80 @@ def fold_worker_reclaim(
         folded["deleted_path_count"] = (
             _as_int(base.get("deleted_path_count")) + outcome.deleted_path_count
         )
-        if outcome.worker_partial and base.get("status") == "succeeded":
-            folded["status"] = "partial"
-            report = outcome.report or {}
-            folded["reason_code"] = report.get("reason_code") or CLEANUP_EXECUTION_PARTIAL
+        if outcome.worker_partial:
+            # The worker's own reap was partial — it leaked disk it could not
+            # reclaim, so a previously-clean run must not still read as success and
+            # the API-side auth/claude-base skips may genuinely remain unreclaimed.
+            # Only ever downgrade here; never upgrade an already-partial base.
+            if base.get("status") == "succeeded":
+                folded["status"] = "partial"
+                report = outcome.report or {}
+                folded["reason_code"] = report.get("reason_code") or CLEANUP_EXECUTION_PARTIAL
+            return folded
+        _reconcile_worker_reclaimed_skips(folded)
         return folded
     folded["status"] = "partial"
     folded["reason_code"] = outcome.reason_code
     return folded
+
+
+def _reconcile_worker_reclaimed_skips(folded: dict[str, object]) -> None:
+    """Drop API-side auth/claude-base skip failures a completed worker reclaim supersedes.
+
+    When the API container lacks ``CAP_SYS_ADMIN`` it records the auth-overlay
+    unmount as a ``delete_errors`` entry (and the claude-base reap as ``partial``),
+    forcing the whole run ``partial``. A completed worker reclaim actually removed
+    those paths, so those specific failures are stale: remove the auth-unmount
+    ``delete_errors`` and, when no *other* failure kept the run partial, restore the
+    headline success. Unrelated API failures — compose teardown, worktree remove,
+    reservation release, companion image prune, and non-auth path deletes — are
+    preserved verbatim so a genuinely partial run never reads as a clean success.
+    """
+    if folded.get("status") != "partial":
+        return
+    removed_auth_skip = False
+    remaining: list[object] = []
+    errors = folded.get("delete_errors")
+    if isinstance(errors, list):
+        for error in errors:
+            if (
+                isinstance(error, Mapping)
+                and error.get("reason_code") in _AUTH_OVERLAY_UNMOUNT_RECONCILED_REASON_CODES
+            ):
+                removed_auth_skip = True
+                continue
+            remaining.append(error)
+        folded["delete_errors"] = remaining
+    claude_base = folded.get("claude_base_reap")
+    claude_base_partial = (
+        isinstance(claude_base, Mapping) and claude_base.get("status") == "partial"
+    )
+    if not (removed_auth_skip or claude_base_partial):
+        # The partial was driven by something the worker does not own; leave it.
+        return
+    if _has_unreconciled_failure(folded, remaining):
+        return
+    folded["status"] = "succeeded"
+    folded["reason_code"] = CLEANUP_EXECUTION_SUCCEEDED
+
+
+def _has_unreconciled_failure(
+    folded: dict[str, object],
+    remaining_delete_errors: list[object],
+) -> bool:
+    """Whether a failure the worker reclaim does *not* supersede keeps the run partial."""
+    if remaining_delete_errors:
+        return True
+    companion = folded.get("companion_image_prune")
+    if isinstance(companion, Mapping) and companion.get("status") == "failed":
+        return True
+    reservations = folded.get("reservation_releases")
+    if isinstance(reservations, Mapping):
+        return any(
+            isinstance(release, Mapping) and release.get("error") is not None
+            for release in reservations.values()
+        )
+    return False
 
 
 def _as_int(value: object) -> int:
