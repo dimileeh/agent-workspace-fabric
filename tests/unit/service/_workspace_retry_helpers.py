@@ -81,7 +81,7 @@ def _opencode_request() -> WorkspaceCreateRequest:
     return WorkspaceCreateRequest.model_validate(payload)
 
 
-def _settings_with_host_home(tmp_path) -> Settings:  # type: ignore[no-untyped-def]
+def _settings_with_host_home(tmp_path: Path) -> Settings:
     return Settings(
         _env_file=None,
         host_home=str(tmp_path / "home"),
