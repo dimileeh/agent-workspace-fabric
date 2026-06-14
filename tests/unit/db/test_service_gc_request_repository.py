@@ -62,6 +62,50 @@ async def test_create_claim_complete_round_trip() -> None:
             assert fetched.status == "completed"
 
 
+async def test_mark_completed_does_not_overwrite_expired() -> None:
+    """A late finish must not clobber the terminal ``expired`` state (#590).
+
+    Expire-on-timeout retires a past-deadline row to ``expired`` after the operator
+    has been told the trigger timed out. If a reap from an abandoned incarnation
+    finishes afterwards, :meth:`mark_completed` must leave the row ``expired`` rather
+    than re-record the timed-out reap as ``completed``.
+    """
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            created = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now - timedelta(seconds=60),
+                deadline_at=now - timedelta(seconds=30),
+            )
+            request_id = created.id
+            # Claim it (running), then expire-on-timeout retires it terminally.
+            await repo.claim_oldest_pending(node_id="node-a", now=now - timedelta(seconds=40))
+            expired = await repo.expire_stale_requests(node_id="node-a", now=now)
+            assert expired == [request_id]
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            result = await repo.mark_completed(
+                request_id=request_id,
+                result={"deleted_path_count": 4},
+                now=now + timedelta(seconds=2),
+            )
+            assert result is not None
+            assert result.status == "expired"
+            assert result.result is None
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            fetched = await repo.get(request_id)
+            assert fetched is not None
+            assert fetched.status == "expired"
+
+
 async def test_mark_failed_records_reason_code() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)

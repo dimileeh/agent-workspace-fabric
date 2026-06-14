@@ -180,10 +180,18 @@ class ServiceGCRequestRepository:
         result: dict[str, Any],
         now: datetime,
     ) -> ServiceGCRequest | None:
-        """Record the worker's reclaimed report and mark the request ``completed``."""
+        """Record the worker's reclaimed report and mark the request ``completed``.
+
+        Refuses to overwrite a terminal ``expired`` row (#590): expire-on-timeout has
+        already told the operator the trigger timed out, so a late finish from an
+        abandoned reap must not re-record that reap as ``completed``. The expired state
+        wins and the row is returned unchanged.
+        """
         request = await self.get(request_id)
         if request is None:
             return None
+        if request.status == SERVICE_GC_REQUEST_STATUS_EXPIRED:
+            return request
         request.status = SERVICE_GC_REQUEST_STATUS_COMPLETED
         request.result = dict(result)
         request.finished_at = now
