@@ -284,15 +284,37 @@ def _ollama_base_url_prelude() -> str:
         # bashism) because the Python side lowercases the host (``urlsplit().hostname``
         # plus ``host.lower() == "localhost"``), so a value like ``http://LocalHost``
         # must normalize on both sides or launch and preflight disagree on the daemon.
+        # Restrict the IPv4 loopback rewrite to genuine ``127.0.0.0/8`` literals. A bare
+        # ``127.*`` glob also matches DNS names that merely *begin* with ``127.`` (e.g.
+        # ``127.0.0.1.nip.io`` or ``127.foo``), which ``ipaddress.ip_address`` rejects as
+        # a literal -- so ``_normalize_host_local_host`` leaves them pointed at their real
+        # host while this prelude would rewrite them to the gateway, diverging launch from
+        # preflight (the worker would then classify the target as non-host-reachable and
+        # skip the probe/pull even though the agent reaches it via the host gateway).
+        # Require ``127.`` followed by exactly three all-numeric octets and nothing else:
+        # reject any non-digit/dot character (a DNS label), reject five or more octets,
+        # then accept three non-empty numeric groups. Mirrors ``_normalize_host_local_host``
+        # (loopback iff ``ipaddress`` parses a ``127.0.0.0/8`` literal).
+        "  __awf_ollama_hl_match=\n"
         '  case "$__awf_ollama_hl_host" in\n'
-        "    [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|0.0.0.0|::|::1|127.*)\n"
-        '      if [ -n "$__awf_ollama_hl_port" ]; then\n'
-        '        __awf_ollama_authority="host.docker.internal:$__awf_ollama_hl_port"\n'
-        "      else\n"
-        '        __awf_ollama_authority="host.docker.internal"\n'
-        "      fi\n"
+        "    [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|0.0.0.0|::|::1)\n"
+        "      __awf_ollama_hl_match=1\n"
+        "      ;;\n"
+        "    127.*)\n"
+        '      case "$__awf_ollama_hl_host" in\n'
+        "        *[!0-9.]*) : ;;\n"
+        "        127.*.*.*.*) : ;;\n"
+        "        127.[0-9]*.[0-9]*.[0-9]*) __awf_ollama_hl_match=1 ;;\n"
+        "      esac\n"
         "      ;;\n"
         "  esac\n"
+        '  if [ -n "$__awf_ollama_hl_match" ]; then\n'
+        '    if [ -n "$__awf_ollama_hl_port" ]; then\n'
+        '      __awf_ollama_authority="host.docker.internal:$__awf_ollama_hl_port"\n'
+        "    else\n"
+        '      __awf_ollama_authority="host.docker.internal"\n'
+        "    fi\n"
+        "  fi\n"
         '  __awf_ollama_host="$__awf_ollama_scheme://$__awf_ollama_authority$__awf_ollama_path"\n'
         '  __awf_ollama_host="${__awf_ollama_host%/}"\n'
         '  case "$__awf_ollama_host" in\n'

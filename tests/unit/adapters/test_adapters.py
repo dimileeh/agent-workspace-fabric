@@ -1071,6 +1071,13 @@ class TestOpenCodeAdapter:
             "192.168.1.10:11434",
             "ollama.local",
             "http://user:pass@127.0.0.1:11434",
+            # A DNS name that merely *starts* with ``127.`` is not a ``127.0.0.0/8``
+            # literal: ``ipaddress.ip_address`` rejects it, so the Python side leaves it
+            # pointed at its real host. The launcher must not let a bare ``127.*`` glob
+            # rewrite it to the gateway, or launch and preflight diverge for these inputs.
+            "127.0.0.1.nip.io:11434",
+            "127.foo:11434",
+            "127.0.0.1.2:11434",
         ],
     )
     async def test_launch_prelude_matches_python_preflight_resolution(
