@@ -89,44 +89,65 @@ async def _poll_for_outcome(
     interval = max(0.0, poll_interval_seconds)
     start = time.monotonic()
     while True:
-        request = await _get_request(session_factory, request_id)
-        if request is not None:
-            if request.status == SERVICE_GC_REQUEST_STATUS_COMPLETED:
-                # The worker can mark a ``running`` row ``completed`` *after* its
-                # ``deadline_at`` if the reap overran the budget and the expire sweep
-                # had not yet raced it to ``expired`` (``mark_completed`` only refuses
-                # to overwrite an already-``expired`` row). Folding that late report as
-                # a successful ``execute`` gc would contradict expire-on-timeout, which
-                # keys the timeout decision off ``deadline_at`` — not on which of the
-                # API's monotonic budget and the row's deadline won the race. Surface
-                # the timeout instead (comment 4493490434).
-                if _finished_past_deadline(request):
-                    return WorkerReclaimOutcome.delegation_timeout(
-                        "worker completed gc reclaim only after its deadline elapsed; "
-                        "the operator's budget had already run out"
-                    )
-                return WorkerReclaimOutcome.from_report(dict(request.result or {}))
-            if request.status == SERVICE_GC_REQUEST_STATUS_FAILED:
-                return WorkerReclaimOutcome.reclaim_failed(
-                    request.error_message or "worker gc reclaim failed",
-                    report=dict(request.result) if request.result else None,
-                )
-            if request.status == SERVICE_GC_REQUEST_STATUS_EXPIRED:
-                # The worker swept this row to the terminal ``expired`` state once its
-                # ``deadline_at`` elapsed (expire-on-timeout, #590); it will never
-                # complete. The poll's monotonic budget starts after the heartbeat +
-                # pending-write I/O, so it outlasts ``deadline_at`` — stop sleeping on a
-                # terminal row and surface the timeout now (PRRT_kwDOSJAM6s6JbNTB).
-                return WorkerReclaimOutcome.delegation_timeout(
-                    "worker gc reclaim expired after its deadline elapsed before the "
-                    "worker completed it"
-                )
+        outcome = _terminal_outcome(await _get_request(session_factory, request_id))
+        if outcome is not None:
+            return outcome
         remaining = budget - (time.monotonic() - start)
         if remaining <= 0:
+            # Budget spent. Take one last authoritative read before giving up: the
+            # worker may have committed a terminal status (e.g. ``completed`` within
+            # its ``deadline_at``) in the window *after* the poll above but before the
+            # budget elapsed, leaving the result already in the DB. Reporting a timeout
+            # then would exit non-zero on a reclaim that actually succeeded
+            # (PRRT_kwDOSJAM6s6JbbKE).
+            outcome = _terminal_outcome(await _get_request(session_factory, request_id))
+            if outcome is not None:
+                return outcome
             return WorkerReclaimOutcome.delegation_timeout(
                 f"worker did not complete gc reclaim within {deadline_seconds:.1f}s"
             )
         await asyncio.sleep(min(interval, remaining) if interval > 0 else remaining)
+
+
+def _terminal_outcome(request: ServiceGCRequest | None) -> WorkerReclaimOutcome | None:
+    """Map a terminal ``service_gc_requests`` row to its poll outcome, or ``None``.
+
+    Returns ``None`` for a missing or still ``pending``/``running`` row so the caller
+    keeps polling (or, once the budget is spent, times out). Shared by the poll loop
+    and the final post-budget read so both evaluate completed/failed/expired the same.
+    """
+    if request is None:
+        return None
+    if request.status == SERVICE_GC_REQUEST_STATUS_COMPLETED:
+        # The worker can mark a ``running`` row ``completed`` *after* its
+        # ``deadline_at`` if the reap overran the budget and the expire sweep
+        # had not yet raced it to ``expired`` (``mark_completed`` only refuses
+        # to overwrite an already-``expired`` row). Folding that late report as
+        # a successful ``execute`` gc would contradict expire-on-timeout, which
+        # keys the timeout decision off ``deadline_at`` — not on which of the
+        # API's monotonic budget and the row's deadline won the race. Surface
+        # the timeout instead (comment 4493490434).
+        if _finished_past_deadline(request):
+            return WorkerReclaimOutcome.delegation_timeout(
+                "worker completed gc reclaim only after its deadline elapsed; "
+                "the operator's budget had already run out"
+            )
+        return WorkerReclaimOutcome.from_report(dict(request.result or {}))
+    if request.status == SERVICE_GC_REQUEST_STATUS_FAILED:
+        return WorkerReclaimOutcome.reclaim_failed(
+            request.error_message or "worker gc reclaim failed",
+            report=dict(request.result) if request.result else None,
+        )
+    if request.status == SERVICE_GC_REQUEST_STATUS_EXPIRED:
+        # The worker swept this row to the terminal ``expired`` state once its
+        # ``deadline_at`` elapsed (expire-on-timeout, #590); it will never
+        # complete. The poll's monotonic budget starts after the heartbeat +
+        # pending-write I/O, so it outlasts ``deadline_at`` — stop sleeping on a
+        # terminal row and surface the timeout now (PRRT_kwDOSJAM6s6JbNTB).
+        return WorkerReclaimOutcome.delegation_timeout(
+            "worker gc reclaim expired after its deadline elapsed before the worker completed it"
+        )
+    return None
 
 
 def _finished_past_deadline(request: ServiceGCRequest) -> bool:

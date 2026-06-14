@@ -270,6 +270,58 @@ async def test_poll_completion_within_deadline_is_success() -> None:
         assert outcome.deleted_path_count == 4
 
 
+async def test_poll_reads_final_status_before_timing_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The worker can commit ``completed`` (within its ``deadline_at``) in the window
+    # *after* the last poll saw ``pending`` but *before* the API's monotonic budget
+    # check fires. The poll must take a final authoritative read before reporting a
+    # timeout, otherwise it exits non-zero on a reclaim whose result is already in the
+    # DB (PRRT_kwDOSJAM6s6JbbKE). With ``deadline_seconds=0`` the budget is spent on
+    # the first iteration, so the timeout branch is reached deterministically.
+    from awf.service import gc_worker_trigger
+
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            request = await repo.create_pending(
+                node_id=_NODE_ID,
+                requested_at=now,
+                deadline_at=now + timedelta(seconds=5),
+            )
+            request_id = request.id
+            await session.commit()
+
+        real_get = gc_worker_trigger._get_request
+        calls = {"n": 0}
+
+        async def _get_with_late_completion(session_factory, rid):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            snapshot = await real_get(session_factory, rid)
+            if calls["n"] == 1:
+                # Simulate the worker committing ``completed`` between this poll and the
+                # budget check; return the pre-commit ``pending`` snapshot to the loop.
+                async with session_factory() as session:
+                    await ServiceGCRequestRepository(session).mark_completed(
+                        request_id=rid,
+                        result={"deleted_path_count": 3, "total_estimated_bytes": 11},
+                        now=datetime.now(UTC),
+                    )
+                    await session.commit()
+            return snapshot
+
+        monkeypatch.setattr(gc_worker_trigger, "_get_request", _get_with_late_completion)
+        outcome = await _poll_for_outcome(
+            factory, request_id=request_id, deadline_seconds=0, poll_interval_seconds=0.02
+        )
+        # The final read picked up the completion; no false timeout.
+        assert outcome.status == "completed"
+        assert outcome.deleted_path_count == 3
+        assert calls["n"] == 2  # initial poll + final authoritative read
+
+
 async def test_poll_times_out_when_request_stays_pending() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
