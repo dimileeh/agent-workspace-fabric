@@ -972,6 +972,13 @@ class TestOpenCodeAdapter:
             ("http://[::]:11434", "http://host.docker.internal:11434/v1"),
             ("http://[::1]", "http://host.docker.internal:11434/v1"),
             ("http://[::1]:11434", "http://host.docker.internal:11434/v1"),
+            # An expanded/uncompressed IPv6 loopback or unspecified literal is
+            # canonicalized to the host gateway like ``::1`` / ``::`` -- the Python
+            # ``ipaddress`` check treats every textual form alike, so the shell must
+            # too (issue #579).
+            ("http://[0:0:0:0:0:0:0:1]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[0::1]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[0:0:0:0:0:0:0:0]:11434", "http://host.docker.internal:11434/v1"),
             # A userinfo-bearing host-local value drops the credentials too.
             ("http://user:pass@127.0.0.1:11434", "http://host.docker.internal:11434/v1"),
         ],
@@ -1004,6 +1011,16 @@ class TestOpenCodeAdapter:
             "0.0.0.0:11434",
             "http://[::1]:11434",
             "[::]:11434",
+            # Expanded/uncompressed IPv6 loopback and unspecified literals must
+            # resolve the same daemon on both sides: the Python preflight uses
+            # ``ipaddress.ip_address()`` (every textual form is loopback/unspecified),
+            # so the shell prelude must canonicalize them too or launch keeps the
+            # IPv6 loopback while the worker probes the gateway (issue #579).
+            "http://[0:0:0:0:0:0:0:1]:11434",
+            "http://[0000:0000:0000:0000:0000:0000:0000:0001]:11434",
+            "http://[0::1]:11434",
+            "http://[0:0:0:0:0:0:0:0]:11434",
+            "http://[0::]:11434",
             "host.docker.internal:11434",
             "ollama-sidecar:11434",
             "192.168.1.10:11434",

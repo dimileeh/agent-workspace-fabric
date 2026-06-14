@@ -133,7 +133,10 @@ def _ollama_base_url_prelude() -> str:
     Compose service name, the gateway aliases) pass through unchanged. The ``127.*``
     shell glob is intentionally looser than the Python ``ipaddress`` check -- no real
     loopback hostname literally starts ``127.`` -- and the parity test asserts the two
-    agree over the representative table.
+    agree over the representative table. An expanded/uncompressed IPv6 loopback or
+    unspecified literal (``0:0:0:0:0:0:0:1``, ``[0000:...:0001]``, ``0::1``) is first
+    canonicalized to ``::1`` / ``::`` so it normalizes like the Python ``ipaddress``
+    check rather than leaking through as a routable host.
 
     An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` still wins over ``OLLAMA_HOST``; with
     neither set we fall back to the default.
@@ -193,6 +196,49 @@ def _ollama_base_url_prelude() -> str:
         "    *)\n"
         '      __awf_ollama_hl_host="$__awf_ollama_hostport"\n'
         "      __awf_ollama_hl_port=\n"
+        "      ;;\n"
+        "  esac\n"
+        # Canonicalize an expanded/uncompressed IPv6 loopback (``::1``) or unspecified
+        # (``::``) literal to its compressed form so the host-local case below catches
+        # it. The Python source of truth uses ``ipaddress.ip_address()``, which treats
+        # every textual form (``0:0:0:0:0:0:0:1``, ``[0000:...:0001]``, ``0::1``) as
+        # loopback/unspecified, but a literal glob would only see ``::1``/``::`` -- so a
+        # valid expanded form would launch against the agent container while the worker
+        # probed the host gateway (issue #579). Collapse the single ``::`` position-
+        # preservingly into one zero group, strip each group's leading zeros, then the
+        # host is host-local iff every group but the last is all-zero and the last group
+        # is ``0`` (unspecified) or ``1`` (loopback). Mirrors ``_normalize_host_local_host``.
+        '  case "$__awf_ollama_hl_host" in\n'
+        "    *.* | *%*) : ;;\n"
+        "    *::*::*) : ;;\n"
+        "    *:*)\n"
+        '      __awf_ip6="$__awf_ollama_hl_host"\n'
+        '      case "$__awf_ip6" in\n'
+        '        ::) __awf_ip6="0" ;;\n'
+        '        ::*) __awf_ip6="0:${__awf_ip6#::}" ;;\n'
+        '        *::) __awf_ip6="${__awf_ip6%::}:0" ;;\n'
+        '        *::*) __awf_ip6="${__awf_ip6%%::*}:0:${__awf_ip6##*::}" ;;\n'
+        "      esac\n"
+        '      __awf_ip6_last="${__awf_ip6##*:}"\n'
+        '      case "$__awf_ip6" in\n'
+        '        *:*) __awf_ip6_prefix="${__awf_ip6%:*}" ;;\n'
+        "        *) __awf_ip6_prefix= ;;\n"
+        "      esac\n"
+        "      while : ; do\n"
+        '        case "$__awf_ip6_last" in\n'
+        '          0?*) __awf_ip6_last="${__awf_ip6_last#0}" ;;\n'
+        "          *) break ;;\n"
+        "        esac\n"
+        "      done\n"
+        '      case "$__awf_ip6_prefix" in\n'
+        "        *[!0:]*) : ;;\n"
+        "        *)\n"
+        '          case "$__awf_ip6_last" in\n'
+        "            '' | 0) __awf_ollama_hl_host=\"::\" ;;\n"
+        '            1) __awf_ollama_hl_host="::1" ;;\n'
+        "          esac\n"
+        "          ;;\n"
+        "      esac\n"
         "      ;;\n"
         "  esac\n"
         # ``localhost`` is matched case-insensitively (POSIX bracket expansion, no
