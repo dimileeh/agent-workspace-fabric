@@ -144,6 +144,31 @@ class WorkerReclaimOutcome:
         return payload
 
 
+def bounded_worker_deadline_seconds(deadline_seconds: float, api_elapsed_seconds: float) -> float:
+    """Shrink the worker-delegation deadline by the API-phase time already spent.
+
+    ``awf service gc --execute`` budgets its HTTP read timeout at
+    ``2 * timeout_seconds + 30`` (CLI), allotting one ``timeout_seconds`` to the
+    API-side worktree/compose reclaim and one to the worker-delegation wait. But the
+    API-side pass has no server-side cap, so a reclaim that runs longer than
+    ``timeout_seconds`` would push the *total* server time (API phase + the full
+    worker deadline) past the client budget — httpx aborts before the structured
+    ``worker_reclaim`` response returns, exactly the false timeout the buffer exists
+    to avoid (PR #590 review, comment 4493565124). Cap the worker deadline so the
+    total server time stays within ``2 * deadline_seconds`` (the client's two-phase
+    budget, leaving its 30s settle margin for the final response): the worker keeps
+    its full ``deadline_seconds`` while the API phase fits its own budget, and only
+    shrinks once the API phase has eaten into the second budget. Never returns a
+    negative budget; once the API phase alone exceeds ``2 * deadline_seconds`` (the
+    client has already aborted) the worker deadline floors at 0 so the route returns
+    a structured timeout rather than waiting on a budget the operator can no longer
+    observe.
+    """
+    budget = max(0.0, deadline_seconds)
+    remaining = 2.0 * budget - max(0.0, api_elapsed_seconds)
+    return max(0.0, min(budget, remaining))
+
+
 def fold_worker_reclaim(
     base: dict[str, object],
     outcome: WorkerReclaimOutcome,

@@ -14,10 +14,33 @@ from awf.service.gc_worker_delegation import (
     SERVICE_GC_WORKER_RECLAIMED,
     SERVICE_GC_WORKER_UNAVAILABLE,
     WorkerReclaimOutcome,
+    bounded_worker_deadline_seconds,
     fold_worker_reclaim,
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_bounded_deadline_keeps_full_budget_when_api_phase_fits() -> None:
+    # API phase well within its own ``deadline_seconds`` budget → worker keeps the lot.
+    assert bounded_worker_deadline_seconds(900.0, 10.0) == 900.0
+    # Exactly at its budget still leaves the worker its full deadline.
+    assert bounded_worker_deadline_seconds(900.0, 900.0) == 900.0
+
+
+def test_bounded_deadline_shrinks_when_api_phase_overruns() -> None:
+    # API phase ran 250s past its 900s budget → worker deadline shrinks by the overrun
+    # so total server time stays at 2*900 = 1800s, inside the CLI's 2*900+30 budget.
+    assert bounded_worker_deadline_seconds(900.0, 1150.0) == 650.0
+
+
+def test_bounded_deadline_floors_at_zero_when_api_phase_exhausts_budget() -> None:
+    # API phase alone exceeded 2*deadline (client already aborted) → never negative.
+    assert bounded_worker_deadline_seconds(900.0, 2000.0) == 0.0
+    # Defensive: a negative elapsed (clock skew) is treated as zero elapsed.
+    assert bounded_worker_deadline_seconds(900.0, -5.0) == 900.0
+    # A non-positive deadline yields a non-positive (zero) budget.
+    assert bounded_worker_deadline_seconds(0.0, 0.0) == 0.0
 
 
 def _api_base(**overrides: object) -> dict[str, object]:

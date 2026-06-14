@@ -320,6 +320,45 @@ async def test_execute_omits_absent_status_filters_from_worker_params(
 
 
 @pytest.mark.unit
+async def test_execute_shrinks_worker_deadline_by_api_phase_elapsed(
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_api_side_reclaim: None,
+) -> None:
+    """A long API-side phase shrinks the worker deadline so the CLI budget holds (#590).
+
+    The CLI budgets its HTTP read timeout at ``2*timeout_seconds + 30``; the API-side
+    reclaim has no server cap, so without bounding, a long API phase plus the full
+    worker deadline overruns that budget and httpx aborts before the structured
+    response. Drive the route handler directly with a scripted monotonic clock so the
+    API phase "takes" 250s on a 200s budget and assert the worker deadline is reduced
+    to ``2*200 - 250 = 150`` rather than the full 200.
+    """
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    from awf.api.routes import service as service_route
+    from awf.api.schemas import ServiceGCRequest
+    from awf.service.gc_worker_delegation import WorkerReclaimOutcome
+
+    # api_phase_start = 0.0, then elapsed read = 250.0 → 250s API phase.
+    monkeypatch.setattr(service_route, "monotonic", iter([0.0, 250.0]).__next__)
+    captured: dict[str, float] = {}
+
+    async def _capture(*_args: object, deadline_seconds: float, **_kwargs: object) -> object:
+        captured["deadline_seconds"] = deadline_seconds
+        return WorkerReclaimOutcome.delegation_timeout("captured")
+
+    monkeypatch.setattr(service_route, "delegate_service_gc_to_worker", _capture)
+
+    await service_route.trigger_service_gc(
+        ServiceGCRequest(execute=True, worker_delegation_timeout_seconds=200.0),
+        session_factory=make_session_factory(engine),
+    )
+
+    assert captured["deadline_seconds"] == 150.0
+
+
+@pytest.mark.unit
 async def test_execute_times_out_when_worker_never_completes(
     client: AsyncClient,
     engine: AsyncEngine,

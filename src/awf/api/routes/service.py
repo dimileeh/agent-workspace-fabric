@@ -10,6 +10,7 @@ reaps the per-workspace Docker volumes that GC previously leaked.
 from __future__ import annotations
 
 from pathlib import Path
+from time import monotonic
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -24,7 +25,10 @@ from awf.service.gc_terminal_passes import (
     terminal_gc_discarded_statuses,
 )
 from awf.service.gc_time import normalize_statuses
-from awf.service.gc_worker_delegation import fold_worker_reclaim
+from awf.service.gc_worker_delegation import (
+    bounded_worker_deadline_seconds,
+    fold_worker_reclaim,
+)
 from awf.service.gc_worker_trigger import delegate_service_gc_to_worker
 from awf.service.node_identity import effective_service_node_id
 
@@ -80,6 +84,12 @@ async def trigger_service_gc(
     # take several minutes. The CLI defaults to --timeout-seconds 900; ensure
     # any upstream proxy (nginx/traefik) has a matching or higher read timeout
     # so the connection is not dropped while the run is still in progress.
+    #
+    # #590 (comment 4493565124): time this API-side phase so the worker-delegation
+    # deadline below can be shrunk by however long it ran — otherwise a long API
+    # phase plus the full worker deadline overruns the CLI's ``2*timeout_seconds+30``
+    # budget and httpx aborts before the structured ``worker_reclaim`` response.
+    api_phase_start = monotonic()
     result = await run_service_workspace_gc(
         session_factory,
         work_dir=Path(settings.work_dir).expanduser().resolve(),
@@ -149,6 +159,12 @@ async def trigger_service_gc(
         payload.worker_delegation_timeout_seconds
         if payload.worker_delegation_timeout_seconds is not None
         else _DEFAULT_WORKER_DELEGATION_TIMEOUT_SECONDS
+    )
+    # Bound the worker wait by the time the API-side phase above already consumed so
+    # the total server time stays within the CLI's two-phase budget and the structured
+    # response always returns before httpx times out the read (#590).
+    deadline_seconds = bounded_worker_deadline_seconds(
+        deadline_seconds, monotonic() - api_phase_start
     )
     # Persist the operator's safety-scoping filters alongside the resolved
     # retention/limit so the worker's capability-gated auth-overlay/claude-base reap
