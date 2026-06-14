@@ -7,6 +7,7 @@ import os
 import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -345,6 +346,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         limit: int | None = None,
         statuses: Sequence[str] | None = None,
         exclude_statuses: Sequence[str] | None = None,
+        now: datetime | None = None,
     ) -> dict[str, object]:
         """Reap per-workspace terminal-workspace auth dirs from the worker (#513).
 
@@ -394,8 +396,13 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         (#590). An explicit ``--status`` set scopes the first pass directly (so the
         augmentation pass is skipped — see ``_terminal_gc_discarded_statuses``);
         ``--exclude-status`` removes statuses from both passes so an excluded auth dir is
-        never reclaimed. The periodic backstop and the test wiring call with no overrides,
-        falling back to the configured retention/batch defaults and the full two-pass sweep.
+        never reclaimed. ``now`` is the API's retention-cutoff anchor (its invocation
+        clock): forwarding it to both passes derives the same ``cutoff_at`` the API-side
+        pass used rather than recomputing eligibility from this worker's (minutes-later)
+        claim clock, so a workspace just under ``--min-age-hours`` at invocation is never
+        reaped behind a plan/dry-run that excluded it (PRRT_kwDOSJAM6s6JbriQ). The periodic
+        backstop and the test wiring call with no overrides, falling back to the configured
+        retention/batch defaults, the full two-pass sweep, and the live clock.
         """
         retention_hours = (
             settings.completed_workspace_retention_hours if min_age_hours is None else min_age_hours
@@ -417,6 +424,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             host_home=host_home,
             reap_claude_bases=settings.claude_base_gc_enabled,
             compose_manager=compose,
+            now=now,
         )
         # The conservative default policy never classifies cancelled/destroyed rows, so a
         # second explicit pass reaps those discarded auth dirs that would otherwise leak
@@ -454,6 +462,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             host_home=host_home,
             reap_claude_bases=settings.claude_base_gc_enabled,
             compose_manager=compose,
+            now=now,
         )
         return _combine_terminal_gc_reports(default_result.to_dict(), discarded_result.to_dict())
 

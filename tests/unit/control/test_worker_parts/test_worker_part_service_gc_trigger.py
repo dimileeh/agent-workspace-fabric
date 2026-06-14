@@ -213,6 +213,37 @@ async def test_consume_omits_empty_status_filters(
     assert captured == {}
 
 
+async def test_consume_threads_cutoff_anchor_into_reaper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The API-anchored ``now`` flows into the reaper so the cutoff stays frozen (#590).
+
+    Forwarding only ``min_age_hours`` would let the worker recompute ``cutoff_at`` from
+    its *own* clock at claim time. A multi-minute API-side phase shifts that clock
+    forward, so a workspace that was just under ``--min-age-hours`` when the operator ran
+    ``gc --execute`` would become eligible by the time the worker reaps — deleting a
+    workspace the API plan never included. The API persists its cutoff anchor as an ISO
+    ``now`` string; the worker parses it back and forwards it so both passes share one
+    cutoff (PRRT_kwDOSJAM6s6JbriQ).
+    """
+    anchor = datetime(2026, 6, 14, 21, 0, tzinfo=UTC)
+    await _seed_pending(
+        session_factory,
+        params={"execute": True, "min_age_hours": 1.5, "now": anchor.isoformat()},
+    )
+    captured: dict[str, object] = {}
+
+    async def _terminal_reaper(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert captured == {"min_age_hours": 1.5, "now": anchor}
+
+
 async def test_consume_is_noop_without_reaper(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

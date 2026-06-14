@@ -195,6 +195,14 @@ async def _run_claimed_service_gc_trigger(
     limit = params.get("limit")
     if limit is not None:
         reaper_kwargs["limit"] = limit
+    # The API persists its retention cutoff anchor (``datetime.now(UTC)`` at invocation)
+    # as an ISO string so the worker derives the *same* ``cutoff_at`` the API-side pass
+    # used instead of recomputing it from the (minutes-later) claim clock — otherwise a
+    # workspace just under ``--min-age-hours`` at invocation could age into eligibility
+    # and be reaped though no plan/dry-run listed it (PRRT_kwDOSJAM6s6JbriQ).
+    now = params.get("now")
+    if now is not None:
+        reaper_kwargs["now"] = datetime.fromisoformat(now)
     statuses = params.get("statuses")
     if statuses:
         reaper_kwargs["statuses"] = statuses

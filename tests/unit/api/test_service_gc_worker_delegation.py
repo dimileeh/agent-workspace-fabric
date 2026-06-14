@@ -297,6 +297,45 @@ async def test_execute_persists_status_filters_in_worker_params(
 
 
 @pytest.mark.unit
+async def test_execute_persists_cutoff_anchor_in_worker_params(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_api_side_reclaim: None,
+) -> None:
+    """The API persists its cutoff anchor (``now``) so the worker reap is frozen (#590).
+
+    Without this the worker recomputes ``cutoff_at`` from its own clock at claim time;
+    a multi-minute API-side phase would let a workspace that was just under
+    ``--min-age-hours`` at invocation become eligible and be reaped though the API plan
+    never included it. The route writes ``datetime.now(UTC)`` as an ISO ``now`` string
+    into ``service_gc_requests.params`` so the worker forwards it and both passes share
+    one cutoff (PRRT_kwDOSJAM6s6JbriQ).
+    """
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    await _seed_fresh_heartbeat(engine)
+    # No worker consumer runs, so the pending row survives for inspection (times out).
+
+    before = datetime.now(UTC)
+    response = await client.post(
+        "/v1/service/gc",
+        json={"execute": True, "worker_delegation_timeout_seconds": 0.2},
+    )
+    after = datetime.now(UTC)
+
+    assert response.status_code == 200, response.text
+    params = await _single_request_params(engine)
+    anchor = params["now"]
+    assert isinstance(anchor, str)
+    parsed = datetime.fromisoformat(anchor)
+    assert parsed.tzinfo is not None
+    # The anchor is the wall clock captured inside the request, bounded by the test's
+    # own before/after readings.
+    assert before <= parsed <= after
+
+
+@pytest.mark.unit
 async def test_execute_omits_absent_status_filters_from_worker_params(
     client: AsyncClient,
     engine: AsyncEngine,

@@ -9,6 +9,7 @@ reaps the per-workspace Docker volumes that GC previously leaked.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 
@@ -122,6 +123,15 @@ async def trigger_service_gc(
     # phase plus the full worker deadline overruns the CLI's ``2*timeout_seconds+30``
     # budget and httpx aborts before the structured ``worker_reclaim`` response.
     api_phase_start = monotonic()
+    # Anchor the retention cutoff once for the whole request. ``run_service_workspace_gc``
+    # derives ``cutoff_at = gc_now - min_age_hours``; pinning ``now`` here (rather than
+    # letting each pass call ``datetime.now`` internally) keeps the API-side pass, the
+    # dry-run augmentation preview, and the delegated worker reap on one cutoff. Without
+    # it the worker recomputes eligibility from its own clock at claim time, so a
+    # multi-minute API-side phase could let a workspace that was just under
+    # ``--min-age-hours`` at invocation age past it and be reaped though no plan/dry-run
+    # ever listed it — breaking plan-before-delete (PRRT_kwDOSJAM6s6JbriQ).
+    gc_now = datetime.now(UTC)
     result = await run_service_workspace_gc(
         session_factory,
         work_dir=Path(settings.work_dir).expanduser().resolve(),
@@ -135,6 +145,7 @@ async def trigger_service_gc(
         companion_image_retention_hours=settings.companion_image_retention_hours,
         host_home=Path(settings.host_home).expanduser(),
         reap_claude_bases=settings.claude_base_gc_enabled,
+        now=gc_now,
     )
     base_payload = result.to_dict()
     if not payload.execute:
@@ -184,6 +195,9 @@ async def trigger_service_gc(
             # then; previewing only the discarded pins here would mislabel it
             # ``protected`` and break plan/execute parity (PRRT_kwDOSJAM6s6Jbinh).
             extra_pruned_auth_dirs=_plan_candidate_auth_dirs(base_payload),
+            # Share the base pass's cutoff anchor so both preview passes classify against
+            # one ``cutoff_at`` (PRRT_kwDOSJAM6s6JbriQ).
+            now=gc_now,
         )
         combined = combine_terminal_gc_reports(base_payload, discarded_result.to_dict())
         return ServiceGCResponse.model_validate(combined)
@@ -215,6 +229,13 @@ async def trigger_service_gc(
         "execute": True,
         "min_age_hours": retention_hours,
         "limit": candidate_limit,
+        # Freeze the worker reap to the same retention cutoff the API-side pass used:
+        # forward the anchor so the worker derives ``cutoff_at = now - min_age_hours``
+        # from the operator's invocation clock, not its own (minutes-later) claim clock.
+        # Otherwise a long API phase lets a workspace just under ``--min-age-hours`` age
+        # into eligibility and be reaped though no plan/dry-run listed it
+        # (PRRT_kwDOSJAM6s6JbriQ). Stored as an ISO string for a stable JSON round-trip.
+        "now": gc_now.isoformat(),
     }
     if payload.statuses:
         worker_params["statuses"] = sorted(normalize_statuses(payload.statuses) or set())
