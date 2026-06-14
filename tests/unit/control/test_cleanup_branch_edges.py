@@ -1072,3 +1072,314 @@ async def test_release_candidate_skips_overlay_when_no_work_dir(
     await worker_cleanup._release_terminal_runtime_for_candidate(worker, candidate)  # noqa: SLF001
 
     assert recorded == [None]
+
+
+# --- Prompt terminal-runtime release on terminal transition (#583, #584) ---
+#
+# These exercise the control flow of ``_release_terminal_runtime_promptly`` over
+# its mockable seams (``_load_terminal_runtime_candidate`` /
+# ``_release_terminal_runtime_for_candidate`` / ``_runtime_cleaner``). The DB-backed
+# candidate loading and the end-to-end teardown/idempotency are covered by the
+# real-Postgres tests in ``test_worker_parts/test_worker_part_051.py``.
+
+
+@pytest.mark.unit
+async def test_prompt_release_noop_when_no_runtime_cleaner() -> None:
+    """With no runtime cleaner wired the prompt release is a clean no-op: it must
+    not even load a candidate, so adding the hook to a cleaner-less worker is safe."""
+    load_calls: list[str] = []
+
+    async def _load(workspace_id: str) -> _TerminalRuntimeCandidate | None:
+        load_calls.append(workspace_id)
+        return _candidate(workspace_id)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=None,
+        _load_terminal_runtime_candidate=_load,
+        _release_terminal_runtime_for_candidate=None,
+    )
+
+    await worker_cleanup._release_terminal_runtime_promptly(worker, "ws1")  # noqa: SLF001
+
+    assert load_calls == []
+
+
+@pytest.mark.unit
+async def test_prompt_release_noop_when_candidate_not_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the workspace is not a release candidate (non-terminal / missing /
+    foreign-node), the per-candidate teardown is never invoked and nothing logs."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    release_calls: list[_TerminalRuntimeCandidate] = []
+
+    async def _load(workspace_id: str) -> _TerminalRuntimeCandidate | None:
+        del workspace_id
+        return None
+
+    async def _release(candidate: _TerminalRuntimeCandidate) -> None:
+        release_calls.append(candidate)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=object(),
+        _load_terminal_runtime_candidate=_load,
+        _release_terminal_runtime_for_candidate=_release,
+    )
+
+    await worker_cleanup._release_terminal_runtime_promptly(worker, "ws1")  # noqa: SLF001
+
+    assert release_calls == []
+    assert log.warnings == []
+
+
+@pytest.mark.unit
+async def test_prompt_release_delegates_to_existing_per_candidate_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prompt path reuses the existing per-candidate teardown (DRY) for a
+    loaded terminal candidate, and does not log on success."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    candidate = _candidate("ws_prompt")
+    release_calls: list[_TerminalRuntimeCandidate] = []
+
+    async def _load(workspace_id: str) -> _TerminalRuntimeCandidate | None:
+        assert workspace_id == "ws_prompt"
+        return candidate
+
+    async def _release(loaded: _TerminalRuntimeCandidate) -> None:
+        release_calls.append(loaded)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=object(),
+        _load_terminal_runtime_candidate=_load,
+        _release_terminal_runtime_for_candidate=_release,
+    )
+
+    await worker_cleanup._release_terminal_runtime_promptly(worker, "ws_prompt")  # noqa: SLF001
+
+    assert release_calls == [candidate]
+    assert log.warnings == []
+
+
+@pytest.mark.unit
+async def test_prompt_release_failure_does_not_break_terminal_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prompt-release failure is swallowed and logged with its dedicated reason
+    code — it must never propagate, so the terminal transition still completes and
+    the interval backstop reclaims the miss later."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    candidate = _candidate("ws_fail")
+
+    async def _load(workspace_id: str) -> _TerminalRuntimeCandidate | None:
+        del workspace_id
+        return candidate
+
+    async def _release(_loaded: _TerminalRuntimeCandidate) -> None:
+        raise RuntimeError("compose down blew up")
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=object(),
+        _load_terminal_runtime_candidate=_load,
+        _release_terminal_runtime_for_candidate=_release,
+    )
+
+    # Must not raise: the terminal transition is never broken by a release failure.
+    await worker_cleanup._release_terminal_runtime_promptly(worker, "ws_fail")  # noqa: SLF001
+
+    assert [event for event, _ in log.warnings] == [
+        "worker.prompt_terminal_runtime_release_failed",
+    ]
+    _, fields = log.warnings[0]
+    assert fields["workspace_id"] == "ws_fail"
+    assert fields["reason_code"] == "PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED"
+    assert fields["error_type"] == "RuntimeError"
+    assert "compose down blew up" in fields["error"]
+
+
+@pytest.mark.unit
+async def test_prompt_release_completes_across_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An external cancel (worker shutdown) landing mid-teardown must not tear the
+    ``compose down`` apart and re-leak the stack: the shielded teardown runs to
+    completion, then the CancelledError still propagates (mirrors
+    ``_release_execution_claim_after_cancellation``'s cancellation contract)."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    candidate = _candidate("ws_cancel")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed: list[str] = []
+
+    async def _load(workspace_id: str) -> _TerminalRuntimeCandidate | None:
+        del workspace_id
+        return candidate
+
+    async def _release(loaded: _TerminalRuntimeCandidate) -> None:
+        started.set()
+        await release.wait()
+        completed.append(loaded.workspace_id)
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=object(),
+        _load_terminal_runtime_candidate=_load,
+        _release_terminal_runtime_for_candidate=_release,
+    )
+
+    task = asyncio.create_task(
+        worker_cleanup._release_terminal_runtime_promptly(worker, "ws_cancel")  # noqa: SLF001
+    )
+    await asyncio.wait_for(started.wait(), timeout=5.0)
+    task.cancel()
+    # Let the cancel be delivered to (and suppressed by) the shield-and-reawait.
+    await asyncio.sleep(0)
+    # The shielded teardown has not been torn apart — it is still mid-flight.
+    assert completed == []
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The teardown still ran to completion despite the cancellation.
+    assert completed == ["ws_cancel"]
+    assert log.warnings == []
+
+
+# --- _load_terminal_runtime_candidate guard branches (#583, #584) ---
+#
+# These monkeypatch ``run_db_operation_with_retry`` to return a single fetched row
+# (mirroring ``test_list_terminal_runtime_candidates_skips_rows_without_repo_url``),
+# exercising every guard branch without a real DB. The DB-backed happy paths are
+# covered by ``test_worker_parts/test_worker_part_051.py``.
+
+
+def _load_candidate_worker(row: Any, *, node_id: str | None) -> SimpleNamespace:
+    async def _run_db_operation_with_retry(*_args: Any, **_kwargs: Any) -> Any:
+        return row
+
+    return SimpleNamespace(
+        _config=SimpleNamespace(node_id=node_id),
+        _session_factory=lambda: object(),
+        _log_transient_db_retry=lambda *_a: None,
+        _run=_run_db_operation_with_retry,
+    )
+
+
+@pytest.mark.unit
+async def test_load_terminal_runtime_candidate_returns_none_when_row_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown workspace id (no row) yields no candidate."""
+    worker = _load_candidate_worker(None, node_id="node-a")
+    monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", worker._run)
+
+    result = await worker_cleanup._load_terminal_runtime_candidate(worker, "ws_missing")  # noqa: SLF001
+
+    assert result is None
+
+
+@pytest.mark.unit
+async def test_load_terminal_runtime_candidate_returns_none_when_not_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-terminal status is skipped — the prompt hook is a no-op for it."""
+    row = (
+        WorkspaceStatus.running.value,
+        "https://example.test/r.git",
+        "awf_ws",
+        "/tmp/ws/compose.yml",
+        None,
+    )
+    worker = _load_candidate_worker(row, node_id="node-a")
+    monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", worker._run)
+
+    result = await worker_cleanup._load_terminal_runtime_candidate(worker, "ws_running")  # noqa: SLF001
+
+    assert result is None
+
+
+@pytest.mark.unit
+async def test_load_terminal_runtime_candidate_returns_none_when_repo_url_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal row with an empty repo_url is not a candidate."""
+    row = (WorkspaceStatus.failed.value, "", "awf_ws", None, None)
+    worker = _load_candidate_worker(row, node_id="node-a")
+    monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", worker._run)
+
+    result = await worker_cleanup._load_terminal_runtime_candidate(worker, "ws_no_repo")  # noqa: SLF001
+
+    assert result is None
+
+
+@pytest.mark.unit
+async def test_load_terminal_runtime_candidate_returns_none_for_foreign_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal row owned by another node is skipped (claim model respected)."""
+    row = (
+        WorkspaceStatus.completed.value,
+        "https://example.test/r.git",
+        "awf_ws",
+        None,
+        "some-other-node",
+    )
+    worker = _load_candidate_worker(row, node_id="node-a")
+    monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", worker._run)
+
+    result = await worker_cleanup._load_terminal_runtime_candidate(worker, "ws_foreign")  # noqa: SLF001
+
+    assert result is None
+
+
+@pytest.mark.unit
+async def test_load_terminal_runtime_candidate_builds_candidate_for_local_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal row owned by this node is turned into a release candidate."""
+    row = (
+        WorkspaceStatus.cancelled.value,
+        "https://example.test/r.git",
+        "awf_ws",
+        "/tmp/ws/compose.yml",
+        "node-a",
+    )
+    worker = _load_candidate_worker(row, node_id="node-a")
+    monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", worker._run)
+
+    result = await worker_cleanup._load_terminal_runtime_candidate(worker, "ws_local")  # noqa: SLF001
+
+    assert result is not None
+    assert result.workspace_id == "ws_local"
+    assert result.status is WorkspaceStatus.cancelled
+    assert result.repo_url == "https://example.test/r.git"
+    assert result.compose_project_name == "awf_ws"
+    assert result.compose_file_path == "/tmp/ws/compose.yml"
+
+
+@pytest.mark.unit
+async def test_load_terminal_runtime_candidate_builds_candidate_for_null_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal row with a NULL node_id is owned locally (single-node fallback,
+    mirroring ``_list_terminal_runtime_candidates``)."""
+    row = (
+        WorkspaceStatus.completed.value,
+        "https://example.test/r.git",
+        None,
+        None,
+        None,
+    )
+    worker = _load_candidate_worker(row, node_id=None)
+    monkeypatch.setattr(worker_cleanup, "run_db_operation_with_retry", worker._run)
+
+    result = await worker_cleanup._load_terminal_runtime_candidate(worker, "ws_null_node")  # noqa: SLF001
+
+    assert result is not None
+    assert result.workspace_id == "ws_null_node"
+    assert result.compose_project_name is None
+    assert result.compose_file_path is None

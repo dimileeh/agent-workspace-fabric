@@ -249,6 +249,23 @@ _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_releas
 _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
 """Reason code accompanying the ``terminal_runtime_release_failed`` event."""
 
+_PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "worker.prompt_terminal_runtime_release_failed"
+"""Structured-log event for a prompt terminal-runtime release that failed (#583, #584).
+
+Emitted by ``_release_terminal_runtime_promptly`` when the eager release fired on a
+terminal transition raises. A prompt-release failure is swallowed-and-logged so it can
+never break the terminal transition itself; the periodic ``_maybe_release_terminal_runtime``
+interval remains the backstop that reclaims the miss."""
+
+_PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED"
+"""Reason code paired with the ``prompt_terminal_runtime_release_failed`` structured-log event.
+
+Worker-internal structured-log reason code only, not a doctor/catalog entry (mirrors
+``_CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE``). Kept distinct from
+``TERMINAL_RUNTIME_RELEASE_FAILED`` (the periodic-path candidate failure event) so operators
+can tell apart a failed *prompt* release (eager, on the terminal transition) from a failed
+*periodic* release attempt."""
+
 _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE = "ORPHAN_DIR_RECONCILE_FAILED"
 """Reason code logged when an orphan-dir reconcile sweep fails non-transiently."""
 
