@@ -772,6 +772,17 @@ def validate_command_probe_targets(
     ``127`` later during pre-push validation. Refresh targets come first, matching
     runtime execution order.
 
+    The local coverage final gate is covered last, again matching runtime order:
+    when ``validation.strategy.final_gate`` is ``coverage`` and
+    ``validation.coverage.command`` is set, PR-monitor pre-push validation runs
+    that command after the validate phase, so its toolchain (e.g. ``coverage`` for
+    ``coverage run -m pytest``) must be probed too — otherwise an adopted PR whose
+    setup forgot to install it slips past this handoff and dies ``127`` later in
+    ``monitoring_pr`` instead of failing early with
+    ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED``. The gate runs whenever those two
+    fields are set (the ``required`` flag does not gate it), so the coverage
+    command is probed regardless of its ``required`` flag.
+
     Advisory commands (``required: false``) are skipped too: ``ValidationRunner``
     records their non-zero/``127`` result without blocking validation, so a
     missing optional tool must not fail the adopt-PR handoff with
@@ -780,17 +791,26 @@ def validate_command_probe_targets(
     """
     targets: list[ValidateCommandProbeTarget] = []
     seen: set[str] = set()
+
+    def _collect(command: str) -> None:
+        for tool in _leading_executables(command):
+            if tool in seen:
+                continue
+            seen.add(tool)
+            targets.append(ValidateCommandProbeTarget(tool=tool, command=command))
+
     for command in (
         *profile.database.pre_validation_refresh,
         *profile.phases.validate_commands,
     ):
         if not command.required:
             continue
-        for tool in _leading_executables(command.command):
-            if tool in seen:
-                continue
-            seen.add(tool)
-            targets.append(ValidateCommandProbeTarget(tool=tool, command=command.command))
+        _collect(command.command)
+
+    coverage_command = profile.validation.coverage.command
+    if profile.validation.strategy.final_gate == "coverage" and coverage_command is not None:
+        _collect(coverage_command.command)
+
     return targets
 
 
