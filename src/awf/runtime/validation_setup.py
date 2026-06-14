@@ -446,10 +446,24 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
     executable, falsely reporting PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED even
     though the real command only runs ``ruff``. The newline that ends the
     comment is still honoured as a statement separator.
+
+    A heredoc redirection (``python - <<'PY'`` ... ``PY``, ``psql <<SQL`` ...
+    ``SQL``) feeds the lines that follow to the command as stdin: the real
+    runner passes the whole string to ``sh -lc``, so the body and its closing
+    delimiter are input, not new commands. The splitter therefore detects ``<<``
+    delimiters and keeps the body (and each closing delimiter line) attached to
+    the opener statement instead of splitting on its newlines — otherwise the
+    delimiter word (``PY``/``SQL``) or a body line would be probed as a required
+    executable and falsely report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED even
+    though the opener tool is installed. While a heredoc is still open, ``;``,
+    ``&&`` and ``||`` on the opener line are kept literal so the opener tool
+    stays the statement's leading token. ``<<<`` is a here-string (no body) and
+    is left to ordinary splitting.
     """
     statements: list[tuple[str, str]] = []
     current: list[str] = []
     quote: str | None = None
+    pending_heredocs: list[str] = []
     index = 0
     length = len(command)
     while index < length:
@@ -474,6 +488,64 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
             current.append(command[index + 1])
             index += 2
             continue
+        if char == "<" and index + 1 < length and command[index + 1] == "<":
+            if index + 2 < length and command[index + 2] == "<":
+                # ``<<<`` is a here-string (no body); leave it to ordinary text.
+                current.append("<<<")
+                index += 3
+                continue
+            operator_start = index
+            index += 2  # step past ``<<``
+            if index < length and command[index] == "-":
+                index += 1  # ``<<-`` strips leading tabs from the delimiter line
+            while index < length and command[index] in " \t":
+                index += 1
+            delimiter_chars: list[str] = []
+            if index < length and command[index] in "'\"":
+                delimiter_quote = command[index]
+                index += 1
+                while index < length and command[index] != delimiter_quote:
+                    delimiter_chars.append(command[index])
+                    index += 1
+                if index < length:
+                    index += 1  # closing quote
+            else:
+                while index < length and command[index] not in " \t\n;&|<>()":
+                    if command[index] == "\\" and index + 1 < length:
+                        delimiter_chars.append(command[index + 1])
+                        index += 2
+                        continue
+                    delimiter_chars.append(command[index])
+                    index += 1
+            current.append(command[operator_start:index])
+            delimiter = "".join(delimiter_chars)
+            if delimiter:
+                pending_heredocs.append(delimiter)
+            continue
+        if char == "\n" and pending_heredocs:
+            # The newline after a heredoc redirection begins the body the real
+            # ``sh -lc`` feeds to the command. Attach the body and each closing
+            # delimiter line to the current statement so the opener tool stays
+            # the probe target instead of a body line or the delimiter word.
+            current.append("\n")
+            index += 1
+            while pending_heredocs:
+                delimiter = pending_heredocs.pop(0)
+                while index < length:
+                    end_of_line = command.find("\n", index)
+                    if end_of_line == -1:
+                        end_of_line = length
+                    line = command[index:end_of_line]
+                    current.append(line)
+                    closes = line.strip() == delimiter
+                    if end_of_line < length:
+                        current.append("\n")
+                        index = end_of_line + 1
+                    else:
+                        index = length
+                    if closes:
+                        break
+            continue
         if char == "#" and (not current or current[-1] in " \t"):
             # ``#`` at a word boundary opens a comment ``sh -lc`` ignores to the
             # end of the line; skip its text (operators included) so it never
@@ -482,12 +554,17 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
             while index < length and command[index] != "\n":
                 index += 1
             continue
-        if char in ";\n":
+        if char in ";\n" and not pending_heredocs:
             statements.append(("".join(current), ";"))
             current = []
             index += 1
             continue
-        if char in "&|" and index + 1 < length and command[index + 1] == char:
+        if (
+            char in "&|"
+            and not pending_heredocs
+            and index + 1 < length
+            and command[index + 1] == char
+        ):
             statements.append(("".join(current), char * 2))
             current = []
             index += 2

@@ -377,6 +377,35 @@ class TestLeadingExecutables:
             "env PYTHONPATH=src pytest -q && /usr/bin/env ruff check ."
         ) == ["pytest", "ruff"]
 
+    def test_heredoc_body_stays_attached_probing_the_opener_tool(self) -> None:
+        # ``python - <<'PY' ... PY`` is fed whole to ``sh -lc``: the body and the
+        # closing ``PY`` delimiter are stdin for ``python``, not new statements.
+        # Keeping the heredoc body attached to its opener keeps ``python`` the
+        # probe target rather than the delimiter word ``PY`` — which would
+        # otherwise falsely report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+        assert _leading_executables("python - <<'PY'\nimport os\nprint(os.getcwd())\nPY") == [
+            "python"
+        ]
+
+    def test_quoted_and_unquoted_heredoc_delimiters_attach_body(self) -> None:
+        # Both bare (``<<SQL``) and ``<<-`` tab-stripping delimiters are consumed
+        # with their body so the opener tool is probed, never a body line.
+        assert _leading_executables("psql -d awf <<SQL\nSELECT 1;\nSQL") == ["psql"]
+        assert _leading_executables("cat <<-EOF\n\tline\n\tEOF") == ["cat"]
+
+    def test_command_after_heredoc_delimiter_is_split_normally(self) -> None:
+        # Once the heredoc closes, the following ``&&`` tool resumes normal
+        # splitting and is probed alongside the opener.
+        assert _leading_executables("python - <<'PY'\nprint(1)\nPY\n && ruff check .") == [
+            "python",
+            "ruff",
+        ]
+
+    def test_here_string_is_not_treated_as_a_heredoc(self) -> None:
+        # ``<<<`` is a here-string with no body; the next newline still splits and
+        # the final segment's tool is probed as usual.
+        assert _leading_executables("grep x <<< value\nruff check .") == ["ruff"]
+
 
 @pytest.mark.unit
 class TestValidateCommandProbeTargets:
