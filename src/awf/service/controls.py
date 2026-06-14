@@ -145,17 +145,27 @@ def _stack_stop_error_from_cleanup(
     ``WorkspaceStackStopError`` carrying the step's error detail so the reason
     code and audit evidence stay identical to the legacy ``docker stop`` path.
 
-    Only called when ``cleanup_result.ok`` is false, which guarantees at least
-    one failed step. The cancel/stop teardown preserves the worktree
+    Only called when ``cleanup_result.ok`` is false. In the service-driven
+    cancel/stop path the teardown preserves the worktree
     (``remove_worktree=False``) and passes no companions, so the only step that
-    can fail is ``compose_down`` — the first (and sole) failed step.
+    can fail is ``compose_down`` — the first (and sole) failed step, whose
+    detail is surfaced. A non-ok result with no failed steps is not produced by
+    the live path (``WorkspaceCleanupResult.from_steps`` makes a ``partial``
+    status imply at least one failed step), but the value is representable when
+    constructed directly or normalized from a mapping, so we fall back to the
+    result reason code rather than indexing into an empty sequence.
     """
-    failed_step = cleanup_result.failed_steps[0]
+    failed_steps = cleanup_result.failed_steps
+    if not failed_steps:
+        stderr = cleanup_result.reason_code
+    else:
+        failed_step = failed_steps[0]
+        stderr = failed_step.error or failed_step.reason_code
     return WorkspaceStackStopError(
         operation="compose down",
         returncode=1,
         stdout="",
-        stderr=failed_step.error or failed_step.reason_code,
+        stderr=stderr,
     )
 
 

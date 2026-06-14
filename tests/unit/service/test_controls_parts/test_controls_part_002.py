@@ -15,6 +15,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.node.cleanup import WorkspaceCleanupResult, WorkspaceCleanupStepResult
 from awf.service import controls
 from awf.service.controls import WorkspaceStackStopError
 
@@ -233,6 +234,45 @@ async def test_communicate_reports_no_output_failure() -> None:
     assert exc_info.value.message == "docker stop failed (exit=2): <no output>"
     assert exc_info.value.stdout == ""
     assert exc_info.value.stderr == ""
+
+
+@pytest.mark.unit
+def test_stack_stop_error_from_cleanup_uses_first_failed_step() -> None:
+    result = WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name="compose_down",
+                status="failed",
+                reason_code="COMPOSE_DOWN_FAILED",
+                error="compose down denied",
+            )
+        ]
+    )
+
+    error = controls._stack_stop_error_from_cleanup(result)  # noqa: SLF001
+
+    assert error.operation == "compose down"
+    assert error.returncode == 1
+    assert error.stdout == ""
+    assert error.stderr == "compose down denied"
+
+
+@pytest.mark.unit
+def test_stack_stop_error_from_cleanup_guards_empty_failed_steps() -> None:
+    # A non-ok result with no failed steps (representable when constructed
+    # directly or normalized from a mapping with status "partial" and no steps)
+    # must not IndexError; the helper falls back to the result reason code so
+    # the failure is still surfaced rather than crashing the cancel/stop path.
+    result = WorkspaceCleanupResult(status="partial", reason_code="CLEANUP_PARTIAL")
+    assert result.ok is False
+    assert result.failed_steps == ()
+
+    error = controls._stack_stop_error_from_cleanup(result)  # noqa: SLF001
+
+    assert error.operation == "compose down"
+    assert error.returncode == 1
+    assert error.stdout == ""
+    assert error.stderr == "CLEANUP_PARTIAL"
 
 
 @pytest.mark.unit
