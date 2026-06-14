@@ -109,6 +109,37 @@ async def test_cancel_stop_stack_terminal_release_means_runtime_released(
 
 
 @pytest.mark.unit
+async def test_cancel_stop_legacy_empty_success_records_runtime_released(
+    session: AsyncSession,
+) -> None:
+    """A legacy cleaner that signals success with no compose-down step still releases.
+
+    The compat path (``_normalize_cleanup_result`` over a ``[]`` / minimal
+    ``{"status": "succeeded"}`` legacy result) produces a succeeded cleanup with
+    no ``compose_down`` step. The teardown ran successfully, so a terminal
+    workspace with a ``compose_project_name`` must emit
+    ``terminal_runtime_released`` and leave the host-port conflict set — matching
+    the destroy success path rather than being suppressed.
+    """
+    workspace = await _workspace(session, status=WorkspaceStatus.running)
+    # Default RecordingCleaner with no result/failures returns ``[]`` -> a
+    # succeeded cleanup with no compose_down step (the legacy compat shape).
+    cleaner = RecordingCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    await service.cancel_workspace(
+        workspace.id,
+        reason="operator requested",
+        stop_stack=True,
+    )
+    release_events = _release_events(await _events(session, workspace.id))
+
+    assert len(release_events) == 1
+    assert release_events[0].payload["source"] == "cancel_workspace"
+    assert await has_terminal_runtime_released_event(session, workspace.id) is True
+
+
+@pytest.mark.unit
 async def test_stop_workspace_runs_full_compose_down(
     session: AsyncSession,
 ) -> None:

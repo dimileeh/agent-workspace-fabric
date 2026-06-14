@@ -234,10 +234,16 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
         """Emit the terminal runtime release, then finish the operation.
 
         The workspace has already reached its terminal status by the time this
-        runs. On a successful compose-down the ``terminal_runtime_released``
-        event is emitted (gated on the compose-down step actually succeeding, so
-        the event now genuinely means "runtime released") and the operation is
-        finished succeeded with the teardown evidence attached. On a compose-down
+        runs. On a successful teardown the ``terminal_runtime_released`` event is
+        emitted (gated on the overall cleanup status being ``succeeded``, matching
+        the destroy success path) and the operation is finished succeeded with the
+        teardown evidence attached. Gating on the result status — not on the
+        presence of a ``compose_down`` step — keeps the legacy compat shapes
+        (``_normalize_cleanup_result`` over a ``[]`` / minimal
+        ``{"status": "succeeded"}`` result, which carry no compose-down step) from
+        being stranded in the host-port conflict set; a failed compose-down makes
+        the result non-``succeeded`` and is handled by the failure branch above,
+        so the event still genuinely means "runtime released". On a compose-down
         failure no release event is emitted (the runtime was *not* released) and
         the operation is finished **failed** via the shared failed-operation
         helper so the teardown error is surfaced, not swallowed. The failure
@@ -258,13 +264,11 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
                 operation=operation,
                 message=failure_message,
             )
-        compose_down_succeeded = any(
-            step.name == "compose_down" for step in cleanup_result.completed_steps
-        )
+        runtime_cleanup_succeeded = cleanup_result.status == "succeeded"
         if (
             workspace.compose_project_name is not None
             and workspace.status in HOST_PORT_TERMINAL_RELEASE_STATUSES
-            and compose_down_succeeded
+            and runtime_cleanup_succeeded
             and not await has_terminal_runtime_released_event(self._session, workspace.id)
         ):
             await repo.add_event(
