@@ -165,13 +165,31 @@ class TestLeadingExecutables:
         # early with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
         assert _leading_executables("ruff check . && mypy src") == ["ruff", "mypy"]
 
-    def test_chains_with_semicolons_and_pipes_collect_each_statement_head(self) -> None:
-        # ``;`` and ``||`` start new statements like ``&&`` does; a pipeline's
-        # leading token is still the tool to probe for that statement.
-        assert _leading_executables("ruff check .; black --check . || mypy src") == [
+    def test_semicolon_segments_collect_each_and_segment_head(self) -> None:
+        # ``;`` starts a new independently-executed list; an AND-segment's leading
+        # tool is required. An OR-list (``black --check . || mypy src``) fails open
+        # because under ``sh -lc`` a missing tool's failure is masked when another
+        # member succeeds, so neither ``black`` nor ``mypy`` is probed.
+        assert _leading_executables("ruff check .; black --check . || mypy src") == ["ruff"]
+
+    def test_or_list_fails_open(self) -> None:
+        # ``ruff check . || true`` exits 0 under ``sh -lc`` even when ruff is
+        # absent, so probing ruff would falsely report
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a passing profile.
+        assert _leading_executables("ruff check . || true") == []
+
+    def test_or_list_skips_every_member(self) -> None:
+        assert _leading_executables("black --check . || mypy src") == []
+
+    def test_and_segment_ending_in_or_fails_open(self) -> None:
+        # ``(ruff && mypy) || true``: either tool's failure is masked by the
+        # trailing ``|| true``, so the whole segment fails open.
+        assert _leading_executables("ruff check . && mypy src || true") == []
+
+    def test_or_list_segment_does_not_suppress_other_segments(self) -> None:
+        assert _leading_executables("ruff check .; black --check . || true; flake8 .") == [
             "ruff",
-            "black",
-            "mypy",
+            "flake8",
         ]
 
     def test_leading_guard_is_skipped_before_chained_tools(self) -> None:

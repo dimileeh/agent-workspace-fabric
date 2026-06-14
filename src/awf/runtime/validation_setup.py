@@ -391,15 +391,18 @@ def _assignment_prefix_sets_path(assignments: list[str]) -> bool:
 _VALIDATE_PROBE_LEADING_GUARDS = frozenset({"set", "shopt", "umask", "ulimit"})
 
 
-def _split_top_level_statements(command: str) -> list[str]:
-    """Split a shell command into top-level statements.
+def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
+    """Split a shell command into ``(statement, terminator)`` pairs.
 
     Breaks on ``;``, newlines, ``&&`` and ``||`` that sit outside single/double
     quotes and are not backslash-escaped — the points where ``sh -lc`` would
-    start a new command. Pipes (``|``) and background (``&``) are *not* split
-    points: the leading token of a pipeline/job is still the tool to probe.
+    start a new command. Each pair carries the operator that *terminated* the
+    statement so the caller can tell an AND-chain from an OR-list: ``";"`` for a
+    ``;`` or newline, ``"&&"``, ``"||"``, or ``""`` for the trailing statement.
+    Pipes (``|``) and background (``&``) are *not* split points: the leading
+    token of a pipeline/job is still the tool to probe.
     """
-    statements: list[str] = []
+    statements: list[tuple[str, str]] = []
     current: list[str] = []
     quote: str | None = None
     index = 0
@@ -427,18 +430,18 @@ def _split_top_level_statements(command: str) -> list[str]:
             index += 2
             continue
         if char in ";\n":
-            statements.append("".join(current))
+            statements.append(("".join(current), ";"))
             current = []
             index += 1
             continue
         if char in "&|" and index + 1 < length and command[index + 1] == char:
-            statements.append("".join(current))
+            statements.append(("".join(current), char * 2))
             current = []
             index += 2
             continue
         current.append(char)
         index += 1
-    statements.append("".join(current))
+    statements.append(("".join(current), ""))
     return statements
 
 
@@ -507,8 +510,32 @@ def _statement_leading_executable(statement: str) -> str | object:
     return leading
 
 
+def _segment_leading_executables(statements: list[str]) -> tuple[list[str], bool]:
+    """Collect the probeable leading tool of each statement in one AND-segment.
+
+    A *segment* is the run of ``&&``-joined statements between two ``;``/newline
+    boundaries. Each statement's leading tool is required because a ``&&`` chain
+    propagates a non-zero exit (a missing tool's ``127`` included), so a later
+    chained tool off PATH would fail the whole command. Returns the collected
+    tools and whether an un-probeable statement *stopped* the walk, so the caller
+    halts the overall walk and keeps whatever earlier tools were collected — the
+    documented STOP semantics (parse failure, a non-guard builtin/keyword such as
+    ``cd``, a subshell, a shell-expanded path, or a ``PATH=`` prefix the
+    shared-PATH probe cannot replay).
+    """
+    tools: list[str] = []
+    for statement in statements:
+        outcome = _statement_leading_executable(statement)
+        if outcome is _SKIP_STATEMENT:
+            continue
+        if outcome is _STOP_PROBE:
+            return tools, True
+        tools.append(outcome)  # type: ignore[arg-type]
+    return tools, False
+
+
 def _leading_executables(command: str) -> list[str]:
-    """Return every PATH-resolvable executable a shell command chains, in order.
+    """Return every PATH-resolvable executable a shell command *requires*, in order.
 
     Walks the command's top-level statements (``ruff check . && mypy src`` ->
     ``ruff check .`` then ``mypy src``) and collects the leading executable of
@@ -517,6 +544,16 @@ def _leading_executables(command: str) -> list[str]:
     chained tool that is off PATH slips past the adopt-PR handoff and dies later
     in ``monitoring_pr`` instead of failing early with
     PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+
+    An OR-list — a ``;``/newline-delimited segment containing a top-level ``||``
+    (``ruff check . || true``, ``black --check . || mypy src``) — *fails open*:
+    none of its commands is collected. Under ``sh -lc`` an OR-list exits non-zero
+    only when *every* member fails, so any single member (a missing tool's ``127``
+    included) may fail while another succeeds and the command still passes.
+    Probing such a member would falsely report
+    PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a profile whose real validation
+    passes, so the safe direction is to skip the whole OR-list rather than add its
+    left-hand command as a required probe target.
 
     A leading shell *guard* statement (``set -e``) or a blank/comment-only
     statement names no tool and is skipped (see
@@ -530,13 +567,22 @@ def _leading_executables(command: str) -> list[str]:
     probeable tool.
     """
     tools: list[str] = []
-    for statement in _split_top_level_statements(command):
-        outcome = _statement_leading_executable(statement)
-        if outcome is _SKIP_STATEMENT:
-            continue
-        if outcome is _STOP_PROBE:
-            break
-        tools.append(outcome)  # type: ignore[arg-type]
+    segment: list[str] = []
+    segment_has_or = False
+    for statement, terminator in _split_top_level_statements(command):
+        segment.append(statement)
+        if terminator == "||":
+            segment_has_or = True
+        if terminator in (";", ""):
+            # End of a ``;``/newline-delimited list: probe it only when it has no
+            # top-level ``||`` (an AND-segment); an OR-list fails open.
+            if not segment_has_or:
+                segment_tools, stopped = _segment_leading_executables(segment)
+                tools.extend(segment_tools)
+                if stopped:
+                    break
+            segment = []
+            segment_has_or = False
     return tools
 
 
