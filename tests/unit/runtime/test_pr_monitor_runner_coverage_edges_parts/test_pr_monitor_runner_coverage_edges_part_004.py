@@ -815,7 +815,7 @@ async def test_invoke_cli_for_verdict_reports_agent_failed_when_no_changes_commi
     )
 
     assert verdict == "agent_failed"
-    assert cmd.calls[-1].args[-2:] == ["status", "--porcelain"]
+    assert cmd.calls[-1].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
 
 
 @pytest.mark.unit

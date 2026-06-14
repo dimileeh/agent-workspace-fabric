@@ -786,7 +786,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     assert push_result.details["reverted_paths"] == [".github/workflows/ci.yml", "src/fix.py"]
     call_args = [call.args for call in cmd.calls]
     assert any(
-        args[:1] == ["git"] and "status" in args and args[-1:] == ["--porcelain"]
+        args[:1] == ["git"] and "status" in args and args[-1:] == ["--untracked-files=all"]
         for args in call_args
     )
     assert any(
