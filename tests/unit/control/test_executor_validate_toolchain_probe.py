@@ -306,7 +306,10 @@ class TestHandoffValidateToolchainProbe:
         # A custom/dynamic tool name carrying token-like content must be redacted
         # in both the failure message and the durable ``details`` payload, just as
         # the representative tool already is — never leaked verbatim.
-        secret_tool = "ghp_0123456789abcdef0123456789abcdef0123"
+        # Assembled from fragments so the contiguous PAT-shaped literal never
+        # lands in the committed source (secret scanners flag it); the runtime
+        # value still matches the ``gh[apousr]_`` redaction pattern under test.
+        secret_tool = "ghp_" + "".join(["0123456789ab", "cdef01234567", "89abcdef0123"])
         validation = _OkSetupValidation(
             probe_result=ValidateToolProbeResult(
                 missing=(
