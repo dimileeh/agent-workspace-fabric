@@ -150,7 +150,11 @@ class TestHandoffValidateToolchainProbe:
         assert len(executor.mark_failed_calls) == 1
         call = executor.mark_failed_calls[0]
         assert call["reason_code"] == PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE
-        assert call["failure_reason"] == FailureReason.infrastructure_failure
+        # A profile gap (validate tool the setup phase never installed) must be
+        # classified as a profile-resolution failure, not transient
+        # infrastructure: retrying the same profile cannot fix it, and the
+        # infrastructure taxonomy would wrongly earn the scheduler retry bonus.
+        assert call["failure_reason"] == FailureReason.profile_resolution_failure
         assert call["from_status"] == WorkspaceStatus.running
         assert "ruff" in call["message"]
         assert "`ruff check .`" in call["message"]

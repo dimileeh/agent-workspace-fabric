@@ -196,10 +196,16 @@ async def _run_monitor_handoff_validate_toolchain_probe(
         "the install step for the missing tool to .awf/workspace.yml setup). "
         f"Missing tools: {', '.join(missing_tools)}."
     )[:2000]
+    # A validate tool the profile's setup never installed is a profile gap, not
+    # transient infrastructure: retrying the same .awf/workspace.yml cannot fix
+    # it. Use ``profile_resolution_failure`` (matching the analogous
+    # ``PROFILE_VALIDATION_TOOL_UNAVAILABLE`` classification) so failure analysis
+    # surfaces a profile fix instead of recommending a retry, and the scheduler
+    # withholds the infrastructure-failure retry bonus.
     await _mark_failed_or_raise_setup_failure(
         self,
         workspace_id=workspace_id,
-        failure_reason=FailureReason.infrastructure_failure,
+        failure_reason=FailureReason.profile_resolution_failure,
         message=message,
         reason_code=PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE,
         details={"missing_tools": missing_tools},
