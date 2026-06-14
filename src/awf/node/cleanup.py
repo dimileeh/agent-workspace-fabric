@@ -175,12 +175,52 @@ class WorkspaceCleaner:
         try:
             if compose_file_path is not None:
                 if compose_file_path.exists():
-                    await self._compose.down_project(
-                        project_name=project_name,
-                        compose_file=compose_file_path,
-                        workspace_id=workspace_id,
-                        remove_volumes=remove_volumes,
-                    )
+                    try:
+                        down_ran = await self._compose.down_project(
+                            project_name=project_name,
+                            compose_file=compose_file_path,
+                            workspace_id=workspace_id,
+                            remove_volumes=remove_volumes,
+                        )
+                    except ComposeOperationError as down_exc:
+                        # The compose file still exists but is stale/unusable, so
+                        # ``docker compose down`` failed. Fall back to label-scoped
+                        # removal (mirroring ``ComposeManager.teardown_project``) so
+                        # the containers, network, and host port are still released
+                        # instead of leaving a stopped-only stack behind. Only a
+                        # failing fallback records a failed ``compose_down``.
+                        _log.warning(
+                            "cleanup.compose_down_label_fallback",
+                            workspace_id=workspace_id,
+                            reason_code=down_exc.reason_code,
+                            stderr=down_exc.stderr[:1000],
+                        )
+                        await self._compose.remove_project_by_label(
+                            project_name=project_name,
+                            workspace_id=workspace_id,
+                            remove_volumes=remove_volumes,
+                        )
+                    else:
+                        if not down_ran:
+                            # The compose file existed at the check above but
+                            # vanished before ``down`` ran its own existence check
+                            # (e.g. a concurrent GC removed the compose directory).
+                            # ``down_project`` silently noops and returns False in
+                            # that case, which would skip the teardown and let the
+                            # service cancel/stop path emit terminal_runtime_released
+                            # while the project's containers/network/host port are
+                            # still live, so fall back to the label-scoped removal
+                            # (mirroring ``ComposeManager.teardown_project``).
+                            _log.warning(
+                                "cleanup.compose_down_vanished_label_fallback",
+                                workspace_id=workspace_id,
+                                project_name=project_name,
+                            )
+                            await self._compose.remove_project_by_label(
+                                project_name=project_name,
+                                workspace_id=workspace_id,
+                                remove_volumes=remove_volumes,
+                            )
                 else:
                     await self._compose.remove_project_by_label(
                         project_name=project_name,
@@ -188,12 +228,93 @@ class WorkspaceCleaner:
                         remove_volumes=remove_volumes,
                     )
             else:
-                await self._compose.down(spec, remove_volumes=remove_volumes)
-                await self._compose.remove_project_by_label(
-                    project_name=project_name,
-                    workspace_id=workspace_id,
-                    remove_volumes=remove_volumes,
-                )
+                # No persisted compose file. ``down`` resolves the default
+                # ``awf_<workspace_id>`` compose path and tears the stack down
+                # under ``spec.project_name()``. A legacy row may persist a
+                # ``compose_project_name`` that differs from that default; using
+                # ``down`` would then reap the default-named project (a noop) and
+                # report success while the actually-stored Docker project keeps
+                # running and holding its host port. Only drive the compose
+                # ``down`` when the resolved project name is the spec default;
+                # otherwise skip it and fall through to the label-scoped pass
+                # keyed on the persisted project name.
+                project_is_default = project_name == spec.project_name()
+                try:
+                    down_ran = (
+                        await self._compose.down(spec, remove_volumes=remove_volumes)
+                        if project_is_default
+                        else False
+                    )
+                except ComposeOperationError as down_exc:
+                    # No persisted compose file, so ``down`` resolves the default
+                    # ``awf_<workspace_id>`` compose path. If that default file
+                    # exists but is stale/unusable ``down`` raises; the
+                    # label-scoped removal that follows still releases the
+                    # containers, network, and host port, so log the fallback
+                    # rather than recording a failed compose_down and stranding a
+                    # stopped-only stack (mirroring the persisted-file fallback
+                    # above and ``ComposeManager.teardown_project``). A failing
+                    # ``remove_project_by_label`` still surfaces via the outer
+                    # ``except`` so genuine teardown failures are not swallowed.
+                    _log.warning(
+                        "cleanup.compose_down_label_fallback",
+                        workspace_id=workspace_id,
+                        reason_code=down_exc.reason_code,
+                        stderr=down_exc.stderr[:1000],
+                    )
+                    await self._compose.remove_project_by_label(
+                        project_name=project_name,
+                        workspace_id=workspace_id,
+                        remove_volumes=remove_volumes,
+                    )
+                else:
+                    if not down_ran:
+                        # Either the default compose file was absent so ``down``
+                        # short-circuited as a noop (returned False), or the
+                        # persisted project name differs from the spec default so
+                        # ``down`` was skipped entirely. Fall back to the
+                        # label-scoped removal so a project whose compose file
+                        # vanished — or whose stored name never matched the spec
+                        # default — but whose containers/network/host port are
+                        # still live is still torn down (mirroring the
+                        # persisted-file vanished fallback above).
+                        _log.warning(
+                            "cleanup.compose_down_vanished_label_fallback",
+                            workspace_id=workspace_id,
+                            project_name=project_name,
+                        )
+                        await self._compose.remove_project_by_label(
+                            project_name=project_name,
+                            workspace_id=workspace_id,
+                            remove_volumes=remove_volumes,
+                        )
+                    else:
+                        # ``down`` actually ran and already freed the
+                        # containers/network/host port. ``docker compose down -v``
+                        # only removes the named volumes declared in the *current*
+                        # rendered compose file, so a workspace launched under an
+                        # older profile can leave project-labelled volumes that the
+                        # current file no longer renders; cancel/stop/destroy would
+                        # then report cleanup success while leaking per-workspace
+                        # volumes. Run a best-effort label-scoped reap to collect
+                        # them, but swallow a transient label failure here: the
+                        # stack was already released, and a failing reap must not
+                        # flip an otherwise-successful ``compose_down`` to failed
+                        # and skip ``terminal_runtime_released``.
+                        try:
+                            await self._compose.remove_project_by_label(
+                                project_name=project_name,
+                                workspace_id=workspace_id,
+                                remove_volumes=remove_volumes,
+                            )
+                        except ComposeOperationError as reap_exc:
+                            _log.warning(
+                                "cleanup.compose_down_post_success_label_reap_failed",
+                                workspace_id=workspace_id,
+                                project_name=project_name,
+                                reason_code=reap_exc.reason_code,
+                                stderr=reap_exc.stderr[:1000],
+                            )
             steps.append(
                 WorkspaceCleanupStepResult(
                     name="compose_down",

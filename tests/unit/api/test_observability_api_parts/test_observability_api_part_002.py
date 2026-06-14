@@ -318,11 +318,36 @@ class TestOperationsAndControls:
         workspace_id = await _create_workspace(client)
         await _mutate_workspace(engine, workspace_id)
         stopped: list[str | None] = []
+        cleaned: list[dict[str, object]] = []
 
         async def fake_stop(compose_project_name: str | None) -> None:
             stopped.append(compose_project_name)
 
+        class FakeCleaner:
+            async def cleanup(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                companion_worktrees: tuple[tuple[str, str], ...] = (),
+                remove_volumes: bool = True,
+                remove_worktree: bool = True,
+                compose_project_name: str | None = None,
+                compose_file_path: Path | None = None,
+                worktree_host_path: Path | None = None,
+            ) -> list[str]:
+                _ = companion_worktrees
+                cleaned.append(
+                    {
+                        "compose_project_name": compose_project_name,
+                        "remove_volumes": remove_volumes,
+                        "remove_worktree": remove_worktree,
+                    }
+                )
+                return []
+
         monkeypatch.setattr(controls_route, "_stop_project", fake_stop)
+        monkeypatch.setattr(controls_route, "_cleaner", FakeCleaner)
         headers = {**_auth(monkeypatch), "Idempotency-Key": "stop-observability"}
 
         response = await client.post(
@@ -334,7 +359,16 @@ class TestOperationsAndControls:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "cancelled"
-        assert stopped == ["awf_ws_observe"]
+        # stop now runs a full compose down (containers + network + port freed),
+        # never a bare docker stop (issue #588 / #583).
+        assert stopped == []
+        assert cleaned == [
+            {
+                "compose_project_name": "awf_ws_observe",
+                "remove_volumes": True,
+                "remove_worktree": False,
+            }
+        ]
 
         operation = await client.get(f"/v1/operations/{body['operation_id']}", headers=headers)
         assert operation.status_code == 200

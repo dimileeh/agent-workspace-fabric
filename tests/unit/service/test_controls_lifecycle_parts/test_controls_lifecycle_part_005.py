@@ -44,6 +44,7 @@ from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers
     _operations,
     _service,
     _workspace,
+    compose_down_succeeded_result,
 )
 
 
@@ -483,7 +484,8 @@ async def test_stop_workspace_skips_runtime_release_when_already_released(
         payload={"compose_project_name": workspace.compose_project_name},
     )
     await session.flush()
-    service, stopper, _cleaner = _service(session)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
 
     response = await service.stop_workspace(workspace.id, reason="re-stop already cancelled")
     release_events = [
@@ -492,9 +494,11 @@ async def test_stop_workspace_skips_runtime_release_when_already_released(
         if event.event_type == TERMINAL_RUNTIME_RELEASE_EVENT_TYPE
     ]
 
-    # The stack stop still runs, but the release event is not duplicated.
+    # The full compose down still runs via the cleaner, but the release event is
+    # not duplicated since one already proved the runtime stopped.
     assert response.status == WorkspaceStatus.cancelled
-    assert stopper.calls == [workspace.compose_project_name]
+    assert stopper.calls == []
+    assert len(cleaner.calls) == 1
     assert len(release_events) == 1
 
 

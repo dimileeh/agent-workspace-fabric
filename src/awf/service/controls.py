@@ -19,7 +19,6 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.repositories.base import (
-    HOST_PORT_TERMINAL_RELEASE_STATUSES,
     TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     TERMINAL_RUNTIME_RELEASE_REASON_CODE,
     has_terminal_runtime_released_event,
@@ -56,6 +55,10 @@ from awf.service.controls_errors import (
     WorkspaceValidateStateError,
 )
 from awf.service.controls_guide import _WorkspaceGuideMixin
+from awf.service.controls_stack_release import (
+    _stack_stop_error_from_cleanup,
+    _WorkspaceStackReleaseMixin,
+)
 from awf.service.controls_types import (
     CleanerFactory,
     ProjectStopper,
@@ -134,7 +137,7 @@ def _require_operator_remonitor_requested_at(requested_at: datetime | None) -> d
     return requested_at
 
 
-class WorkspaceControlService(_WorkspaceGuideMixin):
+class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin):
     """Business logic for sensitive workspace lifecycle controls."""
 
     def __init__(
@@ -188,7 +191,11 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
             return _control_response(
                 workspace=workspace,
                 operation=replay,
-                message="workspace cancellation requested",
+                message=_stack_release_replay_message(
+                    replay,
+                    success_message="workspace cancellation requested",
+                    failure_message="workspace cancelled but stack teardown failed",
+                ),
             )
 
         operation = await operations.create(
@@ -198,18 +205,9 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
             payload=operation_payload,
             idempotency_key=prepared.idempotency_key,
         )
-        if stop_stack:
-            try:
-                await self._project_stopper(workspace.compose_project_name)
-            except WorkspaceStackStopError as exc:
-                await _finish_stack_stop_failed_operation(
-                    self._session,
-                    operations,
-                    operation,
-                    workspace=workspace,
-                    exc=exc,
-                )
-                raise
+        # ``stop_stack=True`` runs a FULL compose down (containers + network +
+        # host port freed), not a bare ``docker stop`` (issue #588 / #583).
+        cleanup_result = await self._release_runtime_stack(workspace) if stop_stack else None
         if (
             workspace.status != WorkspaceStatus.cancelled.value
             and WorkspaceStateMachine.can_transition(
@@ -230,34 +228,33 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
                 reason_code=_OPERATOR_CANCEL_REASON_CODE,
                 payload=event_payload,
             )
-        _cancel_final_status = workspace.status
-        # ``stop_stack=False`` means this control path did not prove the
-        # runtime has stopped, so cleanup owns emitting terminal release. In the
-        # narrow pre-launch race where the provisioner has stamped
-        # compose_project_name but Docker has not started containers yet, this
-        # can conservatively block host-port reuse until cleanup performs the
-        # no-op compose down and records the release event. That bounded false
-        # positive is safer than declaring ports free while a stack may still
-        # exist.
-        if (
-            stop_stack
-            and workspace.compose_project_name is not None
-            and _cancel_final_status in HOST_PORT_TERMINAL_RELEASE_STATUSES
-            and not await has_terminal_runtime_released_event(self._session, workspace.id)
-        ):
-            await repo.add_event(
-                workspace,
-                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-                payload={
-                    "compose_project_name": workspace.compose_project_name,
-                    "workspace_status": _cancel_final_status,
-                    "cleanup": {
-                        "stack_stopped": stop_stack,
-                        "source": "cancel_workspace",
-                    },
-                },
+        audit_extra: dict[str, object | None] = {
+            "stop_stack": stop_stack,
+            "expected_version": expected_version,
+        }
+        if cleanup_result is not None:
+            # The full compose down ran; finalize the terminal runtime release
+            # (or surface a teardown failure) through the shared completion path.
+            return await self._finalize_service_stack_release(
+                repo,
+                operations,
+                operation,
+                workspace=workspace,
+                cleanup_result=cleanup_result,
+                source="cancel_workspace",
+                action=OperationType.cancel.value,
+                reason_code=_OPERATOR_CANCEL_REASON_CODE,
+                audit_extra=audit_extra,
+                success_message="workspace cancellation requested",
+                failure_message="workspace cancelled but stack teardown failed",
             )
+        # ``stop_stack=False`` did not prove the runtime stopped, so cleanup owns
+        # emitting terminal release later. In the narrow pre-launch race where
+        # the provisioner has stamped compose_project_name but Docker has not
+        # started containers yet, this can conservatively block host-port reuse
+        # until cleanup performs the no-op compose down and records the release
+        # event. That bounded false positive is safer than declaring ports free
+        # while a stack may still exist.
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
@@ -270,10 +267,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
             action=OperationType.cancel.value,
             outcome="succeeded",
             reason_code=_OPERATOR_CANCEL_REASON_CODE,
-            extra={
-                "stop_stack": stop_stack,
-                "expected_version": expected_version,
-            },
+            extra=audit_extra,
         )
         return _control_response(
             workspace=workspace,
@@ -318,7 +312,11 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
             return _control_response(
                 workspace=workspace,
                 operation=replay,
-                message="workspace stack stopped",
+                message=_stack_release_replay_message(
+                    replay,
+                    success_message="workspace stack stopped",
+                    failure_message="workspace stack stop failed",
+                ),
             )
 
         operation = await operations.create(
@@ -328,17 +326,10 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
             payload=operation_payload,
             idempotency_key=prepared.idempotency_key,
         )
-        try:
-            await self._project_stopper(workspace.compose_project_name)
-        except WorkspaceStackStopError as exc:
-            await _finish_stack_stop_failed_operation(
-                self._session,
-                operations,
-                operation,
-                workspace=workspace,
-                exc=exc,
-            )
-            raise
+        # ``stop`` always runs the FULL compose down so the containers, the
+        # per-workspace network, and the host port are released (issue #588 /
+        # #583) — never a bare ``docker stop`` that leaves them ``Exited``.
+        cleanup_result = await self._release_runtime_stack(workspace)
         if _is_active(WorkspaceStatus(workspace.status)) and WorkspaceStateMachine.can_transition(
             WorkspaceStatus(workspace.status),
             WorkspaceStatus.cancelled,
@@ -349,46 +340,30 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
                 reason_code=_OPERATOR_STOP_REASON_CODE,
                 payload=event_payload,
             )
-        else:
+        elif cleanup_result.ok:
+            # ``stack_stopped`` asserts the runtime was actually stopped, so it
+            # is only emitted once the compose down succeeds. A failed teardown
+            # is surfaced as a failed operation by the finalizer below; emitting
+            # a success-shaped stack_stopped event here would let observers see a
+            # successful stop for a teardown that actually failed.
             await repo.add_event(
                 workspace,
                 event_type="workspace.stack_stopped",
                 reason_code=_OPERATOR_STOP_REASON_CODE,
                 payload=event_payload,
             )
-        if (
-            workspace.compose_project_name is not None
-            and workspace.status in HOST_PORT_TERMINAL_RELEASE_STATUSES
-            and not await has_terminal_runtime_released_event(self._session, workspace.id)
-        ):
-            await repo.add_event(
-                workspace,
-                event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
-                reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
-                payload={
-                    "compose_project_name": workspace.compose_project_name,
-                    "workspace_status": workspace.status,
-                    "cleanup": {"stack_stopped": True, "source": "stop_workspace"},
-                },
-            )
-        await operations.finish(
-            operation,
-            status=OperationStatus.succeeded,
-            result={"status": workspace.status},
-        )
-        await _add_control_audit_event(
+        return await self._finalize_service_stack_release(
             repo,
-            workspace,
-            operation=operation,
-            action=OperationType.stop.value,
-            outcome="succeeded",
-            reason_code=_OPERATOR_STOP_REASON_CODE,
-            extra={"expected_version": expected_version},
-        )
-        return _control_response(
+            operations,
+            operation,
             workspace=workspace,
-            operation=operation,
-            message="workspace stack stopped",
+            cleanup_result=cleanup_result,
+            source="stop_workspace",
+            action=OperationType.stop.value,
+            reason_code=_OPERATOR_STOP_REASON_CODE,
+            audit_extra={"expected_version": expected_version},
+            success_message="workspace stack stopped",
+            failure_message="workspace stack stop failed",
         )
 
     async def remonitor_workspace(
@@ -1375,6 +1350,7 @@ from awf.service.controls_helpers import (  # noqa: E402
     _payload_matches_idempotency_identity,
     _remonitor_current_head_sha,
     _reset_failed_workspace_for_remonitor,
+    _stack_release_replay_message,
     _with_secret_lease_evidence,
     _with_secret_lease_result,
     _workspace_pr_operation_context,
@@ -1393,6 +1369,7 @@ __all__ = [
     "IdempotencyConflictError",
     "VersionConflictError",
     "WorkspaceStackStopError",
+    "_stack_stop_error_from_cleanup",
     "WorkspaceGuideEmptyDirectiveError",
     "WorkspaceGuideMissingPrUrlError",
     "WorkspaceGuideStateError",

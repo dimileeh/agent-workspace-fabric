@@ -21,7 +21,49 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
+from awf.node.cleanup import (
+    COMPOSE_DOWN_SUCCEEDED,
+    WorkspaceCleanupResult,
+    WorkspaceCleanupStepResult,
+)
 from awf.service.controls import WorkspaceControlService, WorkspaceStackStopError
+
+
+def compose_down_succeeded_result() -> WorkspaceCleanupResult:
+    """A full compose-down result with the worktree preserved (cancel/stop)."""
+    return WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name="compose_down",
+                status="succeeded",
+                reason_code=COMPOSE_DOWN_SUCCEEDED,
+            ),
+            WorkspaceCleanupStepResult(
+                name="worktree_remove",
+                status="skipped",
+                reason_code="WORKTREE_REMOVE_SKIPPED",
+            ),
+        ]
+    )
+
+
+def compose_down_failed_result(*, error: str = "compose down denied") -> WorkspaceCleanupResult:
+    """A compose-down result whose teardown step genuinely failed."""
+    return WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name="compose_down",
+                status="failed",
+                reason_code="COMPOSE_DOWN_FAILED",
+                error=error,
+            ),
+            WorkspaceCleanupStepResult(
+                name="worktree_remove",
+                status="skipped",
+                reason_code="WORKTREE_REMOVE_SKIPPED",
+            ),
+        ]
+    )
 
 
 @dataclass
@@ -61,6 +103,7 @@ class CleanupCall:
 class RecordingCleaner:
     failures: list[str] = field(default_factory=list)
     calls: list[CleanupCall] = field(default_factory=list)
+    result: WorkspaceCleanupResult | None = None
 
     async def cleanup(
         self,
@@ -73,7 +116,7 @@ class RecordingCleaner:
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
-    ) -> list[str]:
+    ) -> list[str] | WorkspaceCleanupResult:
         _ = companion_worktrees
         self.calls.append(
             CleanupCall(
@@ -86,6 +129,8 @@ class RecordingCleaner:
                 remove_worktree=remove_worktree,
             )
         )
+        if self.result is not None:
+            return self.result
         return list(self.failures)
 
 
@@ -255,6 +300,8 @@ __all__ = [
     "RecordingCleaner",
     "RecordingStopper",
     "StaleCallbackCleaner",
+    "compose_down_failed_result",
+    "compose_down_succeeded_result",
     "_events",
     "_issue_control_secret_lease",
     "_operations",
