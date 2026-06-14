@@ -96,6 +96,51 @@ class ServiceGCRequestRepository:
         await self._session.flush()
         return request
 
+    async def reclaim_stale_running(
+        self,
+        *,
+        node_id: str,
+        now: datetime,
+    ) -> list[str]:
+        """Reset abandoned ``running`` rows past their ``deadline_at`` back to ``pending`` (#590).
+
+        A worker cancelled (graceful shutdown) mid-reap leaves its claimed row ``running``
+        with no recovery path: :meth:`claim_oldest_pending` only selects ``pending`` rows,
+        so the row would otherwise accumulate forever. Once its ``deadline_at`` (the API
+        client's polling budget) has elapsed the original claimant is gone — the client has
+        already timed out — so the row is safe to re-queue: reset it to ``pending``
+        (clearing ``claimed_at``) so the next poll re-claims and re-runs the idempotent
+        reap. ``SELECT ... FOR UPDATE SKIP LOCKED`` skips any row a concurrent claim/finish
+        is actively holding, so a genuinely in-flight reap is never disturbed. Single-node
+        only (Phase 1): the only ``running`` rows are ones a prior incarnation of this node
+        abandoned. Rows with a ``NULL`` ``deadline_at`` are never reclaimed (no budget to
+        judge staleness against). Returns the ids reset, oldest first.
+        """
+        stmt = (
+            select(ServiceGCRequest)
+            .where(ServiceGCRequest.status == SERVICE_GC_REQUEST_STATUS_RUNNING)
+            .where(ServiceGCRequest.deadline_at.is_not(None))
+            .where(ServiceGCRequest.deadline_at < now)
+            .where(
+                or_(
+                    ServiceGCRequest.node_id == node_id,
+                    ServiceGCRequest.node_id.is_(None),
+                )
+            )
+            .order_by(ServiceGCRequest.requested_at.asc(), ServiceGCRequest.id.asc())
+        )
+        if self._dialect_name == "postgresql":
+            stmt = stmt.with_for_update(of=ServiceGCRequest, skip_locked=True)
+        rows = (await self._session.execute(stmt)).scalars().all()
+        reclaimed: list[str] = []
+        for request in rows:
+            request.status = SERVICE_GC_REQUEST_STATUS_PENDING
+            request.claimed_at = None
+            reclaimed.append(request.id)
+        if reclaimed:
+            await self._session.flush()
+        return reclaimed
+
     async def mark_completed(
         self,
         *,

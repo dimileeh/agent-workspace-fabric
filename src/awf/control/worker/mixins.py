@@ -45,6 +45,7 @@ class WorkerDelegatesMixin:
     _maybe_reap_superseded_claude_bases = _cleanup._maybe_reap_superseded_claude_bases
     _maybe_reap_terminal_workspace_gc = _cleanup._maybe_reap_terminal_workspace_gc
     _maybe_consume_service_gc_trigger = _cleanup._maybe_consume_service_gc_trigger
+    _reclaim_stale_running_service_gc_triggers = _cleanup._reclaim_stale_running_service_gc_triggers
     _claim_service_gc_trigger = _cleanup._claim_service_gc_trigger
     _run_claimed_service_gc_trigger = _cleanup._run_claimed_service_gc_trigger
     _finish_service_gc_trigger = _cleanup._finish_service_gc_trigger

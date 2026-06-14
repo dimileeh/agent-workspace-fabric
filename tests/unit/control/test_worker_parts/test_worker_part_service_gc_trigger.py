@@ -362,6 +362,126 @@ async def test_consume_propagates_cancellation_during_finish(
         await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
 
 
+async def _seed_running_stale(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    node_id: str | None = _NODE_ID,
+) -> str:
+    """Seed a ``running`` row whose ``deadline_at`` has already elapsed (abandoned)."""
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        request = await ServiceGCRequestRepository(session).create_pending(
+            node_id=node_id,
+            requested_at=now - timedelta(seconds=120),
+            deadline_at=now - timedelta(seconds=30),
+            params={"execute": True},
+        )
+        request.status = "running"
+        request.claimed_at = now - timedelta(seconds=90)
+        await session.flush()
+        await session.commit()
+        return request.id
+
+
+async def test_consume_reclaims_stale_running_row_then_runs_reaper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A ``running`` row past its ``deadline_at`` is re-queued and re-run, not stranded (#590).
+
+    A worker cancelled mid-reap leaves its claimed row ``running``; because
+    ``claim_oldest_pending`` only selects ``pending`` rows the row would otherwise
+    accumulate forever. The consume path resets it to ``pending`` once the deadline has
+    elapsed, then re-claims and re-runs the idempotent reap in the same cycle.
+    """
+    request_id = await _seed_running_stale(session_factory)
+    calls = 0
+
+    async def _terminal_reaper() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {"status": "succeeded", "deleted_path_count": 2}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    assert calls == 1
+    async with session_factory() as session:
+        finished = await ServiceGCRequestRepository(session).get(request_id)
+        assert finished is not None
+        assert finished.status == "completed"
+
+
+async def test_consume_leaves_fresh_running_row_untouched(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A ``running`` row whose ``deadline_at`` has not elapsed is left in flight (#590)."""
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        request = await ServiceGCRequestRepository(session).create_pending(
+            node_id=_NODE_ID,
+            requested_at=now,
+            deadline_at=now + timedelta(seconds=30),
+            params={"execute": True},
+        )
+        request.status = "running"
+        await session.flush()
+        request_id = request.id
+        await session.commit()
+
+    async def _terminal_reaper() -> dict[str, object]:
+        raise AssertionError("reaper must not run for a fresh in-flight row")
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        unchanged = await ServiceGCRequestRepository(session).get(request_id)
+        assert unchanged is not None
+        assert unchanged.status == "running"
+
+
+async def test_consume_swallows_stale_reclaim_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A stale-row reclaim failure is swallowed and must not skip the claim below (#590)."""
+    request_id = await _seed_pending(session_factory)
+
+    async def _terminal_reaper() -> dict[str, object]:
+        return {"status": "succeeded", "deleted_path_count": 1}
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    async def _boom() -> None:
+        raise RuntimeError("reclaim retries exhausted")
+
+    worker._reclaim_stale_running_service_gc_triggers = _boom  # type: ignore[method-assign]  # noqa: SLF001
+
+    # Must not raise, and the pending row is still consumed despite the reclaim failure.
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        finished = await ServiceGCRequestRepository(session).get(request_id)
+        assert finished is not None
+        assert finished.status == "completed"
+
+
+async def test_consume_propagates_cancellation_during_stale_reclaim(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """``CancelledError`` from the reclaim sweep propagates for cooperative shutdown (#590)."""
+    worker = _make_worker(session_factory, terminal_gc_reaper=lambda: None)
+
+    async def _cancel() -> None:
+        raise asyncio.CancelledError
+
+    worker._reclaim_stale_running_service_gc_triggers = _cancel  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+
 async def test_consume_claims_one_row_second_call_noops(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

@@ -48,6 +48,7 @@ from awf.control.worker.constants import (
     _PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
     _PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
     _SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE,
+    _SERVICE_GC_TRIGGER_STALE_RUNNING_RECLAIMED_REASON_CODE,
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
@@ -572,9 +573,24 @@ async def _maybe_consume_service_gc_trigger(self: Any) -> None:
     the sibling ``_maybe_reap_*`` methods — one failed consume must never break
     provisioning/dispatch. ``asyncio.CancelledError`` propagates for cooperative
     shutdown.
+
+    Before claiming, abandoned ``running`` rows past their ``deadline_at`` are re-queued
+    (:meth:`_reclaim_stale_running_service_gc_triggers`) so a row left ``running`` by a
+    worker cancelled mid-reap is recovered instead of accumulating forever (#590). The
+    reclaim is independently guarded: a reclaim failure must not skip the claim below.
     """
     if self._terminal_gc_reaper is None:
         return
+
+    try:
+        await self._reclaim_stale_running_service_gc_triggers()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.exception(
+            "worker.service_gc_trigger_stale_reclaim_failed",
+            reason_code=_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE,
+        )
 
     try:
         claimed = await self._claim_service_gc_trigger()
@@ -635,6 +651,44 @@ async def _claim_service_gc_trigger(self: Any) -> tuple[str, dict[str, Any]] | N
         commit=True,
         on_retry=self._log_transient_db_retry,
     )
+
+
+async def _reclaim_stale_running_service_gc_triggers(self: Any) -> None:
+    """Re-queue abandoned ``running`` gc-trigger rows past their ``deadline_at`` (#590).
+
+    A worker cancelled (graceful shutdown) mid-reap leaves its claimed row ``running``;
+    because :meth:`_claim_service_gc_trigger` (via ``claim_oldest_pending``) only selects
+    ``pending`` rows, such a row has no recovery path and the stored ``deadline_at`` is
+    never read — it would accumulate indefinitely. Once the row's ``deadline_at`` (the API
+    client's polling budget) has elapsed the original claimant is gone, so resetting it to
+    ``pending`` lets a later poll re-claim and re-run the idempotent reap: the operator's
+    on-demand GC request is still honoured across a worker restart, even with the periodic
+    backstop kill-switch off. The repository's ``FOR UPDATE SKIP LOCKED`` skips any row a
+    concurrent claim/finish is actively holding, so a genuinely in-flight reap is never
+    disturbed. Best-effort: a reclaim count is logged for evidence; failures are surfaced
+    by the guarded caller, never here.
+    """
+    node_id = effective_worker_config_node_id(self._config)
+    now = datetime.now(UTC)
+
+    async def _operation(session: AsyncSession) -> list[str]:
+        return await ServiceGCRequestRepository(session).reclaim_stale_running(
+            node_id=node_id,
+            now=now,
+        )
+
+    reclaimed = await run_db_operation_with_retry(
+        self._session_factory,
+        _operation,
+        commit=True,
+        on_retry=self._log_transient_db_retry,
+    )
+    if reclaimed:
+        _log.warning(
+            "worker.service_gc_trigger_stale_running_reclaimed",
+            reason_code=_SERVICE_GC_TRIGGER_STALE_RUNNING_RECLAIMED_REASON_CODE,
+            request_ids=reclaimed,
+        )
 
 
 async def _run_claimed_service_gc_trigger(

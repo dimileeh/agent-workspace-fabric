@@ -177,6 +177,128 @@ async def test_claim_without_for_update_on_non_postgres_dialect() -> None:
             assert claimed.status == "running"
 
 
+async def test_reclaim_stale_running_resets_only_past_deadline_rows() -> None:
+    # A ``running`` row whose ``deadline_at`` has elapsed is abandoned (the API client
+    # has timed out); it is reset to ``pending`` so a later poll can re-claim it (#590).
+    # A still-fresh ``running`` row and a ``running`` row without a ``deadline_at`` are
+    # left untouched.
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            stale = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now - timedelta(seconds=120),
+                deadline_at=now - timedelta(seconds=30),
+            )
+            fresh = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now,
+                deadline_at=now + timedelta(seconds=30),
+            )
+            no_deadline = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now - timedelta(seconds=120),
+                deadline_at=None,
+            )
+            # Move all three into ``running`` to mimic claimed-but-unfinished rows.
+            for request in (stale, fresh, no_deadline):
+                request.status = "running"
+                request.claimed_at = now
+            await session.flush()
+            stale_id, fresh_id, no_deadline_id = stale.id, fresh.id, no_deadline.id
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            reclaimed = await repo.reclaim_stale_running(node_id="node-a", now=now)
+            assert reclaimed == [stale_id]
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            reset = await repo.get(stale_id)
+            assert reset is not None
+            assert reset.status == "pending"
+            assert reset.claimed_at is None
+            assert (await repo.get(fresh_id)).status == "running"  # type: ignore[union-attr]
+            assert (await repo.get(no_deadline_id)).status == "running"  # type: ignore[union-attr]
+
+
+async def test_reclaim_stale_running_excludes_other_node() -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            other = await repo.create_pending(
+                node_id="other-node",
+                requested_at=now - timedelta(seconds=120),
+                deadline_at=now - timedelta(seconds=30),
+            )
+            null_node = await repo.create_pending(
+                node_id=None,
+                requested_at=now - timedelta(seconds=120),
+                deadline_at=now - timedelta(seconds=30),
+            )
+            for request in (other, null_node):
+                request.status = "running"
+            await session.flush()
+            other_id, null_id = other.id, null_node.id
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            # The other-node row is invisible; the NULL-node row is reclaimable.
+            reclaimed = await repo.reclaim_stale_running(node_id="node-a", now=now)
+            assert reclaimed == [null_id]
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            assert (await repo.get(other_id)).status == "running"  # type: ignore[union-attr]
+            assert (await repo.get(null_id)).status == "pending"  # type: ignore[union-attr]
+
+
+async def test_reclaim_stale_running_returns_empty_when_none_stale() -> None:
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            await repo.create_pending(node_id="node-a", requested_at=now, deadline_at=None)
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            assert await repo.reclaim_stale_running(node_id="node-a", now=now) == []
+
+
+async def test_reclaim_stale_running_on_non_postgres_dialect() -> None:
+    # On a non-Postgres dialect the reclaim runs without ``FOR UPDATE SKIP LOCKED``;
+    # the plain UPDATE still executes against the test Postgres engine.
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            stale = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now - timedelta(seconds=120),
+                deadline_at=now - timedelta(seconds=30),
+            )
+            stale.status = "running"
+            await session.flush()
+            stale_id = stale.id
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session, dialect_name="sqlite")
+            reclaimed = await repo.reclaim_stale_running(node_id="node-a", now=now)
+            assert reclaimed == [stale_id]
+
+
 async def test_mutators_return_none_for_missing_request() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
