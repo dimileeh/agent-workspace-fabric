@@ -193,7 +193,7 @@ async def _run_monitor_handoff_validate_toolchain_probe(
         f"validate command `{safe_command}` needs `{safe_tool}`, which is not on "
         "PATH after setup. The adopt-pr path skips the coding agent, so the "
         "profile's setup phase must install everything validate needs (e.g. add "
-        '`pip install -e ".[dev]"` to .awf/workspace.yml setup). '
+        "the install step for the missing tool to .awf/workspace.yml setup). "
         f"Missing tools: {', '.join(missing_tools)}."
     )[:2000]
     await _mark_failed_or_raise_setup_failure(
