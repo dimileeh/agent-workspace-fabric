@@ -166,9 +166,9 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
     ``;`` or newline, ``"&&"``, ``"||"``, or ``""`` for the trailing statement.
     Pipes (``|``) and background (``&``) are *not* split points, so a pipeline or
     job stays within one statement. :func:`_statement_leading_executable` then
-    fails open on a top-level pipeline — under ``sh -lc`` (no ``pipefail``) only
-    its last stage sets the exit status, so probing the leading tool would
-    misreport a masked failure.
+    probes only that pipeline's *final* stage — under ``sh -lc`` (no ``pipefail``)
+    only its last stage sets the exit status, so the masked leading stages fail
+    open while the exit-determining final tool is still probed.
 
     A ``#`` that begins a word (at the start, or after unquoted whitespace)
     starts a comment that ``sh -lc`` ignores to end of line, so the splitter
@@ -388,6 +388,55 @@ def _contains_top_level_pipe(statement: str) -> bool:
     return False
 
 
+def _split_top_level_pipes(statement: str) -> list[str]:
+    """Split ``statement`` into its pipeline stages on top-level ``|`` pipes.
+
+    Mirrors the quote/escape handling of :func:`_contains_top_level_pipe` so the
+    spaced (``a | b``) and ``shlex``-glued (``a|b``) forms split identically.
+    :func:`_split_top_level_statements` has already broken on ``||``, so every
+    ``|`` reaching here joins a pipeline. The last element is the pipeline's
+    exit-determining stage: under ``sh -lc`` (no ``pipefail``) a pipeline exits
+    with the status of its final stage only, so only that stage's tool is a real
+    blocking dependency (see :func:`_statement_leading_executable`).
+    """
+    stages: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    length = len(statement)
+    while index < length:
+        char = statement[index]
+        if quote is not None:
+            current.append(char)
+            if char == "\\" and quote == '"' and index + 1 < length:
+                current.append(statement[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            current.append(char)
+            current.append(statement[index + 1])
+            index += 2
+            continue
+        if char == "|":
+            stages.append("".join(current))
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    stages.append("".join(current))
+    return stages
+
+
 # Per-statement classification outcomes for :func:`_statement_leading_executable`.
 # ``_SKIP_STATEMENT`` -- the statement names no tool (a shell guard, or a
 # blank/comment/env-only line); look at the next statement. ``_STOP_PROBE`` --
@@ -418,14 +467,22 @@ def _statement_leading_executable(statement: str) -> str | object:
         return _SKIP_STATEMENT
     if _contains_top_level_pipe(statement):
         # A top-level pipeline's exit status under ``sh -lc`` (no ``pipefail``) is
-        # that of its *last* stage only, so a missing left-hand tool
+        # that of its *final* stage only. A missing *leading* tool
         # (``pytest -q | tee pytest.log`` with ``pytest`` off PATH) is masked by a
-        # succeeding final stage and the command still passes. Probing the leading
-        # tool would falsely report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED, so the
-        # whole pipeline fails open — like a ``|| true``-masked OR-list member.
-        # ``_SKIP_STATEMENT`` (not ``_STOP_PROBE``) because a pipe never changes how
-        # a later statement resolves, so the walk keeps probing the rest.
-        return _SKIP_STATEMENT
+        # succeeding final stage, so it fails open — but the final stage itself is
+        # exit-determining: an unprovisioned ``custom-reporter`` in
+        # ``pytest -q | custom-reporter`` really exits ``127`` and blocks
+        # validation, so it must be probed or it slips past the handoff and dies
+        # later in ``monitoring_pr`` instead of failing early as
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Probe only the final stage (the
+        # masked earlier stages stay fail-open); the final stage carries no
+        # top-level pipe, so the recursion classifies it as an ordinary statement.
+        final_outcome = _statement_leading_executable(_split_top_level_pipes(statement)[-1])
+        # A pipeline never changes how a *later* top-level statement resolves (its
+        # ``cd``/``PATH=`` run in a subshell), so an un-probeable final stage fails
+        # open (``_SKIP_STATEMENT``) rather than halting the walk like a real
+        # directory-changing ``cd`` would (``_STOP_PROBE``).
+        return _SKIP_STATEMENT if final_outcome is _STOP_PROBE else final_outcome
     index = _first_non_assignment_token_index(tokens)
     if _assignment_prefix_sets_path(tokens[:index]):
         return _STOP_PROBE
