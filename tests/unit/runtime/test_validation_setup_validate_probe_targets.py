@@ -43,6 +43,21 @@ class TestLeadingExecutable:
             ("# run lint\nruff check .", "ruff"),
             ("  # leading comment\nmypy src", "mypy"),
             ("ruff check . # trailing comment", "ruff"),
+            # A required validate block guarded by a leading shell-option command
+            # (``set -e``, ``set -euo pipefail``, ``shopt -s globstar``) runs the
+            # real tool after the guard under ``sh -lc``; the probe must look past
+            # the guard statement to the tool that follows, otherwise a missing
+            # toolchain slips past the handoff and only fails later in
+            # ``monitoring_pr`` instead of as PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+            ("set -e; ruff check .", "ruff"),
+            ("set -euo pipefail && ruff check .", "ruff"),
+            ("set -euo pipefail\nruff check .", "ruff"),
+            ("shopt -s globstar; ruff check .", "ruff"),
+            ("umask 022; mypy src", "mypy"),
+            # Multiple stacked guards are all skipped to reach the real tool.
+            ("set -e; set -x; ruff check .", "ruff"),
+            # A guard followed by an env-assignment prefix still probes the tool.
+            ("set -e; FOO=bar ruff check .", "ruff"),
         ],
     )
     def test_extracts_leading_executable(self, command: str, expected: str) -> None:
@@ -100,6 +115,15 @@ class TestLeadingExecutable:
             # A command that is nothing but a shell comment reduces to no tokens
             # under ``sh -lc``; there is no executable to probe, so fail open.
             "# just a note, no command here",
+            # A leading shell *guard* (``set -e``) is skipped, but only guard
+            # statements are — a leading ``cd`` changes the working directory the
+            # tool resolves against, so a ``cd``-prefixed sequence keeps the
+            # existing fail-open behavior rather than probing the later tool under
+            # the wrong directory.
+            "cd build; ruff check .",
+            # A guard with no following command names no tool, so fail open.
+            "set -euo pipefail",
+            "shopt -s globstar",
         ],
     )
     def test_unprobeable_leading_token_returns_none(self, command: str) -> None:
@@ -188,6 +212,30 @@ class TestValidateCommandProbeTargets:
             ("ruff", "# run lint\nruff check ."),
             ("mypy", "mypy src"),
         ]
+
+    def test_probes_tool_after_leading_shell_guard(self) -> None:
+        # A required validate command guarded by a leading ``set -e`` (or
+        # ``set -euo pipefail``) runs the real tool after the guard under
+        # ``sh -lc``; the probe must look past the guard so a missing toolchain
+        # is caught at handoff as PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED rather
+        # than slipping through to fail later in ``monitoring_pr``. The full
+        # command is kept as the representative for the operator message.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["set -euo pipefail; ruff check .", "mypy src"])
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("ruff", "set -euo pipefail; ruff check ."),
+            ("mypy", "mypy src"),
+        ]
+
+    def test_skips_guard_only_command_with_no_following_tool(self) -> None:
+        # A validate command that is only a shell guard names no tool, so it
+        # yields no probe target (fail-open) rather than reporting the guard
+        # itself as a missing toolchain.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["set -euo pipefail", "ruff check ."])
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
 
     def test_skips_advisory_required_false_commands(self) -> None:
         # An advisory (``required: false``) validate command is not probed: its

@@ -380,16 +380,87 @@ def _assignment_prefix_sets_path(assignments: list[str]) -> bool:
     return any(assignment.split("=", 1)[0] == "PATH" for assignment in assignments)
 
 
+# Leading shell *guard* commands configure the shell (error/option flags,
+# resource limits) without naming a project tool, and conventionally prefix the
+# real command in a sequence (``set -e; ruff check .``). The probe skips such a
+# leading statement and looks at the next one so a required ``validate`` block
+# opened by ``set -euo pipefail`` still yields a probe target for the tool that
+# follows. Unlike ``cd`` — which changes the directory the tool resolves
+# against and so stays fail-open — these never affect tool resolution, so
+# advancing past them cannot make the probe target the wrong command.
+_VALIDATE_PROBE_LEADING_GUARDS = frozenset({"set", "shopt", "umask", "ulimit"})
+
+
+def _split_top_level_statements(command: str) -> list[str]:
+    """Split a shell command into top-level statements.
+
+    Breaks on ``;``, newlines, ``&&`` and ``||`` that sit outside single/double
+    quotes and are not backslash-escaped — the points where ``sh -lc`` would
+    start a new command. Pipes (``|``) and background (``&``) are *not* split
+    points: the leading token of a pipeline/job is still the tool to probe.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if quote is not None:
+            current.append(char)
+            if char == "\\" and quote == '"' and index + 1 < length:
+                current.append(command[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            current.append(char)
+            current.append(command[index + 1])
+            index += 2
+            continue
+        if char in ";\n":
+            statements.append("".join(current))
+            current = []
+            index += 1
+            continue
+        if char in "&|" and index + 1 < length and command[index + 1] == char:
+            statements.append("".join(current))
+            current = []
+            index += 2
+            continue
+        current.append(char)
+        index += 1
+    statements.append("".join(current))
+    return statements
+
+
 def _leading_executable(command: str) -> str | None:
     """Return the leading PATH-resolvable executable of a shell command, or None.
 
-    Skips leading ``NAME=VALUE`` env assignments (``FOO=bar ruff`` -> ``ruff``)
+    Walks the command's top-level statements (``set -e; ruff check .`` ->
+    ``set -e`` then ``ruff check .``): a leading shell *guard* statement
+    (``set``/``shopt``/``umask``/``ulimit``, see
+    :data:`_VALIDATE_PROBE_LEADING_GUARDS`) or a blank/comment-only statement is
+    skipped so the probe reaches the tool that actually runs, and the first
+    statement that names a probeable executable wins. Within a statement it
+    skips leading ``NAME=VALUE`` env assignments (``FOO=bar ruff`` -> ``ruff``)
     and returns the program token a simple command would exec (``python`` for
-    ``python -m ruff``). Returns ``None`` for un-probeable leading tokens: a
-    parse failure (unbalanced quotes), no token after assignments, a shell
-    builtin/keyword (``cd``, ``:``, ``echo``), or a leading ``PATH=...`` env
-    assignment the shared-PATH probe cannot replay — all fail-open so the probe
-    never false-positives on a command it cannot reduce to one probeable tool.
+    ``python -m ruff``).
+
+    Returns ``None`` for un-probeable leading tokens: a parse failure (unbalanced
+    quotes), a non-guard shell builtin/keyword (``cd``, ``:``, ``echo``), or a
+    leading ``PATH=...`` env assignment the shared-PATH probe cannot replay — all
+    fail-open so the probe never false-positives on a command it cannot reduce to
+    one probeable tool. A leading ``cd`` stays fail-open even before a probeable
+    tool because it changes the directory the tool resolves against.
 
     Tokenization strips shell comments (``comments=True``) because the real
     runner executes the command under ``sh -lc``, which ignores ``#`` comments.
@@ -398,38 +469,50 @@ def _leading_executable(command: str) -> str | None:
     keep the literal ``#`` as the leading token and the probe would falsely
     report ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED`` for a valid command.
     """
-    tokens = _shell_tokens(command, comments=True)
-    if tokens is None:
-        return None
-    index = _first_non_assignment_token_index(tokens)
-    if _assignment_prefix_sets_path(tokens[:index]):
-        return None
-    if index >= len(tokens):
-        return None
-    leading = tokens[index]
-    # A leading subshell opener (``(cd frontend && npm test)`` -> ``(cd``, or
-    # ``( cd ... )`` -> ``(`` when spaced) is shell grouping the real runner
-    # executes under ``sh -lc``. ``shlex`` keeps the ``(`` glued to the first
-    # word, so probing ``command -v "(cd"`` would falsely report the workspace
-    # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED and block monorepo profiles that
-    # validate from a subdirectory. No real executable name begins with ``(``,
-    # so fail open.
-    if leading.startswith("("):
-        return None
-    # A leading token that relies on shell expansion to name the executable —
-    # tilde expansion (``~/bin/ruff``) or parameter/command substitution
-    # (``$HOME/.local/bin/ruff``, ``${HOME}/bin/ruff``, ``` `which ruff` ```) —
-    # is expanded by the ``sh -lc`` the real runner uses, so the command
-    # resolves. ``shlex`` keeps the literal ``~``/``$``/`` ` `` token, and the
-    # probe passes it *quoted* to ``command -v "$t"``, where it is not
-    # re-expanded, so probing it would falsely report the workspace
-    # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Fail open rather than probe a
-    # token whose real value the shared-shell probe cannot reproduce.
-    if leading.startswith("~") or "$" in leading or "`" in leading:
-        return None
-    if leading in _VALIDATE_PROBE_SHELL_BUILTINS:
-        return None
-    return leading
+    for statement in _split_top_level_statements(command):
+        tokens = _shell_tokens(statement, comments=True)
+        if tokens is None:
+            return None
+        if not tokens:
+            # A blank or comment-only statement (e.g. the ``# run lint`` line
+            # above a command) names no tool; skip it and look at the next.
+            continue
+        index = _first_non_assignment_token_index(tokens)
+        if _assignment_prefix_sets_path(tokens[:index]):
+            return None
+        if index >= len(tokens):
+            # Only env assignments in this statement (``FOO=bar``); nothing to
+            # probe here, so move on to the next statement.
+            continue
+        leading = tokens[index]
+        # A leading subshell opener (``(cd frontend && npm test)`` -> ``(cd``, or
+        # ``( cd ... )`` -> ``(`` when spaced) is shell grouping the real runner
+        # executes under ``sh -lc``. ``shlex`` keeps the ``(`` glued to the first
+        # word, so probing ``command -v "(cd"`` would falsely report the workspace
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED and block monorepo profiles that
+        # validate from a subdirectory. No real executable name begins with ``(``,
+        # so fail open.
+        if leading.startswith("("):
+            return None
+        # A leading token that relies on shell expansion to name the executable —
+        # tilde expansion (``~/bin/ruff``) or parameter/command substitution
+        # (``$HOME/.local/bin/ruff``, ``${HOME}/bin/ruff``, ``` `which ruff` ```) —
+        # is expanded by the ``sh -lc`` the real runner uses, so the command
+        # resolves. ``shlex`` keeps the literal ``~``/``$``/`` ` `` token, and the
+        # probe passes it *quoted* to ``command -v "$t"``, where it is not
+        # re-expanded, so probing it would falsely report the workspace
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Fail open rather than probe a
+        # token whose real value the shared-shell probe cannot reproduce.
+        if leading.startswith("~") or "$" in leading or "`" in leading:
+            return None
+        if leading in _VALIDATE_PROBE_LEADING_GUARDS:
+            # A shell-option/limit guard names no tool; skip to the next
+            # statement, which is the command the guard protects.
+            continue
+        if leading in _VALIDATE_PROBE_SHELL_BUILTINS:
+            return None
+        return leading
+    return None
 
 
 def validate_command_probe_targets(
