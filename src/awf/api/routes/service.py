@@ -19,6 +19,10 @@ from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import ServiceGCRequest, ServiceGCResponse
 from awf.service.config import resolve_service_settings
 from awf.service.gc import run_service_workspace_gc
+from awf.service.gc_terminal_passes import (
+    combine_terminal_gc_reports,
+    terminal_gc_discarded_statuses,
+)
 from awf.service.gc_time import normalize_statuses
 from awf.service.gc_worker_delegation import fold_worker_reclaim
 from awf.service.gc_worker_trigger import delegate_service_gc_to_worker
@@ -35,6 +39,16 @@ router = APIRouter(
 # CLI does not pin ``worker_delegation_timeout_seconds`` — matches the CLI's
 # ``--timeout-seconds`` default so a default-flag run lines up end to end (#582).
 _DEFAULT_WORKER_DELEGATION_TIMEOUT_SECONDS = 900.0
+
+
+def _plan_candidate_count(plan_payload: dict[str, object]) -> int:
+    """First-pass candidate count from a gc plan payload, defaulting to 0.
+
+    Used to split the shared cleanup-batch budget across the dry-run preview's two
+    passes, mirroring the worker's ``batch_limit - len(default_result.plan.candidates)``.
+    """
+    count = plan_payload.get("candidate_count")
+    return count if isinstance(count, int) and not isinstance(count, bool) else 0
 
 
 @router.post("/gc", response_model=ServiceGCResponse)
@@ -82,8 +96,41 @@ async def trigger_service_gc(
     )
     base_payload = result.to_dict()
     if not payload.execute:
-        # Dry-run: plan only. No worker trigger, response unchanged.
-        return ServiceGCResponse.model_validate(base_payload)
+        # Dry-run: plan only, no worker trigger. But ``--execute`` does not stop at
+        # this API default-policy pass — it delegates to the worker's default two-pass
+        # GC, whose second pass reaps the cancelled/destroyed auth dirs the default
+        # policy never classifies (#513). Previewing only the default pass would let
+        # ``--execute`` delete an old cancelled workspace's auth dir that this dry-run
+        # reported as 0 candidates, breaking the plan-before-delete contract
+        # (PRRT_kwDOSJAM6s6JbN6x). So mirror the worker's augmentation pass here as a
+        # dry-run and fold it in, so the plan lists exactly what ``--execute`` reaps.
+        # Planning needs no CAP_SYS_ADMIN, so the capability-less API previews it
+        # directly without a worker round-trip. The augmentation is skipped under an
+        # explicit ``--status`` scope (the first pass already covers it) and drops
+        # ``--exclude-status`` statuses — identical to ``_terminal_gc_discarded_statuses``.
+        discarded_statuses = terminal_gc_discarded_statuses(
+            tuple(payload.statuses) if payload.statuses else None,
+            tuple(payload.exclude_statuses) if payload.exclude_statuses else None,
+        )
+        if not discarded_statuses:
+            return ServiceGCResponse.model_validate(base_payload)
+        # Share one cleanup-batch budget across both preview passes, exactly as the
+        # worker's execute does (``discarded_limit = batch_limit - default candidates``),
+        # so the preview never lists more candidates than ``--execute`` could reap in one
+        # batch. Derive the first pass's count from the plan payload (not ``result.plan``)
+        # so the fold stays robust to a stubbed entrypoint in tests.
+        discarded_limit = max(candidate_limit - _plan_candidate_count(base_payload), 0)
+        discarded_result = await run_service_workspace_gc(
+            session_factory,
+            work_dir=Path(settings.work_dir).expanduser().resolve(),
+            execute=False,
+            min_age_hours=retention_hours,
+            limit=discarded_limit,
+            include_statuses=discarded_statuses,
+            cleanup_enabled=settings.workspace_cleanup_enabled,
+        )
+        combined = combine_terminal_gc_reports(base_payload, discarded_result.to_dict())
+        return ServiceGCResponse.model_validate(combined)
 
     # ``execute``: the API-side pass above recorded the auth/claude-base paths as
     # ``skipped`` (0), so delegate that capability-gated reclaim to the worker and

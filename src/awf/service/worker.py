@@ -8,7 +8,7 @@ import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -24,7 +24,7 @@ from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.enums import TaskKind, WorkspaceStatus
+from awf.db.enums import TaskKind
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
@@ -47,12 +47,18 @@ from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_relea
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings
-from awf.service.gc import CLEANUP_EXECUTION_PARTIAL, run_service_workspace_gc
+from awf.service.gc import run_service_workspace_gc
 from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
     OrphanDirReconcileResult,
     build_default_compose_teardown,
     reconcile_orphaned_workspace_dirs,
+)
+from awf.service.gc_terminal_passes import (
+    combine_terminal_gc_reports as _combine_terminal_gc_reports,
+)
+from awf.service.gc_terminal_passes import (
+    terminal_gc_discarded_statuses as _terminal_gc_discarded_statuses,
 )
 from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
@@ -106,69 +112,6 @@ def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
     closer = loop.create_task(gh.aclose())
     _PENDING_FORGE_CLIENT_CLOSERS.add(closer)
     closer.add_done_callback(_PENDING_FORGE_CLIENT_CLOSERS.discard)
-
-
-def _combine_terminal_gc_reports(
-    default_report: dict[str, object], discarded_report: dict[str, object]
-) -> dict[str, object]:
-    """Fold the discarded-status (cancelled/destroyed) GC pass into the default pass.
-
-    The worker runs the terminal-workspace GC twice — once under the conservative
-    default policy and once with an explicit ``include_statuses`` for the
-    cancelled/destroyed rows that policy never classifies (#513) — and the cleanup
-    loop logs a single summary, so the two reports are merged here. The passes act on
-    disjoint status sets and never reclaim the same path, so deleted paths /
-    candidates / delete-errors concatenate and preserved counts and byte estimates
-    sum. ``total_estimated_bytes`` in particular must add both passes' totals (and
-    not keep only the default pass's, as ``dict(default_report)`` would): unlike the
-    API-side ``fold_worker_reclaim`` — where the base is one plan total that already
-    estimated the skipped auth dir — here each pass estimates only its own disjoint
-    dirs, so the discarded pass's GB-scale auth reclaim is net-new bytes. A
-    ``partial`` from either pass wins (it leaked disk it could not reclaim), so a
-    self-protected sweep is never masked behind the other's clean success.
-    """
-    combined = dict(default_report)
-    for key in ("deleted_paths", "candidates", "delete_errors"):
-        first = cast("list[object]", default_report.get(key) or [])
-        second = cast("list[object]", discarded_report.get(key) or [])
-        combined[key] = [*first, *second]
-    combined["deleted_path_count"] = len(cast("list[object]", combined["deleted_paths"]))
-    combined["candidate_count"] = len(cast("list[object]", combined["candidates"]))
-    combined["preserved_count"] = cast("int", default_report.get("preserved_count") or 0) + cast(
-        "int", discarded_report.get("preserved_count") or 0
-    )
-    combined["total_estimated_bytes"] = cast(
-        "int", default_report.get("total_estimated_bytes") or 0
-    ) + cast("int", discarded_report.get("total_estimated_bytes") or 0)
-    if "partial" in (default_report.get("status"), discarded_report.get("status")):
-        combined["status"] = "partial"
-        combined["reason_code"] = CLEANUP_EXECUTION_PARTIAL
-    return combined
-
-
-def _terminal_gc_discarded_statuses(
-    requested_statuses: tuple[str, ...] | None,
-    excluded_statuses: tuple[str, ...] | None,
-) -> tuple[str, ...]:
-    """Cancelled/destroyed statuses the default-policy pass omits, honouring operator scope.
-
-    The conservative default policy only classifies completed/failed/superseded, so the
-    worker runs a second explicit pass to reap the discarded cancelled/destroyed rows whose
-    ~1.7 GB auth dirs would otherwise leak (#513). Two ``awf service gc`` scope cases narrow
-    that augmentation so the worker never reclaims auth dirs the operator's flags excluded
-    (#590): an explicit ``--status`` set means the first pass already covers exactly the
-    requested terminal statuses (cancelled/destroyed included when asked for), so no
-    augmentation is needed and this returns empty; ``--exclude-status`` removes those
-    statuses from the augmentation set.
-    """
-    if requested_statuses is not None:
-        return ()
-    excluded = set(excluded_statuses or ())
-    return tuple(
-        status
-        for status in (WorkspaceStatus.cancelled.value, WorkspaceStatus.destroyed.value)
-        if status not in excluded
-    )
 
 
 def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:

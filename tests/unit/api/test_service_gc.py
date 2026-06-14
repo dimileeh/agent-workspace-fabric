@@ -47,6 +47,33 @@ async def _seed_completed_merged(
         return workspace.id
 
 
+async def _seed_cancelled(
+    engine: AsyncEngine,
+    *,
+    updated_at: datetime,
+) -> str:
+    """Seed an aged cancelled workspace.
+
+    The conservative default GC policy never classifies ``cancelled``/``destroyed``
+    rows, so the dry-run plan omits this workspace — but ``--execute`` reaps its auth
+    dir via the worker's discarded-status augmentation pass (#513).
+    """
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="development",
+            task_title="gc cancelled",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.cancelled.value
+        workspace.updated_at = updated_at
+        await session.commit()
+        return workspace.id
+
+
 class _FakeGCResult:
     def __init__(self, payload: dict[str, object]) -> None:
         self._payload = payload
@@ -90,6 +117,69 @@ async def test_service_gc_dry_run_returns_plan(
     assert payload["status"] == "dry_run"
     assert payload["candidate_count"] == 1
     assert payload["candidates"][0]["workspace_id"] == workspace_id
+
+
+@pytest.mark.unit
+async def test_service_gc_dry_run_previews_discarded_status_pass(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dry-run must preview the worker's cancelled/destroyed augmentation pass (#513).
+
+    ``--execute`` delegates to the worker's two-pass GC, whose second pass reaps the
+    cancelled/destroyed auth dirs the default policy never classifies. If the dry-run
+    plan omitted them an operator would see ``candidate_count: 0`` yet ``--execute``
+    would delete the auth dir — breaking the plan-before-delete contract
+    (PRRT_kwDOSJAM6s6JbN6x). With no explicit ``--status`` the preview now lists the
+    aged cancelled workspace.
+    """
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    cancelled_id = await _seed_cancelled(
+        engine,
+        updated_at=datetime.now(UTC) - timedelta(hours=400),
+    )
+
+    response = await client.post("/v1/service/gc", json={"min_age_hours": 24})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["dry_run"] is True
+    assert payload["status"] == "dry_run"
+    candidate_ids = {c["workspace_id"] for c in payload["candidates"]}
+    assert cancelled_id in candidate_ids
+
+
+@pytest.mark.unit
+async def test_service_gc_dry_run_explicit_status_skips_augmentation(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit ``--status`` scopes both dry-run and execute, so no augmentation runs.
+
+    With ``--status completed`` the worker runs only the first (explicit-scope) pass,
+    so the dry-run must mirror that scope and never preview the cancelled row — keeping
+    plan and execute symmetric (#590).
+    """
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    cancelled_id = await _seed_cancelled(
+        engine,
+        updated_at=datetime.now(UTC) - timedelta(hours=400),
+    )
+
+    response = await client.post(
+        "/v1/service/gc",
+        json={"min_age_hours": 24, "statuses": ["completed"]},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["dry_run"] is True
+    candidate_ids = {c["workspace_id"] for c in payload["candidates"]}
+    assert cancelled_id not in candidate_ids
 
 
 @pytest.mark.unit
