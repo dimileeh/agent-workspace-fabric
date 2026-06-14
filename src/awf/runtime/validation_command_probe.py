@@ -706,13 +706,17 @@ def validate_command_probe_targets(
     instead of slipping through to die during ``monitoring_pr`` validation.
     Commands whose leading token is un-probeable are skipped.
 
-    The targets cover the profile's ``database.pre_validation_refresh`` hooks as
-    well as its ``validate`` phase: :func:`profile_phase_command_plan` prepends
-    the refresh hooks (``alembic upgrade head``, ``psql ...``) as required
-    ``db_refresh`` gates whenever the validate phase runs, so a refresh tool that
-    setup did not install would otherwise slip past this early probe and die
-    ``127`` later during pre-push validation. Refresh targets come first, matching
-    runtime execution order.
+    The targets cover the profile's ``post_agent`` phase and its
+    ``database.pre_validation_refresh`` hooks as well as its ``validate`` phase:
+    PR-monitor pre-push validation (including at ``sync_base_push``) runs the
+    ``post_agent`` phase before ``validate`` (see
+    ``_pre_push_validation_commands``'s ``("post_agent", "validate")`` plan), and
+    :func:`profile_phase_command_plan` prepends the refresh hooks
+    (``alembic upgrade head``, ``psql ...``) as required ``db_refresh`` gates
+    whenever the validate phase runs. A ``post_agent`` or refresh tool that setup
+    did not install would otherwise slip past this early probe and die ``127``
+    later during pre-push validation. ``post_agent`` targets come first, then
+    refresh, then validate — matching runtime execution order.
 
     The local coverage final gate is covered last, again matching runtime order:
     when ``validation.strategy.final_gate`` is ``coverage`` and
@@ -742,6 +746,7 @@ def validate_command_probe_targets(
             targets.append(ValidateCommandProbeTarget(tool=tool, command=command))
 
     for command in (
+        *profile.phases.post_agent,
         *profile.database.pre_validation_refresh,
         *profile.phases.validate_commands,
     ):

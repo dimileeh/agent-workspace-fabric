@@ -45,6 +45,21 @@ def _profile_with_refresh_and_validate(
     )
 
 
+def _profile_with_post_agent_and_validate(
+    *,
+    post_agent: list[object],
+    validate: list[object],
+    pre_validation_refresh: list[object] | None = None,
+) -> WorkspaceProfile:
+    payload: dict[str, object] = {
+        "name": "validate-profile",
+        "phases": {"post_agent": post_agent, "validate": validate},
+    }
+    if pre_validation_refresh is not None:
+        payload["database"] = {"pre_validation_refresh": pre_validation_refresh}
+    return WorkspaceProfile.model_validate(payload)
+
+
 def _profile_with_coverage_gate(
     *,
     validate: list[object],
@@ -616,6 +631,82 @@ class TestValidateCommandProbeTargets:
                     {"command": "advisory-lint .", "required": False},
                     {"command": "ruff check ."},
                 ]
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_probes_post_agent_tools_before_validate(self) -> None:
+        # PR-monitor pre-push validation (including at ``sync_base_push``) runs the
+        # ``post_agent`` phase before ``validate`` (the ``("post_agent",
+        # "validate")`` plan), so a ``post_agent`` tool like ``make`` whose setup
+        # did not install must be probed too — otherwise the missing tool slips
+        # past the handoff and dies 127 later during pre-push validation instead of
+        # failing early with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. ``post_agent``
+        # targets come first, matching runtime execution order.
+        targets = validate_command_probe_targets(
+            _profile_with_post_agent_and_validate(
+                post_agent=["make build-assets"],
+                validate=["ruff check ."],
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("make", "make build-assets"),
+            ("ruff", "ruff check ."),
+        ]
+
+    def test_probes_post_agent_then_refresh_then_validate_in_runtime_order(self) -> None:
+        # The full pre-push execution order is ``post_agent`` -> ``db_refresh``
+        # (pre_validation_refresh) -> ``validate``; the probe targets follow that
+        # order so the operator message names a representative command from the
+        # phase a missing tool actually runs in.
+        targets = validate_command_probe_targets(
+            _profile_with_post_agent_and_validate(
+                post_agent=["make build-assets"],
+                pre_validation_refresh=["alembic upgrade head"],
+                validate=["ruff check ."],
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("make", "make build-assets"),
+            ("alembic", "alembic upgrade head"),
+            ("ruff", "ruff check ."),
+        ]
+
+    def test_dedupes_post_agent_tool_shared_with_validate(self) -> None:
+        # A tool that appears in both a ``post_agent`` command and a validate
+        # command collapses to a single probe target, keeping the first
+        # (``post_agent``) command as the representative for the operator message.
+        targets = validate_command_probe_targets(
+            _profile_with_post_agent_and_validate(
+                post_agent=["python -m build"],
+                validate=["python -m pytest -q"],
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("python", "python -m build"),
+        ]
+
+    def test_skips_advisory_required_false_post_agent_commands(self) -> None:
+        # An advisory (``required: false``) ``post_agent`` command is non-blocking
+        # in the runner (its non-zero/127 result does not fail validation), so it
+        # must not fail the handoff with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+        # Only the required validate command yields a probe target.
+        targets = validate_command_probe_targets(
+            _profile_with_post_agent_and_validate(
+                post_agent=[{"command": "make build-assets", "required": False}],
+                validate=["ruff check ."],
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_skips_unprobeable_post_agent_commands(self) -> None:
+        # A ``post_agent`` command whose leading token is un-probeable (a ``cd``
+        # that changes the resolving directory) fails open like any other command
+        # rather than reporting a false missing toolchain.
+        targets = validate_command_probe_targets(
+            _profile_with_post_agent_and_validate(
+                post_agent=["cd build"],
+                validate=["ruff check ."],
             )
         )
         assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
