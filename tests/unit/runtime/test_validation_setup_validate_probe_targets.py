@@ -68,10 +68,21 @@ class TestLeadingExecutable:
             "read -r answer",
             "function lint { ruff; }",
             "command ruff check .",
+            # A leading ``PATH=...`` env assignment is what makes the executable
+            # resolvable, but the shared-PATH ``command -v`` probe cannot replay a
+            # per-command PATH prefix, so the command fails open rather than being
+            # falsely reported PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+            "PATH=/workspace/node_modules/.bin:$PATH eslint .",
+            "FOO=bar PATH=/opt/bin:$PATH mypy src",
         ],
     )
     def test_unprobeable_leading_token_returns_none(self, command: str) -> None:
         assert _leading_executable(command) is None
+
+    def test_non_path_assignments_still_probe_the_executable(self) -> None:
+        # Only a PATH-binding assignment forces fail-open; other env assignments
+        # leave the executable probeable under the shared PATH.
+        assert _leading_executable("PYTHONPATH=/x FOO=bar ruff check .") == "ruff"
 
 
 @pytest.mark.unit
@@ -101,6 +112,18 @@ class TestValidateCommandProbeTargets:
         # probeable command yields a target.
         targets = validate_command_probe_targets(
             _profile_with_validate(["cd build", "ruff check ."])
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_skips_path_modifying_commands(self) -> None:
+        # A command whose env prefix binds PATH is what makes its executable
+        # resolvable; the shared-PATH probe cannot replay that, so it is skipped
+        # (fail-open) rather than failing the handoff with
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. The plain command still probes.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(
+                ["PATH=/workspace/node_modules/.bin:$PATH eslint .", "ruff check ."]
+            )
         )
         assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
 

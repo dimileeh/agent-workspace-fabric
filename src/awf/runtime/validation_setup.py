@@ -367,20 +367,36 @@ _VALIDATE_PROBE_SHELL_BUILTINS = frozenset(
 )
 
 
+def _assignment_prefix_sets_path(assignments: list[str]) -> bool:
+    """True if any leading ``NAME=VALUE`` env assignment binds ``PATH``.
+
+    A validate command such as ``PATH=/workspace/node_modules/.bin:$PATH eslint .``
+    relies on its env prefix to make the executable resolvable. The batched
+    ``command -v`` probe checks every tool under one shared default PATH and cannot
+    replay a per-command PATH prefix, so such a command must fail open (yield no
+    probe target) rather than be reported ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED``
+    while the real command — which exports the assignment — would resolve the tool.
+    """
+    return any(assignment.split("=", 1)[0] == "PATH" for assignment in assignments)
+
+
 def _leading_executable(command: str) -> str | None:
     """Return the leading PATH-resolvable executable of a shell command, or None.
 
     Skips leading ``NAME=VALUE`` env assignments (``FOO=bar ruff`` -> ``ruff``)
     and returns the program token a simple command would exec (``python`` for
     ``python -m ruff``). Returns ``None`` for un-probeable leading tokens: a
-    parse failure (unbalanced quotes), no token after assignments, or a shell
-    builtin/keyword (``cd``, ``:``, ``echo``) — all fail-open so the probe never
-    false-positives on a command it cannot reduce to one executable.
+    parse failure (unbalanced quotes), no token after assignments, a shell
+    builtin/keyword (``cd``, ``:``, ``echo``), or a leading ``PATH=...`` env
+    assignment the shared-PATH probe cannot replay — all fail-open so the probe
+    never false-positives on a command it cannot reduce to one probeable tool.
     """
     tokens = _shell_tokens(command)
     if tokens is None:
         return None
     index = _first_non_assignment_token_index(tokens)
+    if _assignment_prefix_sets_path(tokens[:index]):
+        return None
     if index >= len(tokens):
         return None
     leading = tokens[index]
