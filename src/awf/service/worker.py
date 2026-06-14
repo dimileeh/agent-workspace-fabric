@@ -118,9 +118,14 @@ def _combine_terminal_gc_reports(
     cancelled/destroyed rows that policy never classifies (#513) — and the cleanup
     loop logs a single summary, so the two reports are merged here. The passes act on
     disjoint status sets and never reclaim the same path, so deleted paths /
-    candidates / delete-errors concatenate and preserved counts sum. A ``partial``
-    from either pass wins (it leaked disk it could not reclaim), so a self-protected
-    sweep is never masked behind the other's clean success.
+    candidates / delete-errors concatenate and preserved counts and byte estimates
+    sum. ``total_estimated_bytes`` in particular must add both passes' totals (and
+    not keep only the default pass's, as ``dict(default_report)`` would): unlike the
+    API-side ``fold_worker_reclaim`` — where the base is one plan total that already
+    estimated the skipped auth dir — here each pass estimates only its own disjoint
+    dirs, so the discarded pass's GB-scale auth reclaim is net-new bytes. A
+    ``partial`` from either pass wins (it leaked disk it could not reclaim), so a
+    self-protected sweep is never masked behind the other's clean success.
     """
     combined = dict(default_report)
     for key in ("deleted_paths", "candidates", "delete_errors"):
@@ -132,6 +137,9 @@ def _combine_terminal_gc_reports(
     combined["preserved_count"] = cast("int", default_report.get("preserved_count") or 0) + cast(
         "int", discarded_report.get("preserved_count") or 0
     )
+    combined["total_estimated_bytes"] = cast(
+        "int", default_report.get("total_estimated_bytes") or 0
+    ) + cast("int", discarded_report.get("total_estimated_bytes") or 0)
     if "partial" in (default_report.get("status"), discarded_report.get("status")):
         combined["status"] = "partial"
         combined["reason_code"] = CLEANUP_EXECUTION_PARTIAL

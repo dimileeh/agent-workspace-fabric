@@ -641,6 +641,7 @@ def test_combine_terminal_gc_reports_concatenates_and_sums() -> None:
         "preserved_count": 1,
         "deleted_path_count": 1,
         "candidate_count": 1,
+        "total_estimated_bytes": 200,
     }
     discarded_report: dict[str, Any] = {
         "status": "succeeded",
@@ -651,6 +652,7 @@ def test_combine_terminal_gc_reports_concatenates_and_sums() -> None:
         "preserved_count": 2,
         "deleted_path_count": 2,
         "candidate_count": 2,
+        "total_estimated_bytes": 1_700_000_000,
     }
 
     combined = worker_mod._combine_terminal_gc_reports(default_report, discarded_report)
@@ -661,6 +663,42 @@ def test_combine_terminal_gc_reports_concatenates_and_sums() -> None:
     assert combined["deleted_path_count"] == 3
     assert combined["candidate_count"] == 3
     assert combined["preserved_count"] == 3
+    # Both passes reclaim disjoint dirs, so their byte estimates sum rather than the
+    # combiner keeping only the default pass's total.
+    assert combined["total_estimated_bytes"] == 1_700_000_200
+
+
+@pytest.mark.unit
+def test_combine_terminal_gc_reports_sums_bytes_when_default_pass_empty() -> None:
+    """The dominant case #590 flags: a no-candidate default pass + GB-scale discarded pass.
+
+    When the conservative default policy classifies nothing but the discarded
+    cancelled/destroyed pass reclaims the multi-GB auth dirs, the merged headline must
+    report the bytes the worker actually freed — not the default pass's ``0`` — so the
+    operator-facing "report actual GB reclaimed" stays accurate.
+    """
+    default_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [],
+        "preserved_count": 0,
+        "total_estimated_bytes": 0,
+    }
+    discarded_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": ["/auth/ws_cancelled"],
+        "candidates": [{"workspace_id": "ws_cancelled"}],
+        "delete_errors": [],
+        "preserved_count": 0,
+        "total_estimated_bytes": 1_700_000_000,
+    }
+
+    combined = worker_mod._combine_terminal_gc_reports(default_report, discarded_report)
+
+    assert combined["total_estimated_bytes"] == 1_700_000_000
 
 
 @pytest.mark.unit
