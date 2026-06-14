@@ -228,7 +228,25 @@ class WorkspaceCleaner:
                         remove_volumes=remove_volumes,
                     )
             else:
-                await self._compose.down(spec, remove_volumes=remove_volumes)
+                try:
+                    await self._compose.down(spec, remove_volumes=remove_volumes)
+                except ComposeOperationError as down_exc:
+                    # No persisted compose file, so ``down`` resolves the default
+                    # ``awf_<workspace_id>`` compose path. If that default file
+                    # exists but is stale/unusable ``down`` raises; the
+                    # label-scoped removal that follows still releases the
+                    # containers, network, and host port, so log the fallback
+                    # rather than recording a failed compose_down and stranding a
+                    # stopped-only stack (mirroring the persisted-file fallback
+                    # above and ``ComposeManager.teardown_project``). A failing
+                    # ``remove_project_by_label`` still surfaces via the outer
+                    # ``except`` so genuine teardown failures are not swallowed.
+                    _log.warning(
+                        "cleanup.compose_down_label_fallback",
+                        workspace_id=workspace_id,
+                        reason_code=down_exc.reason_code,
+                        stderr=down_exc.stderr[:1000],
+                    )
                 await self._compose.remove_project_by_label(
                     project_name=project_name,
                     workspace_id=workspace_id,
