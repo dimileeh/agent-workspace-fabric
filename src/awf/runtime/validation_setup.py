@@ -686,6 +686,57 @@ def _required_and_suffix(segment: list[tuple[str, str]]) -> list[str]:
     return required
 
 
+def _statement_enables_errexit(statement: str) -> bool:
+    """True if ``statement`` is a ``set`` command that turns on ``errexit``.
+
+    Recognises the short-flag bundles (``set -e``, ``set -euo pipefail``,
+    ``set -ex``) and the long form (``set -o errexit``); ``set -o pipefail`` /
+    ``set -u`` alone do not enable it. Once errexit is on, a ``;``/newline list
+    aborts on the first failing command, so every following segment's leading
+    tool becomes required (see :func:`_leading_executables`). Only *enabling* is
+    detected — a later ``set +e`` is not modelled because validate commands do
+    not toggle errexit back off in practice.
+    """
+    tokens = _shell_tokens(statement, comments=True)
+    if not tokens or tokens[0] != "set":
+        return False
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-o":
+            if index + 1 < len(tokens) and tokens[index + 1] == "errexit":
+                return True
+            index += 2
+            continue
+        if token.startswith("-") and not token.startswith("--") and "e" in token[1:]:
+            return True
+        index += 1
+    return False
+
+
+def _segment_enables_errexit(segment: list[tuple[str, str]]) -> bool:
+    """True if any statement in the ``&&``/``||``-joined segment enables errexit."""
+    return any(_statement_enables_errexit(statement) for statement, _ in segment)
+
+
+def _segment_is_executable(segment: list[tuple[str, str]]) -> bool:
+    """True if the segment runs a command rather than nothing.
+
+    A trailing ``;``/newline (a YAML block scalar's trailing newline,
+    ``ruff check .;``) or a comment-only line yields a segment whose statements
+    tokenize to nothing under ``sh -lc``; such a segment executes no command and
+    so never sets the list's exit status. It must not be mistaken for the
+    exit-determining final segment, which would otherwise leave the real command
+    before it failing open. A parse-failing statement (``_shell_tokens`` ->
+    ``None``) is treated as executable: the shell would still attempt it.
+    """
+    for statement, _ in segment:
+        tokens = _shell_tokens(statement, comments=True)
+        if tokens is None or tokens:
+            return True
+    return False
+
+
 def _leading_executables(command: str) -> list[str]:
     """Return every PATH-resolvable executable a shell command *requires*, in order.
 
@@ -697,8 +748,21 @@ def _leading_executables(command: str) -> list[str]:
     in ``monitoring_pr`` instead of failing early with
     PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
 
-    Within a ``;``/newline-delimited segment, ``&&`` and ``||`` share precedence
-    and associate left-to-right, so only the maximal trailing ``&&`` run is
+    A ``;``/newline-delimited list exits with the status of its *final* executed
+    member under ``sh -lc`` (``ruff check .; pytest -q`` exits with ``pytest``'s
+    status), so only that final segment determines whether the command fails.
+    A non-final segment's failure — a missing tool's ``127`` included — is masked
+    by the succeeding final segment, so its tools fail open, mirroring the
+    top-level pipeline and ``|| true`` handling. The exception is ``set -e``
+    (``set -euo pipefail``, ``set -o errexit``): once enabled it aborts the list
+    on the first failure, making every following segment exit-determining, so
+    each of their leading tools is required again. A trailing ``;``/newline or a
+    comment-only line leaves a non-executing segment that never sets the exit
+    status (see :func:`_segment_is_executable`), so the real command before it
+    stays the exit-determining final segment.
+
+    Within an exit-determining segment, ``&&`` and ``||`` share precedence and
+    associate left-to-right, so only the maximal trailing ``&&`` run is
     guaranteed to execute (see :func:`_required_and_suffix`). Thus
     ``ruff check . || true && mypy src`` still probes ``mypy`` — it always runs —
     while the ``|| true``-masked ``ruff`` fails open, and a segment whose last
@@ -717,23 +781,40 @@ def _leading_executables(command: str) -> list[str]:
     replay) stops the walk and keeps whatever earlier tools were collected: the
     walk never probes a token it cannot reduce to a real executable, and a
     directory-changing ``cd`` ends collection because tools after it resolve
-    against a different directory. The result is empty when no statement yields a
+    against a different directory. Every segment is walked for this halt even when
+    its tools fail open, so a masked non-final ``cd`` still ends collection for
+    the tools that follow it. The result is empty when no statement yields a
     probeable tool.
     """
-    tools: list[str] = []
+    segments: list[list[tuple[str, str]]] = []
     segment: list[tuple[str, str]] = []
     for statement, terminator in _split_top_level_statements(command):
         segment.append((statement, terminator))
         if terminator in (";", ""):
-            # End of a ``;``/newline-delimited list: probe only the statements the
-            # shell guarantees to run — the maximal trailing ``&&`` run.
-            required = _required_and_suffix(segment)
-            if required:
-                segment_tools, stopped = _segment_leading_executables(required)
-                tools.extend(segment_tools)
-                if stopped:
-                    break
+            segments.append(segment)
             segment = []
+    last_executable = -1
+    for index, current in enumerate(segments):
+        if _segment_is_executable(current):
+            last_executable = index
+
+    tools: list[str] = []
+    errexit = False
+    for index, current in enumerate(segments):
+        # Only the final executed segment sets the list's exit status unless
+        # ``set -e`` is active, which makes every following segment determine it.
+        exit_determining = errexit or index == last_executable
+        required = _required_and_suffix(current)
+        if required:
+            segment_tools, stopped = _segment_leading_executables(required)
+            if exit_determining:
+                tools.extend(segment_tools)
+            if stopped:
+                # A resolution-changing/un-probeable token halts the walk even in
+                # a masked segment: tools after it cannot be probed reliably.
+                break
+        if not errexit and _segment_enables_errexit(current):
+            errexit = True
     return tools
 
 

@@ -223,12 +223,53 @@ class TestLeadingExecutables:
         # early with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
         assert _leading_executables("ruff check . && mypy src") == ["ruff", "mypy"]
 
-    def test_semicolon_segments_collect_each_and_segment_head(self) -> None:
-        # ``;`` starts a new independently-executed list; an AND-segment's leading
-        # tool is required. An OR-list (``black --check . || mypy src``) fails open
-        # because under ``sh -lc`` a missing tool's failure is masked when another
-        # member succeeds, so neither ``black`` nor ``mypy`` is probed.
-        assert _leading_executables("ruff check .; black --check . || mypy src") == ["ruff"]
+    def test_semicolon_list_probes_only_the_final_segment(self) -> None:
+        # A ``;`` list exits with its *final* member's status under ``sh -lc``
+        # (``a; b`` -> b's status), so a non-final segment's failure (a missing
+        # tool's ``127`` included) is masked when the final segment succeeds.
+        # ``ruff check .; pytest -q`` therefore probes only ``pytest`` — probing
+        # the masked ``ruff`` would falsely report
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a profile that passes.
+        assert _leading_executables("ruff check .; pytest -q") == ["pytest"]
+
+    def test_semicolon_list_final_segment_or_list_fails_open(self) -> None:
+        # The final ``;``-segment is exit-determining, but an OR-list
+        # (``black --check . || mypy src``) still fails open because a missing
+        # tool's failure is masked by a succeeding member; the masked non-final
+        # ``ruff`` segment fails open too, so nothing is probed.
+        assert _leading_executables("ruff check .; black --check . || mypy src") == []
+
+    def test_set_e_makes_every_semicolon_segment_required(self) -> None:
+        # With ``set -e`` active, a ``;`` list aborts on the first failure, so
+        # every following segment is exit-determining and each leading tool is
+        # required. ``set -e; ruff check .; pytest -q`` probes both ``ruff`` and
+        # ``pytest``; the guard itself names no tool.
+        assert _leading_executables("set -e; ruff check .; pytest -q") == ["ruff", "pytest"]
+
+    def test_set_o_errexit_makes_every_semicolon_segment_required(self) -> None:
+        # The long ``set -o errexit`` form enables errexit just like ``set -e``.
+        assert _leading_executables("set -o errexit\nruff check .\npytest -q") == [
+            "ruff",
+            "pytest",
+        ]
+
+    def test_set_x_alone_does_not_make_segments_required(self) -> None:
+        # ``set -x`` (xtrace) is a guard that enables no errexit, so the non-final
+        # ``ruff`` stays masked and only the final ``pytest`` is probed.
+        assert _leading_executables("set -x; ruff check .; pytest -q") == ["pytest"]
+
+    def test_set_o_pipefail_alone_does_not_make_segments_required(self) -> None:
+        # ``set -o pipefail`` (without ``errexit``) does not abort the list on a
+        # failed command, so the non-final ``ruff`` stays masked and only the
+        # final ``pytest`` is probed.
+        assert _leading_executables("set -o pipefail; ruff check .; pytest -q") == ["pytest"]
+
+    def test_trailing_separator_keeps_the_real_segment_exit_determining(self) -> None:
+        # A trailing ``;``/newline (a YAML block scalar's trailing newline) leaves
+        # an empty segment that executes nothing, so the real command before it is
+        # still the exit-determining final segment and is probed.
+        assert _leading_executables("ruff check .\n") == ["ruff"]
+        assert _leading_executables("ruff check .;") == ["ruff"]
 
     def test_or_list_fails_open(self) -> None:
         # ``ruff check . || true`` exits 0 under ``sh -lc`` even when ruff is
@@ -258,9 +299,12 @@ class TestLeadingExecutables:
         # left-hand ``||`` group.
         assert _leading_executables("black --check . || mypy src && pytest") == ["pytest"]
 
-    def test_or_list_segment_does_not_suppress_other_segments(self) -> None:
+    def test_only_the_final_semicolon_segment_is_probed(self) -> None:
+        # ``ruff check .; black --check . || true; flake8 .``: only the final
+        # ``flake8`` segment sets the command's exit status under ``sh -lc``
+        # (no ``set -e``). The masked ``ruff`` and the ``|| true``-masked ``black``
+        # both fail open, so only ``flake8`` is probed.
         assert _leading_executables("ruff check .; black --check . || true; flake8 .") == [
-            "ruff",
             "flake8",
         ]
 
