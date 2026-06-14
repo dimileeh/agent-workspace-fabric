@@ -59,8 +59,14 @@ def combine_terminal_gc_reports(
     cancelled/destroyed rows that policy never classifies (#513) — and the cleanup
     loop logs a single summary, so the two reports are merged here. The passes act on
     disjoint status sets and never reclaim the same path, so deleted paths /
-    candidates / delete-errors concatenate and preserved counts and byte estimates
-    sum. ``total_estimated_bytes`` in particular must add both passes' totals (and
+    candidates / delete-errors concatenate, the per-workspace detail maps
+    (compose teardowns, secret leases, worktree removes, reservation releases)
+    union, and preserved counts and byte estimates sum. Folding those detail maps
+    matters when the discarded pass goes ``partial`` for a non-delete side effect —
+    a ``reservation_releases`` entry with an error, a failed compose teardown — that
+    never lands in ``delete_errors``: keeping only the default pass's (clean) maps
+    would leave the merged ``partial`` status with no visible cause
+    (PRRT_kwDOSJAM6s6Jbctw). ``total_estimated_bytes`` in particular must add both passes' totals (and
     not keep only the default pass's, as ``dict(default_report)`` would): unlike the
     API-side ``fold_worker_reclaim`` — where the base is one plan total that already
     estimated the skipped auth dir — here each pass estimates only its own disjoint
@@ -73,6 +79,11 @@ def combine_terminal_gc_reports(
         first = cast("list[object]", default_report.get(key) or [])
         second = cast("list[object]", discarded_report.get(key) or [])
         combined[key] = [*first, *second]
+    for key in ("compose_teardowns", "secret_leases", "worktree_removes", "reservation_releases"):
+        first_map = cast("Mapping[str, object]", default_report.get(key) or {})
+        second_map = cast("Mapping[str, object]", discarded_report.get(key) or {})
+        if first_map or second_map:
+            combined[key] = {**first_map, **second_map}
     combined["deleted_path_count"] = len(cast("list[object]", combined["deleted_paths"]))
     combined["candidate_count"] = len(cast("list[object]", combined["candidates"]))
     combined["preserved_count"] = cast("int", default_report.get("preserved_count") or 0) + cast(

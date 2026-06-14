@@ -818,6 +818,93 @@ def test_combine_terminal_gc_reports_partial_in_either_pass_wins() -> None:
     assert combined["delete_errors"] == [{"kind": "auth", "error": "boom"}]
 
 
+@pytest.mark.unit
+def test_combine_terminal_gc_reports_merges_per_pass_detail_maps() -> None:
+    """A discarded pass partial via a non-delete side effect keeps its detail maps.
+
+    The discarded-status pass can go ``partial`` for a reservation/secret/compose
+    teardown failure that never lands in ``delete_errors``. The combiner keeps the
+    partial status, so it must also fold the discarded pass's per-workspace detail
+    maps in — otherwise operators see ``partial`` next to only the default pass's
+    (clean) reservation/secret/teardown maps and cannot tell why the sweep failed.
+    """
+    from awf.service.gc import CLEANUP_EXECUTION_PARTIAL
+
+    default_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [],
+        "preserved_count": 0,
+        "compose_teardowns": {"ws_completed": {"status": "succeeded"}},
+        "secret_leases": {"ws_completed": {"status": "revoked"}},
+        "worktree_removes": {"ws_completed": {"status": "removed"}},
+        "reservation_releases": {"ws_completed": {"error": None}},
+    }
+    discarded_report: dict[str, Any] = {
+        "status": "partial",
+        "reason_code": CLEANUP_EXECUTION_PARTIAL,
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [],
+        "preserved_count": 0,
+        "compose_teardowns": {"ws_cancelled": {"status": "failed"}},
+        "secret_leases": {"ws_cancelled": {"status": "revoke_failed"}},
+        "worktree_removes": {"ws_cancelled": {"status": "remove_failed"}},
+        "reservation_releases": {"ws_cancelled": {"error": "boom"}},
+    }
+
+    combined = worker_mod._combine_terminal_gc_reports(default_report, discarded_report)
+
+    assert combined["status"] == "partial"
+    assert combined["reason_code"] == CLEANUP_EXECUTION_PARTIAL
+    # Both passes act on disjoint workspaces, so every per-pass detail map is the
+    # union — the discarded pass's failing entry is preserved alongside the default's.
+    assert combined["reservation_releases"] == {
+        "ws_completed": {"error": None},
+        "ws_cancelled": {"error": "boom"},
+    }
+    assert combined["secret_leases"] == {
+        "ws_completed": {"status": "revoked"},
+        "ws_cancelled": {"status": "revoke_failed"},
+    }
+    assert combined["compose_teardowns"] == {
+        "ws_completed": {"status": "succeeded"},
+        "ws_cancelled": {"status": "failed"},
+    }
+    assert combined["worktree_removes"] == {
+        "ws_completed": {"status": "removed"},
+        "ws_cancelled": {"status": "remove_failed"},
+    }
+
+
+@pytest.mark.unit
+def test_combine_terminal_gc_reports_takes_discarded_detail_map_when_default_absent() -> None:
+    """A discarded-only detail map survives when the default pass omitted it."""
+    default_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [],
+        "preserved_count": 0,
+    }
+    discarded_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [],
+        "preserved_count": 0,
+        "reservation_releases": {"ws_cancelled": {"error": None}},
+    }
+
+    combined = worker_mod._combine_terminal_gc_reports(default_report, discarded_report)
+
+    assert combined["reservation_releases"] == {"ws_cancelled": {"error": None}}
+
+
 def _reap(status: str, reason_code: str, **lists: Any) -> dict[str, Any]:
     """Build a minimal ``claude_base_reap`` sub-report for merge tests."""
     payload: dict[str, Any] = {
