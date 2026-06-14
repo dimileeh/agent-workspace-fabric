@@ -221,6 +221,17 @@ def _reconcile_worker_reclaimed_skips(folded: dict[str, object]) -> None:
         return
     folded["status"] = "succeeded"
     folded["reason_code"] = CLEANUP_EXECUTION_SUCCEEDED
+    if isinstance(claude_base, Mapping) and claude_base_partial:
+        # The worker actually reclaimed claude-base, so the API-side ``partial``
+        # reap is stale. Reconcile the nested object too — otherwise callers see
+        # a ``succeeded`` headline next to ``claude_base_reap.status: partial``.
+        # Copy before mutating so the caller's ``base`` is left untouched, and
+        # keep the original diagnostic lists while recording the supersession.
+        reconciled = dict(claude_base)
+        reconciled["status"] = "succeeded"
+        reconciled["reason_code"] = SERVICE_GC_WORKER_RECLAIMED
+        reconciled["reconciled_by_worker"] = True
+        folded["claude_base_reap"] = reconciled
 
 
 def _has_unreconciled_failure(
