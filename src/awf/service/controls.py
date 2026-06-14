@@ -340,7 +340,12 @@ class WorkspaceControlService(_WorkspaceGuideMixin, _WorkspaceStackReleaseMixin)
                 reason_code=_OPERATOR_STOP_REASON_CODE,
                 payload=event_payload,
             )
-        else:
+        elif cleanup_result.ok:
+            # ``stack_stopped`` asserts the runtime was actually stopped, so it
+            # is only emitted once the compose down succeeds. A failed teardown
+            # is surfaced as a failed operation by the finalizer below; emitting
+            # a success-shaped stack_stopped event here would let observers see a
+            # successful stop for a teardown that actually failed.
             await repo.add_event(
                 workspace,
                 event_type="workspace.stack_stopped",

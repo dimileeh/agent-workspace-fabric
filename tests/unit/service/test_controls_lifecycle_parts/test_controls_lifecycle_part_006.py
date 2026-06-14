@@ -318,6 +318,39 @@ async def test_stop_compose_down_failure_is_surfaced(
 
 
 @pytest.mark.unit
+async def test_stop_terminal_workspace_compose_down_failure_skips_stack_stopped_event(
+    session: AsyncSession,
+) -> None:
+    """A failed teardown of a terminal workspace must not emit ``stack_stopped``.
+
+    For a non-active (already terminal) workspace the stop path records a
+    ``workspace.stack_stopped`` event instead of a state transition. That event
+    asserts the stack was stopped, so it must only be emitted once the compose
+    down actually succeeds — otherwise observers would see a successful
+    stack-stopped event for a teardown that the finalizer marks failed.
+    """
+    workspace = await _workspace(session, status=WorkspaceStatus.completed)
+    cleaner = RecordingCleaner(result=compose_down_failed_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.stop_workspace(workspace.id, reason="already done")
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    stack_stopped_events = [e for e in events if e.event_type == "workspace.stack_stopped"]
+
+    assert response.status == WorkspaceStatus.completed
+    assert workspace.status == WorkspaceStatus.completed.value
+    assert operations[0].status == OperationStatus.failed.value
+    assert response.operation_status == OperationStatus.failed.value
+    assert response.message == "workspace stack stop failed"
+    assert operations[0].error_code == "STACK_STOP_FAILED"
+    # No success-asserting stack_stopped event for a failed teardown, and no
+    # terminal runtime-release event since the runtime was not released.
+    assert stack_stopped_events == []
+    assert await has_terminal_runtime_released_event(session, workspace.id) is False
+
+
+@pytest.mark.unit
 async def test_cancel_failed_stack_release_replay_keeps_failure_message(
     session: AsyncSession,
 ) -> None:
