@@ -295,6 +295,30 @@ def test_pull_timeout_maps_to_pull_failed() -> None:
 
 
 @pytest.mark.unit
+def test_pull_invalid_url_maps_to_pull_failed() -> None:
+    # A malformed pull URL (e.g. an unresolved ``${OLLAMA_HOST}`` placeholder or a
+    # bad percent escape from operator config) makes httpx raise ``InvalidURL`` at
+    # request construction. ``InvalidURL`` is not an ``httpx.HTTPError`` subclass,
+    # so without naming it explicitly the exception would escape
+    # ``ensure_ollama_model_available`` as an unhandled raise instead of resolving
+    # to a structured OLLAMA_MODEL_PULL_FAILED — mirroring the probe-path guards.
+    post = _FakePostStream(raise_exc=httpx.InvalidURL("invalid pull URL"))
+
+    result = ensure_ollama_model_available(
+        model="ollama/llama4:70b",
+        tags_urls=_TAGS_URLS,
+        pull_urls=_PULL_URLS,
+        http_get=_http_get_returning(("other:latest",)),
+        http_post_stream=post,
+        secrets=frozenset(),
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_PULL_FAILED"
+    assert "InvalidURL" in result["detail"]
+
+
+@pytest.mark.unit
 def test_pull_stream_never_terminating_is_bounded_by_wall_clock() -> None:
     # A daemon whose /api/pull keeps streaming progress lines but never emits a
     # terminal status must not hang the executor thread forever: httpx's timeout

@@ -435,9 +435,17 @@ def _pull_ollama_model(
                 failures.append(f"{url}: {stream_error}" if len(urls) > 1 else stream_error)
                 continue
             return {"ok": True, "detail": None}
-        except httpx.HTTPError as exc:
-            # Only transport failures are retried across URLs; non-transport
-            # bugs (e.g. a faulty on_progress callback) must surface, not be
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            # Transport failures *and* a syntactically invalid pull URL
+            # (``httpx.InvalidURL`` — e.g. an unresolved ``${OLLAMA_HOST}``
+            # placeholder or a bad percent escape from operator config) are
+            # retried across URLs and ultimately become OLLAMA_MODEL_PULL_FAILED,
+            # mirroring the ``_probe_ollama``/``_probe_ollama_model`` guards above.
+            # ``InvalidURL`` is not an ``httpx.HTTPError`` subclass, so it must be
+            # named explicitly or an operator config error would escape
+            # ``ensure_ollama_model_available`` as an unhandled raise instead of a
+            # structured, redacted readiness failure. Other non-transport bugs
+            # (e.g. a faulty on_progress callback) must still surface, not be
             # masked as OLLAMA_MODEL_PULL_FAILED.
             _log_redacted_exception(
                 "provider_readiness.ollama_pull_exception",
