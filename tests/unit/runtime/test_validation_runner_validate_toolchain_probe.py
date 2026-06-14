@@ -102,6 +102,33 @@ class TestProbeValidateCommandTools:
         assert "agent" in argv
         assert argv[-2:] == ["ruff", "mypy"]
 
+    async def test_probe_mirrors_validate_shell_with_venv_preamble(self, tmp_path: Path) -> None:
+        # Regression: the probe must resolve tools under the same shell as real
+        # validate commands (``sh -lc`` + the ``.venv`` activation preamble), or a
+        # tool installed only into ``/workspace/.venv/bin`` during setup is falsely
+        # reported MISSING and adoption fails with
+        # ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED``.
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="OK ruff\n")
+        runner = _runner(fake, tmp_path)
+
+        await runner.probe_validate_command_tools(
+            workspace_id="ws-1",
+            compose_project="awf_ws1",
+            compose_file=tmp_path / "compose.yml",
+            profile=_profile_with_validate(["ruff check ."]),
+        )
+
+        argv = fake.calls[0].args
+        # The reachability script is exec'd with the venv-activation preamble, so a
+        # ``.venv``-only tool resolves exactly as it would during real validation.
+        preamble = validation_runner_module._VENV_ACTIVATE_PREAMBLE
+        probe_script = next(arg for arg in argv if arg.startswith(preamble) and "command -v" in arg)
+        assert "/workspace/.venv/bin/activate" in probe_script
+        # That script runs under a login shell (``sh -lc``), matching the real
+        # validate exec path; the token immediately preceding it is ``-lc``.
+        assert argv[argv.index(probe_script) - 1] == "-lc"
+
     async def test_probe_all_present_reports_nothing_missing(self, tmp_path: Path) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="OK ruff\n")

@@ -449,10 +449,16 @@ class ValidationRunner:
         invocation = build_tracked_compose_exec(
             compose_project=compose_project,
             compose_file=compose_file,
+            # Mirror the shell that real validate commands run under (``sh -lc`` +
+            # the ``.venv`` activation preamble; see lines that exec ``command.command``
+            # below). Without this, a tool installed only into ``/workspace/.venv/bin``
+            # during setup resolves when validate actually runs but is reported MISSING
+            # by a bare ``sh -c`` probe, falsely failing adoption with
+            # ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED``.
             cli_args=[
                 "sh",
-                "-c",
-                _VALIDATE_TOOLCHAIN_PROBE_SCRIPT,
+                "-lc",
+                _VENV_ACTIVATE_PREAMBLE + _VALIDATE_TOOLCHAIN_PROBE_SCRIPT,
                 "validate_toolchain_probe",
                 *[target.tool for target in targets],
             ],
