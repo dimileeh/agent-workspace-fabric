@@ -354,7 +354,15 @@ _VALIDATE_PROBE_SHELL_BUILTINS = frozenset(
         "done",
         "case",
         "esac",
+        "select",
         "function",
+        "time",
+        # Bash conditional-expression keywords. ``shlex.split`` keeps ``[[`` and
+        # ``]]`` as standalone tokens, and ``command -v [[`` exits 1 in bash, so
+        # a ``[[ -f pyproject.toml ]] && ...`` command must fail open rather than
+        # report ``[[`` as a missing tool.
+        "[[",
+        "]]",
     }
 )
 
