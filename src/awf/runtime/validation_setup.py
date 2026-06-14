@@ -398,10 +398,18 @@ def validate_command_probe_targets(
     phase, keeping the first command that introduced each tool so an operator
     message can name a representative command. Commands whose leading token is
     un-probeable (see :func:`_leading_executable`) are skipped.
+
+    Advisory commands (``required: false``) are skipped too: ``ValidationRunner``
+    records their non-zero/``127`` result without blocking validation, so a
+    missing optional tool must not fail the adopt-PR handoff with
+    ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED`` before the required commands even
+    run.
     """
     targets: list[ValidateCommandProbeTarget] = []
     seen: set[str] = set()
     for command in profile.phases.validate_commands:
+        if not command.required:
+            continue
         tool = _leading_executable(command.command)
         if tool is None or tool in seen:
             continue

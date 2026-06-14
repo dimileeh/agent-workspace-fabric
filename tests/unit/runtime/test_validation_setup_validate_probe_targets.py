@@ -21,6 +21,12 @@ def _profile_with_validate(commands: list[str]) -> WorkspaceProfile:
     )
 
 
+def _profile_with_validate_objects(commands: list[dict[str, object]]) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {"name": "validate-profile", "phases": {"validate": commands}}
+    )
+
+
 @pytest.mark.unit
 class TestLeadingExecutable:
     @pytest.mark.parametrize(
@@ -95,5 +101,20 @@ class TestValidateCommandProbeTargets:
         # probeable command yields a target.
         targets = validate_command_probe_targets(
             _profile_with_validate(["cd build", "ruff check ."])
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_skips_advisory_required_false_commands(self) -> None:
+        # An advisory (``required: false``) validate command is not probed: its
+        # missing tool is recorded non-blocking by the runner, so it must not fail
+        # the handoff with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Only the
+        # required command yields a probe target.
+        targets = validate_command_probe_targets(
+            _profile_with_validate_objects(
+                [
+                    {"command": "advisory-lint .", "required": False},
+                    {"command": "ruff check ."},
+                ]
+            )
         )
         assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
