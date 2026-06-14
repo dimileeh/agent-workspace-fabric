@@ -12,7 +12,11 @@ from __future__ import annotations
 import pytest
 
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.validation import _leading_executable, validate_command_probe_targets
+from awf.runtime.validation import (
+    _leading_executable,
+    _leading_executables,
+    validate_command_probe_targets,
+)
 
 
 def _profile_with_validate(commands: list[str]) -> WorkspaceProfile:
@@ -150,6 +154,46 @@ class TestLeadingExecutable:
 
 
 @pytest.mark.unit
+class TestLeadingExecutables:
+    def test_single_command_yields_one_tool(self) -> None:
+        assert _leading_executables("ruff check .") == ["ruff"]
+
+    def test_compound_command_yields_every_chained_tool(self) -> None:
+        # A single validate command that chains tools with ``&&`` must be probed
+        # for *all* of them — otherwise a later chained tool that is off PATH
+        # slips past the handoff and fails later in ``monitoring_pr`` instead of
+        # early with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+        assert _leading_executables("ruff check . && mypy src") == ["ruff", "mypy"]
+
+    def test_chains_with_semicolons_and_pipes_collect_each_statement_head(self) -> None:
+        # ``;`` and ``||`` start new statements like ``&&`` does; a pipeline's
+        # leading token is still the tool to probe for that statement.
+        assert _leading_executables("ruff check .; black --check . || mypy src") == [
+            "ruff",
+            "black",
+            "mypy",
+        ]
+
+    def test_leading_guard_is_skipped_before_chained_tools(self) -> None:
+        assert _leading_executables("set -euo pipefail && ruff check . && mypy src") == [
+            "ruff",
+            "mypy",
+        ]
+
+    def test_unprobeable_statement_stops_collection_keeping_earlier_tools(self) -> None:
+        # A directory-changing ``cd`` ends collection because tools after it
+        # resolve against a different directory, but the tool collected before it
+        # is still probed rather than discarded.
+        assert _leading_executables("ruff check . && cd build && mypy") == ["ruff"]
+
+    def test_leading_unprobeable_token_yields_no_tools(self) -> None:
+        assert _leading_executables("cd build && ruff check .") == []
+
+    def test_comment_only_command_yields_no_tools(self) -> None:
+        assert _leading_executables("# just a note, no command here") == []
+
+
+@pytest.mark.unit
 class TestValidateCommandProbeTargets:
     def test_empty_validate_phase_has_no_targets(self) -> None:
         assert validate_command_probe_targets(_profile_with_validate([])) == []
@@ -161,6 +205,32 @@ class TestValidateCommandProbeTargets:
         assert [(t.tool, t.command) for t in targets] == [
             ("ruff", "ruff check ."),
             ("mypy", "mypy src"),
+        ]
+
+    def test_compound_command_probes_every_chained_tool(self) -> None:
+        # A single required validate command chaining tools with ``&&`` yields a
+        # probe target for each tool, all keeping the full command as the
+        # representative for the operator message, so a later chained tool that
+        # is off PATH fails the handoff early with
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED instead of slipping through.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["ruff check . && mypy src"])
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("ruff", "ruff check . && mypy src"),
+            ("mypy", "ruff check . && mypy src"),
+        ]
+
+    def test_dedupes_chained_tool_shared_across_commands(self) -> None:
+        # A tool that appears both inside a compound command and as a standalone
+        # command collapses to a single probe target, keeping the first command
+        # that introduced it as the representative.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["ruff check . && mypy src", "mypy --strict src"])
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("ruff", "ruff check . && mypy src"),
+            ("mypy", "ruff check . && mypy src"),
         ]
 
     def test_dedupes_by_tool_keeping_first_command(self) -> None:

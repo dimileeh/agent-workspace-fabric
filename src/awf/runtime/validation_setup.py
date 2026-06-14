@@ -442,77 +442,115 @@ def _split_top_level_statements(command: str) -> list[str]:
     return statements
 
 
-def _leading_executable(command: str) -> str | None:
-    """Return the leading PATH-resolvable executable of a shell command, or None.
+# Per-statement classification outcomes for :func:`_statement_leading_executable`.
+# ``_SKIP_STATEMENT`` -- the statement names no tool (a shell guard, or a
+# blank/comment/env-only line); look at the next statement. ``_STOP_PROBE`` --
+# the statement's leading token is un-probeable (parse failure, ``cd``/builtin,
+# subshell, shell-expansion, or a ``PATH=`` prefix the shared-PATH probe cannot
+# replay); stop walking and keep whatever earlier tools were collected so the
+# probe never false-positives on a token it cannot reduce to a real executable.
+_SKIP_STATEMENT = object()
+_STOP_PROBE = object()
 
-    Walks the command's top-level statements (``set -e; ruff check .`` ->
-    ``set -e`` then ``ruff check .``): a leading shell *guard* statement
-    (``set``/``shopt``/``umask``/``ulimit``, see
-    :data:`_VALIDATE_PROBE_LEADING_GUARDS`) or a blank/comment-only statement is
-    skipped so the probe reaches the tool that actually runs, and the first
-    statement that names a probeable executable wins. Within a statement it
-    skips leading ``NAME=VALUE`` env assignments (``FOO=bar ruff`` -> ``ruff``)
-    and returns the program token a simple command would exec (``python`` for
-    ``python -m ruff``).
 
-    Returns ``None`` for un-probeable leading tokens: a parse failure (unbalanced
-    quotes), a non-guard shell builtin/keyword (``cd``, ``:``, ``echo``), or a
-    leading ``PATH=...`` env assignment the shared-PATH probe cannot replay — all
-    fail-open so the probe never false-positives on a command it cannot reduce to
-    one probeable tool. A leading ``cd`` stays fail-open even before a probeable
-    tool because it changes the directory the tool resolves against.
+def _statement_leading_executable(statement: str) -> str | object:
+    """Classify one top-level statement for the validate-tool probe.
 
-    Tokenization strips shell comments (``comments=True``) because the real
-    runner executes the command under ``sh -lc``, which ignores ``#`` comments.
-    A YAML block command that opens with a comment line (``# run lint\nruff
-    check .``) really runs ``ruff``; without comment handling ``shlex`` would
-    keep the literal ``#`` as the leading token and the probe would falsely
-    report ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED`` for a valid command.
+    Returns the probeable program token a simple command would exec (``ruff`` for
+    ``FOO=bar ruff check .``, ``python`` for ``python -m ruff``), or one of the
+    :data:`_SKIP_STATEMENT` / :data:`_STOP_PROBE` sentinels. Tokenization strips
+    shell comments (``comments=True``) because the real runner executes the
+    command under ``sh -lc``, which ignores ``#`` comments — so ``# run lint`` on
+    its own line is a skippable comment, not a literal ``#`` tool.
     """
+    tokens = _shell_tokens(statement, comments=True)
+    if tokens is None:
+        return _STOP_PROBE
+    if not tokens:
+        # A blank or comment-only statement (e.g. the ``# run lint`` line above a
+        # command) names no tool; skip it and look at the next.
+        return _SKIP_STATEMENT
+    index = _first_non_assignment_token_index(tokens)
+    if _assignment_prefix_sets_path(tokens[:index]):
+        return _STOP_PROBE
+    if index >= len(tokens):
+        # Only env assignments in this statement (``FOO=bar``); nothing to probe
+        # here, so move on to the next statement.
+        return _SKIP_STATEMENT
+    leading = tokens[index]
+    # A leading subshell opener (``(cd frontend && npm test)`` -> ``(cd``, or
+    # ``( cd ... )`` -> ``(`` when spaced) is shell grouping the real runner
+    # executes under ``sh -lc``. ``shlex`` keeps the ``(`` glued to the first
+    # word, so probing ``command -v "(cd"`` would falsely report the workspace
+    # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED and block monorepo profiles that
+    # validate from a subdirectory. No real executable name begins with ``(``,
+    # so fail open.
+    if leading.startswith("("):
+        return _STOP_PROBE
+    # A leading token that relies on shell expansion to name the executable —
+    # tilde expansion (``~/bin/ruff``) or parameter/command substitution
+    # (``$HOME/.local/bin/ruff``, ``${HOME}/bin/ruff``, ``` `which ruff` ```) —
+    # is expanded by the ``sh -lc`` the real runner uses, so the command
+    # resolves. ``shlex`` keeps the literal ``~``/``$``/`` ` `` token, and the
+    # probe passes it *quoted* to ``command -v "$t"``, where it is not
+    # re-expanded, so probing it would falsely report the workspace
+    # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Fail open rather than probe a
+    # token whose real value the shared-shell probe cannot reproduce.
+    if leading.startswith("~") or "$" in leading or "`" in leading:
+        return _STOP_PROBE
+    if leading in _VALIDATE_PROBE_LEADING_GUARDS:
+        # A shell-option/limit guard names no tool; skip to the next statement,
+        # which is the command the guard protects.
+        return _SKIP_STATEMENT
+    if leading in _VALIDATE_PROBE_SHELL_BUILTINS:
+        return _STOP_PROBE
+    return leading
+
+
+def _leading_executables(command: str) -> list[str]:
+    """Return every PATH-resolvable executable a shell command chains, in order.
+
+    Walks the command's top-level statements (``ruff check . && mypy src`` ->
+    ``ruff check .`` then ``mypy src``) and collects the leading executable of
+    each, so a single ``validate`` command that chains multiple tools with ``&&``
+    is probed for *all* of them rather than only the first — otherwise a later
+    chained tool that is off PATH slips past the adopt-PR handoff and dies later
+    in ``monitoring_pr`` instead of failing early with
+    PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+
+    A leading shell *guard* statement (``set -e``) or a blank/comment-only
+    statement names no tool and is skipped (see
+    :func:`_statement_leading_executable`). An un-probeable leading token (parse
+    failure, a non-guard builtin/keyword such as ``cd``, a subshell, a
+    shell-expanded path, or a ``PATH=`` prefix the shared-PATH probe cannot
+    replay) stops the walk and keeps whatever earlier tools were collected: the
+    walk never probes a token it cannot reduce to a real executable, and a
+    directory-changing ``cd`` ends collection because tools after it resolve
+    against a different directory. The result is empty when no statement yields a
+    probeable tool.
+    """
+    tools: list[str] = []
     for statement in _split_top_level_statements(command):
-        tokens = _shell_tokens(statement, comments=True)
-        if tokens is None:
-            return None
-        if not tokens:
-            # A blank or comment-only statement (e.g. the ``# run lint`` line
-            # above a command) names no tool; skip it and look at the next.
+        outcome = _statement_leading_executable(statement)
+        if outcome is _SKIP_STATEMENT:
             continue
-        index = _first_non_assignment_token_index(tokens)
-        if _assignment_prefix_sets_path(tokens[:index]):
-            return None
-        if index >= len(tokens):
-            # Only env assignments in this statement (``FOO=bar``); nothing to
-            # probe here, so move on to the next statement.
-            continue
-        leading = tokens[index]
-        # A leading subshell opener (``(cd frontend && npm test)`` -> ``(cd``, or
-        # ``( cd ... )`` -> ``(`` when spaced) is shell grouping the real runner
-        # executes under ``sh -lc``. ``shlex`` keeps the ``(`` glued to the first
-        # word, so probing ``command -v "(cd"`` would falsely report the workspace
-        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED and block monorepo profiles that
-        # validate from a subdirectory. No real executable name begins with ``(``,
-        # so fail open.
-        if leading.startswith("("):
-            return None
-        # A leading token that relies on shell expansion to name the executable —
-        # tilde expansion (``~/bin/ruff``) or parameter/command substitution
-        # (``$HOME/.local/bin/ruff``, ``${HOME}/bin/ruff``, ``` `which ruff` ```) —
-        # is expanded by the ``sh -lc`` the real runner uses, so the command
-        # resolves. ``shlex`` keeps the literal ``~``/``$``/`` ` `` token, and the
-        # probe passes it *quoted* to ``command -v "$t"``, where it is not
-        # re-expanded, so probing it would falsely report the workspace
-        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Fail open rather than probe a
-        # token whose real value the shared-shell probe cannot reproduce.
-        if leading.startswith("~") or "$" in leading or "`" in leading:
-            return None
-        if leading in _VALIDATE_PROBE_LEADING_GUARDS:
-            # A shell-option/limit guard names no tool; skip to the next
-            # statement, which is the command the guard protects.
-            continue
-        if leading in _VALIDATE_PROBE_SHELL_BUILTINS:
-            return None
-        return leading
-    return None
+        if outcome is _STOP_PROBE:
+            break
+        tools.append(outcome)  # type: ignore[arg-type]
+    return tools
+
+
+def _leading_executable(command: str) -> str | None:
+    """Return the first PATH-resolvable executable of a shell command, or None.
+
+    Thin wrapper over :func:`_leading_executables` that returns the leading tool
+    (or ``None`` when the command reduces to no probeable tool). Prefer
+    :func:`_leading_executables` for probe targets so chained tools are not
+    missed; this single-tool view is retained for callers that only need the
+    head of the command.
+    """
+    tools = _leading_executables(command)
+    return tools[0] if tools else None
 
 
 def validate_command_probe_targets(
@@ -520,10 +558,14 @@ def validate_command_probe_targets(
 ) -> list[ValidateCommandProbeTarget]:
     """Return the deduped ``validate``-tool probe targets for a profile.
 
-    One target per distinct leading executable across every command the validate
-    phase actually executes, keeping the first command that introduced each tool
-    so an operator message can name a representative command. Commands whose
-    leading token is un-probeable (see :func:`_leading_executable`) are skipped.
+    One target per distinct executable across every command the validate phase
+    actually executes, keeping the first command that introduced each tool so an
+    operator message can name a representative command. A single command that
+    chains multiple tools with ``&&`` (``ruff check . && mypy src``) contributes
+    *every* chained tool, not just the first (see :func:`_leading_executables`),
+    so a later chained tool that setup did not install fails the handoff early
+    instead of slipping through to die during ``monitoring_pr`` validation.
+    Commands whose leading token is un-probeable are skipped.
 
     The targets cover the profile's ``database.pre_validation_refresh`` hooks as
     well as its ``validate`` phase: :func:`profile_phase_command_plan` prepends
@@ -547,11 +589,11 @@ def validate_command_probe_targets(
     ):
         if not command.required:
             continue
-        tool = _leading_executable(command.command)
-        if tool is None or tool in seen:
-            continue
-        seen.add(tool)
-        targets.append(ValidateCommandProbeTarget(tool=tool, command=command.command))
+        for tool in _leading_executables(command.command):
+            if tool in seen:
+                continue
+            seen.add(tool)
+            targets.append(ValidateCommandProbeTarget(tool=tool, command=command.command))
     return targets
 
 
