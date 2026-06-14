@@ -63,6 +63,101 @@ def test_fold_sums_worker_reclaim_into_headline() -> None:
     assert worker_reclaim["report"] == report
 
 
+def test_fold_adds_worker_only_candidate_bytes_to_headline() -> None:
+    # PRRT_kwDOSJAM6s6JbHKg: when the API default pass has no eligible candidates
+    # (plan total 0) but the worker's discarded-status augmentation reaps a
+    # cancelled/destroyed workspace the API plan never estimated, its GB-scale auth
+    # bytes are net-new and must reach the headline ``total_estimated_bytes`` — not
+    # be dropped, leaving GB-scale ``deleted_path_count`` alongside 0 bytes.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-cancelled"],
+        "total_estimated_bytes": 1_700_000_000,
+        "candidates": [
+            {
+                "workspace_id": "ws-cancelled",
+                "status": "cancelled",
+                "estimated_bytes": {"auth": 1_700_000_000, "total": 1_700_000_000},
+            }
+        ],
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        candidates=[],
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["deleted_path_count"] == 1
+    # The worker-only candidate's estimate is added: GB-scale deletions now report
+    # GB-scale bytes instead of 0.
+    assert folded["total_estimated_bytes"] == 1_700_000_000
+
+
+def test_fold_does_not_double_count_overlapping_api_planned_candidate_bytes() -> None:
+    # The API plan already estimates its own default-policy candidates' auth dirs
+    # (counted even though the capability-less API pass skipped deleting them). The
+    # worker re-estimates the *same* workspace, so its bytes must NOT be summed again
+    # — only worker-only workspaces (absent from the API plan) are net-new.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-1"],
+        "total_estimated_bytes": 1_700_000_000,
+        "candidates": [
+            {
+                "workspace_id": "ws-1",
+                "status": "completed",
+                "estimated_bytes": {"auth": 1_700_000_000, "total": 1_700_000_000},
+            }
+        ],
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=1_700_000_000,
+        candidates=[
+            {
+                "workspace_id": "ws-1",
+                "status": "completed",
+                "estimated_bytes": {"auth": 1_700_000_000, "total": 1_700_000_000},
+            }
+        ],
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # ``ws-1`` is already in the API plan total — adding the worker's re-estimate
+    # would double-count ~1.7GB. The headline keeps the single plan total.
+    assert folded["total_estimated_bytes"] == 1_700_000_000
+
+
+def test_fold_keeps_plan_total_when_worker_report_omits_candidate_breakdown() -> None:
+    # With no candidate breakdown there is no way to prove which bytes are worker-only,
+    # so the conservative default holds: keep the base plan total, never blindly sum
+    # the worker's (potentially overlapping) total.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-1"],
+        "total_estimated_bytes": 1_700_000_000,
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=0, deleted_paths=[], total_estimated_bytes=100)
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["total_estimated_bytes"] == 100
+
+
 def test_fold_merges_worker_deleted_paths_into_headline_list() -> None:
     # ``WorkspaceGCResult.to_dict()`` guarantees ``deleted_path_count ==
     # len(deleted_paths)``. A successful worker reclaim sums its count onto the

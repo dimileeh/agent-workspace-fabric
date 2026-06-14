@@ -158,12 +158,20 @@ def fold_worker_reclaim(
     ``partial`` the headline status is downgraded so the operator is not told a
     self-protected sweep fully succeeded.
 
-    ``total_estimated_bytes`` is **not** summed: the base value is the API GC
-    *plan* total, a directory-scan estimate that already includes the auth-dir
-    estimate even though that path was skipped at execution time. The worker
-    re-estimates the same auth dir it removes, so adding its plan total would
-    double-count those bytes (~1.7GB per workspace). The headline keeps the base
-    plan total; the worker's own estimate stays visible on ``worker_reclaim``.
+    ``total_estimated_bytes`` sums only the worker's **net-new** bytes — the
+    workspaces it reaped that the API plan never estimated. The base value is the
+    API GC *plan* total, a directory-scan estimate that already includes the
+    auth-dir estimate for its own default-policy candidates even though those paths
+    were skipped at execution time; the worker re-estimates those same dirs, so
+    blindly adding its whole plan total would double-count ~1.7GB per overlapping
+    workspace. But the worker also runs a discarded-status augmentation pass
+    (cancelled/destroyed rows the API default policy omits — see
+    ``_combine_terminal_gc_reports``); those workspaces are absent from the API plan,
+    so their estimate is net-new and must reach the headline — otherwise a run that
+    reaped only discarded auth dirs reports GB-scale ``deleted_path_count`` next to a
+    plan total of 0 (PRRT_kwDOSJAM6s6JbHKg). ``_worker_only_estimated_bytes`` adds
+    exactly the worker candidates whose ``workspace_id`` the API plan never carried;
+    the worker's own full estimate stays visible on ``worker_reclaim``.
 
     When the worker fully reclaimed the capability-gated auth overlays +
     claude-base, the API-side skip failures for *those* paths are stale: the
@@ -193,6 +201,14 @@ def fold_worker_reclaim(
         merged_paths: list[object] = list(base_deleted) if isinstance(base_deleted, list) else []
         merged_paths.extend(_worker_reclaimed_path_strs(outcome))
         folded["deleted_paths"] = merged_paths
+        # Add the bytes of workspaces the worker reaped that the API plan never
+        # estimated (the discarded-status augmentation pass — cancelled/destroyed
+        # rows the API default policy omits). Without this the headline reports
+        # GB-scale ``deleted_path_count`` next to the bare API plan total — often 0 —
+        # so callers see GB deletions with 0 bytes reclaimed (PRRT_kwDOSJAM6s6JbHKg).
+        folded["total_estimated_bytes"] = _as_int(
+            base.get("total_estimated_bytes")
+        ) + _worker_only_estimated_bytes(base, outcome.report or {})
         if outcome.worker_partial:
             # The worker's own reap was partial — it leaked disk it could not
             # reclaim, so a previously-clean run must not still read as success and
@@ -368,6 +384,45 @@ def _has_unreconciled_failure(
             for release in reservations.values()
         )
     return False
+
+
+def _worker_only_estimated_bytes(base: dict[str, object], report: dict[str, object]) -> int:
+    """Estimated bytes for workspaces the worker reaped that the API plan never estimated.
+
+    The headline ``total_estimated_bytes`` carries the API GC *plan* total, which
+    already estimates the auth dirs of its own default-policy candidates. The worker
+    re-estimates those same workspaces, so summing its whole total double-counts them.
+    The worker's discarded-status augmentation pass, however, reaps cancelled/destroyed
+    workspaces the API default policy never classified (see
+    ``_combine_terminal_gc_reports``); those carry no API plan estimate, so their bytes
+    are net-new. Identify them by ``workspace_id`` — any worker-report candidate absent
+    from the API plan's candidate set — and sum each one's estimated ``total`` so the
+    headline reflects the real GB-scale reclaim instead of the bare plan total (often 0
+    when the API default pass had no eligible candidates). Missing/garbled candidate
+    payloads contribute 0, so a worker report without a candidate breakdown leaves the
+    base plan total untouched (the conservative no-double-count default).
+    """
+    base_ids = {
+        candidate.get("workspace_id")
+        for candidate in _candidate_dicts(base)
+        if candidate.get("workspace_id") is not None
+    }
+    total = 0
+    for candidate in _candidate_dicts(report):
+        if candidate.get("workspace_id") in base_ids:
+            continue
+        estimated = candidate.get("estimated_bytes")
+        if isinstance(estimated, Mapping):
+            total += _as_int(estimated.get("total"))
+    return total
+
+
+def _candidate_dicts(payload: dict[str, object]) -> list[Mapping[str, object]]:
+    """The candidate entries of a gc report/plan dict, skipping non-mapping noise."""
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    return [candidate for candidate in candidates if isinstance(candidate, Mapping)]
 
 
 def _as_int(value: object) -> int:
