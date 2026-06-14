@@ -87,6 +87,7 @@ async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
         tmp_path / "worktrees" / workspace_id,
         "status",
         "--porcelain",
+        "--untracked-files=all",
     )
     assert {finding.reason_code for finding in findings} == {
         "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION",
@@ -136,5 +137,5 @@ async def test_ci_fix_refuses_pre_existing_dirty_worktree_before_agent(
     }
     assert adapter.calls == []
     assert [call.args for call in cmd.calls] == [
-        _git_worktree_command(worktree, "status", "--porcelain")
+        _git_worktree_command(worktree, "status", "--porcelain", "--untracked-files=all")
     ]

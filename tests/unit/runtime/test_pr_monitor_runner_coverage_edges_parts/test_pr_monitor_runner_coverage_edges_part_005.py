@@ -341,7 +341,7 @@ async def test_execute_ci_repair_start_failures_are_terminal(
     assert state.iter_count == 0
     assert adapter.calls == []
     assert [call.args for call in cmd.calls] == [
-        _git_worktree_command(worktree, "status", "--porcelain")
+        _git_worktree_command(worktree, "status", "--porcelain", "--untracked-files=all")
     ]
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -404,7 +404,7 @@ async def test_execute_comment_repair_pre_existing_dirty_worktree_is_terminal(
     assert adapter.calls == []
     assert "T_dirty_start" not in state.threads_addressed_ids
     assert [call.args for call in cmd.calls] == [
-        _git_worktree_command(worktree, "status", "--porcelain")
+        _git_worktree_command(worktree, "status", "--porcelain", "--untracked-files=all")
     ]
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -463,7 +463,7 @@ async def test_execute_ci_repair_missing_operation_start_head_is_terminal(
     assert state.iter_count == 0
     assert adapter.calls == []
     assert [call.args for call in cmd.calls] == [
-        _git_worktree_command(worktree, "status", "--porcelain"),
+        _git_worktree_command(worktree, "status", "--porcelain", "--untracked-files=all"),
         _git_worktree_command(worktree, "rev-parse", "HEAD"),
     ]
     async with factory() as s:
@@ -528,7 +528,7 @@ async def test_execute_comment_repair_missing_operation_start_head_is_terminal(
     assert adapter.calls == []
     assert "T_missing_start" not in state.threads_addressed_ids
     assert [call.args for call in cmd.calls] == [
-        _git_worktree_command(worktree, "status", "--porcelain"),
+        _git_worktree_command(worktree, "status", "--porcelain", "--untracked-files=all"),
         _git_worktree_command(worktree, "rev-parse", "HEAD"),
     ]
     async with factory() as s:
@@ -786,7 +786,7 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
     assert push_result.details["reverted_paths"] == [".github/workflows/ci.yml", "src/fix.py"]
     call_args = [call.args for call in cmd.calls]
     assert any(
-        args[:1] == ["git"] and "status" in args and args[-1:] == ["--porcelain"]
+        args[:1] == ["git"] and "status" in args and args[-1:] == ["--untracked-files=all"]
         for args in call_args
     )
     assert any(

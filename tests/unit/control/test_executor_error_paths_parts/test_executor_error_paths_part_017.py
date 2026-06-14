@@ -311,6 +311,7 @@ class TestBuildHandoffPrMonitorReusesConfiguredMonitor:
         configured_monitor = object()
         setup_calls: list[str] = []
         recheck_actions: list[str] = []
+        ensure_calls: list[str] = []
 
         class _Executor:
             _pr_monitor = configured_monitor
@@ -324,6 +325,10 @@ class TestBuildHandoffPrMonitorReusesConfiguredMonitor:
 
             async def _recheck_status(self, workspace_id: str, *, action: str, **_kw: Any) -> bool:
                 recheck_actions.append(action)
+                return True
+
+            async def _ensure_ollama_model_or_mark_failed(self, **_kwargs: Any) -> bool:
+                ensure_calls.append("ensure")
                 return True
 
         # The profile resolver is exercised separately; stub it so this test
@@ -352,6 +357,78 @@ class TestBuildHandoffPrMonitorReusesConfiguredMonitor:
         assert monitor is configured_monitor
         assert setup_calls == ["setup"]
         assert recheck_actions == ["monitor_handoff_build_pr_monitor"]
+        # The monitor-only handoff must ensure the Ollama model before returning
+        # the monitor, since no pre-agent auto-pull step runs for these task kinds.
+        assert ensure_calls == ["ensure"]
+
+
+class TestBuildHandoffPrMonitorEnsuresOllamaModel:
+    @pytest.mark.unit
+    async def test_build_handoff_aborts_when_ollama_ensure_fails(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Monitor-only handoffs never run ``execute``'s pre-agent Ollama auto-pull
+        # step, so the build path ensures the model itself. When that ensure step
+        # fails (it has already marked the workspace failed), the build must abort
+        # and return ``None`` so the handoff stops before transitioning to
+        # monitoring — otherwise the monitor's first PR repair would invoke
+        # OpenCode against a missing model.
+        ws_id = await _seed_ready(
+            factory, task_kind="sync_feature_pr", task_policy=_PR_ADOPTION_POLICY
+        )
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(ws_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED_RUNNING")
+            await s.commit()
+            workspace = ws
+
+        configured_monitor = object()
+        ensure_calls: list[str] = []
+
+        class _Executor:
+            _pr_monitor = configured_monitor
+            _pr_monitor_factory = None
+            _session_factory = factory
+            _config = SimpleNamespace(planning_max_iterations_default=3)
+
+            async def _run_monitor_handoff_profile_setup(self, **_kwargs: Any) -> bool:
+                return True
+
+            async def _recheck_status(self, workspace_id: str, *, action: str, **_kw: Any) -> bool:
+                return True
+
+            async def _ensure_ollama_model_or_mark_failed(self, **_kwargs: Any) -> bool:
+                ensure_calls.append("ensure")
+                return False
+
+        async def _sync_resolved_profile(self: Any, **_kwargs: Any) -> object:
+            return object()
+
+        monkeypatch.setattr(
+            monitor_handoff_module, "_sync_resolved_profile", _sync_resolved_profile
+        )
+        monkeypatch.setattr(
+            monitor_handoff_module, "_profile_for_workspace", lambda *_a, **_k: object()
+        )
+
+        monitor = await _build_handoff_pr_monitor(
+            _Executor(),
+            workspace_id=ws_id,
+            workspace=workspace,
+            worktree_path=tmp_path,
+            compose_project="awf_x",
+            compose_file=tmp_path / "compose.yml",
+            build_failed_log_event="test.handoff_monitor_build_failed",
+            build_failed_message_prefix="handoff failed: ",
+        )
+
+        assert monitor is None
+        assert ensure_calls == ["ensure"]
 
 
 class TestPrepareHandoffProfileGenericFailure:

@@ -1003,6 +1003,21 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "awf service doctor",
         "docs/REASON_CATALOG.md#opencode_ollama_auth_missing",
     ),
+    "OPENCODE_PROVIDER_AUTH_MISSING": _ReasonText(
+        "No OpenCode/provider auth signal was visible for a non-Ollama OpenCode model.",
+        "Mount ~/.config/opencode or set the provider API key (e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY).",
+        "Missing OpenCode/provider credentials for a provider-qualified (non-Ollama) model.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#opencode_provider_auth_missing",
+    ),
+    "OPENCODE_OLLAMA_BASE_URL_MALFORMED": _ReasonText(
+        "AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST is set to a malformed value.",
+        "Fix the Ollama base URL (unbalanced IPv6 brackets or a non-numeric port), then retry.",
+        "An explicit Ollama base URL cannot be parsed, so worker-side readiness would "
+        "probe a different daemon than the agent uses.",
+        "awf service doctor",
+        "docs/REASON_CATALOG.md#opencode_ollama_base_url_malformed",
+    ),
     "GROK_AUTH_MISSING": _ReasonText(
         "No Grok Build auth signal was visible.",
         "Mount ~/.grok or set XAI_API_KEY in the AWF service environment.",
@@ -1279,6 +1294,25 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         ),
         "awf service doctor",
         "docs/REASON_CATALOG.md#provider_auth_failed",
+    ),
+    "OLLAMA_MODEL_PULL_FAILED": _ReasonText(
+        (
+            "AWF could not make the requested OpenCode/Ollama model available: the "
+            "host daemon failed to pull it before the agent run."
+        ),
+        (
+            "Check the host Ollama daemon (`ollama ls`, `ollama pull <model>`), "
+            "confirm the model name and registry reachability, then recreate or "
+            "remonitor the workspace once the model can be pulled."
+        ),
+        (
+            "The requested model is not present in the daemon's `/api/tags`, is not "
+            "an Ollama Cloud (`:cloud`) model, and the streamed `POST /api/pull` "
+            "reported an error, timed out, or left the model still missing — for "
+            "example a misspelled model name or an unreachable model registry."
+        ),
+        "awf workspace logs <workspace_id>",
+        _reason_catalog_link("OLLAMA_MODEL_PULL_FAILED"),
     ),
 }
 

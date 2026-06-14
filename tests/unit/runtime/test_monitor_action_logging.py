@@ -996,6 +996,7 @@ class TestMonitorDirtyWorktreeSalvage:
         cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
         cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
         cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # dirty check
+        cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # stage status (untracked=all)
         cmd.queue_result(returncode=0)  # git add -A
         cmd.queue_result(returncode=1)  # git diff --cached --quiet
         cmd.queue_result(returncode=0)  # git commit
@@ -1090,6 +1091,10 @@ class TestMonitorDirtyWorktreeSalvage:
             returncode=0,
             stdout=" M tests/integration/test_workspace_agent_git_in_workspace.py\n",
         )  # dirty check after scope correction
+        cmd.queue_result(
+            returncode=0,
+            stdout=" M tests/integration/test_workspace_agent_git_in_workspace.py\n",
+        )  # stage status (untracked=all)
         cmd.queue_result(returncode=0)  # git add -A
         cmd.queue_result(returncode=1)  # git diff --cached --quiet
         cmd.queue_result(returncode=0)  # git commit

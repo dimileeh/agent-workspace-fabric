@@ -99,6 +99,7 @@ async def test_commit_dirty_worktree_threaded_tag_skips_resolver(
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=" M file.py\n")  # status --porcelain (dirty)
+    cmd.queue_result(returncode=0, stdout=" M file.py\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)  # add -A
     cmd.queue_result(returncode=1)  # diff --cached --quiet (staged)
     cmd.queue_result(returncode=0)  # commit
@@ -138,7 +139,8 @@ async def test_commit_dirty_worktree_threaded_none_is_unprefixed_and_skips_resol
         await session.commit()
 
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M file.py\n")
+    cmd.queue_result(returncode=0, stdout=" M file.py\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M file.py\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=0)
@@ -178,7 +180,8 @@ async def test_commit_dirty_worktree_omitted_tag_self_resolves_once(
         await session.commit()
 
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M file.py\n")
+    cmd.queue_result(returncode=0, stdout=" M file.py\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M file.py\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=0)
@@ -210,7 +213,8 @@ async def test_commit_dirty_worktree_threaded_tag_truncated_to_72(
     """The threaded-tag path keeps the ``[:72]`` truncation parity of every AWF commit."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M file.py\n")
+    cmd.queue_result(returncode=0, stdout=" M file.py\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M file.py\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=0)

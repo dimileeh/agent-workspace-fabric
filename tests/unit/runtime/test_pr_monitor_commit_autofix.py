@@ -165,7 +165,7 @@ async def test_monitor_precommit_autofix_retry_returns_none_when_status_fails(
 
     assert retry is None
     assert len(runner.calls) == 1
-    assert runner.calls[0].args[-2:] == ["status", "--porcelain"]
+    assert runner.calls[0].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
 
 
 @pytest.mark.unit
@@ -216,7 +216,7 @@ async def test_monitor_precommit_autofix_retry_returns_none_when_only_staged_rep
 
     assert retry is None
     assert len(runner.calls) == 1
-    assert runner.calls[0].args[-2:] == ["status", "--porcelain"]
+    assert runner.calls[0].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
 
 
 @pytest.mark.unit
@@ -282,6 +282,46 @@ async def test_monitor_precommit_autofix_retry_allows_untracked_operation_paths(
     retry_result, restaged_paths = retry
     assert retry_result.ok
     assert restaged_paths == (fixed_path,)
+    assert runner.calls[1].args[-3:] == ["add", "--", fixed_path]
+
+
+@pytest.mark.unit
+async def test_monitor_precommit_autofix_retry_filters_untracked_agent_memory_from_status(
+    tmp_path: Path,
+) -> None:
+    """Untracked agent-runtime memory must not abort the autofix retry.
+
+    Regression for PR #577 review thread PRRT_kwDOSJAM6s6JYIY3: passing the
+    filtered ``operation_dirty_paths`` is not enough on its own — the retry's
+    own status read must also enumerate untracked files (``--untracked-files=all``)
+    and drop ``.claude/agent-memory/`` leaves, or a pre-existing memory artifact
+    is counted as dirt outside the operation scope and the repair fails closed.
+    """
+    fixed_path = "src/awf/fixed.py"
+    memory_path = ".claude/agent-memory/note.md"
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout=f"?? {memory_path}\nMM {fixed_path}\n")
+    runner.queue_result(returncode=0)
+    runner.queue_result(returncode=0)
+
+    retry = await _retry_monitor_precommit_autofix_commit_once(
+        runner=runner,
+        workspace_id="ws_123",
+        worktree_path=tmp_path,
+        message="fix: monitor repair",
+        commit_result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr=_deterministic_autofix_stderr(fixed_path),
+        ),
+        operation_dirty_paths=(fixed_path,),
+    )
+
+    assert retry is not None
+    retry_result, restaged_paths = retry
+    assert retry_result.ok
+    assert restaged_paths == (fixed_path,)
+    assert runner.calls[0].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
     assert runner.calls[1].args[-3:] == ["add", "--", fixed_path]
 
 

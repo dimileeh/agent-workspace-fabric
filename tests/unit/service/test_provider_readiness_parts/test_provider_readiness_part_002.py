@@ -9,10 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 import awf.service.provider_readiness as provider_readiness
 import awf.service.provider_readiness_helpers as provider_readiness_helpers
+import awf.service.provider_readiness_provider_checks as provider_readiness_provider_checks
 from awf.service.config import ServiceSettings
 from awf.service.provider_readiness import (
     collect_agent_readiness,
@@ -269,7 +271,9 @@ def test_provider_readiness_claude_file_reports_overlay_isolation(
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
-    monkeypatch.setattr(provider_readiness, "claude_auth_isolation_label", lambda **_: label)
+    monkeypatch.setattr(
+        provider_readiness_provider_checks, "claude_auth_isolation_label", lambda **_: label
+    )
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
@@ -299,7 +303,9 @@ def test_provider_readiness_claude_json_only_reports_copy_isolation(
     home.mkdir()
     (home / ".claude.json").write_text('{"token":"claude_file_secret"}')
     monkeypatch.setattr(
-        provider_readiness, "claude_auth_isolation_label", lambda **_: "per_workspace_overlay"
+        provider_readiness_provider_checks,
+        "claude_auth_isolation_label",
+        lambda **_: "per_workspace_overlay",
     )
 
     payload = collect_agent_readiness(
@@ -333,7 +339,9 @@ def test_provider_readiness_claude_dir_keeps_overlay_json_stays_copy(
     (home / ".claude" / "settings.json").write_text('{"token":"claude_dir_secret"}')
     (home / ".claude.json").write_text('{"token":"claude_json_secret"}')
     monkeypatch.setattr(
-        provider_readiness, "claude_auth_isolation_label", lambda **_: "per_workspace_overlay"
+        provider_readiness_provider_checks,
+        "claude_auth_isolation_label",
+        lambda **_: "per_workspace_overlay",
     )
 
     payload = collect_agent_readiness(
@@ -640,7 +648,7 @@ def test_provider_readiness_opencode_ollama_unreachable_fails_when_strict(
 
     def _http_get(_url: str, *, timeout: float) -> Any:
         assert timeout > 0
-        raise RuntimeError("connection refused")
+        raise httpx.ConnectError("connection refused")
 
     payload = collect_agent_readiness(
         _settings(tmp_path),
@@ -719,7 +727,7 @@ def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhos
     def _http_get(url: str, *, timeout: float) -> Any:
         urls.append(url)
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("nodename nor servname provided")
+            raise httpx.ConnectError("nodename nor servname provided")
         return SimpleNamespace(status_code=200, text="ok")
 
     payload = collect_agent_readiness(
@@ -755,7 +763,7 @@ def test_ollama_http_probe_records_recovered_failures_as_redacted_debug(
         assert timeout > 0
         urls.append(url)
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("transport failed for sk-proj-ollama-fallback-secret")
+            raise httpx.ConnectError("transport failed for sk-proj-ollama-fallback-secret")
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=200, text="ok")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
@@ -776,7 +784,7 @@ def test_ollama_http_probe_records_recovered_failures_as_redacted_debug(
                 {
                     "url": "http://host.docker.internal:11434/api/version",
                     "status": "exception",
-                    "detail": "RuntimeError: transport failed for <redacted>",
+                    "detail": "ConnectError: transport failed for <redacted>",
                 }
             ]
         },
@@ -871,7 +879,7 @@ def test_ollama_http_probe_terminal_mixed_failure_logs_only_http_terminal_detail
     def _http_get(url: str, *, timeout: float) -> Any:
         assert timeout > 0
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("transport failed for sk-proj-ollama-terminal-secret")
+            raise httpx.ConnectError("transport failed for sk-proj-ollama-terminal-secret")
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=503, text="busy ghp_ollama_terminal_secret")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
@@ -891,15 +899,15 @@ def test_ollama_http_probe_terminal_mixed_failure_logs_only_http_terminal_detail
     )
 
     assert result["ok"] is False
-    assert "RuntimeError: transport failed for <redacted>" in result["detail"]
+    assert "ConnectError: transport failed for <redacted>" in result["detail"]
     assert "HTTP 503: busy <redacted>" in result["detail"]
     messages = [record.getMessage() for record in caplog.records]
     traceback_messages = [message for message in messages if "Traceback" in message]
     terminal_http_messages = [message for message in messages if "HTTP 503: busy" in message]
     assert len(traceback_messages) == 1
     assert len(terminal_http_messages) == 1
-    assert "RuntimeError: transport failed for <redacted>" in traceback_messages[0]
-    assert "RuntimeError: transport failed" not in terminal_http_messages[0]
+    assert "ConnectError: transport failed for <redacted>" in traceback_messages[0]
+    assert "ConnectError: transport failed" not in terminal_http_messages[0]
     assert "HTTP 503: busy <redacted>" in terminal_http_messages[0]
     assert "sk-proj-ollama-terminal-secret" not in caplog.text
     assert "ghp_ollama_terminal_secret" not in caplog.text
@@ -919,7 +927,7 @@ def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted
         assert timeout > 0
         urls.append(url)
         if url == "http://host.docker.internal:11434/api/version":
-            raise RuntimeError("transport failed for sk-proj-ollama-terminal-secret")
+            raise httpx.ConnectError("transport failed for sk-proj-ollama-terminal-secret")
         if url == "http://localhost:11434/api/version":
             return SimpleNamespace(status_code=503, text="busy ghp_ollama_terminal_secret")
         raise AssertionError(f"unexpected Ollama probe URL: {url}")
@@ -948,498 +956,7 @@ def test_provider_readiness_opencode_all_ollama_candidates_fail_reports_redacted
     assert "ghp_ollama_terminal_secret" not in serialized
     assert "provider_readiness.ollama_probe_exception" in caplog.text
     assert "Traceback" in caplog.text
-    assert "RuntimeError: transport failed for <redacted>" in caplog.text
+    assert "ConnectError: transport failed for <redacted>" in caplog.text
     assert "HTTP 503: busy <redacted>" in caplog.text
     assert "sk-proj-ollama-terminal-secret" not in caplog.text
     assert "ghp_ollama_terminal_secret" not in caplog.text
-
-
-@pytest.mark.unit
-def test_ollama_url_helpers_normalize_v1_and_host_gateway() -> None:
-    env = {"OLLAMA_HOST": "host.docker.internal:11434/v1"}
-
-    assert provider_readiness_helpers._ollama_version_url(env) == (
-        "http://host.docker.internal:11434/api/version"
-    )
-    assert provider_readiness._ollama_tags_urls(env) == (
-        "http://host.docker.internal:11434/api/tags",
-        "http://localhost:11434/api/tags",
-    )
-
-
-@pytest.mark.unit
-def test_ollama_url_helpers_preserve_host_gateway_fallback_port() -> None:
-    env = {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://host.docker.internal:23456/v1"}
-
-    assert provider_readiness_helpers._ollama_version_urls(env) == (
-        "http://host.docker.internal:23456/api/version",
-        "http://localhost:23456/api/version",
-    )
-
-
-@pytest.mark.unit
-def test_provider_readiness_opencode_env_only_reason_when_ollama_reachable(
-    tmp_path: Path,
-) -> None:
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={
-            "OLLAMA_API_KEY": "ollama_env_secret",
-            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
-        },
-        run_subprocess=_unexpected_subprocess,
-        http_get=_ollama_ok,
-    )
-
-    opencode = payload["providers"]["opencode"]
-    assert opencode["ok"] is True
-    assert opencode["reason"] == "OLLAMA_ENV_AUTH_PRESENT"
-    assert "ollama_env_secret" not in json.dumps(payload, sort_keys=True)
-
-
-@pytest.mark.unit
-def test_provider_readiness_opencode_http_error_detail_is_redacted(tmp_path: Path) -> None:
-    def _http_get(_url: str, *, timeout: float) -> Any:
-        return SimpleNamespace(status_code=401, text="bad token ghp_ollama_secret")
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={
-            "OLLAMA_API_KEY": "ghp_ollama_secret",
-            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
-        },
-        run_subprocess=_unexpected_subprocess,
-        http_get=_http_get,
-    )
-
-    opencode = payload["providers"]["opencode"]
-    assert opencode["reason"] == "OLLAMA_HOST_UNREACHABLE"
-    serialized = json.dumps(payload, sort_keys=True)
-    assert "ghp_ollama_secret" not in serialized
-    assert "<redacted>" in serialized
-
-
-@pytest.mark.unit
-def test_ollama_http_probe_all_http_failures_log_redacted_terminal_event(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
-
-    def _http_get(_url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        return SimpleNamespace(status_code=503, text="busy sk-proj-ollama-secret")
-
-    result = provider_readiness._probe_ollama(
-        ("http://ollama.local:11434/api/version",),
-        http_get=_http_get,
-        secrets=frozenset({"sk-proj-ollama-secret"}),
-    )
-
-    serialized = json.dumps(result, sort_keys=True)
-    assert result["ok"] is False
-    assert "HTTP 503: busy <redacted>" in serialized
-    assert "provider_readiness.ollama_probe_exception" in caplog.text
-    assert "HTTP 503: busy <redacted>" in caplog.text
-    assert "Traceback" not in caplog.text
-    assert "sk-proj-ollama-secret" not in serialized
-    assert "sk-proj-ollama-secret" not in caplog.text
-
-
-@pytest.mark.unit
-def test_ollama_http_probe_exception_logs_redacted_traceback(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
-
-    def _http_get(_url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        raise RuntimeError("transport failed for sk-proj-ollama-secret")
-
-    result = provider_readiness._probe_ollama(
-        ("http://ollama.local:11434/api/version",),
-        http_get=_http_get,
-        secrets=frozenset({"sk-proj-ollama-secret"}),
-    )
-
-    serialized = json.dumps(result, sort_keys=True)
-    assert result["ok"] is False
-    assert "RuntimeError: transport failed for <redacted>" in serialized
-    assert "provider_readiness.ollama_probe_exception" in caplog.text
-    assert "Traceback" in caplog.text
-    assert "RuntimeError: transport failed for <redacted>" in caplog.text
-    assert "sk-proj-ollama-secret" not in serialized
-    assert "sk-proj-ollama-secret" not in caplog.text
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_reports_missing_model_and_transport_failures() -> None:
-    calls: list[str] = []
-
-    assert provider_readiness._probe_ollama_model(
-        ("http://ollama.local:11434/api/tags",),
-        model=None,
-        http_get=lambda _url, *, timeout: _ollama_ok(
-            "http://ollama.local:11434/api/tags", timeout=timeout
-        ),
-        secrets=frozenset(),
-    ) == {
-        "status": "fail",
-        "reason_code": "MODEL_NOT_SELECTED",
-        "message": "No OpenCode/Ollama model was selected for launch.",
-    }
-
-    def _http_get(url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        calls.append(url)
-        if url == "http://primary.local/api/tags":
-            raise RuntimeError("connect failed")
-        return SimpleNamespace(status_code=503, text="busy sk-proj-ollama-secret")
-
-    result = provider_readiness._probe_ollama_model(
-        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
-        model="llama3",
-        http_get=_http_get,
-        secrets=frozenset({"sk-proj-ollama-secret"}),
-    )
-
-    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
-    assert calls == ["http://primary.local/api/tags", "http://secondary.local/api/tags"]
-    assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
-    assert "<redacted>" in result["detail"]
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_checks_fallback_tags_urls_before_missing() -> None:
-    calls: list[str] = []
-
-    def _http_get(url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        calls.append(url)
-        if url == "http://host.docker.internal:11434/api/tags":
-            return SimpleNamespace(
-                status_code=200,
-                text='{"models":[{"name":"other-model:latest"}]}',
-            )
-        if url == "http://localhost:11434/api/tags":
-            return SimpleNamespace(
-                status_code=200,
-                text='{"models":[{"name":"llama3:latest"}]}',
-            )
-        raise AssertionError(f"unexpected Ollama tags URL: {url}")
-
-    result = provider_readiness._probe_ollama_model(
-        (
-            "http://host.docker.internal:11434/api/tags",
-            "http://localhost:11434/api/tags",
-        ),
-        model="llama3",
-        http_get=_http_get,
-        secrets=frozenset(),
-    )
-
-    assert result == {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
-    assert calls == [
-        "http://host.docker.internal:11434/api/tags",
-        "http://localhost:11434/api/tags",
-    ]
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_records_recovered_failure_debug_when_available(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
-
-    def _http_get(url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        if url == "http://primary.local/api/tags":
-            raise RuntimeError("connect failed for sk-proj-ollama-secret")
-        return SimpleNamespace(status_code=200, text='{"models":[{"name":"llama3:latest"}]}')
-
-    result = provider_readiness._probe_ollama_model(
-        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
-        model="llama3",
-        http_get=_http_get,
-        secrets=frozenset({"sk-proj-ollama-secret"}),
-    )
-
-    assert result == {
-        "status": "ok",
-        "reason_code": "OLLAMA_MODEL_AVAILABLE",
-        "debug": {
-            "recovered_failures": [
-                {
-                    "url": "http://primary.local/api/tags",
-                    "status": "exception",
-                    "detail": "RuntimeError: connect failed for <redacted>",
-                }
-            ]
-        },
-    }
-    serialized = json.dumps(result, sort_keys=True)
-    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
-    assert "Traceback" not in caplog.text
-    assert "sk-proj-ollama-secret" not in serialized
-    assert "sk-proj-ollama-secret" not in caplog.text
-
-    caplog.clear()
-
-    def _http_error_then_success(url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        if url == "http://primary.local/api/tags":
-            return SimpleNamespace(status_code=500, text="error for sk-proj-ollama-secret")
-        return SimpleNamespace(status_code=200, text='{"models":[{"name":"llama3:latest"}]}')
-
-    http_error_result = provider_readiness._probe_ollama_model(
-        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
-        model="llama3",
-        http_get=_http_error_then_success,
-        secrets=frozenset({"sk-proj-ollama-secret"}),
-    )
-
-    assert http_error_result == {
-        "status": "ok",
-        "reason_code": "OLLAMA_MODEL_AVAILABLE",
-        "debug": {
-            "recovered_failures": [
-                {
-                    "url": "http://primary.local/api/tags",
-                    "status": "http_error",
-                    "status_code": 500,
-                    "detail": "HTTP 500: error for <redacted>",
-                }
-            ]
-        },
-    }
-    serialized = json.dumps(http_error_result, sort_keys=True)
-    assert "provider_readiness.ollama_model_probe_exception" not in caplog.text
-    assert "Traceback" not in caplog.text
-    assert "sk-proj-ollama-secret" not in serialized
-    assert "sk-proj-ollama-secret" not in caplog.text
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_reports_missing_model_with_probe_failures() -> None:
-    def _http_get(url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        if url == "http://primary.local/api/tags":
-            return SimpleNamespace(
-                status_code=200,
-                text='{"models":[{"name":"other-model:latest"}]}',
-            )
-        return SimpleNamespace(status_code=503, text="busy")
-
-    result = provider_readiness._probe_ollama_model(
-        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
-        model="llama3",
-        http_get=_http_get,
-        secrets=frozenset(),
-    )
-
-    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
-    assert result["detail"] == (
-        "selected=llama3; available_count=1; "
-        "probe_failures=http://secondary.local/api/tags: HTTP 503: busy"
-    )
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_missing_model_redacts_before_truncating_detail() -> None:
-    secret = "LEAKME-sensitive-ollama-secret-value"
-
-    def _http_get(url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        if url == "http://primary.local/api/tags":
-            return SimpleNamespace(
-                status_code=200,
-                text='{"models":[{"name":"other-model:latest"}]}',
-            )
-        return SimpleNamespace(status_code=503, text=("x" * 120) + secret + "-tail")
-
-    result = provider_readiness._probe_ollama_model(
-        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
-        model="llama3",
-        http_get=_http_get,
-        secrets=frozenset({secret}),
-    )
-
-    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
-    assert secret not in result["detail"]
-    assert "LEAKME" not in result["detail"]
-    assert "<redacted>" in result["detail"]
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_failure_redacts_before_truncating_detail() -> None:
-    secret = "LEAKME-sensitive-ollama-secret-value"
-
-    def _http_get(_url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        return SimpleNamespace(status_code=503, text=("x" * 160) + secret + "-tail")
-
-    result = provider_readiness._probe_ollama_model(
-        ("http://primary.local/api/tags",),
-        model="llama3",
-        http_get=_http_get,
-        secrets=frozenset({secret}),
-    )
-
-    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
-    assert secret not in result["detail"]
-    assert "LEAKME" not in result["detail"]
-    assert "<redacted>" in result["detail"]
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_logs_exception_after_missing_model_response(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.ERROR, logger=provider_readiness.__name__)
-
-    def _http_get(url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        if url == "http://primary.local/api/tags":
-            raise RuntimeError("connect failed for sk-proj-ollama-secret")
-        return SimpleNamespace(
-            status_code=200,
-            text='{"models":[{"name":"other-model:latest"}]}',
-        )
-
-    result = provider_readiness._probe_ollama_model(
-        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
-        model="llama3",
-        http_get=_http_get,
-        secrets=frozenset({"sk-proj-ollama-secret"}),
-    )
-
-    assert result["status"] == "fail"
-    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
-    assert (
-        "probe_failures=http://primary.local/api/tags: RuntimeError: connect failed for <redacted>"
-        in result["detail"]
-    )
-    assert "provider_readiness.ollama_model_probe_exception" in caplog.text
-    assert "Traceback" in caplog.text
-    assert "RuntimeError: connect failed for <redacted>" in caplog.text
-    assert "sk-proj-ollama-secret" not in caplog.text
-    assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
-
-
-@pytest.mark.unit
-def test_ollama_model_probe_rejects_invalid_json() -> None:
-    def _http_get(_url: str, *, timeout: float) -> Any:
-        assert timeout > 0
-        return SimpleNamespace(status_code=200, text="{not-json")
-
-    result = provider_readiness._probe_ollama_model(
-        ("http://ollama.local/api/tags",),
-        model="llama3",
-        http_get=_http_get,
-        secrets=frozenset(),
-    )
-
-    assert result["status"] == "fail"
-    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
-    assert "invalid JSON from Ollama /api/tags" in result["detail"]
-
-
-@pytest.mark.unit
-def test_ollama_model_candidate_and_name_helpers_handle_sparse_shapes() -> None:
-    assert provider_readiness_helpers._ollama_model_candidates(None) == set()
-    assert provider_readiness_helpers._ollama_model_candidates("   ") == set()
-    assert provider_readiness_helpers._ollama_model_candidates("openai/gpt-oss") == {
-        "openai/gpt-oss",
-        "openai/gpt-oss:latest",
-    }
-    assert provider_readiness_helpers._ollama_model_candidates("ollama/") == {
-        "ollama/",
-        "ollama/:latest",
-    }
-    assert provider_readiness_helpers._ollama_model_candidates("llama3:8b") == {"llama3:8b"}
-
-    assert provider_readiness_helpers._ollama_model_names(None) == set()
-    assert provider_readiness_helpers._ollama_model_names({"models": "bad-shape"}) == set()
-    assert provider_readiness_helpers._ollama_model_names(
-        {
-            "models": [
-                "llama3:latest",
-                "",
-                42,
-                {},
-                {"model": "mistral:7b"},
-                {"name": "qwen:14b"},
-            ]
-        }
-    ) == {"llama3:latest", "mistral:7b", "qwen:14b"}
-
-
-@pytest.mark.unit
-def test_provider_readiness_truncates_verbose_details(tmp_path: Path) -> None:
-    def _run(_args: list[str], **_kwargs: object) -> Any:
-        return _completed(returncode=1, stderr="failure " * 50)
-
-    payload = collect_agent_readiness(
-        _settings(tmp_path),
-        environ={"AWF_GITHUB_TOKEN": "ghp_verbose_secret"},
-        run_subprocess=_run,
-    )
-
-    detail = payload["providers"]["github"]["detail"]
-    assert isinstance(detail, str)
-    assert len(detail) == 240
-    assert detail.endswith("\N{HORIZONTAL ELLIPSIS}")
-
-
-@pytest.mark.unit
-def test_provider_readiness_default_subprocess_and_http_wrappers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    completed = _completed(stdout="ok")
-    calls: list[tuple[list[str], float]] = []
-
-    def _subprocess_run(args: list[str], **kwargs: object) -> Any:
-        calls.append((args, kwargs["timeout"]))
-        return completed
-
-    def _httpx_get(url: str, *, timeout: float) -> Any:
-        assert url == "http://example.test/api/version"
-        assert timeout == 1.5
-        return SimpleNamespace(status_code=200, text="ok")
-
-    monkeypatch.setattr(provider_readiness_helpers.subprocess, "run", _subprocess_run)
-    monkeypatch.setattr(provider_readiness_helpers.httpx, "get", _httpx_get)
-
-    assert (
-        provider_readiness_helpers._run_subprocess(
-            ["gh", "auth", "status"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-            env={},
-        )
-        is completed
-    )
-    assert calls == [(["gh", "auth", "status"], 1.5)]
-    assert (
-        provider_readiness_helpers._http_get("http://example.test/api/version", timeout=1.5).text
-        == "ok"
-    )
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "secret",
-    [
-        "ghp_providerreadinesssecret",
-        "gho_providerreadinesssecret",
-        "github_pat_providerreadinesssecret",
-        "sk-proj-provider-readiness-secret",
-        "sk-ant-provider-readiness-secret",
-        "sk-providerReadinessSecret1234567890",
-        "AIzaProviderReadinessSecret",
-        "xoxb-provider-readiness-secret",
-    ],
-)
-def test_provider_readiness_redacts_known_token_patterns(secret: str) -> None:
-    assert provider_readiness._redact(f"token {secret}", frozenset()) == "token <redacted>"

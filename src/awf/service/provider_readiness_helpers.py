@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
-import json
+import ipaddress
+import re
 import subprocess
-import traceback
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import httpx
+from pydantic import ValidationError
 
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
+from awf.profiles.models import WorkspaceProfile
 from awf.service.config import ServiceSettings
+from awf.service.environment import ComposeEnvInterpolationError, compose_expand_value
+
+# Env keys that select the Ollama daemon. The OpenCode launcher resolves the
+# base URL from these (``AWF_OPENCODE_OLLAMA_BASE_URL`` first, then ``OLLAMA_HOST``)
+# inside the rendered workspace container, where a profile's ``runtime.environment``
+# value wins over the worker-env placeholder (``merge_agent_environment`` is
+# first-writer-wins). Mirror that resolution wherever a probe/pull must target the
+# same daemon the agent will reach.
+_OLLAMA_BASE_URL_ENV_KEYS = ("AWF_OPENCODE_OLLAMA_BASE_URL", "OLLAMA_HOST")
 
 
 def _credential_source(
@@ -233,6 +245,45 @@ def _first_present_env(environ: Mapping[str, str], keys: Iterable[str]) -> str |
     return next((key for key in keys if environ.get(key)), None)
 
 
+# Provider prefix -> env keys that satisfy that provider for OpenCode. All of
+# these are already in ``KNOWN_SECRET_ENV_KEYS``, so detection keeps redaction
+# intact. A provider prefix absent from this map is satisfied only by the
+# OpenCode credential store (``~/.config/opencode``). Only list keys OpenCode
+# actually reads: its OpenAI path uses the AI SDK OpenAI provider, whose apiKey
+# default is ``OPENAI_API_KEY`` — the Codex-style ``OPENAI_API_TOKEN`` is *not*
+# consumed, so admitting it would pass preflight only for the agent to launch
+# without the credential OpenCode reads and fail later.
+_OPENCODE_PROVIDER_ENV_KEYS: Mapping[str, tuple[str, ...]] = {
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "xai": ("XAI_API_KEY",),
+}
+
+
+def _opencode_provider_credentials_present(
+    model: str | None,
+    environ: Mapping[str, str],
+    host_home: Path,
+) -> tuple[bool, str | None]:
+    """Return whether OpenCode has a credential for a non-Ollama provider model.
+
+    Symmetric to the OpenCode/Ollama auth gate: a provider-qualified non-Ollama
+    model (``openai/...``, ``anthropic/...``) is served by an OpenCode cloud
+    provider, so create-time readiness requires a usable credential. ``~/.config/
+    opencode`` is OpenCode's own multi-provider credential store and satisfies any
+    provider; otherwise the provider API key matching the model's ``<provider>/``
+    prefix must be visible. An unknown provider prefix not in
+    ``_OPENCODE_PROVIDER_ENV_KEYS`` is satisfied only by ``~/.config/opencode``.
+    """
+
+    if (host_home / ".config" / "opencode").is_dir():
+        return True, "~/.config/opencode"
+    provider = (model or "").strip().partition("/")[0].lower()
+    signal = _first_present_env(environ, _OPENCODE_PROVIDER_ENV_KEYS.get(provider, ()))
+    return (signal is not None), signal
+
+
 def _secret_values(settings: ServiceSettings, environ: Mapping[str, str]) -> frozenset[str]:
     values = {
         value
@@ -242,181 +293,6 @@ def _secret_values(settings: ServiceSettings, environ: Mapping[str, str]) -> fro
     if settings.github_token and len(settings.github_token) >= 4:
         values.add(settings.github_token)
     return frozenset(values)
-
-
-def _redact(value: str, secrets: frozenset[str]) -> str:
-    redacted = value
-    for secret in sorted(secrets, key=len, reverse=True):
-        redacted = redacted.replace(secret, _REDACTION)
-    redacted = URL_CREDENTIAL_RE.sub(r"\1<redacted>@", redacted)
-    return TOKEN_RE.sub(_REDACTION, redacted)
-
-
-def _redact_with_redaction_parts(
-    value: str,
-    secrets: frozenset[str],
-) -> tuple[str, list[str] | None]:
-    segments: list[_RedactionSegment] = [("literal", value)]
-    for secret in sorted(secrets, key=len, reverse=True):
-        segments = _replace_literal_redaction_spans(segments, secret)
-    segments = _replace_url_credential_redaction_spans(segments)
-    segments = _replace_token_redaction_spans(segments)
-    return _render_redaction_segments(segments), _redaction_parts(segments)
-
-
-def _replace_literal_redaction_spans(
-    segments: list[_RedactionSegment],
-    text: str,
-) -> list[_RedactionSegment]:
-    if not text:
-        return segments
-    replaced: list[_RedactionSegment] = []
-    for kind, segment_text in segments:
-        if kind == "redaction":
-            replaced.append((kind, segment_text))
-            continue
-        parts = segment_text.split(text)
-        if len(parts) == 1:
-            replaced.append((kind, segment_text))
-            continue
-        for index, part in enumerate(parts):
-            if part:
-                replaced.append(("literal", part))
-            if index < len(parts) - 1:
-                replaced.append(("redaction", ""))
-    return _merge_literal_redaction_segments(replaced)
-
-
-def _replace_url_credential_redaction_spans(
-    segments: list[_RedactionSegment],
-) -> list[_RedactionSegment]:
-    rendered = _render_redaction_segments(segments)
-    replacements: list[tuple[int, int, list[_RedactionSegment]]] = []
-    for match in URL_CREDENTIAL_RE.finditer(rendered):
-        replacements.append((match.start(2), match.end(2), [("redaction", ""), ("literal", "@")]))
-    return _replace_rendered_redaction_spans(segments, replacements)
-
-
-def _replace_token_redaction_spans(
-    segments: list[_RedactionSegment],
-) -> list[_RedactionSegment]:
-    rendered = _render_redaction_segments(segments)
-    replacements: list[tuple[int, int, list[_RedactionSegment]]] = []
-    for match in TOKEN_RE.finditer(rendered):
-        replacements.append((match.start(1), match.end(1), [("redaction", "")]))
-    return _replace_rendered_redaction_spans(segments, replacements)
-
-
-def _replace_rendered_redaction_spans(
-    segments: list[_RedactionSegment],
-    replacements: list[tuple[int, int, list[_RedactionSegment]]],
-) -> list[_RedactionSegment]:
-    if not replacements:
-        return segments
-
-    rendered_length = len(_render_redaction_segments(segments))
-    cursor = 0
-    replaced: list[_RedactionSegment] = []
-    for start, end, replacement in replacements:
-        replaced.extend(_slice_redaction_segments(segments, cursor, start))
-        replaced.extend(replacement)
-        cursor = end
-    replaced.extend(_slice_redaction_segments(segments, cursor, rendered_length))
-    return _merge_literal_redaction_segments(replaced)
-
-
-def _slice_redaction_segments(
-    segments: list[_RedactionSegment],
-    start: int,
-    end: int,
-) -> list[_RedactionSegment]:
-    if start >= end:
-        return []
-
-    sliced: list[_RedactionSegment] = []
-    position = 0
-    for kind, segment_text in segments:
-        rendered = segment_text if kind == "literal" else _REDACTION
-        next_position = position + len(rendered)
-        overlap_start = max(start, position)
-        overlap_end = min(end, next_position)
-        if overlap_start < overlap_end:
-            inner_start = overlap_start - position
-            inner_end = overlap_end - position
-            if kind == "redaction" and inner_start == 0 and inner_end == len(_REDACTION):
-                sliced.append(("redaction", ""))
-            else:
-                sliced.append(("literal", rendered[inner_start:inner_end]))
-        position = next_position
-        if position >= end:
-            break
-    return sliced
-
-
-def _merge_literal_redaction_segments(
-    segments: list[_RedactionSegment],
-) -> list[_RedactionSegment]:
-    merged: list[_RedactionSegment] = []
-    for kind, text in segments:
-        if kind == "literal" and not text:
-            continue
-        if kind == "literal" and merged and merged[-1][0] == "literal":
-            merged[-1] = ("literal", f"{merged[-1][1]}{text}")
-            continue
-        merged.append((kind, text))
-    return merged
-
-
-def _render_redaction_segments(segments: list[_RedactionSegment]) -> str:
-    return "".join(text if kind == "literal" else _REDACTION for kind, text in segments)
-
-
-def _redaction_parts(segments: list[_RedactionSegment]) -> list[str] | None:
-    if not any(kind == "redaction" for kind, _text in segments):
-        return None
-
-    parts = [""]
-    for kind, text in segments:
-        if kind == "redaction":
-            parts.append("")
-        else:
-            parts[-1] += text
-    return parts
-
-
-def _log_redacted_exception(
-    event: str,
-    exc: Exception,
-    secrets: frozenset[str],
-) -> None:
-    detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
-    trace = _redact(
-        _truncate(
-            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
-            limit=_TRACEBACK_LOG_LIMIT,
-        ),
-        secrets,
-    )
-    _log.error("%s: %s\n%s", event, detail, trace)
-
-
-def _log_redacted_terminal_failure(
-    event: str,
-    detail: str,
-    secrets: frozenset[str],
-) -> None:
-    _log.error(
-        "%s: %s",
-        event,
-        _truncate(_redact(detail, secrets), limit=_TRACEBACK_LOG_LIMIT),
-    )
-
-
-def _truncate(value: str, *, limit: int = 240) -> str:
-    stripped = value.strip()
-    if len(stripped) <= limit:
-        return stripped
-    return stripped[: limit - 1] + "…"
 
 
 def _security_warning(
@@ -659,7 +535,123 @@ def _ollama_tags_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
     return _ollama_api_urls(environ, "api/tags")
 
 
-def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
+def _ollama_pull_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
+    return _ollama_api_urls(environ, "api/pull")
+
+
+def _ollama_pull_name(model: str | None) -> str:
+    """Return the bare Ollama model reference for a ``POST /api/pull`` body."""
+    raw = (model or "").strip()
+    if "/" in raw:
+        provider, remainder = raw.split("/", 1)
+        if provider == "ollama" and remainder:
+            return remainder
+    return raw
+
+
+def _is_cloud_model(model: str | None) -> bool:
+    """Return whether the model is an Ollama Cloud model (served remotely).
+
+    Ollama Cloud models carry a ``cloud`` tag in either form the daemon
+    publishes: the bare ``:cloud`` tag (e.g. ``glm-5.1:cloud``) or a
+    size-qualified tag ending in ``-cloud`` (e.g. ``gpt-oss:120b-cloud``,
+    ``gemma4:31b-cloud``). Match on the tag portion so both are treated as
+    served-remotely (no local ``/api/pull``).
+
+    The size qualifier always begins with a digit (a parameter count such as
+    ``31b`` or ``120b``), so a plain suffix match on ``-cloud`` would be too
+    loose: a local tag like ``:not-cloud`` must NOT be classified as cloud, or
+    readiness would skip pull-pending and the executor would never pull it.
+    """
+    pull_name = _ollama_pull_name(model)
+    tag = pull_name.rpartition(":")[2] if ":" in pull_name else ""
+    return tag == "cloud" or re.fullmatch(r"[0-9][0-9.]*[a-z]*-cloud", tag) is not None
+
+
+def _opencode_model_is_local_ollama(model: str | None) -> bool:
+    """Return whether an OpenCode model is an authless local Ollama model.
+
+    A bare or ``ollama/``-prefixed reference that is NOT an Ollama Cloud
+    (``:cloud``) model is served by the local host Ollama daemon, whose
+    ``/api/tags`` and ``/api/pull`` endpoints need no OpenCode/Ollama Cloud
+    credential. A provider-qualified non-Ollama model (handled separately by
+    ``OPENCODE_NON_OLLAMA_PROVIDER_SELECTED``) and a ``:cloud`` model both
+    return ``False`` — the latter is served remotely and still requires the
+    cloud credential.
+    """
+    raw = (model or "").strip()
+    if not raw:
+        return False
+    if _opencode_model_targets_non_ollama_provider(raw):
+        return False
+    return not _is_cloud_model(raw)
+
+
+def _opencode_ollama_credentials_present(
+    environ: Mapping[str, str],
+    host_home: Path,
+) -> bool:
+    """Return whether an OpenCode/Ollama Cloud credential is visible to the worker.
+
+    Mirrors the credential-signal detection in ``_check_opencode``: OpenCode's own
+    credential store (``~/.config/opencode``), mounted ``~/.ollama`` auth files, or
+    the ``OLLAMA_API_KEY`` env. A ``:cloud`` Ollama model is served remotely and
+    needs one of these (unlike a local model, which is authless), so the
+    non-worker-reachable host-probe defer is gated on this for cloud models.
+    """
+
+    if (host_home / ".config" / "opencode").is_dir():
+        return True
+    if any((host_home / ".ollama" / filename).is_file() for filename in _OLLAMA_AUTH_FILES):
+        return True
+    return _first_present_env(environ, _OPENCODE_ENV_KEYS) is not None
+
+
+def _opencode_ollama_host_probe_deferrable(
+    model: str | None,
+    environ: Mapping[str, str],
+    host_home: Path,
+) -> bool:
+    """Return whether the worker-side Ollama daemon probe can be deferred.
+
+    Used by create/retry admission when the resolved Ollama base URL is not
+    reachable from the worker (a workspace Compose service DNS name such as
+    ``http://ollama-sidecar:11434``). The probe defers to the agent container —
+    where the sidecar daemon IS reachable — for an Ollama-served model:
+
+    - a local model is authless, so it always defers (see
+      ``_opencode_model_is_local_ollama``);
+    - a ``:cloud`` model is served remotely *through* the daemon and still needs the
+      OpenCode/Ollama Cloud credential, so it defers only once that credential is
+      visible. Without it the caller falls through to ``_check_opencode``, which
+      blocks with ``OPENCODE_OLLAMA_AUTH_MISSING`` (no host probe) — the correct
+      create-time disposition.
+
+    A provider-qualified non-Ollama model is handled by the dedicated
+    ``OPENCODE_NON_OLLAMA_PROVIDER_SELECTED`` path and never reaches here.
+    """
+
+    if _opencode_model_is_local_ollama(model):
+        return True
+    if _opencode_model_targets_non_ollama_provider(model):
+        return False
+    return _is_cloud_model(model) and _opencode_ollama_credentials_present(environ, host_home)
+
+
+def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
+    """Resolve and parse the Ollama base URL, normalizing malformed input.
+
+    Both the worker reachability classifier and the probe/pull URL builder need the
+    *same* resolution of ``AWF_OPENCODE_OLLAMA_BASE_URL`` / ``OLLAMA_HOST`` (falling
+    back to the default) and the *same* behavior for a garbled value. ``urlsplit``
+    raises ``ValueError`` for an unbalanced IPv6 literal (e.g. ``http://[::1``), and
+    its lazy ``.hostname`` / ``.port`` accessors raise for an invalid IPv6 host or a
+    non-numeric port. Force those accessors here so a malformed value normalizes to
+    the ``host.docker.internal`` default exactly once — host-reachable, never a crash
+    during readiness — instead of escaping as a ``ValueError`` from whichever caller
+    happens to touch the offending attribute first.
+    """
+
     raw = (
         environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
         or environ.get("OLLAMA_HOST")
@@ -667,7 +659,86 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
     ).strip()
     if "://" not in raw:
         raw = f"http://{raw}"
-    parts = urlsplit(raw)
+    try:
+        parts = urlsplit(raw)
+        # Trigger the lazy netloc parse so an invalid IPv6 host / non-numeric port
+        # surfaces here rather than at an arbitrary downstream attribute access.
+        _ = parts.hostname
+        _ = parts.port
+        # ``urlsplit`` accepts a hostless value (e.g. ``http://`` or ``://``) without
+        # raising; treat it like any other malformed input so it normalizes to the
+        # default rather than building a hostless ``http:///api/...`` endpoint.
+        if not parts.hostname:
+            raise ValueError("missing Ollama host")
+    except ValueError:
+        parts = urlsplit(DEFAULT_OLLAMA_OPENAI_BASE_URL)
+    return _default_ollama_port(parts)
+
+
+def _default_ollama_port(parts: SplitResult) -> SplitResult:
+    """Default a port-less authority to Ollama's daemon port (11434).
+
+    The OpenCode launcher prelude normalizes a port-less ``OLLAMA_HOST`` (a bare
+    Compose service name such as ``ollama-sidecar``, or ``localhost`` / ``0.0.0.0``)
+    to ``:11434`` before handing the agent its base URL. The worker-side probe/pull
+    URL builder must resolve the *same* daemon, so mirror that defaulting here —
+    otherwise a port-less value would probe the scheme default (port 80) while the
+    agent talks to 11434, failing or hitting the wrong daemon at create/retry
+    preflight. A value that already carries a port (or has no host, e.g. ``://``) is
+    returned unchanged.
+    """
+
+    if parts.port is not None or not parts.hostname:
+        return parts
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    userinfo = ""
+    if parts.username is not None:
+        userinfo = parts.username
+        if parts.password is not None:
+            userinfo = f"{userinfo}:{parts.password}"
+        userinfo = f"{userinfo}@"
+    return parts._replace(netloc=f"{userinfo}{host}:11434")
+
+
+def _ollama_base_url_malformed(environ: Mapping[str, str]) -> bool:
+    """Return whether an *explicitly set* Ollama base URL is unparseable.
+
+    ``_parse_ollama_base_url`` normalizes a malformed value to the
+    ``host.docker.internal`` default so readiness never crashes. That is the right
+    disposition for a blank/missing value (which resolves to the always-valid
+    default), but not for an *explicit* ``AWF_OPENCODE_OLLAMA_BASE_URL`` /
+    ``OLLAMA_HOST`` that fails to parse: the OpenCode launcher passes the explicit
+    value through to the agent verbatim, so probing/pulling the default daemon would
+    admit a workspace — and even pull a model — against a daemon the agent never
+    uses, only for the agent to fail later against the invalid URL. Surface such
+    explicit-malformed config to the admission gate so it can fail-close instead.
+
+    Mirrors ``_parse_ollama_base_url``'s resolution/parse exactly (precedence,
+    scheme defaulting, and the lazy ``hostname`` / ``port`` accessors that raise on
+    an invalid IPv6 host or non-numeric port) but reports the malformed value rather
+    than swallowing it into the default.
+    """
+
+    raw = environ.get("AWF_OPENCODE_OLLAMA_BASE_URL") or environ.get("OLLAMA_HOST")
+    if raw is None or not raw.strip():
+        return False
+    candidate = raw.strip()
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+    try:
+        parts = urlsplit(candidate)
+        _ = parts.hostname
+        _ = parts.port
+    except ValueError:
+        return True
+    # ``urlsplit`` does not raise for a hostless value (e.g. ``http://`` or ``://``),
+    # but such an explicit URL can never reach a daemon — report it malformed so
+    # admission fails closed instead of probing/pulling a hostless endpoint.
+    return not parts.hostname
+
+
+def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
+    parts = _parse_ollama_base_url(environ)
     path = parts.path.rstrip("/")
     if path.endswith("/v1"):
         path = path[: -len("/v1")]
@@ -681,225 +752,295 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
     return (primary,)
 
 
-def _ollama_probe_failure_debug(
-    *,
-    url: str,
-    status: str,
-    detail: str,
-    secrets: frozenset[str],
-    status_code: int | None = None,
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "url": _redact(url, secrets),
-        "status": status,
-        "detail": _truncate(_redact(detail, secrets)),
+# Hostnames that resolve to the host the worker runs on (Docker host gateway
+# aliases and localhost). An Ollama base URL pointing at one of these — or any
+# loopback IP — is reachable from the worker; anything else (a workspace Compose
+# service DNS name, a routable LAN IP) is not. ``0.0.0.0`` is a valid Ollama bind
+# address (``OLLAMA_HOST=0.0.0.0:11434``) that, as a *connection* target, routes
+# to the loopback just like ``localhost``; classify it reachable so a broken
+# host-bound daemon is still caught at create time rather than silently skipped
+# (``ip_address("0.0.0.0").is_loopback`` is ``False`` — the unspecified address is
+# not a loopback IP — so it would otherwise fall through to the conservative skip).
+_WORKER_HOST_REACHABLE_HOSTNAMES = frozenset(
+    {
+        "host.docker.internal",
+        "gateway.docker.internal",
+        "localhost",
+        "0.0.0.0",
     }
-    if status_code is not None:
-        payload["status_code"] = status_code
-    return payload
+)
 
 
-def _probe_ollama(
-    urls: tuple[str, ...],
-    *,
-    http_get: HttpGet,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    failures: list[str] = []
-    http_failures: list[str] = []
-    recovered_failures: list[dict[str, Any]] = []
-    exceptions: list[Exception] = []
-    for url in urls:
+def _ollama_url_host_reachable_from_worker(environ: Mapping[str, str]) -> bool:
+    """Return whether the resolved Ollama base URL is reachable from the worker.
+
+    The worker runs off ``awf_net`` and cannot reach a workspace Compose service
+    DNS name (e.g. ``http://ollama-sidecar:11434``). Mirror ``_ollama_api_urls``'s
+    URL resolution, then classify the host: the Docker host gateway aliases,
+    ``localhost``, and loopback IPs are host-reachable; any other DNS name (a
+    Compose service) or routable IP is not. A missing/blank/garbled value resolves
+    to the ``host.docker.internal`` default and is therefore host-reachable (no
+    crash). The skip is conservative: a non-host-reachable URL defers the model
+    probe to the agent container rather than risk a false ``OLLAMA_MODEL_PROBE_FAILED``.
+    """
+
+    # ``_parse_ollama_base_url`` normalizes a malformed value (unbalanced IPv6
+    # brackets, non-numeric port) to the ``host.docker.internal`` default, which is
+    # host-reachable — so a garbled URL is treated like any other garbled value
+    # (host-reachable, never a crash) without a guard here.
+    host = (_parse_ollama_base_url(environ).hostname or "").lower()
+    if not host:
+        return True
+    if host in _WORKER_HOST_REACHABLE_HOSTNAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def overlay_profile_ollama_base_url(
+    environ: Mapping[str, str],
+    profile_snapshot: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Return *environ* overlaid with the profile's agent Ollama base URL.
+
+    The OpenCode launcher derives ``AWF_OPENCODE_OLLAMA_BASE_URL`` / ``OLLAMA_HOST``
+    from the agent container environment, where a profile's ``runtime.environment``
+    value wins over the worker-env placeholder. If an Ollama probe/pull derived
+    those URLs from the worker process env alone, AWF could target a different
+    daemon than the agent reaches — admitting a workspace for a daemon the agent
+    cannot use, or recording readiness against the wrong host. Overlay the
+    profile-declared base URL so create-time admission and the executor pre-agent
+    step both probe the same daemon. A base URL declared instead as a
+    ``kind="env"``/``provider="env"`` secret lease — which the launcher merges into the
+    agent env, never appearing in ``runtime.environment`` — is mirrored here too, symmetric
+    to ``overlay_profile_provider_credentials``. A workspace without a resolved profile (or an
+    unvalidatable snapshot) falls back to *environ* unchanged.
+    """
+
+    result: dict[str, str] = dict(environ)
+    if not isinstance(profile_snapshot, Mapping):
+        return result
+    try:
+        profile = WorkspaceProfile.model_validate(dict(profile_snapshot))
+    except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
+        return result
+    profile_env = profile.runtime.environment
+    # Profile env values may carry Compose-style ``${NAME}`` placeholders that the
+    # agent container resolves via Docker Compose host-env substitution. The
+    # worker-side probe/pull does not pass through Compose, so resolve each declared
+    # value against ``environ`` here — otherwise a literal ``${OLLAMA_HOST}`` would
+    # be probed as ``http://${OLLAMA_HOST}/api/tags`` and block/fail the workspace
+    # before launch. Record the profile's ownership on *presence* in ``profile_env``
+    # (not truthiness): the launcher's agent-env merge is first-writer-wins, so a key
+    # the profile declares owns the agent's slot even when its value resolves empty —
+    # a literal empty string (``AWF_OPENCODE_OLLAMA_BASE_URL: ""``), a placeholder
+    # resolving empty, or an unset required-interpolation form
+    # (``${OLLAMA_URL:?set OLLAMA_URL}``). The required form raises when the variable
+    # is absent from ``environ``; since this overlay runs during create/retry
+    # admission before provider readiness — paths that only translate profile/
+    # readiness exceptions — an unhandled raise would escape as a 500, and the worker
+    # environ is a best-effort approximation of the agent's Compose context, so treat
+    # an unresolvable required placeholder the same as one resolving to empty: owned
+    # but empty (mask the inherited value below), never surfaced as an error.
+    declared: dict[str, str] = {}
+    owned: list[int] = []
+    runtime_owned: set[str] = set()
+    for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS):
+        if key not in profile_env:
+            continue
+        runtime_owned.add(key)
+        owned.append(index)
         try:
-            response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
-        except Exception as exc:
-            exceptions.append(exc)
-            detail = f"{type(exc).__name__}: {exc}"
-            failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
-            recovered_failures.append(
-                _ollama_probe_failure_debug(
-                    url=url,
-                    status="exception",
-                    detail=detail,
-                    secrets=secrets,
-                )
-            )
+            expanded = compose_expand_value(profile_env[key], environ=environ).strip()
+        except ComposeEnvInterpolationError:
+            expanded = ""
+        if expanded:
+            declared[key] = expanded
+    # A profile may instead supply an Ollama base URL via a ``kind="env"``/``provider="env"``
+    # secret lease (e.g. ``target="OLLAMA_HOST"``, ``ref="env/HOST_OLLAMA_URL"``), which the
+    # stack launcher merges into the agent env (``agent_environment_with_declared_secret_leases``)
+    # — it never appears in ``runtime.environment``. Mirror
+    # ``overlay_profile_provider_credentials``: resolve each such lease's host source against
+    # ``environ`` so create/retry preflight and the executor auto-pull probe the same daemon the
+    # agent reaches, not the inherited/default one. ``runtime.environment`` wins (the launcher
+    # merge is first-writer-wins), so a target already declared there is skipped. A lease whose
+    # provider is not ``env``, whose ref is unparseable, or whose host source is absent/empty is
+    # treated as undeclared (the launcher omits an optional lease and fails a required one); this
+    # best-effort overlay only surfaces — and only masks behind — a daemon URL it can resolve.
+    ollama_key_index = {key: index for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS)}
+    for secret in profile.secrets:
+        if secret.kind != "env" or secret.target not in ollama_key_index:
             continue
-        if 200 <= response.status_code < 300:
-            payload: dict[str, Any] = {"ok": True}
-            if recovered_failures:
-                payload["debug"] = {"recovered_failures": recovered_failures}
-            return payload
-        detail = response.text or f"HTTP {response.status_code}"
-        failure = f"HTTP {response.status_code}: {detail}"
-        failure_detail = f"{url}: {failure}" if len(urls) > 1 else failure
-        failures.append(failure_detail)
-        http_failures.append(failure_detail)
-        recovered_failures.append(
-            _ollama_probe_failure_debug(
-                url=url,
-                status="http_error",
-                status_code=response.status_code,
-                detail=failure,
-                secrets=secrets,
-            )
-        )
-    for logged_exc in exceptions:
-        _log_redacted_exception(
-            "provider_readiness.ollama_probe_exception",
-            logged_exc,
-            secrets,
-        )
-    if http_failures:
-        _log_redacted_terminal_failure(
-            "provider_readiness.ollama_probe_exception",
-            "; ".join(http_failures),
-            secrets,
-        )
-    return {"ok": False, "detail": _redact("; ".join(failures), secrets)}
+        if (secret.provider or "").strip().lower() != "env":
+            continue
+        if secret.target in runtime_owned:
+            continue
+        source_name = _env_secret_ref_name(secret.ref)
+        if source_name is None:
+            continue
+        value = environ.get(source_name, "").strip()
+        if not value:
+            continue
+        declared[secret.target] = value
+        index = ollama_key_index[secret.target]
+        if index not in owned:
+            owned.append(index)
+    if not owned:
+        return result
+    # The profile owns the Ollama daemon selection. ``_ollama_api_urls`` (and the
+    # OpenCode launcher) resolve the daemon from the first non-empty key in precedence
+    # order, so a higher-precedence worker-env value the profile did *not* declare
+    # would shadow the profile's chosen daemon — e.g. a profile that declares only
+    # ``OLLAMA_HOST`` while the worker env carries ``AWF_OPENCODE_OLLAMA_BASE_URL``.
+    # The compose merge masks exactly those higher-precedence keys
+    # (``_shadowing_worker_ollama_keys``), so mirror it: apply the profile's resolved
+    # values, and drop both the keys the profile owns but leaves empty and any inherited
+    # worker value above the profile's highest-precedence owned key. Otherwise an
+    # empty profile-owned slot would leave an inherited daemon in the readiness environ
+    # that the agent never reaches — admitting/pulling against the wrong daemon.
+    top = min(owned)
+    for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS):
+        if key in declared:
+            result[key] = declared[key]
+        elif index in owned or index < top:
+            result.pop(key, None)
+    return result
 
 
-def _probe_ollama_model(
-    urls: tuple[str, ...],
-    *,
-    model: str | None,
-    http_get: HttpGet,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    candidates = _ollama_model_candidates(model)
-    if not candidates:
-        return {
-            "status": "fail",
-            "reason_code": "MODEL_NOT_SELECTED",
-            "message": "No OpenCode/Ollama model was selected for launch.",
-        }
+_ENV_SECRET_REF_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-    failures: list[str] = []
-    exceptions: list[Exception] = []
-    recovered_failures: list[dict[str, Any]] = []
-    available_models: set[str] = set()
-    saw_model_response = False
-    for url in urls:
+
+def _env_secret_ref_name(ref: str | None) -> str | None:
+    """Return the host env var name a profile ``kind="env"`` secret lease reads from.
+
+    Mirrors ``node.secret_mounts`` ref parsing: an optional ``env/`` prefix is stripped
+    and the remainder must be a valid env identifier. Anything else (a path-style ref, a
+    malformed name, ``None``) yields ``None`` so the overlay treats it as unresolvable.
+    """
+
+    if ref is None:
+        return None
+    stripped = ref.strip()
+    if stripped.startswith("env/"):
+        stripped = stripped[len("env/") :]
+    if not _ENV_SECRET_REF_NAME_RE.fullmatch(stripped):
+        return None
+    return stripped
+
+
+def overlay_profile_provider_credentials(
+    environ: Mapping[str, str],
+    profile_snapshot: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Return *environ* overlaid with the profile's OpenCode provider API keys.
+
+    The non-Ollama OpenCode create-time gate (``_opencode_provider_credentials_present``)
+    detects a usable provider credential from the readiness environ, but a provider API
+    key declared solely in a profile's ``runtime.environment`` (e.g. ``OPENAI_API_KEY``)
+    reaches the *agent* container — not the worker process this admission check runs in.
+    Without this overlay such a workspace would be blocked with
+    ``OPENCODE_PROVIDER_AUTH_MISSING`` despite the credential the agent would use. The
+    OpenCode/Ollama Cloud credential (``OLLAMA_API_KEY``, ``_OPENCODE_ENV_KEYS``) is
+    overlaid for the same reason: a profile that points a ``:cloud`` Ollama model at a
+    sidecar daemon unreachable from the worker needs that key visible for the host-probe
+    defer path (``_opencode_ollama_host_probe_deferrable``); otherwise admission falls
+    through to ``_check_opencode`` and blocks with ``OPENCODE_OLLAMA_AUTH_MISSING``.
+    Symmetric to ``overlay_profile_ollama_base_url``: bring the profile-declared provider
+    key into the environ so create/retry admission sees the same credential the agent
+    reaches. Compose-style ``${NAME}`` placeholders are resolved against *environ*; a
+    value resolving empty or to an unset required placeholder is treated as undeclared
+    (the worker env is a best-effort approximation of the agent's Compose context).
+    A profile may instead supply the same credential as a ``kind="env"`` secret lease
+    (e.g. ``target="OPENAI_API_KEY"``, ``ref="env/HOST_OPENAI_KEY"``), which the launcher
+    merges into the agent env; such leases are reflected here too by resolving each lease's
+    host source against *environ* (``runtime.environment`` wins on conflict).
+    A workspace without a resolved profile falls back to *environ* unchanged.
+    """
+
+    result: dict[str, str] = dict(environ)
+    if not isinstance(profile_snapshot, Mapping):
+        return result
+    try:
+        profile = WorkspaceProfile.model_validate(dict(profile_snapshot))
+    except ValidationError:  # pragma: no cover - persisted snapshots are pre-validated
+        return result
+    profile_env = profile.runtime.environment
+    candidate_keys = (
+        *(key for keys in _OPENCODE_PROVIDER_ENV_KEYS.values() for key in keys),
+        *_OPENCODE_ENV_KEYS,
+    )
+    runtime_declared: set[str] = set()
+    for key in candidate_keys:
+        if key not in profile_env:
+            continue
+        raw = profile_env[key]
+        # ``runtime.environment`` wins over secret leases in the launcher's agent-env
+        # merge (``merge_agent_environment`` is first-writer-wins), so a key declared
+        # here owns the agent's slot even when its value cannot be resolved from the
+        # worker environ — an unset required placeholder (``${MISSING:?set}``), one
+        # resolving empty, or a literal empty string (``OPENAI_API_KEY: ""``). The
+        # launcher keeps that empty/failing runtime value (the key is *present* in the
+        # base env, so the skip-existing rule drops the lease addition), so record the
+        # declaration on *presence* in ``profile_env`` rather than truthiness of the
+        # value — and *before* attempting expansion. Otherwise the lease loop below
+        # would overlay a host credential the launcher then drops in favour of the empty
+        # runtime slot, admitting a workspace whose agent never receives a usable credential.
+        runtime_declared.add(key)
         try:
-            response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
-        except Exception as exc:
-            exceptions.append(exc)
-            detail = f"{type(exc).__name__}: {exc}"
-            failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
-            recovered_failures.append(
-                _ollama_probe_failure_debug(
-                    url=url,
-                    status="exception",
-                    detail=detail,
-                    secrets=secrets,
-                )
-            )
+            expanded = compose_expand_value(raw, environ=environ).strip()
+        except ComposeEnvInterpolationError:
+            expanded = ""
+        if expanded:
+            result[key] = expanded
+        else:
+            # The profile owns this slot but its declared value resolves empty (a literal
+            # empty string, an unset required placeholder, or one resolving empty). The
+            # launcher renders only the profile value into the agent, so an inherited
+            # worker/service value of the same key — copied from ``environ`` into ``result``
+            # above — never reaches the agent. Drop it so the credential gate does not pass
+            # on a credential the agent will not receive (or a placeholder Compose cannot
+            # resolve).
+            result.pop(key, None)
+    # A provider credential may instead be declared as a profile ``kind="env"`` secret
+    # lease (e.g. ``target="OPENAI_API_KEY"``, ``ref="env/HOST_OPENAI_KEY"``). The stack
+    # launcher merges the resolved lease environment into the agent env
+    # (``agent_environment_with_declared_secret_leases``), so the agent receives that
+    # credential — but it never appears in ``runtime.environment``. Reflect such leases
+    # here too, resolving each lease's host source against ``environ``, so admission does
+    # not block the workspace with ``OPENCODE_PROVIDER_AUTH_MISSING`` (or, for
+    # ``OLLAMA_API_KEY``, ``OPENCODE_OLLAMA_AUTH_MISSING``) before the lease is resolved.
+    # ``runtime.environment`` wins (the launcher merge is first-writer-wins), so a lease
+    # whose target is declared in ``runtime.environment`` is skipped — even when that
+    # runtime declaration could not be resolved here — because the launcher keeps the
+    # runtime value and drops the lease. A lease whose host source is absent/empty is also
+    # treated as undeclared: the launcher omits an optional lease and fails a required one,
+    # but this best-effort overlay only surfaces a credential it can actually resolve from
+    # the worker environ.
+    candidate_set = frozenset(candidate_keys)
+    for secret in profile.secrets:
+        if secret.kind != "env" or secret.target not in candidate_set:
             continue
-        if not 200 <= response.status_code < 300:
-            detail = response.text or f"HTTP {response.status_code}"
-            failure = f"HTTP {response.status_code}: {detail}"
-            failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
-            recovered_failures.append(
-                _ollama_probe_failure_debug(
-                    url=url,
-                    status="http_error",
-                    status_code=response.status_code,
-                    detail=failure,
-                    secrets=secrets,
-                )
-            )
+        # The launcher only merges a ``kind="env"`` lease into the agent env when its
+        # provider routes through ``LocalSecretLeaseMountResolver``'s env path —
+        # ``provider: env`` (``node.secret_mounts._ENV_PROVIDERS``). A lease that omits
+        # ``provider`` is skipped (``_normalized_provider`` returns ``None``) and a
+        # non-env provider routes to a different handler (or is rejected), so neither
+        # injects this env key into the agent. Gate the overlay on the same ``provider:
+        # env`` semantics — otherwise admission would pass an ``openai``/... preflight on
+        # a host credential the agent container never receives.
+        if (secret.provider or "").strip().lower() != "env":
             continue
-        try:
-            payload = json.loads(response.text or "{}")
-        except json.JSONDecodeError as exc:
-            failures.append(
-                f"{url}: invalid JSON from Ollama /api/tags: {exc}"
-                if len(urls) > 1
-                else f"invalid JSON from Ollama /api/tags: {exc}"
-            )
+        if secret.target in runtime_declared:
             continue
-
-        available = _ollama_model_names(payload)
-        if candidates & available:
-            result: dict[str, Any] = {
-                "status": "ok",
-                "reason_code": "OLLAMA_MODEL_AVAILABLE",
-            }
-            if recovered_failures:
-                result["debug"] = {"recovered_failures": recovered_failures}
-            return result
-        saw_model_response = True
-        available_models.update(available)
-
-    if saw_model_response:
-        _log_ollama_model_probe_exceptions(exceptions, secrets)
-        detail = f"selected={model}; available_count={len(available_models)}"
-        if failures:
-            detail = f"{detail}; probe_failures={'; '.join(failures)}"
-        return {
-            "status": "fail",
-            "reason_code": "OLLAMA_MODEL_NOT_AVAILABLE",
-            "message": "Selected OpenCode/Ollama model is not available from Ollama /api/tags.",
-            "detail": _truncate(_redact(detail, secrets)),
-        }
-
-    _log_ollama_model_probe_exceptions(exceptions, secrets)
-
-    return {
-        "status": "fail",
-        "reason_code": "OLLAMA_MODEL_PROBE_FAILED",
-        "message": "Ollama model availability probe did not complete successfully.",
-        "detail": _truncate(_redact("; ".join(failures), secrets)),
-    }
-
-
-def _log_ollama_model_probe_exceptions(
-    exceptions: Sequence[Exception],
-    secrets: frozenset[str],
-) -> None:
-    for logged_exc in exceptions:
-        _log_redacted_exception(
-            "provider_readiness.ollama_model_probe_exception",
-            logged_exc,
-            secrets,
-        )
-
-
-def _ollama_model_candidates(model: str | None) -> set[str]:
-    if model is None:
-        return set()
-    raw = model.strip()
-    if not raw:
-        return set()
-    candidates = {raw}
-    model_name = raw
-    if "/" in raw:
-        provider, remainder = raw.split("/", 1)
-        if provider == "ollama" and remainder:
-            model_name = remainder
-            candidates.add(model_name)
-    if ":" not in model_name:
-        candidates.add(f"{model_name}:latest")
-    return candidates
-
-
-def _ollama_model_names(payload: object) -> set[str]:
-    if not isinstance(payload, Mapping):
-        return set()
-    raw_models = payload.get("models")
-    if not isinstance(raw_models, list):
-        return set()
-    names: set[str] = set()
-    for item in raw_models:
-        if isinstance(item, str) and item:
-            names.add(item)
+        source_name = _env_secret_ref_name(secret.ref)
+        if source_name is None:
             continue
-        if not isinstance(item, Mapping):
-            continue
-        name = item.get("name") or item.get("model")
-        if isinstance(name, str) and name:
-            names.add(name)
-    return names
+        value = environ.get(source_name, "").strip()
+        if value:
+            result[secret.target] = value
+    return result
 
 
 def _ordered_names(providers: set[ProviderName]) -> list[str]:
@@ -927,6 +1068,23 @@ def _run_subprocess(
 
 def _http_get(url: str, *, timeout: float) -> HttpResponseLike:
     return httpx.get(url, timeout=timeout)
+
+
+def _http_post_stream(
+    url: str,
+    *,
+    json: Mapping[str, Any],
+    timeout: float,
+) -> AbstractContextManager[HttpStreamResponseLike]:
+    # Thin wrapper over httpx's streaming POST, mirroring ``_http_get``. The
+    # body is exercised through the injectable seam in tests; the live default
+    # is a trivial passthrough.
+    return httpx.stream(  # pragma: no cover - thin httpx passthrough
+        "POST",
+        url,
+        json=dict(json),
+        timeout=timeout,
+    )
 
 
 def _check_docker_provider(
@@ -1019,22 +1177,266 @@ def _check_docker_provider(
     )
 
 
+def _check_grok(
+    *,
+    environ: Mapping[str, str],
+    host_home: Path,
+    strict: bool,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    auth_json = host_home / ".grok" / "auth.json"
+    if auth_json.is_file():
+        file_sources = [
+            _credential_source(
+                type_="path",
+                signal="~/.grok/auth.json",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+        ]
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="GROK_FILE_AUTH_PRESENT",
+            message="Grok Build auth files are visible for per-workspace isolated copies.",
+            signals=[source["signal"] for source in file_sources],
+            secrets=secrets,
+            credential_sources=file_sources,
+            credential_scope="isolated_workspace",
+            isolation="per_workspace_copy",
+            warnings=[],
+        )
+
+    signal = _first_present_env(environ, _XAI_ENV_KEYS)
+    if signal is not None:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="GROK_ENV_AUTH_PRESENT",
+            message="Grok Build auth is visible through service environment variables.",
+            signals=[signal],
+            secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="env",
+                    signal=signal,
+                    credential_scope="static_env_token",
+                    isolation="service_env",
+                )
+            ],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=_static_env_warnings(
+                provider_label="Grok Build",
+                signals=[signal],
+            ),
+        )
+
+    return _provider_result(
+        ok=False,
+        strict=strict,
+        reason="GROK_AUTH_MISSING",
+        message="No Grok Build auth signal was visible. Mount ~/.grok or set XAI_API_KEY.",
+        secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
+    )
+
+
+def _check_opencode(
+    *,
+    environ: Mapping[str, str],
+    host_home: Path,
+    strict: bool,
+    http_get: HttpGet,
+    secrets: frozenset[str],
+    model: str | None = None,
+) -> dict[str, Any]:
+    opencode_config = (host_home / ".config" / "opencode").is_dir()
+    ollama_files = [
+        filename for filename in _OLLAMA_AUTH_FILES if (host_home / ".ollama" / filename).is_file()
+    ]
+    env_signal = _first_present_env(environ, _OPENCODE_ENV_KEYS)
+    signals: list[str] = []
+    credential_sources: list[dict[str, str]] = []
+    if opencode_config:
+        signals.append("~/.config/opencode")
+        credential_sources.append(
+            _credential_source(
+                type_="path",
+                signal="~/.config/opencode",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+        )
+    if ollama_files:
+        signals.append("~/.ollama auth files")
+        credential_sources.extend(
+            _credential_source(
+                type_="path",
+                signal=f"~/.ollama/{filename}",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+            for filename in ollama_files
+        )
+    if env_signal is not None:
+        signals.append(env_signal)
+        credential_sources.append(
+            _credential_source(
+                type_="env",
+                signal=env_signal,
+                credential_scope="static_env_token",
+                isolation="service_env",
+            )
+        )
+
+    if not signals:
+        # Local-Ollama authless carve-out (symmetric to
+        # OPENCODE_NON_OLLAMA_PROVIDER_SELECTED): a local ``ollama/``-prefixed
+        # model (NOT a ``:cloud`` model) is served by the host Ollama daemon,
+        # whose ``/api/tags`` and ``/api/pull`` endpoints need no OpenCode/Ollama
+        # Cloud credential. When that daemon is reachable, waive the credential
+        # requirement so ``_selected_launch_probe`` can report a pull-pending
+        # disposition and the executor pre-agent step can auto-pull. The waiver
+        # is conditional on daemon reachability: a ``:cloud`` model still needs
+        # the cloud credential, and an unreachable daemon with no credential
+        # still blocks with OPENCODE_OLLAMA_AUTH_MISSING below.
+        if _opencode_model_is_local_ollama(model):
+            version_urls = _ollama_version_urls(environ)
+            local_probe = _probe_ollama(version_urls, http_get=http_get, secrets=secrets)
+            if local_probe["ok"]:
+                return _provider_result(
+                    ok=True,
+                    strict=strict,
+                    reason="OPENCODE_OLLAMA_LOCAL_AUTHLESS",
+                    message=(
+                        "No OpenCode/Ollama Cloud credential is required: the selected "
+                        "local Ollama model is served by the reachable host daemon."
+                    ),
+                    signals=["OLLAMA_HOST_REACHABLE"],
+                    secrets=secrets,
+                    credential_scope="not_observed",
+                    isolation="none",
+                    warnings=[],
+                )
+        return _provider_result(
+            ok=False,
+            strict=strict,
+            reason="OPENCODE_OLLAMA_AUTH_MISSING",
+            message=(
+                "No OpenCode/Ollama auth signal was visible. Mount ~/.config/opencode, "
+                "mount small ~/.ollama auth files, or set OLLAMA_API_KEY."
+            ),
+            secrets=secrets,
+            credential_scope="not_observed",
+            isolation="none",
+        )
+
+    version_urls = _ollama_version_urls(environ)
+    probe = _probe_ollama(version_urls, http_get=http_get, secrets=secrets)
+    if not probe["ok"]:
+        probe_detail = probe.get("detail")
+        return _provider_result(
+            ok=False,
+            strict=strict,
+            reason="OLLAMA_HOST_UNREACHABLE",
+            message=(
+                "OpenCode/Ollama auth is visible, but the Ollama host did not answer "
+                "a cheap /api/version readiness probe."
+            ),
+            detail=probe_detail if isinstance(probe_detail, str) else None,
+            signals=[*signals, "ollama /api/version"],
+            secrets=secrets,
+            credential_sources=credential_sources,
+            credential_scope=_primary_credential_scope(credential_sources),
+            isolation=_primary_isolation(credential_sources),
+            warnings=_static_env_warnings(
+                provider_label="OpenCode/Ollama",
+                signals=[env_signal]
+                if env_signal is not None and not (opencode_config or ollama_files)
+                else [],
+            ),
+        )
+
+    # Keep successful readiness payloads schema-stable. `_probe_ollama` retains
+    # recovered candidate failures under debug for internal diagnostics; only
+    # terminal probe failures become operator-facing provider detail.
+    reason = "OPENCODE_FILE_AUTH_PRESENT"
+    if not opencode_config and ollama_files:
+        reason = "OLLAMA_FILE_AUTH_PRESENT"
+    elif not opencode_config and env_signal is not None:
+        reason = "OLLAMA_ENV_AUTH_PRESENT"
+
+    return _provider_result(
+        ok=True,
+        strict=strict,
+        reason=reason,
+        message="OpenCode/Ollama auth is visible and the Ollama host is reachable.",
+        signals=[*signals, "OLLAMA_HOST_REACHABLE"],
+        secrets=secrets,
+        credential_sources=credential_sources,
+        credential_scope=_primary_credential_scope(credential_sources),
+        isolation=_primary_isolation(credential_sources),
+        warnings=_static_env_warnings(
+            provider_label="OpenCode/Ollama",
+            signals=[env_signal]
+            if env_signal is not None and not (opencode_config or ollama_files)
+            else [],
+        ),
+    )
+
+
 from awf.service.provider_readiness import (  # noqa: E402
     _CODEX_AUTH_FILES,
     _GITHUB_TOKEN_ENV_KEYS,
-    _HTTP_TIMEOUT_SECONDS,
+    _OLLAMA_AUTH_FILES,
+    _OPENCODE_ENV_KEYS,
     _PROVIDER_PROBE_TIMEOUT_SECONDS,
-    _REDACTION,
-    _TRACEBACK_LOG_LIMIT,
+    _XAI_ENV_KEYS,
     KNOWN_SECRET_ENV_KEYS,
     PROVIDER_NAMES,
-    TOKEN_RE,
-    URL_CREDENTIAL_RE,
     CompletedProcessLike,
     HttpGet,
     HttpResponseLike,
+    HttpStreamResponseLike,
     ProviderName,
     SubprocessRun,
-    _log,
-    _RedactionSegment,
+    _opencode_model_targets_non_ollama_provider,
+)
+
+# Re-exported so existing call sites (``_check_opencode`` below) and tests keep
+# reaching the Ollama probe/pull helpers via the ``provider_readiness_helpers``
+# namespace after they were extracted into ``provider_readiness_ollama`` to satisfy
+# the maintainability line limit.
+from awf.service.provider_readiness_ollama import (  # noqa: E402, F401
+    _consume_pull_stream,
+    _log_ollama_model_probe_exceptions,
+    _ollama_model_candidates,
+    _ollama_model_names,
+    _ollama_probe_failure_debug,
+    _probe_ollama,
+    _probe_ollama_model,
+    _pull_ollama_model,
+    ensure_ollama_model_available,
+)
+
+# Re-exported so existing call sites (and tests) keep reaching the redaction
+# helpers via the ``provider_readiness_helpers`` namespace after they were
+# extracted into ``provider_readiness_redaction`` to satisfy the maintainability
+# line limit.
+from awf.service.provider_readiness_redaction import (  # noqa: E402, F401
+    _log_redacted_exception,
+    _log_redacted_terminal_failure,
+    _merge_literal_redaction_segments,
+    _redact,
+    _redact_with_redaction_parts,
+    _redaction_parts,
+    _render_redaction_segments,
+    _replace_literal_redaction_spans,
+    _replace_rendered_redaction_spans,
+    _replace_token_redaction_spans,
+    _replace_url_credential_redaction_spans,
+    _slice_redaction_segments,
+    _truncate,
 )

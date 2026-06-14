@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -49,6 +50,8 @@ from awf.service.node_identity import effective_worker_node_id
 from awf.service.provider_readiness import (
     HttpGet,
     SubprocessRun,
+    overlay_profile_ollama_base_url,
+    overlay_profile_provider_credentials,
     provider_readiness_preflight_from_task_policy,
     selected_provider_readiness_preflight,
 )
@@ -124,13 +127,29 @@ async def create_workspace_row(
             resolved_profile = _resolved
     requested_profile = cast(dict[str, Any] | None, requested_profile)
     resolved_profile = cast(dict[str, Any] | None, resolved_profile)
+    # Overlay the resolved profile's Ollama base URL onto the readiness environ so
+    # create-time admission probes the same daemon the executor's pre-agent step
+    # targets (which derives its URLs from the same profile env). Without this, an
+    # OpenCode/Ollama profile pointing at a sidecar daemon would be admitted (or
+    # blocked) against the worker's daemon — recording readiness against the wrong
+    # host. A workspace without a resolved profile falls back to the worker env.
+    # Also overlay any profile-declared provider API key (e.g. OPENAI_API_KEY) the
+    # agent container would receive, so the non-Ollama create-time credential gate
+    # does not block a workspace whose credential lives only in the profile env.
+    preflight_environ = overlay_profile_provider_credentials(
+        overlay_profile_ollama_base_url(
+            provider_environ if provider_environ is not None else os.environ,
+            resolved_profile,
+        ),
+        resolved_profile,
+    )
     preflight = await _selected_provider_preflight_for_task_async(
         resolved_settings,
         agent=payload.task.agent,
         task_policy=base_task_policy,
         override=payload.preflight.provider_readiness_override,
         override_reason=payload.preflight.provider_readiness_override_reason,
-        provider_environ=provider_environ,
+        provider_environ=preflight_environ,
         run_subprocess=run_subprocess,
         http_get=http_get,
     )

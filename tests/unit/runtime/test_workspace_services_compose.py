@@ -210,6 +210,47 @@ def test_github_token_placeholder_preserves_profile_supplied_agent_env() -> None
 
 
 @pytest.mark.unit
+def test_profile_ollama_host_suppresses_worker_base_url_placeholder() -> None:
+    # The profile owns the daemon by declaring only the lower-precedence
+    # OLLAMA_HOST. A stale higher-precedence AWF_OPENCODE_OLLAMA_BASE_URL in the
+    # worker env must NOT be injected, or the agent's OpenCode launcher would
+    # talk to a different daemon than AWF's preflight readied.
+    env = agent_environment_with_legacy_host_auth(
+        (("OLLAMA_HOST", "http://ollama.profile:11434"),),
+        host_env={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://stale.worker:11434/v1"},
+    )
+
+    assert env == (("OLLAMA_HOST", "http://ollama.profile:11434"),)
+
+
+@pytest.mark.unit
+def test_profile_base_url_still_allows_worker_ollama_host_placeholder() -> None:
+    # The profile declares the highest-precedence key; the lower-precedence
+    # OLLAMA_HOST cannot shadow it, so injecting the worker value is harmless.
+    env = agent_environment_with_legacy_host_auth(
+        (("AWF_OPENCODE_OLLAMA_BASE_URL", "http://ollama.profile:11434/v1"),),
+        host_env={"OLLAMA_HOST": "http://worker:11434"},
+    )
+
+    assert env == (
+        ("AWF_OPENCODE_OLLAMA_BASE_URL", "http://ollama.profile:11434/v1"),
+        ("OLLAMA_HOST", "${OLLAMA_HOST}"),
+    )
+
+
+@pytest.mark.unit
+def test_worker_ollama_base_url_injected_when_profile_declares_none() -> None:
+    # No profile-declared Ollama key — the worker base URL flows through as a
+    # placeholder unchanged (the pre-existing behavior).
+    env = agent_environment_with_legacy_host_auth(
+        (),
+        host_env={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker:11434/v1"},
+    )
+
+    assert env == (("AWF_OPENCODE_OLLAMA_BASE_URL", "${AWF_OPENCODE_OLLAMA_BASE_URL}"),)
+
+
+@pytest.mark.unit
 def test_opencode_bash_timeout_env_reaches_agent_as_placeholder() -> None:
     env = agent_environment_with_legacy_host_auth(
         (),

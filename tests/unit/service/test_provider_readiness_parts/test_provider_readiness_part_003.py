@@ -13,6 +13,7 @@ import pytest
 
 import awf.service.provider_readiness as provider_readiness
 import awf.service.provider_readiness_helpers as provider_readiness_helpers
+import awf.service.provider_readiness_provider_checks as provider_readiness_provider_checks
 from awf.service.provider_readiness import collect_agent_readiness
 
 from .test_provider_readiness_part_001 import (
@@ -107,11 +108,11 @@ def test_provider_readiness_codex_directory_sources_include_rules_and_directory(
     codex_home = home / ".codex"
     (codex_home / "rules").mkdir(parents=True)
 
-    rule_sources = provider_readiness._codex_file_sources(home)
+    rule_sources = provider_readiness_helpers._codex_file_sources(home)
     assert [source["signal"] for source in rule_sources] == ["~/.codex/rules"]
 
     (codex_home / "rules").rmdir()
-    directory_sources = provider_readiness._codex_file_sources(home)
+    directory_sources = provider_readiness_helpers._codex_file_sources(home)
     assert [source["signal"] for source in directory_sources] == ["~/.codex"]
 
 
@@ -142,7 +143,9 @@ def test_provider_readiness_existing_file_providers_report_credential_scope(
     # Pin the Claude isolation posture so this assertion does not depend on
     # whether the test host happens to support overlayfs + CAP_SYS_ADMIN.
     monkeypatch.setattr(
-        provider_readiness, "claude_auth_isolation_label", lambda **_: "per_workspace_copy"
+        provider_readiness_provider_checks,
+        "claude_auth_isolation_label",
+        lambda **_: "per_workspace_copy",
     )
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)

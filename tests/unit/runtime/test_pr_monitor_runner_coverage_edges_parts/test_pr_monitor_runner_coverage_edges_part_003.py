@@ -10,7 +10,7 @@ import structlog
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
@@ -38,9 +38,6 @@ from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
 from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
-from awf.runtime.pr_monitor_runner.helpers import (
-    _target_reconcile_failure_payload,
-)
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
 )
@@ -51,7 +48,6 @@ from awf.runtime.pr_monitor_runner.types import (
 from awf.service.alembic_resolver import AlembicResolveResult, AlembicResolveStatus
 from awf.service.merge_queue import MergeQueueBlocker
 from awf.service.target_branch_monitor import (
-    TargetBranchMonitorError,
     TargetBranchMonitorResult,
     TargetBranchMonitorStatus,
 )
@@ -294,141 +290,6 @@ async def _force_workspace_status(
 
 
 @pytest.mark.unit
-async def test_target_branch_reconcile_failure_reuses_exception_payload(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-
-    class _CountingResultError(Exception):
-        def __init__(self) -> None:
-            super().__init__("target branch locked " + ("x" * 1200))
-            self.result_accesses = 0
-            self._result = CommandResult(
-                returncode=128,
-                stdout="stdout " + ("o" * 1200),
-                stderr="stderr " + ("e" * 1200),
-                reason_code="GIT_FAILED",
-            )
-
-        @property
-        def result(self) -> CommandResult:
-            self.result_accesses += 1
-            return self._result
-
-    failure = _CountingResultError()
-
-    async def failing_reconciler(*, repo_url: str, branch: str, workspace_id: str) -> object:
-        del repo_url, branch, workspace_id
-        raise failure
-
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        post_merge_target_reconciler=failing_reconciler,
-    )
-
-    with structlog.testing.capture_logs() as captured:
-        await runner._reconcile_target_branch_after_merge(
-            workspace_id=workspace_id,
-            repo_url="git@github.com:dimileeh/aira-web.git",
-            base_branch="development",
-        )
-
-    failure_log = next(
-        event
-        for event in captured
-        if event.get("event") == "monitor.target_branch_reconcile_failed"
-    )
-    assert failure.result_accesses == 1
-    assert len(failure_log["error"]) == 500
-    assert len(failure_log["stderr"]) == 500
-    assert len(failure_log["stdout"]) == 500
-
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(workspace_id)
-        assert ws is not None
-        event_payload = ws.events[-1].payload
-        assert len(event_payload["error"]) == 1000
-        assert len(event_payload["stderr"]) == 1000
-        assert len(event_payload["stdout"]) == 1000
-
-
-@pytest.mark.unit
-def test_target_reconcile_failure_payload_uses_command_error_contract() -> None:
-    result = CommandResult(
-        returncode=128,
-        stdout="fatal stdout",
-        stderr="fatal stderr",
-        reason_code="GIT_FAILED",
-    )
-    exc = TargetBranchMonitorError(
-        operation="target_branch.git_fetch",
-        result=result,
-    )
-    exc.target_reconcile_payload = lambda: {  # type: ignore[attr-defined]
-        "status": "committed",
-        "resolver_results": [{"status": "resolved"}],
-        "commit_sha": "abc123",
-        "pushed": True,
-    }
-
-    payload = _target_reconcile_failure_payload(exc, error_limit=100)
-
-    assert payload["status"] == "failed"
-    assert "target_reconcile_status" not in payload
-    assert payload["resolver_results"] == []
-    assert payload["commit_sha"] is None
-    assert payload["pushed"] is False
-    assert payload["operation"] == "target_branch.git_fetch"
-    assert payload["returncode"] == 128
-    assert payload["command_reason_code"] == "GIT_FAILED"
-    assert payload["stderr"] == "fatal stderr"
-    assert payload["stdout"] == "fatal stdout"
-
-
-@pytest.mark.unit
-async def test_target_branch_reconcile_success_appends_payload_event(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    workspace_id = await seed_monitoring_workspace(factory)
-
-    async def reconciler(*, repo_url: str, branch: str, workspace_id: str) -> object:
-        return {
-            "status": "TARGET_BRANCH_FAST_FORWARDED",
-            "repo_url": repo_url,
-            "branch": branch,
-            "workspace_id": workspace_id,
-        }
-
-    runner = make_runner(
-        factory=factory,
-        cmd=FakeCommandRunner(),
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-        post_merge_target_reconciler=reconciler,
-    )
-
-    await runner._reconcile_target_branch_after_merge(
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        base_branch="development",
-    )
-
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(workspace_id)
-        assert ws is not None
-        assert ws.events[-1].event_type == "target_branch.reconciled"
-        assert ws.events[-1].reason_code == "TARGET_BRANCH_FAST_FORWARDED"
-        assert ws.events[-1].payload["branch"] == "development"
-
-
-@pytest.mark.unit
 async def test_target_branch_reconcile_event_preserves_resolver_operator_details(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -577,25 +438,49 @@ async def test_dirty_worktree_helper_returns_false_for_non_commit_cases(
     missing_result, missing_calls = await run_case(workspace_exists=False, queued=[])
     status_result, status_calls = await run_case(queued=[(1, "", "status failed")])
     clean_result, clean_calls = await run_case(queued=[(0, "", "")])
-    add_result, add_calls = await run_case(queued=[(0, " M a.py\n", ""), (1, "", "add failed")])
+    # Both the initial dirty check and the later staging scan run with
+    # ``--untracked-files=all`` so untracked agent-runtime memory is excluded
+    # before any commit-side effects and before staging.
+    add_result, add_calls = await run_case(
+        queued=[(0, " M a.py\n", ""), (0, " M a.py\n", ""), (1, "", "add failed")]
+    )
+    stage_status_result, stage_status_calls = await run_case(
+        queued=[(0, " M a.py\n", ""), (1, "", "stage status failed")]
+    )
     cached_result, cached_calls = await run_case(
-        queued=[(0, " M a.py\n", ""), (0, "", ""), (0, "", "")]
+        queued=[(0, " M a.py\n", ""), (0, " M a.py\n", ""), (0, "", ""), (0, "", "")]
     )
     commit_result, commit_calls = await run_case(
-        queued=[(0, " M a.py\n", ""), (0, "", ""), (1, "", ""), (1, "", "commit failed")]
+        queued=[
+            (0, " M a.py\n", ""),
+            (0, " M a.py\n", ""),
+            (0, "", ""),
+            (1, "", ""),
+            (1, "", "commit failed"),
+        ]
     )
 
     assert missing_result is False
     assert missing_calls == []
     assert status_result is False
-    assert [args[-2:] for args in status_calls] == [["status", "--porcelain"]]
+    assert [args[-3:] for args in status_calls] == [
+        ["status", "--porcelain", "--untracked-files=all"]
+    ]
     assert clean_result is False
-    assert [args[-2:] for args in clean_calls] == [["status", "--porcelain"]]
+    assert [args[-3:] for args in clean_calls] == [
+        ["status", "--porcelain", "--untracked-files=all"]
+    ]
     assert add_result is False
-    assert [args[-2:] for args in add_calls] == [["status", "--porcelain"], ["add", "-A"]]
+    assert add_calls[0][-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert add_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert "add" in add_calls[2] and "a.py" in add_calls[2]
+    assert stage_status_result is False
+    assert stage_status_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
     assert cached_result is False
-    assert [args[-2:] for args in cached_calls[:2]] == [["status", "--porcelain"], ["add", "-A"]]
-    assert cached_calls[2][-3:] == ["diff", "--cached", "--quiet"]
+    assert cached_calls[0][-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert cached_calls[1][-3:] == ["status", "--porcelain", "--untracked-files=all"]
+    assert "add" in cached_calls[2]
+    assert cached_calls[3][-3:] == ["diff", "--cached", "--quiet"]
     assert commit_result is False
     assert commit_calls[-1][-3:] == ["commit", "-m", "fix: dirty"]
 
@@ -610,7 +495,8 @@ async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)  # git add
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
     cmd.queue_result(returncode=0)  # git commit
@@ -648,7 +534,7 @@ async def test_commit_dirty_worktree_repairs_runtime_ownership_around_commit(
     )
 
     assert result is True
-    assert repair_call_lengths == [1, 4]
+    assert repair_call_lengths == [1, 5]
 
 
 @pytest.mark.unit
@@ -669,7 +555,8 @@ async def test_commit_dirty_worktree_restages_precommit_autofix_and_retries_comm
         f"Fixing {fixed_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)  # initial git add -A
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -746,7 +633,8 @@ async def test_commit_dirty_worktree_autofix_retry_still_fails_returns_false(
         f"Fixing {fixed_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -810,7 +698,8 @@ async def test_commit_dirty_worktree_does_not_retry_unowned_autofix_dirty_paths(
         f"Fixing {fixed_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -879,7 +768,8 @@ async def test_commit_dirty_worktree_does_not_retry_unknown_autofix_hook(
         f"Fixing {fixed_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=f" M {fixed_path}\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -941,7 +831,8 @@ async def test_commit_dirty_worktree_logs_commit_stderr_when_failed_commit_repai
     worktree.mkdir(parents=True)
     commit_stderr = "fatal: unable to create commit\n" + ("detail " * 100)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=1, stderr=commit_stderr)
@@ -1003,7 +894,8 @@ async def test_commit_dirty_worktree_logs_commit_when_post_commit_ownership_repa
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --porcelain
+    cmd.queue_result(returncode=0, stdout=" M pyproject.toml\n")  # status --untracked-files=all
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=1)
     cmd.queue_result(returncode=0)

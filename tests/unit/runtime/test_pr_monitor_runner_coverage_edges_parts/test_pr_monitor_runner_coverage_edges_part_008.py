@@ -120,7 +120,9 @@ async def test_commit_dirty_worktree_uses_refreshed_paths_for_protected_repair_a
         f"Fixing {repaired_path}\n"
     )
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f" M {initial_path}\n")
+    cmd.queue_result(returncode=0, stdout=f" M {initial_path}\n")  # status --porcelain
+    # status --untracked-files=all enumerates the post-repair worktree before staging.
+    cmd.queue_result(returncode=0, stdout=f" M {repaired_path}\n")
     cmd.queue_result(returncode=0)  # initial git add -A after protected-scope repair
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
     cmd.queue_result(returncode=1, stderr=hook_stderr)
@@ -176,6 +178,93 @@ async def test_commit_dirty_worktree_uses_refreshed_paths_for_protected_repair_a
         ["commit", "-m", "fix: repair protected scope"],
     ]
     assert any(call.args[-3:] == ["add", "--", repaired_path] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_commit_dirty_worktree_excludes_agent_memory_from_autofix_retry_scope(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-repair autofix retry scope must drop untracked agent-runtime memory.
+
+    Regression for PR #577 review thread PRRT_kwDOSJAM6s6JXxXY: after a
+    protected-scope repair the commit path must scope the pre-commit autofix
+    retry (``operation_dirty_paths``) to exactly what it staged — the
+    leaf-enumerated, agent-runtime-filtered ``stage_paths`` — so an untracked
+    ``.claude/agent-memory/`` leftover never widens the retry's in-scope check.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    repaired_path = "src/awf/example.py"
+    memory_path = ".claude/agent-memory/note.md"
+    hook_stderr = (
+        "fix end of files................................................Failed\n"
+        "- hook id: end-of-file-fixer\n"
+        "- exit code: 1\n"
+        "- files were modified by this hook\n\n"
+        f"Fixing {repaired_path}\n"
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")  # initial dirty check
+    # Post-repair stage status enumerates the repaired file plus untracked memory.
+    cmd.queue_result(returncode=0, stdout=f" M {repaired_path}\n?? {memory_path}\n")
+    cmd.queue_result(returncode=0)  # git add -A of the staged repaired file
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=1, stderr=hook_stderr)  # git commit (hook autofix failure)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_protected_scope_changes_before_commit(**kwargs: object) -> CommandResult:
+        del kwargs
+        return CommandResult(returncode=0, stdout=f" M {repaired_path}\n", stderr="")
+
+    async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+        del kwargs
+        return True
+
+    captured_scope: list[tuple[str, ...]] = []
+
+    async def _capture_retry(
+        *, operation_dirty_paths: object, **kwargs: object
+    ) -> tuple[CommandResult, tuple[str, ...]]:
+        del kwargs
+        captured_scope.append(tuple(operation_dirty_paths))  # type: ignore[arg-type]
+        return CommandResult(returncode=0, stdout="", stderr=""), (repaired_path,)
+
+    monkeypatch.setattr(
+        runner,
+        "_repair_protected_scope_changes_before_commit",
+        _repair_protected_scope_changes_before_commit,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "_retry_monitor_precommit_autofix_commit_once",
+        _capture_retry,
+    )
+
+    result = await runner._commit_dirty_worktree(
+        workspace_id=workspace_id,
+        message="fix: repair protected scope",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result is True
+    # Only the staged repaired file is in scope; the untracked agent-memory
+    # leftover (and any collapsed ``.claude/`` entry) is filtered out.
+    assert captured_scope == [(repaired_path,)]
 
 
 @pytest.mark.unit

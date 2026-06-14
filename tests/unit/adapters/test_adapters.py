@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -33,11 +32,12 @@ from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.gemini import GeminiAdapter
 from awf.adapters.gemini import _settings_for_effort as gemini_settings_for_effort
 from awf.adapters.gemini import _thinking_level_for_effort as gemini_thinking_level_for_effort
-from awf.adapters.grok import GrokAdapter, _grok_launcher_script, _model_for_effort
-from awf.adapters.model_selection import cursor_model_for_effort, cursor_selected_model
+from awf.adapters.grok import GrokAdapter
 from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     OpenCodeAdapter,
+    _config_model_key,
+    _ollama_base_url_prelude,
     _opencode_config_for_effort,
     _opencode_launcher_script,
     _qualified_model,
@@ -862,6 +862,110 @@ class TestOpenCodeAdapter:
         assert "--model" in args
         assert "ollama/glm-5.1:cloud" in args
 
+    @staticmethod
+    async def _resolve_ollama_base_url(env_overrides: dict[str, str]) -> str:
+        """Execute the launcher prelude under ``sh`` and return the resolved URL."""
+        script = _ollama_base_url_prelude() + 'printf "%s" "$AWF_OPENCODE_OLLAMA_BASE_URL"\n'
+        env = {"PATH": os.environ.get("PATH", "")}
+        env.update(env_overrides)
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            "-c",
+            script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        assert proc.returncode == 0, stderr.decode()
+        return stdout.decode()
+
+    @pytest.mark.unit
+    async def test_launch_prelude_prefers_explicit_base_url(self) -> None:
+        """An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` wins over ``OLLAMA_HOST``."""
+        resolved = await self._resolve_ollama_base_url(
+            {
+                "AWF_OPENCODE_OLLAMA_BASE_URL": "http://explicit.local:11434/v1",
+                "OLLAMA_HOST": "http://ollama.local:11434",
+            }
+        )
+        assert resolved == "http://explicit.local:11434/v1"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("base_url", "expected"),
+        [
+            # A port-less explicit base URL must inherit Ollama's default daemon
+            # port (11434) so launch agrees with the worker probe/pull builder,
+            # which defaults the same key to :11434 before probing.
+            ("http://ollama-sidecar/v1", "http://ollama-sidecar:11434/v1"),
+            ("http://ollama-sidecar", "http://ollama-sidecar:11434/v1"),
+            ("ollama-sidecar", "http://ollama-sidecar:11434/v1"),
+            ("https://ollama-sidecar/v1", "https://ollama-sidecar:11434/v1"),
+            ("http://[::1]/v1", "http://[::1]:11434/v1"),
+            # A port-less value carrying userinfo credentials still inherits the
+            # default daemon port (11434): the colon in ``user:pass`` is part of
+            # the credentials, not a port, so it must not suppress defaulting.
+            (
+                "http://user:pass@ollama.local/v1",
+                "http://user:pass@ollama.local:11434/v1",
+            ),
+            (
+                "http://user:pass@[::1]/v1",
+                "http://user:pass@[::1]:11434/v1",
+            ),
+            # Userinfo with an explicit port is left intact.
+            (
+                "http://user:pass@ollama.local:9999/v1",
+                "http://user:pass@ollama.local:9999/v1",
+            ),
+            # An explicit value that already carries a port is left intact.
+            ("http://explicit.local:9999/v1", "http://explicit.local:9999/v1"),
+        ],
+    )
+    async def test_launch_prelude_normalizes_explicit_base_url(
+        self, base_url: str, expected: str
+    ) -> None:
+        """A port-less explicit base URL is normalized so the agent targets the
+        same daemon AWF probes/pulls in the preflight."""
+        resolved = await self._resolve_ollama_base_url({"AWF_OPENCODE_OLLAMA_BASE_URL": base_url})
+        assert resolved == expected
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("ollama_host", "expected"),
+        [
+            ("ollama.local:11434", "http://ollama.local:11434/v1"),
+            ("http://ollama.local:11434", "http://ollama.local:11434/v1"),
+            ("http://ollama.local:11434/", "http://ollama.local:11434/v1"),
+            ("http://ollama.local:11434/v1", "http://ollama.local:11434/v1"),
+            ("https://ollama.local:11434", "https://ollama.local:11434/v1"),
+            # A port-less host must inherit Ollama's default daemon port
+            # (11434) rather than collapsing to the scheme default (port 80).
+            ("ollama-sidecar", "http://ollama-sidecar:11434/v1"),
+            ("http://ollama-sidecar", "http://ollama-sidecar:11434/v1"),
+            ("https://ollama-sidecar/v1", "https://ollama-sidecar:11434/v1"),
+            ("ollama.local", "http://ollama.local:11434/v1"),
+            ("0.0.0.0", "http://0.0.0.0:11434/v1"),
+            # IPv6 literals: bracket form, with and without a port.
+            ("http://[::1]", "http://[::1]:11434/v1"),
+            ("http://[::1]:11434", "http://[::1]:11434/v1"),
+        ],
+    )
+    async def test_launch_prelude_mirrors_ollama_host(
+        self, ollama_host: str, expected: str
+    ) -> None:
+        """``OLLAMA_HOST``-only profiles get a normalized base URL so the agent
+        targets the same daemon AWF probes/pulls in the preflight."""
+        resolved = await self._resolve_ollama_base_url({"OLLAMA_HOST": ollama_host})
+        assert resolved == expected
+
+    @pytest.mark.unit
+    async def test_launch_prelude_falls_back_to_default(self) -> None:
+        """With neither variable set the prelude keeps the default daemon URL."""
+        resolved = await self._resolve_ollama_base_url({})
+        assert resolved == "http://host.docker.internal:11434/v1"
+
     @pytest.mark.unit
     async def test_default_opencode_invocation_omits_variant_without_effort(self) -> None:
         runner = FakeCommandRunner()
@@ -895,6 +999,123 @@ class TestOpenCodeAdapter:
         low_config = _opencode_config_for_effort(effort=None)
         models = low_config["provider"]["ollama"]["models"]  # type: ignore[index]
         assert all("options" not in model for model in models.values())
+
+    @pytest.mark.unit
+    def test_opencode_config_declares_arbitrary_non_allowlist_model(self) -> None:
+        config = _opencode_config_for_effort(effort=None, model="ollama/kimi-k2.7:cloud")
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        # The selected model is declared even though it is not in the default
+        # fallback tuple — the old hardcoded-allowlist rejection is gone.
+        assert "kimi-k2.7:cloud" not in OPENCODE_OLLAMA_CLOUD_MODELS
+        assert "kimi-k2.7:cloud" in models
+        assert models["kimi-k2.7:cloud"]["name"] == "kimi-k2.7:cloud"
+        # The default fallback set remains available too.
+        for default_model in OPENCODE_OLLAMA_CLOUD_MODELS:
+            assert default_model in models
+
+    @pytest.mark.unit
+    def test_opencode_config_normalizes_bare_model_key(self) -> None:
+        config = _opencode_config_for_effort(effort=None, model="llama4:70b")
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert "llama4:70b" in models
+        assert "ollama/llama4:70b" not in models
+
+    @pytest.mark.unit
+    def test_opencode_config_omits_non_ollama_provider_model(self) -> None:
+        # A provider-qualified model that belongs to another provider must not
+        # leak into the ``ollama`` block — those entries would misroute runs.
+        config = _opencode_config_for_effort(effort=None, model="openai/gpt-x")
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert "openai/gpt-x" not in models
+        # The default Ollama fallback set is preserved untouched.
+        assert set(models) == set(OPENCODE_OLLAMA_CLOUD_MODELS)
+
+    @pytest.mark.unit
+    def test_opencode_config_declares_slash_bearing_ollama_model(self) -> None:
+        # A daemon-served model such as ``ollama/hf.co/...`` normalizes to a key
+        # that still contains a ``/``; it must still be declared in the
+        # ``ollama`` block so OpenCode does not reject the selected model.
+        config = _opencode_config_for_effort(effort=None, model="ollama/hf.co/unsloth/model:Q4_K_M")
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert "hf.co/unsloth/model:Q4_K_M" in models
+        assert models["hf.co/unsloth/model:Q4_K_M"]["name"] == "hf.co/unsloth/model:Q4_K_M"
+
+    @pytest.mark.unit
+    def test_opencode_config_default_fallback_when_no_model(self) -> None:
+        config = _opencode_config_for_effort(effort=None, model=None)
+        models = config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert set(models) == set(OPENCODE_OLLAMA_CLOUD_MODELS)
+
+    @pytest.mark.unit
+    def test_config_model_key_strips_ollama_prefix_only(self) -> None:
+        assert _config_model_key("ollama/kimi-k2.7:cloud") == "kimi-k2.7:cloud"
+        assert _config_model_key("llama4:70b") == "llama4:70b"
+        assert _config_model_key("foo:bar") == "foo:bar"
+        # Only the ``ollama/`` provider prefix is stripped.
+        assert _config_model_key("openai/gpt-x") == "openai/gpt-x"
+
+    @pytest.mark.unit
+    async def test_cli_model_and_embedded_config_agree(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(
+            runner=runner,
+            default_model="ollama/foo:bar",
+            default_effort="xhigh",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        assert "--model" in args
+        assert "ollama/foo:bar" in args
+        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
+        script = args[sh_start + 2]
+        # The embedded config JSON declares the selected model under its bare
+        # key, so the launched ``--model`` and the config never disagree.
+        assert '"foo:bar"' in script
+
+    @pytest.mark.unit
+    async def test_cli_model_normalizes_surrounding_whitespace(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(
+            runner=runner,
+            default_model="  ollama/foo:bar  ",
+            default_effort="xhigh",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        model_index = args.index("--model")
+        # The ``--model`` flag is normalized once, so it never carries stray
+        # whitespace that the stripped config key would disagree with.
+        assert args[model_index + 1] == "ollama/foo:bar"
+        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
+        script = args[sh_start + 2]
+        assert '"foo:bar"' in script
+
+    @pytest.mark.unit
+    async def test_cli_model_falls_back_when_only_whitespace(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(runner=runner, default_model="   ")
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        model_index = args.index("--model")
+        assert args[model_index + 1] == f"ollama/{OPENCODE_OLLAMA_CLOUD_MODELS[0]}"
 
     @pytest.mark.unit
     async def test_opencode_launcher_forwards_termination_and_cleans_temp_files(
@@ -969,376 +1190,6 @@ class TestOpenCodeAdapter:
         assert fake_prompt.read_text() == "workspace prompt"
         assert list(tmp_dir.glob("awf-opencode-prompt.*.md")) == []
         assert list(tmp_dir.glob("awf-opencode-config.*.json")) == []
-
-
-class TestCursorAdapter:
-    """Cursor adapter contract tests."""
-
-    @pytest.mark.unit
-    def test_reports_cursor_provider(self) -> None:
-        """Cursor reports its own provider for model attribution."""
-        adapter = CursorAdapter(runner=FakeCommandRunner())
-
-        assert adapter.get_provider("sonnet-4-thinking") == "cursor"
-
-    @pytest.mark.unit
-    async def test_produces_correct_default_cli_invocation(self) -> None:
-        """The default Cursor run uses print mode, force, and text output."""
-        runner = FakeCommandRunner()
-        adapter = CursorAdapter(
-            runner=runner,
-            default_model="sonnet-4-thinking",
-            default_effort="xhigh",
-        )
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-
-        args = runner.calls[0].args
-        _assert_docker_exec_prefix(args)
-        cursor_start = args.index("cursor-agent")
-        assert args[cursor_start:] == [
-            "cursor-agent",
-            "-p",
-            "--force",
-            "-m",
-            "sonnet-4-thinking",
-            "--output-format",
-            "text",
-        ]
-        _assert_prompt_not_in_argv(args)
-        _assert_prompt_sent_on_stdin(runner)
-
-    @pytest.mark.unit
-    async def test_lower_effort_without_model_override_omits_thinking_model(self) -> None:
-        """Lower Cursor effort does not inherit the thinking model default."""
-        runner = FakeCommandRunner()
-        adapter = CursorAdapter(
-            runner=runner,
-            default_model="sonnet-4-thinking",
-            default_effort="medium",
-        )
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-
-        args = runner.calls[0].args
-        cursor_start = args.index("cursor-agent")
-        assert args[cursor_start:] == [
-            "cursor-agent",
-            "-p",
-            "--force",
-            "--output-format",
-            "text",
-        ]
-        assert "-m" not in args[cursor_start:]
-
-    @pytest.mark.unit
-    async def test_lower_effort_failure_metadata_omits_unselected_thinking_model(self) -> None:
-        """Cursor failure metadata follows the model actually selected for CLI."""
-        runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="cursor-agent failed: cursor auth required")
-        adapter = CursorAdapter(
-            runner=runner,
-            default_model="sonnet-4-thinking",
-            default_effort="medium",
-        )
-
-        with (
-            structlog.testing.capture_logs() as captured,
-            pytest.raises(AgentRunError) as exc,
-        ):
-            await adapter.run(
-                compose_project=_COMPOSE_PROJECT,
-                compose_file=_COMPOSE_FILE,
-                prompt=_PROMPT,
-            )
-
-        assert exc.value.reason_code == "AGENT_AUTH_FAILED"
-        assert exc.value.details["provider"] == "cursor"
-        assert exc.value.details["model"] == "unknown"
-        provider_recovery = exc.value.details["provider_recovery"]
-        assert provider_recovery["provider"] == "cursor"
-        assert "model" not in provider_recovery
-        assert "sonnet-4-thinking" not in provider_recovery["failure_fingerprint"]
-        assert any(
-            event.get("event") == "agent.run.start" and event.get("model") is None
-            for event in captured
-        )
-
-    @pytest.mark.unit
-    async def test_explicit_lower_effort_failure_metadata_reports_selected_model(self) -> None:
-        """Cursor failure metadata keeps an explicit lower-effort model override."""
-        runner = FakeCommandRunner()
-        runner.queue_result(returncode=1, stderr="cursor-agent failed: cursor auth required")
-        adapter = CursorAdapter(
-            runner=runner,
-            default_model="sonnet-4-thinking",
-            default_effort="medium",
-        )
-
-        with pytest.raises(AgentRunError) as exc:
-            await adapter.run(
-                compose_project=_COMPOSE_PROJECT,
-                compose_file=_COMPOSE_FILE,
-                prompt=_PROMPT,
-                model="sonnet-4-thinking",
-            )
-
-        assert exc.value.reason_code == "AGENT_AUTH_FAILED"
-        assert exc.value.details["provider"] == "cursor"
-        assert exc.value.details["model"] == "sonnet-4-thinking"
-        provider_recovery = exc.value.details["provider_recovery"]
-        assert provider_recovery["provider"] == "cursor"
-        assert provider_recovery["model"] == "sonnet-4-thinking"
-
-    @pytest.mark.unit
-    async def test_explicit_thinking_model_override_is_preserved_for_lower_effort(self) -> None:
-        """Explicit Cursor model overrides win even when effort is lower."""
-        runner = FakeCommandRunner()
-        adapter = CursorAdapter(
-            runner=runner,
-            default_model="sonnet-4-thinking",
-            default_effort="medium",
-        )
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-            model="sonnet-4-thinking",
-        )
-
-        args = runner.calls[0].args
-        cursor_start = args.index("cursor-agent")
-        assert args[cursor_start:] == [
-            "cursor-agent",
-            "-p",
-            "--force",
-            "-m",
-            "sonnet-4-thinking",
-            "--output-format",
-            "text",
-        ]
-        _assert_prompt_not_in_argv(args)
-        _assert_prompt_sent_on_stdin(runner)
-
-    @pytest.mark.unit
-    async def test_model_override_is_passed_without_prompt_argv(self) -> None:
-        """Explicit models are passed while prompts remain stdin-only."""
-        runner = FakeCommandRunner()
-        adapter = CursorAdapter(
-            runner=runner,
-            default_model="sonnet-4-thinking",
-            default_effort="xhigh",
-        )
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-            model="gpt-5",
-        )
-
-        args = runner.calls[0].args
-        cursor_start = args.index("cursor-agent")
-        assert args[cursor_start:] == [
-            "cursor-agent",
-            "-p",
-            "--force",
-            "-m",
-            "gpt-5",
-            "--output-format",
-            "text",
-        ]
-        _assert_prompt_not_in_argv(args)
-        _assert_prompt_sent_on_stdin(runner)
-
-    @pytest.mark.unit
-    async def test_no_model_omits_model_flag_but_keeps_force_and_text_output(self) -> None:
-        """Cursor omits -m when no model or effort-derived model is selected."""
-        runner = FakeCommandRunner()
-        adapter = CursorAdapter(runner=runner)
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-
-        args = runner.calls[0].args
-        cursor_start = args.index("cursor-agent")
-        assert args[cursor_start:] == [
-            "cursor-agent",
-            "-p",
-            "--force",
-            "--output-format",
-            "text",
-        ]
-        assert "-m" not in args
-
-    @pytest.mark.unit
-    def test_effort_mapping_uses_documented_models_not_extra_flags(self) -> None:
-        """Effort mapping selects models instead of undocumented Cursor flags."""
-        assert cursor_model_for_effort(model="gpt-5", effort="xhigh") == "gpt-5"
-        assert cursor_model_for_effort(model="sonnet-4", effort="high") == "sonnet-4"
-        assert cursor_model_for_effort(model=None, effort=None) is None
-        assert cursor_model_for_effort(model=None, effort="medium") is None
-        assert cursor_model_for_effort(model=None, effort="high") == "sonnet-4-thinking"
-        assert cursor_model_for_effort(model=None, effort="xhigh") == "sonnet-4-thinking"
-        assert cursor_model_for_effort(model=None, effort="max") == "sonnet-4-thinking"
-
-    @pytest.mark.unit
-    def test_custom_default_model_bypasses_effort_mapping(self) -> None:
-        """Custom Cursor defaults remain operator-controlled for high efforts."""
-        assert (
-            cursor_selected_model(
-                model=None,
-                default_model="gpt-5",
-                effort="xhigh",
-            )
-            == "gpt-5"
-        )
-
-
-class TestGrokAdapter:
-    """Grok Build adapter contract tests."""
-
-    @pytest.mark.unit
-    def test_reports_xai_provider(self) -> None:
-        adapter = GrokAdapter(runner=FakeCommandRunner())
-
-        assert adapter.get_provider("grok-build") == "xai"
-
-    @pytest.mark.unit
-    async def test_produces_correct_cli_invocation(self) -> None:
-        runner = FakeCommandRunner()
-        adapter = GrokAdapter(
-            runner=runner,
-            default_model="grok-build",
-            default_effort="xhigh",
-        )
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-
-        args = runner.calls[0].args
-        _assert_docker_exec_prefix(args)
-        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
-        assert args[sh_start : sh_start + 3] == ["sh", "-c", args[sh_start + 2]]
-        script = args[sh_start + 2]
-        assert 'prompt="$(cat; printf x)"' in script
-        assert 'prompt="${prompt%x}"' in script
-        assert 'exec grok -p "$prompt" "$@"' in script
-        grok_args = args[sh_start + 4 :]
-        assert grok_args == [
-            "--always-approve",
-            "--no-alt-screen",
-            "--no-auto-update",
-            "--output-format",
-            "plain",
-            "-m",
-            "grok-build",
-        ]
-        _assert_prompt_not_in_argv(args)
-        _assert_prompt_sent_on_stdin(runner)
-
-    @pytest.mark.unit
-    async def test_produces_cli_invocation_without_model_or_effort(self) -> None:
-        runner = FakeCommandRunner()
-        adapter = GrokAdapter(runner=runner)
-
-        await adapter.run(
-            compose_project=_COMPOSE_PROJECT,
-            compose_file=_COMPOSE_FILE,
-            prompt=_PROMPT,
-        )
-
-        args = runner.calls[0].args
-        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
-        assert args[sh_start + 4 :] == [
-            "--always-approve",
-            "--no-alt-screen",
-            "--no-auto-update",
-            "--output-format",
-            "plain",
-        ]
-        assert "-m" not in args
-        assert "--model" not in args
-
-    @pytest.mark.unit
-    def test_effort_mapping_keeps_selected_model_without_undocumented_flags(self) -> None:
-        for effort in (None, "low", "medium", "high", "xhigh", "max"):
-            assert _model_for_effort(model="grok-build", effort=effort) == "grok-build"
-        assert _model_for_effort(model=None, effort="xhigh") is None
-
-    @pytest.mark.unit
-    async def test_launcher_reads_stdin_and_passes_prompt_to_official_single_flag(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        bin_dir = tmp_path / "bin"
-        bin_dir.mkdir()
-        fake_grok = bin_dir / "grok"
-        argv_copy = tmp_path / "argv.json"
-        fake_grok.write_text(
-            "#!/bin/sh\n"
-            "python - <<'PY' \"$@\"\n"
-            "import json, os, sys\n"
-            "with open(os.environ['AWF_FAKE_GROK_ARGV'], 'w', encoding='utf-8') as fh:\n"
-            "    json.dump(sys.argv[1:], fh)\n"
-            "PY\n"
-        )
-        fake_grok.chmod(0o755)
-        env = os.environ.copy()
-        env.update({"PATH": f"{bin_dir}:{env['PATH']}", "AWF_FAKE_GROK_ARGV": str(argv_copy)})
-        proc = await asyncio.create_subprocess_exec(
-            "sh",
-            "-c",
-            _grok_launcher_script(),
-            "awf-grok",
-            "--always-approve",
-            "--no-alt-screen",
-            "--no-auto-update",
-            "--output-format",
-            "plain",
-            "-m",
-            "grok-build",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        assert proc.stdin is not None
-        proc.stdin.write(b"workspace prompt\n\n")
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await proc.stdin.wait_closed()
-
-        stdout, stderr = await proc.communicate()
-
-        assert proc.returncode == 0, stderr.decode()
-        assert stdout == b""
-        assert json.loads(argv_copy.read_text()) == [
-            "-p",
-            "workspace prompt\n\n",
-            "--always-approve",
-            "--no-alt-screen",
-            "--no-auto-update",
-            "--output-format",
-            "plain",
-            "-m",
-            "grok-build",
-        ]
 
 
 @pytest.mark.unit

@@ -5,18 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import re
-import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from awf.db.enums import AgentRuntime
-from awf.node.auth_mounts import (
-    claude_auth_isolation_label,
-    force_copy_isolation_requested,
-    overlay_path_has_reserved_chars,
-)
 from awf.service.config import ServiceSettings
 from awf.service.workspace_observability import effective_agent_identity
 
@@ -45,6 +40,10 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
 _GITHUB_TIMEOUT_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 2.0
 _PROVIDER_PROBE_TIMEOUT_SECONDS = 5.0
+# Wall/read bound for a streamed ``POST /api/pull``. Multi-GB models take
+# minutes, so the bound is generous; a stalled stream still cannot hang forever
+# because the bound is passed through to the injected HTTP stream seam.
+_OLLAMA_PULL_TIMEOUT_SECONDS = 1800.0
 _TRACEBACK_LOG_LIMIT = 4000
 _REDACTION = "<redacted>"
 _CODEX_AUTH_FILES = ("auth.json", "config.toml", "installation_id")
@@ -177,6 +176,25 @@ class HttpGet(Protocol):
         *,
         timeout: float,
     ) -> HttpResponseLike: ...
+
+
+class HttpStreamResponseLike(Protocol):
+    @property
+    def status_code(self) -> int: ...  # pragma: no cover - Protocol declaration only.
+
+    def iter_lines(  # pragma: no cover - Protocol method declaration only.
+        self,
+    ) -> Iterator[str]: ...
+
+
+class HttpPostStream(Protocol):
+    def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        url: str,
+        *,
+        json: Mapping[str, Any],
+        timeout: float,
+    ) -> AbstractContextManager[HttpStreamResponseLike]: ...
 
 
 class ProviderReadinessError(ValueError):
@@ -321,6 +339,179 @@ def selected_provider_readiness_preflight(
         )
 
     provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
+    if provider == "opencode" and _opencode_model_targets_non_ollama_provider(identity.model):
+        # A provider-qualified non-Ollama model is served by an OpenCode cloud
+        # provider, which needs an OpenCode/provider credential. With none visible
+        # (#554), fail create-time admission up front with a clear reason —
+        # symmetric to OPENCODE_OLLAMA_AUTH_MISSING — instead of deferring to the
+        # provider and surfacing a confusing agent-CLI error later. No probe runs
+        # in the no-creds path (mirroring how OPENCODE_OLLAMA_AUTH_MISSING blocks
+        # before any probe).
+        creds_present, _creds_signal = _opencode_provider_credentials_present(
+            identity.model, env, host_home
+        )
+        if not creds_present:
+            target_provider = (identity.model or "").strip().partition("/")[0].lower()
+            provider_env_hint = (
+                " / ".join(_OPENCODE_PROVIDER_ENV_KEYS.get(target_provider, ()))
+                or "the provider API key"
+            )
+            auth_missing_message = (
+                f"OpenCode model {identity.model!r} targets the {target_provider!r} "
+                "provider but no OpenCode/provider credentials were visible. Mount "
+                f"~/.config/opencode or set {provider_env_hint}."
+            )
+            provider_result = _provider_result(
+                ok=False,
+                strict=True,
+                reason="OPENCODE_PROVIDER_AUTH_MISSING",
+                message=auth_missing_message,
+                secrets=secrets,
+                credential_scope="not_observed",
+                isolation="none",
+            )
+            return _launch_preflight_payload(
+                agent=runtime.value,
+                provider=provider,
+                model=identity.model,
+                model_source=identity.model_source,
+                provider_result=provider_result,
+                probe={"status": "skipped", "reason_code": "OPENCODE_PROVIDER_AUTH_MISSING"},
+                reason_code="OPENCODE_PROVIDER_AUTH_MISSING",
+                message=auth_missing_message,
+                override=override,
+                override_reason=override_reason,
+                checked_at=checked,
+                secrets=secrets,
+            )
+        # OpenCode can run a provider-qualified non-Ollama model (``openai/...``
+        # or ``anthropic/...``) served by the selected provider rather than the
+        # local Ollama daemon. ``_check_opencode`` only knows how to probe Ollama
+        # auth/host, so running it here would reject the workspace with an Ollama
+        # reason code at create time — before the executor's pre-agent step could
+        # skip it. Skip only the Ollama auth/daemon checks; the OpenCode CLI must
+        # still be present in the runtime image regardless of which provider serves
+        # the model, so keep the generic runtime-CLI availability probe — otherwise
+        # a runtime image missing the ``opencode`` binary would be admitted as
+        # ready here and only fail later as an agent command failure.
+        deferred_message = (
+            f"OpenCode model {identity.model!r} targets a non-Ollama provider; the "
+            "Ollama auth/daemon preflight does not apply and is skipped."
+        )
+        provider_result = _provider_result(
+            ok=True,
+            strict=True,
+            reason="OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            message=deferred_message,
+            secrets=secrets,
+            credential_scope="deferred_to_provider",
+            isolation="none",
+        )
+        cli_probe = _probe_agent_runtime_cli(
+            settings,
+            executable="opencode",
+            provider=provider,
+            environ=env,
+            run_subprocess=resolved_run,
+            secrets=secrets,
+        )
+        if cli_probe.get("status") == "ok":
+            probe: dict[str, Any] = {
+                "status": "unavailable",
+                "reason_code": "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED",
+            }
+            reason_code = "OPENCODE_NON_OLLAMA_PROVIDER_SELECTED"
+            message = deferred_message
+        else:
+            probe = cli_probe
+            reason_code = str(cli_probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+            message = str(
+                cli_probe.get("message")
+                or "OpenCode runtime CLI is not available in the configured runtime image."
+            )
+        return _launch_preflight_payload(
+            agent=runtime.value,
+            provider=provider,
+            model=identity.model,
+            model_source=identity.model_source,
+            provider_result=provider_result,
+            probe=probe,
+            reason_code=reason_code,
+            message=message,
+            override=override,
+            override_reason=override_reason,
+            checked_at=checked,
+            secrets=secrets,
+        )
+    if provider == "opencode" and _ollama_base_url_malformed(env):
+        # An explicit AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST that fails to parse
+        # must block admission rather than silently normalize to the
+        # host.docker.internal default (which the URL builders/reachability classifier
+        # fall back to so they never crash mid-readiness). The OpenCode launcher passes
+        # the explicit value through to the agent verbatim, so probing/pulling the
+        # default daemon would admit a workspace — and even pull a model — against a
+        # daemon the agent never uses, only for the agent to fail later. A non-Ollama
+        # provider model never reaches here (it returns above) and does not use the
+        # Ollama URL, so this gate is scoped to Ollama-served OpenCode models. No probe
+        # runs (mirroring how OPENCODE_OLLAMA_AUTH_MISSING blocks before any probe).
+        malformed_message = (
+            "AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST is set to a malformed value "
+            "(unbalanced IPv6 brackets or a non-numeric port). Fix the Ollama base URL "
+            "so worker-side readiness probes the same daemon the agent will use."
+        )
+        provider_result = _provider_result(
+            ok=False,
+            strict=True,
+            reason="OPENCODE_OLLAMA_BASE_URL_MALFORMED",
+            message=malformed_message,
+            secrets=secrets,
+            credential_scope="not_observed",
+            isolation="none",
+        )
+        return _launch_preflight_payload(
+            agent=runtime.value,
+            provider=provider,
+            model=identity.model,
+            model_source=identity.model_source,
+            provider_result=provider_result,
+            probe={"status": "skipped", "reason_code": "OPENCODE_OLLAMA_BASE_URL_MALFORMED"},
+            reason_code="OPENCODE_OLLAMA_BASE_URL_MALFORMED",
+            message=malformed_message,
+            override=override,
+            override_reason=override_reason,
+            checked_at=checked,
+            secrets=secrets,
+        )
+    if (
+        provider == "opencode"
+        and not _ollama_url_host_reachable_from_worker(env)
+        and _opencode_ollama_host_probe_deferrable(identity.model, env, host_home)
+    ):
+        # #569 symmetry: this create/retry admission path runs in the worker/service
+        # process off ``awf_net`` and cannot reach a workspace Compose service DNS
+        # name such as ``http://ollama-sidecar:11434``. A worker-side ``/api/version``
+        # / ``/api/tags`` probe of such a host would falsely reject the workspace
+        # with ``OLLAMA_HOST_UNREACHABLE`` (auth visible) or ``OPENCODE_OLLAMA_AUTH_
+        # MISSING`` (authless local, daemon reachability cannot be verified to waive)
+        # before the executor pre-agent step — which already skips the same probe for
+        # *any* non-host-reachable URL — could defer it. Skip the Ollama auth/daemon
+        # preflight here too and defer to the agent container where the sidecar daemon
+        # IS reachable. ``_opencode_ollama_host_probe_deferrable`` covers a local model
+        # (authless) and a ``:cloud`` model whose Cloud credential is already visible,
+        # while a credential-less cloud model and the non-Ollama provider model (both
+        # handled above / via ``_check_opencode``) still fall through to their gates.
+        return _opencode_local_ollama_host_deferred_preflight(
+            settings,
+            runtime=runtime,
+            model=identity.model,
+            model_source=identity.model_source,
+            env=env,
+            run_subprocess=resolved_run,
+            secrets=secrets,
+            override=override,
+            override_reason=override_reason,
+            checked=checked,
+        )
     provider_result = _check_provider_readiness(
         provider,
         settings,
@@ -331,6 +522,11 @@ def selected_provider_readiness_preflight(
         http_get=resolved_http_get,
         secrets=secrets,
         probe_runtime_cli=False,
+        # Pass the effective model so the OpenCode/Ollama check can apply the
+        # local-Ollama authless carve-out at launch admission. Broad readiness
+        # callers (collect_agent_readiness / check_single_provider_readiness)
+        # have no selected model, so they keep the strict AUTH_MISSING gate.
+        model=identity.model,
     )
     probe = _selected_launch_probe(
         provider,
@@ -372,6 +568,99 @@ def selected_provider_readiness_preflight(
         checked_at=checked,
         secrets=secrets,
     )
+
+
+def _opencode_local_ollama_host_deferred_preflight(
+    settings: ServiceSettings,
+    *,
+    runtime: AgentRuntime,
+    model: str | None,
+    model_source: str,
+    env: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+    override: bool,
+    override_reason: str | None,
+    checked: datetime,
+) -> dict[str, Any]:
+    """Admit a local-Ollama workspace whose daemon URL the worker cannot reach.
+
+    Symmetric to the executor pre-agent skip (#569): when the resolved Ollama base
+    URL is a workspace Compose service DNS name (e.g. ``http://ollama-sidecar:11434``)
+    the worker/service cannot reach it, so a worker-side ``/api/version`` /
+    ``/api/tags`` probe would falsely block the workspace before launch. Skip the
+    Ollama auth/daemon preflight and defer to the agent container where the sidecar
+    daemon IS reachable. The OpenCode CLI must still be present in the runtime image
+    regardless of which daemon serves the model, so keep the generic runtime-CLI
+    availability probe (mirroring the non-Ollama provider skip) — a runtime image
+    missing the ``opencode`` binary must still block here rather than be admitted as
+    ready and only fail later as an agent command failure.
+    """
+
+    deferred_message = (
+        f"OpenCode model {model!r} targets an Ollama daemon URL the worker cannot "
+        "reach; the worker-side Ollama auth/daemon preflight is skipped and deferred "
+        "to the agent container."
+    )
+    provider_result = _provider_result(
+        ok=True,
+        strict=True,
+        reason="OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE",
+        message=deferred_message,
+        secrets=secrets,
+        credential_scope="deferred_to_provider",
+        isolation="none",
+    )
+    cli_probe = _probe_agent_runtime_cli(
+        settings,
+        executable="opencode",
+        provider="opencode",
+        environ=env,
+        run_subprocess=run_subprocess,
+        secrets=secrets,
+    )
+    if cli_probe.get("status") == "ok":
+        probe: dict[str, Any] = {
+            "status": "unavailable",
+            "reason_code": "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE",
+        }
+        reason_code = "OPENCODE_OLLAMA_HOST_NOT_WORKER_REACHABLE"
+        message = deferred_message
+    else:
+        probe = cli_probe
+        reason_code = str(cli_probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+        message = str(
+            cli_probe.get("message")
+            or "OpenCode runtime CLI is not available in the configured runtime image."
+        )
+    return _launch_preflight_payload(
+        agent=runtime.value,
+        provider="opencode",
+        model=model,
+        model_source=model_source,
+        provider_result=provider_result,
+        probe=probe,
+        reason_code=reason_code,
+        message=message,
+        override=override,
+        override_reason=override_reason,
+        checked_at=checked,
+        secrets=secrets,
+    )
+
+
+def _opencode_model_targets_non_ollama_provider(model: str | None) -> bool:
+    """Return whether an OpenCode model names a non-Ollama provider.
+
+    Mirrors ``OpenCodeAdapter.get_provider``: a provider-qualified model such as
+    ``openai/gpt-oss`` or ``anthropic/claude-sonnet`` carries a ``<provider>/``
+    prefix, while a bare or ``ollama/``-prefixed reference targets the local
+    Ollama daemon. Only the latter is probed/pulled against Ollama, so a
+    non-Ollama provider model must skip the Ollama auth/host preflight.
+    """
+
+    provider, slash, _remainder = (model or "").strip().partition("/")
+    return bool(slash) and provider != "ollama"
 
 
 def provider_readiness_preflight_from_task_policy(
@@ -436,6 +725,7 @@ def _check_provider_readiness(
     http_get: HttpGet,
     secrets: frozenset[str],
     probe_runtime_cli: bool = True,
+    model: str | None = None,
 ) -> dict[str, Any]:
     if provider == "github":
         return _check_github(
@@ -489,6 +779,7 @@ def _check_provider_readiness(
             strict=strict,
             http_get=http_get,
             secrets=secrets,
+            model=model,
         )
     if provider == "grok":
         return _check_grok(
@@ -538,11 +829,17 @@ def _selected_launch_probe(
         if provider in {"codex", "claude_code", "cursor", "gemini", "grok"}:
             return runtime_probe
     if provider == "opencode":
+        # Create-time admission must never block on (or perform) a pull: a
+        # ``:cloud`` model is served remotely and an absent non-cloud model is
+        # pulled later in the async executor pre-agent step. Both are reported
+        # as non-blocking dispositions here; only an unreachable daemon blocks.
         return _probe_ollama_model(
             _ollama_tags_urls(environ),
             model=model,
             http_get=http_get,
             secrets=secrets,
+            allow_cloud=True,
+            pull_pending_ok=True,
         )
     return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
 
@@ -571,6 +868,11 @@ def _preflight_reason_code(
         return str(provider_result.get("reason") or "PROVIDER_AUTH_NOT_READY")
     if probe.get("status") == "fail":
         return str(probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+    if probe.get("status") == "pending":
+        # Non-blocking: the model is absent locally but will be auto-pulled
+        # before the agent runs. Surface the disposition so the console can show
+        # *why* the workspace is not yet fully ready without blocking launch.
+        return str(probe.get("reason_code") or "PROVIDER_PROBE_PENDING")
     return "PROVIDER_READY"
 
 
@@ -589,6 +891,11 @@ def _preflight_message(
         )
     if probe.get("status") == "fail":
         return str(probe.get("message") or "Selected provider auth probe did not report readiness.")
+    if probe.get("status") == "pending":
+        return str(
+            probe.get("message")
+            or "Selected provider model is not present locally yet; AWF will pull it before launch."
+        )
     return "Selected provider authentication and model readiness are sufficient for launch."
 
 
@@ -611,7 +918,10 @@ def _launch_preflight_payload(
     auth_ok = provider_result is not None and provider_result.get("ok") is True
     model_ok = bool(model) or not model_required
     probe_status = str(probe.get("status") or "skipped")
-    probe_ok = probe_status in {"ok", "unavailable"}
+    # ``pending`` is a non-blocking disposition: the requested Ollama model is
+    # absent locally but will be auto-pulled in the executor pre-agent step, so
+    # it must not require an override or block launch admission.
+    probe_ok = probe_status in {"ok", "unavailable", "pending"}
     override_required = not (auth_ok and model_ok and probe_ok)
     override_used = bool(override and override_required)
     blocks_launch = override_required and not override_used
@@ -712,774 +1022,84 @@ def _credential_sources(
     return sources
 
 
-def _check_github(
-    settings: ServiceSettings,
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    run_subprocess: SubprocessRun,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    token, token_signal = _github_token(settings, environ)
-    if not token:
-        if (host_home / ".config" / "gh").exists():
-            return _provider_result(
-                ok=False,
-                strict=strict,
-                reason="GITHUB_KEYRING_ONLY_NOT_VISIBLE_IN_COMPOSE",
-                message=(
-                    "GitHub CLI config is visible, but local service containers cannot "
-                    "use keychain-only gh auth. Set AWF_GITHUB_TOKEN or GH_TOKEN in the "
-                    "Compose environment."
-                ),
-                action=(
-                    'Run `export AWF_GITHUB_TOKEN="$(gh auth token)"` before '
-                    "starting Compose, or put AWF_GITHUB_TOKEN/GH_TOKEN in "
-                    "root .env."
-                ),
-                signals=["~/.config/gh"],
-                secrets=secrets,
-                credential_sources=[
-                    _credential_source(
-                        type_="path",
-                        signal="~/.config/gh",
-                        credential_scope="read_only_host_path",
-                        isolation="read_only_bind",
-                    )
-                ],
-                credential_scope="read_only_host_path",
-                isolation="read_only_bind",
-            )
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="GITHUB_TOKEN_ENV_MISSING",
-            message=(
-                "No service-visible GitHub token was found. Set AWF_GITHUB_TOKEN, "
-                "GH_TOKEN, or GITHUB_TOKEN so AWF can create PRs, comment, and merge."
-            ),
-            action="Set AWF_GITHUB_TOKEN from `gh auth token` before starting the service.",
-            secrets=secrets,
-            credential_scope="not_observed",
-            isolation="none",
-        )
-
-    gh_env = {**dict(environ), "AWF_GITHUB_TOKEN": token, "GH_TOKEN": token, "GITHUB_TOKEN": token}
-    token_source = _credential_source(
-        type_="env",
-        signal=token_signal,
-        credential_scope="static_env_token",
-        isolation="service_env",
-    )
-    token_warnings = [
-        _security_warning(
-            "STATIC_TOKEN_FALLBACK",
-            f"GitHub auth is supplied by static service environment variable {token_signal}.",
-        )
-    ]
-    args = ["gh", "auth", "status", "--hostname", "github.com"]
-    try:
-        result = run_subprocess(
-            args,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_GITHUB_TIMEOUT_SECONDS,
-            env=gh_env,
-        )
-    except FileNotFoundError:
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="GITHUB_CLI_NOT_FOUND",
-            message="GitHub token is present, but the gh CLI is not installed in the service.",
-            action="Install gh in the service image or rebuild docker/control-plane.Dockerfile.",
-            signals=[token_signal],
-            capabilities=["pr_create", "comment", "merge"],
-            secrets=secrets,
-            credential_sources=[token_source],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=token_warnings,
-        )
-    except subprocess.TimeoutExpired:
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="GITHUB_AUTH_TIMEOUT",
-            message=f"`gh auth status` exceeded {_GITHUB_TIMEOUT_SECONDS:g}s.",
-            signals=[token_signal, "gh auth status"],
-            capabilities=["pr_create", "comment", "merge"],
-            secrets=secrets,
-            credential_sources=[token_source],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=token_warnings,
-        )
-    except Exception as exc:
-        _log_redacted_exception(
-            "provider_readiness.github_auth_check_exception",
-            exc,
-            secrets,
-        )
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="GITHUB_AUTH_UNUSABLE",
-            message="GitHub CLI auth check failed before it could complete.",
-            detail=f"{type(exc).__name__}: {exc}",
-            signals=[token_signal, "gh auth status"],
-            capabilities=["pr_create", "comment", "merge"],
-            secrets=secrets,
-            credential_sources=[token_source],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=token_warnings,
-        )
-
-    if result.returncode != 0:
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="GITHUB_AUTH_UNUSABLE",
-            message="GitHub CLI auth is not usable for local service PR operations.",
-            detail=result.stderr or result.stdout or "gh auth status exited non-zero",
-            signals=[token_signal, "gh auth status"],
-            capabilities=["pr_create", "comment", "merge"],
-            secrets=secrets,
-            credential_sources=[token_source],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=token_warnings,
-        )
-
-    return _provider_result(
-        ok=True,
-        strict=strict,
-        reason="GITHUB_AUTH_OK",
-        message="GitHub CLI auth is usable for PR creation, comments, and merges.",
-        signals=[token_signal, "gh auth status"],
-        capabilities=["pr_create", "comment", "merge"],
-        secrets=secrets,
-        credential_sources=[token_source],
-        credential_scope="static_env_token",
-        isolation="service_env",
-        warnings=token_warnings,
-    )
-
-
-def _check_codex(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    file_sources = _codex_file_sources(host_home)
-    if file_sources:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="CODEX_FILE_AUTH_PRESENT",
-            message="Codex auth files are visible for per-workspace isolated copies.",
-            signals=[source["signal"] for source in file_sources],
-            secrets=secrets,
-            credential_sources=file_sources,
-            credential_scope="isolated_workspace",
-            isolation="per_workspace_copy",
-            warnings=[],
-        )
-
-    signal = _first_present_env(environ, _CODEX_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="CODEX_ENV_AUTH_PRESENT",
-            message="Codex auth is visible through service environment variables.",
-            signals=[signal],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="env",
-                    signal=signal,
-                    credential_scope="static_env_token",
-                    isolation="service_env",
-                )
-            ],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=[
-                _security_warning(
-                    "STATIC_TOKEN_FALLBACK",
-                    f"Codex auth is supplied by static service environment variable {signal}.",
-                )
-            ],
-        )
-
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="CODEX_AUTH_MISSING",
-        message=(
-            "No Codex auth signal was visible. Mount ~/.codex or set OPENAI_API_KEY, "
-            "OPENAI_API_TOKEN, CODEX_API_KEY, or CODEX_AUTH_TOKEN."
-        ),
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
-
-
-def _check_claude(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    work_dir: Path,
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    """Check whether Claude Code authentication signals are present.
-
-    Probes file-based (``~/.claude`` directory + ``~/.claude.json``) and
-    environment-based (``ANTHROPIC_API_KEY`` etc.) auth sources.  Reports
-    the isolation posture (overlay vs per-workspace copy) determined by
-    ``force_copy_isolation_requested`` and overlay path constraints.
-
-    When the effective ``environ`` carries ``AWF_WORK_DIR_BIND_PROPAGATION``
-    (set by bootstrap on non-propagating hosts or read from the compose
-    env-file by status), the value is attached as ``mount_propagation`` so
-    callers can correlate the readiness check with the bind-propagation
-    posture.
-
-    The force-copy and overlay-path-reserved-chars probes read the passed
-    ``environ`` (not ``os.environ``) because bootstrap folds the operator
-    override into the readiness environ dict; a default ``os.environ``
-    probe would miss it and overstate overlay isolation.
-    """
-    # ``~/.claude`` is isolated per workspace via a shared read-only overlay base
-    # + per-workspace writable upper when overlayfs is available, else a full
-    # per-workspace copy. ``~/.claude.json`` is *always* a per-workspace copy
-    # (the resolver never overlays it), so the overlay posture applies only to
-    # the directory source — labelling the file source with the overlay label
-    # would overstate its isolation/disk posture on ``.claude.json``-only hosts.
-    #
-    # The force-copy probe reads the *passed* ``environ``, not ``os.environ``:
-    # ``awf service bootstrap`` on a non-propagating host folds
-    # ``AWF_CLAUDE_AUTH_FORCE_COPY=true`` into the readiness ``environ`` dict (the
-    # worker provisions with the copy fallback) rather than the CLI process
-    # environment, so a default probe over ``os.environ`` would miss it and report
-    # ``per_workspace_overlay`` while the worker actually uses per-workspace copies.
-    #
-    # The reserved-chars probe folds in the same deterministic, host-level copy
-    # fallback the worker takes when ``work_dir`` (the overlay auth root, inherited
-    # from ``AWF_WORK_DIR`` / ``AWF_HOST_WORK_DIR``) carries a ``,`` or ``:`` that
-    # overlayfs's unescapable ``-o`` payload cannot encode. Every overlay mount
-    # degrades to per-workspace copy there, so the label must report copy rather
-    # than overstate overlay isolation.
-    directory_isolation = claude_auth_isolation_label(
-        force_copy_requested=lambda: force_copy_isolation_requested(environ),
-        overlay_path_unsupported=lambda: overlay_path_has_reserved_chars(work_dir),
-    )
-    propagation_posture = environ.get("AWF_WORK_DIR_BIND_PROPAGATION")
-    file_sources: list[dict[str, str]] = []
-    if (host_home / ".claude").exists():
-        file_sources.append(
-            _credential_source(
-                type_="path",
-                signal="~/.claude",
-                credential_scope="isolated_workspace",
-                isolation=directory_isolation,
-            )
-        )
-    if (host_home / ".claude.json").exists():
-        file_sources.append(
-            _credential_source(
-                type_="path",
-                signal="~/.claude.json",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-        )
-    if file_sources:
-        result = _provider_result(
-            ok=True,
-            strict=strict,
-            reason="CLAUDE_FILE_AUTH_PRESENT",
-            message="Claude Code auth files are visible to the local service.",
-            signals=[source["signal"] for source in file_sources],
-            secrets=secrets,
-            credential_sources=file_sources,
-            credential_scope="isolated_workspace",
-            isolation=file_sources[0]["isolation"],
-            warnings=[],
-        )
-    elif (signal := _first_present_env(environ, _CLAUDE_ENV_KEYS)) is not None:
-        result = _provider_result(
-            ok=True,
-            strict=strict,
-            reason="CLAUDE_ENV_AUTH_PRESENT",
-            message="Claude Code auth is visible through service environment variables.",
-            signals=[signal],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="env",
-                    signal=signal,
-                    credential_scope="static_env_token",
-                    isolation="service_env",
-                )
-            ],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=[
-                _security_warning(
-                    "STATIC_TOKEN_FALLBACK",
-                    f"Claude Code auth is supplied by static service environment variable {signal}.",
-                )
-            ],
-        )
-    else:
-        result = _provider_result(
-            ok=False,
-            strict=strict,
-            reason="CLAUDE_AUTH_MISSING",
-            message=(
-                "No Claude Code auth signal was visible. Set ANTHROPIC_API_KEY, "
-                "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, or mount ~/.claude."
-            ),
-            secrets=secrets,
-            credential_scope="not_observed",
-            isolation="none",
-        )
-    if propagation_posture is not None:
-        result["mount_propagation"] = propagation_posture
-    return result
-
-
-def _check_cursor(
-    *,
-    environ: Mapping[str, str],
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    """Check whether Cursor API-key auth is visible to the service."""
-    signal = _first_present_env(environ, _CURSOR_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="CURSOR_ENV_AUTH_PRESENT",
-            message="Cursor auth is visible through service environment variables.",
-            signals=[signal],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="env",
-                    signal=signal,
-                    credential_scope="static_env_token",
-                    isolation="service_env",
-                )
-            ],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=[
-                _security_warning(
-                    "STATIC_TOKEN_FALLBACK",
-                    f"Cursor auth is supplied by static service environment variable {signal}.",
-                )
-            ],
-        )
-
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="CURSOR_AUTH_MISSING",
-        message="No Cursor auth signal was visible. Set CURSOR_API_KEY.",
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
-
-
-def _check_cursor_readiness(
-    settings: ServiceSettings,
-    *,
-    environ: Mapping[str, str],
-    strict: bool,
-    run_subprocess: SubprocessRun,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    """Combine Cursor env auth with the runtime CLI availability probe."""
-    cursor_result = _check_cursor(environ=environ, strict=strict, secrets=secrets)
-    if cursor_result.get("ok") is not True:
-        return cursor_result
-
-    probe = _probe_agent_runtime_cli(
-        settings,
-        executable="cursor-agent",
-        provider="cursor",
-        environ=environ,
-        run_subprocess=run_subprocess,
-        secrets=secrets,
-    )
-    runtime_cli_probe = _runtime_cli_probe_payload(probe)
-    if probe.get("status") == "ok":
-        cursor_result["runtime_cli_probe"] = runtime_cli_probe
-        return cursor_result
-
-    reason = str(probe.get("reason_code") or "CURSOR_RUNTIME_CLI_NOT_FOUND")
-    message = str(probe.get("message") or "Cursor auth was found but cursor-agent is unavailable.")
-    result = _provider_result(
-        ok=False,
-        strict=strict,
-        reason=reason,
-        message=message,
-        detail=str(probe.get("detail") or "") or None,
-        signals=[
-            *[signal for signal in cursor_result.get("signals", []) if isinstance(signal, str)],
-            "cursor-agent",
-        ],
-        secrets=secrets,
-        credential_sources=_credential_sources(cursor_result),
-        credential_scope=str(cursor_result.get("credential_scope") or "static_env_token"),
-        isolation=str(cursor_result.get("isolation") or "service_env"),
-        warnings=[
-            *[
-                warning
-                for warning in cursor_result.get("warnings", [])
-                if isinstance(warning, Mapping)
-            ],
-            _security_warning(
-                reason,
-                _redact(message, secrets),
-                severity="error" if strict else "warning",
-            ),
-        ],
-    )
-    result["runtime_cli_probe"] = runtime_cli_probe
-    return result
-
-
-def _check_gemini(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    file_sources = _existing_credential_sources(
-        ((host_home / ".gemini", "~/.gemini"),),
-        credential_scope="isolated_workspace",
-        isolation="per_workspace_copy",
-    )
-    if file_sources:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_FILE_AUTH_PRESENT",
-            message="Gemini auth files are visible to the local service.",
-            signals=[source["signal"] for source in file_sources],
-            secrets=secrets,
-            credential_sources=file_sources,
-            credential_scope="isolated_workspace",
-            isolation="per_workspace_copy",
-            warnings=[],
-        )
-
-    signal = _first_present_env(environ, _GEMINI_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_ENV_AUTH_PRESENT",
-            message="Gemini auth is visible through service environment variables.",
-            signals=[signal],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="env",
-                    signal=signal,
-                    credential_scope="static_env_token",
-                    isolation="service_env",
-                )
-            ],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=[
-                _security_warning(
-                    "STATIC_TOKEN_FALLBACK",
-                    f"Gemini auth is supplied by static service environment variable {signal}.",
-                )
-            ],
-        )
-
-    credentials = environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if credentials and Path(credentials).expanduser().is_file():
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_ENV_AUTH_PRESENT",
-            message="Google application credentials are visible to the local service.",
-            signals=["GOOGLE_APPLICATION_CREDENTIALS"],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="path",
-                    signal="GOOGLE_APPLICATION_CREDENTIALS",
-                    credential_scope="read_only_host_path",
-                    isolation="read_only_bind",
-                )
-            ],
-            credential_scope="read_only_host_path",
-            isolation="read_only_bind",
-            warnings=[],
-        )
-
-    message = (
-        "No Gemini auth signal was visible. Set GEMINI_API_KEY, GOOGLE_API_KEY, "
-        "GOOGLE_APPLICATION_CREDENTIALS, or mount ~/.gemini."
-    )
-    if credentials:
-        message = (
-            "GOOGLE_APPLICATION_CREDENTIALS is set but the file is not visible to "
-            "the local service. Mount the file or use GEMINI_API_KEY/GOOGLE_API_KEY."
-        )
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="GEMINI_AUTH_MISSING",
-        message=message,
-        signals=["GOOGLE_APPLICATION_CREDENTIALS"] if credentials else None,
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
-
-
-def _check_opencode(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    http_get: HttpGet,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    opencode_config = (host_home / ".config" / "opencode").is_dir()
-    ollama_files = [
-        filename for filename in _OLLAMA_AUTH_FILES if (host_home / ".ollama" / filename).is_file()
-    ]
-    env_signal = _first_present_env(environ, _OPENCODE_ENV_KEYS)
-    signals: list[str] = []
-    credential_sources: list[dict[str, str]] = []
-    if opencode_config:
-        signals.append("~/.config/opencode")
-        credential_sources.append(
-            _credential_source(
-                type_="path",
-                signal="~/.config/opencode",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-        )
-    if ollama_files:
-        signals.append("~/.ollama auth files")
-        credential_sources.extend(
-            _credential_source(
-                type_="path",
-                signal=f"~/.ollama/{filename}",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-            for filename in ollama_files
-        )
-    if env_signal is not None:
-        signals.append(env_signal)
-        credential_sources.append(
-            _credential_source(
-                type_="env",
-                signal=env_signal,
-                credential_scope="static_env_token",
-                isolation="service_env",
-            )
-        )
-
-    if not signals:
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="OPENCODE_OLLAMA_AUTH_MISSING",
-            message=(
-                "No OpenCode/Ollama auth signal was visible. Mount ~/.config/opencode, "
-                "mount small ~/.ollama auth files, or set OLLAMA_API_KEY."
-            ),
-            secrets=secrets,
-            credential_scope="not_observed",
-            isolation="none",
-        )
-
-    version_urls = _ollama_version_urls(environ)
-    probe = _probe_ollama(version_urls, http_get=http_get, secrets=secrets)
-    if not probe["ok"]:
-        probe_detail = probe.get("detail")
-        return _provider_result(
-            ok=False,
-            strict=strict,
-            reason="OLLAMA_HOST_UNREACHABLE",
-            message=(
-                "OpenCode/Ollama auth is visible, but the Ollama host did not answer "
-                "a cheap /api/version readiness probe."
-            ),
-            detail=probe_detail if isinstance(probe_detail, str) else None,
-            signals=[*signals, "ollama /api/version"],
-            secrets=secrets,
-            credential_sources=credential_sources,
-            credential_scope=_primary_credential_scope(credential_sources),
-            isolation=_primary_isolation(credential_sources),
-            warnings=_static_env_warnings(
-                provider_label="OpenCode/Ollama",
-                signals=[env_signal]
-                if env_signal is not None and not (opencode_config or ollama_files)
-                else [],
-            ),
-        )
-
-    # Keep successful readiness payloads schema-stable. `_probe_ollama` retains
-    # recovered candidate failures under debug for internal diagnostics; only
-    # terminal probe failures become operator-facing provider detail.
-    reason = "OPENCODE_FILE_AUTH_PRESENT"
-    if not opencode_config and ollama_files:
-        reason = "OLLAMA_FILE_AUTH_PRESENT"
-    elif not opencode_config and env_signal is not None:
-        reason = "OLLAMA_ENV_AUTH_PRESENT"
-
-    return _provider_result(
-        ok=True,
-        strict=strict,
-        reason=reason,
-        message="OpenCode/Ollama auth is visible and the Ollama host is reachable.",
-        signals=[*signals, "OLLAMA_HOST_REACHABLE"],
-        secrets=secrets,
-        credential_sources=credential_sources,
-        credential_scope=_primary_credential_scope(credential_sources),
-        isolation=_primary_isolation(credential_sources),
-        warnings=_static_env_warnings(
-            provider_label="OpenCode/Ollama",
-            signals=[env_signal]
-            if env_signal is not None and not (opencode_config or ollama_files)
-            else [],
-        ),
-    )
-
-
-def _check_grok(
-    *,
-    environ: Mapping[str, str],
-    host_home: Path,
-    strict: bool,
-    secrets: frozenset[str],
-) -> dict[str, Any]:
-    auth_json = host_home / ".grok" / "auth.json"
-    if auth_json.is_file():
-        file_sources = [
-            _credential_source(
-                type_="path",
-                signal="~/.grok/auth.json",
-                credential_scope="isolated_workspace",
-                isolation="per_workspace_copy",
-            )
-        ]
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GROK_FILE_AUTH_PRESENT",
-            message="Grok Build auth files are visible for per-workspace isolated copies.",
-            signals=[source["signal"] for source in file_sources],
-            secrets=secrets,
-            credential_sources=file_sources,
-            credential_scope="isolated_workspace",
-            isolation="per_workspace_copy",
-            warnings=[],
-        )
-
-    signal = _first_present_env(environ, _XAI_ENV_KEYS)
-    if signal is not None:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GROK_ENV_AUTH_PRESENT",
-            message="Grok Build auth is visible through service environment variables.",
-            signals=[signal],
-            secrets=secrets,
-            credential_sources=[
-                _credential_source(
-                    type_="env",
-                    signal=signal,
-                    credential_scope="static_env_token",
-                    isolation="service_env",
-                )
-            ],
-            credential_scope="static_env_token",
-            isolation="service_env",
-            warnings=_static_env_warnings(
-                provider_label="Grok Build",
-                signals=[signal],
-            ),
-        )
-
-    return _provider_result(
-        ok=False,
-        strict=strict,
-        reason="GROK_AUTH_MISSING",
-        message="No Grok Build auth signal was visible. Mount ~/.grok or set XAI_API_KEY.",
-        secrets=secrets,
-        credential_scope="not_observed",
-        isolation="none",
-    )
-
-
 from awf.service.provider_readiness_helpers import (  # noqa: E402
+    _OPENCODE_PROVIDER_ENV_KEYS,
     _check_docker_provider,
-    _codex_file_sources,
-    _credential_source,
-    _existing_credential_sources,
-    _first_present_env,
-    _github_token,
+    _check_grok,
+    _check_opencode,
     _http_get,
-    _log_redacted_exception,
+    _http_post_stream,
+    _is_cloud_model,
+    _ollama_base_url_malformed,
+    _ollama_pull_urls,
     _ollama_tags_urls,
-    _ollama_version_urls,
+    _ollama_url_host_reachable_from_worker,
+    _opencode_ollama_host_probe_deferrable,
+    _opencode_provider_credentials_present,
     _ordered_names,
     _primary_credential_scope,
     _primary_isolation,
     _probe_agent_runtime_cli,
     _probe_cli_auth_status,
-    _probe_ollama,
-    _probe_ollama_model,
     _provider_result,
-    _redact,
-    _redact_with_redaction_parts,
     _run_subprocess,
-    _runtime_cli_probe_payload,
     _secret_values,
     _security_summary,
-    _security_warning,
-    _static_env_warnings,
+    overlay_profile_ollama_base_url,
+    overlay_profile_provider_credentials,
+)
+
+# Imported from ``provider_readiness_ollama`` (their defining module after the
+# extraction) rather than via ``provider_readiness_helpers`` so mypy treats them
+# as explicit exports; the helpers module re-exports the same names for its own
+# ``_check_opencode`` call site and existing test namespace access.
+from awf.service.provider_readiness_ollama import (  # noqa: E402
+    _probe_ollama,
+    _probe_ollama_model,
+    ensure_ollama_model_available,
+)
+
+# Imported after the helper/redaction re-exports above so the per-provider check
+# helpers (extracted into ``provider_readiness_provider_checks`` to satisfy the
+# maintainability line limit) can resolve the names they pull back from this
+# module. ``_check_provider_readiness`` above reaches them via this namespace.
+from awf.service.provider_readiness_provider_checks import (  # noqa: E402
+    _check_claude,
+    _check_codex,
+    _check_cursor,
+    _check_cursor_readiness,
+    _check_gemini,
+    _check_github,
+)
+from awf.service.provider_readiness_redaction import (  # noqa: E402
+    _redact,
+    _redact_with_redaction_parts,
     _truncate,
 )
 
 __all__ = [
+    "HttpPostStream",
+    "HttpStreamResponseLike",
     "ProviderName",
     "ProviderReadinessError",
     "check_single_provider_readiness",
     "collect_agent_readiness",
     "default_subprocess_runner",
+    "ensure_ollama_model_available",
+    "overlay_profile_ollama_base_url",
+    "overlay_profile_provider_credentials",
     "provider_readiness_preflight_from_task_policy",
     "redact_launch_preflight_text",
     "selected_provider_readiness_preflight",
     "validate_provider_names",
+    "_http_post_stream",
+    "_is_cloud_model",
+    "_ollama_pull_urls",
+    "_ollama_tags_urls",
     "_redact",
+    "_primary_credential_scope",
+    "_primary_isolation",
     "_probe_cli_auth_status",
+    "_probe_ollama",
     "_secret_values",
 ]

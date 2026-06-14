@@ -47,7 +47,6 @@ from awf.runtime.pr_monitor import (
     MergeableState,
     MergeStateStatus,
     MonitorState,
-    NotifyHuman,
     PRStatus,
     ReviewComment,
 )
@@ -580,7 +579,18 @@ class TestMiscMonitorHelpers:
                 "ws_add_failed",
                 [
                     {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 1, "stderr": "add failed"},
+                ],
+            )
+            is False
+        )
+        assert (
+            await run_case(
+                "ws_stage_status_failed",
+                [
+                    {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 1, "stderr": "status failed"},
                 ],
             )
             is False
@@ -589,6 +599,7 @@ class TestMiscMonitorHelpers:
             await run_case(
                 "ws_cached_clean",
                 [
+                    {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0},
                     {"returncode": 0},
@@ -601,6 +612,7 @@ class TestMiscMonitorHelpers:
                 "ws_commit_failed",
                 [
                     {"returncode": 0, "stdout": " M file.py\n"},
+                    {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0},
                     {"returncode": 1},
                     {"returncode": 1, "stderr": "commit failed"},
@@ -612,6 +624,7 @@ class TestMiscMonitorHelpers:
             await run_case(
                 "ws_committed",
                 [
+                    {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0, "stdout": " M file.py\n"},
                     {"returncode": 0},
                     {"returncode": 1},
@@ -638,7 +651,8 @@ class TestMiscMonitorHelpers:
         fake = FakeCommandRunner()
         for result in (
             {"returncode": 0, "stdout": " M file.py\n"},  # status --porcelain (dirty)
-            {"returncode": 0},  # add -A
+            {"returncode": 0, "stdout": " M file.py\n"},  # status --untracked-files=all
+            {"returncode": 0},  # add -A -- <stage_paths>
             {"returncode": 1},  # diff --cached --quiet (staged changes present)
             {"returncode": 0},  # commit
         ):
@@ -656,6 +670,83 @@ class TestMiscMonitorHelpers:
         assert commit_calls, "expected a git commit invocation"
         message = commit_calls[-1].args[commit_calls[-1].args.index("-m") + 1]
         assert message == "PROJ-123 awf: monitor dirty worktree"
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_excludes_untracked_agent_runtime_memory(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Pre-existing reviewer subagent memory is never staged into the PR commit.
+
+        The pre-existing-dirty guard lets a repair run when the only dirt is an
+        untracked ``.claude/agent-memory/`` file; the commit path must apply the
+        same exclusion so ``git add`` never re-stages that memory alongside a real
+        fix (PRRT_kwDOSJAM6s6JXd4I).
+        """
+        workspace_id = "ws_memory_exclusion"
+        fake = FakeCommandRunner()
+        dirty = " M src/awf/foo.py\n?? .claude/agent-memory/reviewer/bug.md\n"
+        for result in (
+            {"returncode": 0, "stdout": dirty},  # status --porcelain
+            {"returncode": 0, "stdout": dirty},  # status --untracked-files=all
+            {"returncode": 0},  # add -A -- <stage_paths>
+            {"returncode": 1},  # diff --cached --quiet (staged changes present)
+            {"returncode": 0},  # commit
+        ):
+            fake.queue_result(**result)
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+        )
+
+        assert committed is True
+        add_calls = [call for call in fake.calls if "add" in call.args]
+        assert add_calls, "expected a git add invocation"
+        add_args = add_calls[-1].args
+        assert "src/awf/foo.py" in add_args
+        assert not any(arg.startswith(".claude/agent-memory") for arg in add_args)
+
+    @pytest.mark.unit
+    async def test_commit_dirty_worktree_memory_only_skips_commit_side_effects(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Memory-only dirt short-circuits before any commit-side effects.
+
+        The initial dirty check runs with ``--untracked-files=all`` and drops the
+        untracked agent-runtime artifact, so a worktree dirtied only by reviewer
+        subagent memory returns False after a single ``git status`` — never entering
+        the supply-chain policy refresh, agent-runtime ownership repair, or
+        protected-scope repair (which can launch the agent CLI) that the
+        pre-existing-dirty guard and staging logic intentionally skip. Cursor BUGBOT
+        follow-up to PRRT_kwDOSJAM6s6JXd4I: the plain ``--porcelain`` check used here
+        previously let memory-only dirt fall through into those side effects.
+        """
+        workspace_id = "ws_memory_only"
+        fake = FakeCommandRunner()
+        # ``--untracked-files=all`` enumerates the leaf path; the agent-runtime filter
+        # then drops it, leaving nothing PR-worthy.
+        fake.queue_result(returncode=0, stdout="?? .claude/agent-memory/reviewer/bug.md\n")
+        runner = _monitor_runner(tmp_path, fake, session_factory=factory)
+        (runner._worktrees_root / workspace_id).mkdir(parents=True, exist_ok=True)
+
+        committed = await runner._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message="awf: monitor dirty worktree",
+        )
+
+        assert committed is False
+        # Exactly one git command — the initial ``--untracked-files=all`` dirty
+        # check — runs: no second status, no add, no commit, no protected-scope work.
+        assert len(fake.calls) == 1
+        assert fake.calls[0].args[-3:] == ["status", "--porcelain", "--untracked-files=all"]
+        assert not any("add" in call.args for call in fake.calls)
+        assert not any("commit" in call.args for call in fake.calls)
 
     @pytest.mark.unit
     async def test_commit_dirty_worktree_truncates_subject_to_72(
@@ -678,7 +769,8 @@ class TestMiscMonitorHelpers:
         fake = FakeCommandRunner()
         for result in (
             {"returncode": 0, "stdout": " M file.py\n"},  # status --porcelain (dirty)
-            {"returncode": 0},  # add -A
+            {"returncode": 0, "stdout": " M file.py\n"},  # status --untracked-files=all
+            {"returncode": 0},  # add -A -- <stage_paths>
             {"returncode": 1},  # diff --cached --quiet (staged changes present)
             {"returncode": 0},  # commit
         ):
@@ -1088,128 +1180,6 @@ async def test_late_validation_recovery_callback_records_stale_ready_workspace(
     assert stale_events[0].payload["callback_action"] == "recovery_dispatch"
     assert stale_events[0].payload["actual_status"] == WorkspaceStatus.ready.value
     assert [op for op in operations if op.type == OperationType.validate.value] == []
-
-
-@pytest.mark.unit
-async def test_manual_human_wait_records_operation(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)
-    sleep_fn = RecordedSleep()
-    pr_number = 79
-    head_sha = "f" * 40
-    workspace_id = await seed_monitoring_workspace(
-        factory,
-        pr_number=pr_number,
-        head_sha=head_sha,
-        auto_merge=False,
-    )
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=sleep_fn,
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    terminal = await runner._execute(
-        action=NotifyHuman(message="manual merge required"),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=pr_number,
-        status=_green_status(pr_number=pr_number, head_sha=head_sha),
-        state=MonitorState(started_at=0.0),
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    assert terminal is False
-    assert sleep_fn.calls == [60]
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-    assert workspace.status == WorkspaceStatus.monitoring_pr.value
-    assert len(operations) == 1
-    operation = operations[0]
-    assert operation.type == "human_wait"
-    assert operation.status == OperationStatus.succeeded.value
-    assert operation.started_at is not None
-    assert operation.finished_at is not None
-    assert operation.payload == {
-        "owner": "pr_monitor",
-        "source": "pr_monitor",
-        "action": "human_wait",
-        "requested_action": "notify_human",
-        "reason": "manual merge required",
-        "reason_code": "HUMAN_WAIT",
-        "pr_number": pr_number,
-        "pr_url": f"https://github.com/dimileeh/aira-web/pull/{pr_number}",
-        "source_head_sha": head_sha,
-        "source_base_sha": "a" * 40,
-        "target_branch": "development",
-        "remote_branch": f"awf/{workspace_id}",
-    }
-    assert operation.result == {
-        "status": "succeeded",
-        "outcome": "human_notification_posted",
-        "slept_seconds": 60,
-    }
-
-
-@pytest.mark.unit
-async def test_monitor_operation_payload_redacts_secret_like_values(
-    factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0)
-    workspace_id = await seed_monitoring_workspace(factory, pr_number=80)
-    runner = make_runner(
-        factory=factory,
-        cmd=cmd,
-        adapter=FakeAdapter(),
-        sleep_fn=RecordedSleep(),
-        worktrees_root=tmp_path / "worktrees",
-    )
-
-    await runner._execute(
-        action=NotifyHuman(
-            message=(
-                "blocked with Bearer ghp_should_not_persist "
-                "token=github_pat_should_not_persist password=sk-should-not-persist"
-            )
-        ),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=80,
-        status=_green_status(pr_number=80),
-        state=MonitorState(started_at=0.0),
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
-
-    async with factory() as session:
-        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-    assert len(operations) == 1
-    persisted = f"{operations[0].payload!r} {operations[0].result!r}"
-    assert "ghp_should_not_persist" not in persisted
-    assert "github_pat_should_not_persist" not in persisted
-    assert "sk-should-not-persist" not in persisted
-    assert "Bearer" not in persisted
-    assert "token=" not in persisted
-    assert "password=" not in persisted
-    assert "[redacted]" in persisted
 
 
 @pytest.mark.unit

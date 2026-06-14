@@ -466,12 +466,33 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#network_posture_unavailable](#network_posture_unavailable)
 
+### OLLAMA_MODEL_PULL_FAILED
+**Problem:** AWF could not make the requested OpenCode/Ollama model available: the host daemon failed to pull it before the agent run.
+**Likely Cause:** The requested model is not present in the daemon's `/api/tags`, is not an Ollama Cloud (`:cloud`) model, and the streamed `POST /api/pull` reported an error, timed out, or left the model still missing — for example a misspelled model name or an unreachable model registry.
+**Operator Fix:** Check the host Ollama daemon (`ollama ls`, `ollama pull <model>`), confirm the model name and registry reachability, then recreate or remonitor the workspace once the model can be pulled.
+**Related Command:** `awf workspace logs <workspace_id>`
+**Docs Link:** [docs/REASON_CATALOG.md#ollama_model_pull_failed](#ollama_model_pull_failed)
+
 ### OPENCODE_OLLAMA_AUTH_MISSING
 **Problem:** No OpenCode/Ollama auth signal was visible.
 **Likely Cause:** Missing OpenCode/Ollama credentials.
 **Operator Fix:** Mount ~/.config/opencode, mount ~/.ollama auth files, or set OLLAMA_API_KEY.
 **Related Command:** `awf service doctor`
 **Docs Link:** [docs/REASON_CATALOG.md#opencode_ollama_auth_missing](#opencode_ollama_auth_missing)
+
+### OPENCODE_OLLAMA_BASE_URL_MALFORMED
+**Problem:** AWF_OPENCODE_OLLAMA_BASE_URL / OLLAMA_HOST is set to a malformed value.
+**Likely Cause:** An explicit Ollama base URL cannot be parsed, so worker-side readiness would probe a different daemon than the agent uses.
+**Operator Fix:** Fix the Ollama base URL (unbalanced IPv6 brackets or a non-numeric port), then retry.
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#opencode_ollama_base_url_malformed](#opencode_ollama_base_url_malformed)
+
+### OPENCODE_PROVIDER_AUTH_MISSING
+**Problem:** No OpenCode/provider auth signal was visible for a non-Ollama OpenCode model.
+**Likely Cause:** Missing OpenCode/provider credentials for a provider-qualified (non-Ollama) model.
+**Operator Fix:** Mount ~/.config/opencode or set the provider API key (e.g. OPENAI_API_KEY / ANTHROPIC_API_KEY).
+**Related Command:** `awf service doctor`
+**Docs Link:** [docs/REASON_CATALOG.md#opencode_provider_auth_missing](#opencode_provider_auth_missing)
 
 ### OPEN_PR_RESOLVER_FORGE_NOT_SUPPORTED
 **Problem:** AWF could not recover the open PR for a preserved workspace because the open-PR resolver only supports GitHub.
