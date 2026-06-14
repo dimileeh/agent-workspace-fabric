@@ -992,6 +992,10 @@ class TestOpenCodeAdapter:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "env_var",
+        ["OLLAMA_HOST", "AWF_OPENCODE_OLLAMA_BASE_URL"],
+    )
+    @pytest.mark.parametrize(
         "ollama_host",
         [
             "127.0.0.1:11434",
@@ -1008,7 +1012,7 @@ class TestOpenCodeAdapter:
         ],
     )
     async def test_launch_prelude_matches_python_preflight_resolution(
-        self, ollama_host: str
+        self, ollama_host: str, env_var: str
     ) -> None:
         """Parity anchor: the shell launcher prelude and the Python worker preflight
         must resolve the *same* daemon (host + port) for every representative input.
@@ -1017,8 +1021,11 @@ class TestOpenCodeAdapter:
         hosts pass through unchanged. Running the actual prelude under ``sh`` against
         ``_parse_ollama_base_url`` is what keeps the two implementations honest — any
         sh-specific bracketed-IPv6/userinfo bug, or a drift between the host-local sets,
-        surfaces as a host/port mismatch here."""
-        env = {"OLLAMA_HOST": ollama_host}
+        surfaces as a host/port mismatch here. Both env keys are exercised because the
+        prelude (and ``_parse_ollama_base_url``) prefer ``AWF_OPENCODE_OLLAMA_BASE_URL``
+        over ``OLLAMA_HOST`` while sharing the downstream normalization, so a regression
+        specific to the preferred branch must also surface as a mismatch."""
+        env = {env_var: ollama_host}
         resolved = await self._resolve_ollama_base_url(env)
         shell_parts = urlsplit(resolved)
         python_parts = provider_readiness_helpers._parse_ollama_base_url(env)
