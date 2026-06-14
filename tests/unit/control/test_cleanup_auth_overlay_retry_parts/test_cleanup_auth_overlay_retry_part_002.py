@@ -22,6 +22,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import WorkerConfig
+from awf.control.worker import cleanup as worker_cleanup
 from awf.control.worker import cleanup_auth_overlay as worker_overlay
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
@@ -40,6 +41,7 @@ from awf.db.repositories.base import (
     latest_terminal_runtime_release_event_order_expr,
 )
 from awf.db.session import make_session_factory
+from awf.node.cleanup import WorkspaceCleanupResult
 from tests.postgres import postgres_test_engine
 from tests.unit.control.test_cleanup_auth_overlay_retry_parts.test_cleanup_auth_overlay_retry_part_001 import (
     _BASE,
@@ -977,6 +979,103 @@ async def test_append_pending_writes_event_but_not_after_terminal_marker(
         assert (await _event_types(session, ws_id)).count(
             worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE
         ) == 1
+
+
+def _prompt_releaser(factory: async_sessionmaker[AsyncSession], node_id: str = "node-1") -> Any:
+    """Build a worker double wiring the prompt-path release recorder + its guards.
+
+    Mirrors ``_sweeper`` but for ``_record_terminal_runtime_released`` and the
+    duplicate-release overlay-marker seed guard it relies on, so the real SQL helper
+    runs end-to-end against Postgres.
+    """
+    return type(
+        "PromptReleaser",
+        (),
+        {
+            "_config": WorkerConfig(node_id=node_id),
+            "_session_factory": factory,
+            "_log_transient_db_retry": lambda *_: None,
+            "_has_terminal_runtime_release_event": (
+                worker_cleanup._has_terminal_runtime_release_event
+            ),
+            "_has_current_cycle_terminal_auth_overlay_unmount_marker": (
+                worker_overlay._has_current_cycle_terminal_auth_overlay_unmount_marker
+            ),
+            "_record_terminal_runtime_released": (worker_cleanup._record_terminal_runtime_released),
+        },
+    )()
+
+
+@pytest.mark.asyncio
+async def test_record_released_seeds_pending_overlay_on_preemitted_stop_stack_release(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A ``cancel --stop-stack`` pre-emits ``terminal_runtime_released`` after only a
+    ``docker stop`` (no overlay work). The prompt path then runs ``compose down`` + the
+    overlay umount; when that umount fails it reaches ``_record_terminal_runtime_released``
+    with the release event already present. It must still seed exactly one ``pending``
+    overlay marker so the deferred re-sweep has a candidate (the ~1.7 GB overlay no longer
+    leaks), and a second invocation is idempotent — the release event is never re-written."""
+    releaser = _prompt_releaser(factory)
+    ws_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        # Service pre-emit after ``docker stop`` only: a bare release, no overlay marker.
+        await repo.add_event(
+            ws,
+            event_type=TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
+            reason_code=TERMINAL_RUNTIME_RELEASE_REASON_CODE,
+        )
+        ws_id = ws.id
+        await session.commit()
+
+    candidate = _candidate(ws_id)
+    for _ in range(2):
+        await releaser._record_terminal_runtime_released(  # noqa: SLF001
+            candidate,
+            WorkspaceCleanupResult.skipped(),
+            auth_overlay_unmounted=False,
+        )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    assert types.count(worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE) == 1
+    assert types.count(TERMINAL_RUNTIME_RELEASE_EVENT_TYPE) == 1
+
+
+@pytest.mark.asyncio
+async def test_record_released_does_not_seed_pending_when_terminal_marker_present(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """When a current-cycle terminal (``resolved``) overlay marker already exists, the
+    duplicate-release path does not seed a fresh ``pending`` that would resurrect the
+    workspace as a deferred candidate after the sweep already concluded."""
+    releaser = _prompt_releaser(factory)
+    sweeper = _sweeper(factory)
+    ws_id: str = ""
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await _make_workspace(session, repo)
+        await _mark_runtime_released(repo, ws)
+        ws_id = ws.id
+        await session.commit()
+
+    candidate = _candidate(ws_id)
+    # The deferred sweep already resolved this cycle's overlay.
+    await sweeper._record_terminal_auth_overlay_unmount_resolved(  # noqa: SLF001
+        candidate, auth_overlay_unmounted=True
+    )
+
+    await releaser._record_terminal_runtime_released(  # noqa: SLF001
+        candidate,
+        WorkspaceCleanupResult.skipped(),
+        auth_overlay_unmounted=False,
+    )
+
+    async with factory() as session:
+        types = await _event_types(session, ws_id)
+    assert worker_overlay._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE not in types
 
 
 @pytest.mark.asyncio

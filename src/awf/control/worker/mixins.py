@@ -86,6 +86,9 @@ class WorkerDelegatesMixin:
     _has_terminal_auth_overlay_unmount_terminal_event = (
         _cleanup_auth_overlay._has_terminal_auth_overlay_unmount_terminal_event
     )
+    _has_current_cycle_terminal_auth_overlay_unmount_marker = (
+        _cleanup_auth_overlay._has_current_cycle_terminal_auth_overlay_unmount_marker
+    )
     _record_terminal_auth_overlay_unmount_resolved = (
         _cleanup_auth_overlay._record_terminal_auth_overlay_unmount_resolved
     )

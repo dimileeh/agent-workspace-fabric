@@ -664,6 +664,137 @@ async def test_record_released_returns_when_event_already_exists(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("marker_exists", [False, True])
+async def test_record_released_seeds_pending_overlay_marker_on_duplicate_release(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    marker_exists: bool,
+) -> None:
+    """A duplicate ``terminal_runtime_released`` (e.g. a ``cancel --stop-stack`` that
+    pre-emitted it after only ``docker stop``) must still seed the deferred-retry
+    ``pending`` overlay marker when the prompt-path umount failed, or the ~1.7 GB auth
+    overlay leaks despite the prompt cleanup. The seed is idempotent: when a
+    pending/terminal overlay marker already exists for the current release cycle, no
+    duplicate is appended so the umount attempt count never inflates."""
+    candidate = _candidate("ws_dup_overlay")
+    added_events: list[str] = []
+
+    class _Workspace:
+        status = WorkspaceStatus.failed.value
+
+    class _WorkspaceRepo:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        async def get_for_update(self, workspace_id: str, *, skip_locked: bool) -> object:
+            del workspace_id, skip_locked
+            return _Workspace()
+
+        async def add_event(self, *_args: Any, **kwargs: Any) -> None:
+            added_events.append(kwargs["event_type"])
+
+    async def _has_release_event(_session: object, _workspace_id: str) -> bool:
+        return True
+
+    async def _has_overlay_marker(_session: object, _workspace_id: str) -> bool:
+        return marker_exists
+
+    async def _run_db_operation_with_retry(_factory: Any, operation: Any, **_kwargs: Any) -> bool:
+        return await operation(_RecordingSession())
+
+    monkeypatch.setattr(worker_cleanup, "WorkspaceRepository", _WorkspaceRepo)
+    monkeypatch.setattr(
+        worker_cleanup,
+        "run_db_operation_with_retry",
+        _run_db_operation_with_retry,
+    )
+
+    worker = SimpleNamespace(
+        _session_factory=lambda: _RecordingSession(),
+        _log_transient_db_retry=lambda *_a: None,
+        _has_terminal_runtime_release_event=_has_release_event,
+        _has_current_cycle_terminal_auth_overlay_unmount_marker=_has_overlay_marker,
+    )
+
+    await worker_cleanup._record_terminal_runtime_released(  # noqa: SLF001
+        worker,
+        candidate,
+        WorkspaceCleanupResult.skipped(),
+        auth_overlay_unmounted=False,
+    )
+
+    if marker_exists:
+        # The deferred sweep already owns this overlay for the current cycle; no
+        # duplicate ``pending`` is appended.
+        assert added_events == []
+    else:
+        # No existing marker: the prompt path seeds the first ``pending`` so the
+        # deferred re-sweep has a candidate. The release event itself is never
+        # re-written (it is a duplicate).
+        assert added_events == [worker_cleanup._TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE]  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_record_released_skips_pending_seed_when_overlay_unmounted_on_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a duplicate release where the overlay umount *succeeded* (or was N/A), no
+    ``pending`` marker is seeded and the marker-existence check is never consulted."""
+    candidate = _candidate("ws_dup_ok")
+    added_events: list[str] = []
+    marker_check_calls = 0
+
+    class _Workspace:
+        status = WorkspaceStatus.failed.value
+
+    class _WorkspaceRepo:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        async def get_for_update(self, workspace_id: str, *, skip_locked: bool) -> object:
+            del workspace_id, skip_locked
+            return _Workspace()
+
+        async def add_event(self, *_args: Any, **kwargs: Any) -> None:
+            added_events.append(kwargs["event_type"])
+
+    async def _has_release_event(_session: object, _workspace_id: str) -> bool:
+        return True
+
+    async def _has_overlay_marker(_session: object, _workspace_id: str) -> bool:
+        nonlocal marker_check_calls
+        marker_check_calls += 1
+        return False
+
+    async def _run_db_operation_with_retry(_factory: Any, operation: Any, **_kwargs: Any) -> bool:
+        return await operation(_RecordingSession())
+
+    monkeypatch.setattr(worker_cleanup, "WorkspaceRepository", _WorkspaceRepo)
+    monkeypatch.setattr(
+        worker_cleanup,
+        "run_db_operation_with_retry",
+        _run_db_operation_with_retry,
+    )
+
+    worker = SimpleNamespace(
+        _session_factory=lambda: _RecordingSession(),
+        _log_transient_db_retry=lambda *_a: None,
+        _has_terminal_runtime_release_event=_has_release_event,
+        _has_current_cycle_terminal_auth_overlay_unmount_marker=_has_overlay_marker,
+    )
+
+    await worker_cleanup._record_terminal_runtime_released(  # noqa: SLF001
+        worker,
+        candidate,
+        WorkspaceCleanupResult.skipped(),
+        auth_overlay_unmounted=True,
+    )
+
+    assert added_events == []
+    assert marker_check_calls == 0
+
+
+@pytest.mark.unit
 async def test_record_released_reraises_cancelled_from_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

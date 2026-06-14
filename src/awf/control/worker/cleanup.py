@@ -1075,6 +1075,31 @@ async def _record_terminal_runtime_released(
         if ws.status not in {status.value for status in _TERMINAL_RELEASE_STATUSES}:
             return False
         if await self._has_terminal_runtime_release_event(session, candidate.workspace_id):
+            # The release event already exists — e.g. a ``cancel --stop-stack`` pre-emits
+            # ``terminal_runtime_released`` in the service after only a ``docker stop``
+            # (#583/#584), yet the prompt path still ran ``compose down`` + the overlay
+            # umount above. When that umount failed we must still seed the deferred-retry
+            # ``pending`` marker; the bare early-return previously dropped it, so the
+            # deferred re-sweep had no candidate and the ~1.7 GB overlay leaked despite the
+            # prompt cleanup. Idempotent: skip when any pending/terminal overlay marker
+            # already exists for the current release cycle so the deferred sweep keeps
+            # owning the attempt lifecycle (and the umount count never inflates).
+            if (
+                auth_overlay_unmounted is False
+                and not await self._has_current_cycle_terminal_auth_overlay_unmount_marker(
+                    session, candidate.workspace_id
+                )
+            ):
+                await repo.add_event(
+                    ws,
+                    event_type=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_EVENT_TYPE,
+                    reason_code=_TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING_REASON_CODE,
+                    payload={
+                        "compose_project_name": candidate.compose_project_name,
+                        "workspace_status": candidate.status.value,
+                        "attempt": 1,
+                    },
+                )
             return False
         await repo.add_event(
             ws,
