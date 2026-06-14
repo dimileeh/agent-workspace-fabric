@@ -381,9 +381,16 @@ own. Respond, do not restart:
 
 `guide --directive` is also the lever for a review that **will not converge** (each fix
 drawing one more incremental bot comment over many commits): direct the monitor to
-resolve low-value/incremental comments via `DEFER`/`FALSE POSITIVE` *replies* instead
+clear low-value/incremental comments via `DEFER`/`FALSE POSITIVE` *replies* instead
 of code edits (every edit triggers another CI + re-review cycle), and to defer anything
-needing files outside `owned_paths` — so it stops looping and merges on green CI.
+needing files outside `owned_paths` — so it stops looping and merges on green CI. Mind
+which reply actually unblocks merge: `DEFER` breaks the loop only for **bot** comments
+and for inline threads the monitor can auto-resolve (it files a tracking issue, posts an
+explanatory comment, and resolves the thread). A `DEFER` on a **human-authored
+review-level comment** has no thread to auto-resolve and still routes to `NotifyHuman`,
+blocking auto-merge — there, use `FALSE POSITIVE` (only when it genuinely is one; never
+to dismiss valid feedback) as the non-blocking reply, or answer the comment. `NEEDS_HUMAN`
+always blocks, regardless of author.
 
 > Operational note: pushing directly to a branch the monitor is actively pushing
 > to (e.g. landing a small fix on `development` while a `development→main`
