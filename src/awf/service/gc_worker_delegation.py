@@ -118,12 +118,20 @@ def fold_worker_reclaim(
 ) -> dict[str, object]:
     """Fold a worker reclaim outcome into the API-side gc result dict.
 
-    On a successful delegation the worker's reclaimed ``deleted_path_count`` /
-    ``total_estimated_bytes`` are **summed** onto the headline numbers (the
-    API-side pass recorded the auth/claude-base paths as ``skipped``/0, so this is
-    additive, never double-counted) and the ``worker_reclaim`` sub-object is
-    attached. If the worker's own reap was ``partial`` the headline status is
-    downgraded so the operator is not told a self-protected sweep fully succeeded.
+    On a successful delegation the worker's reclaimed ``deleted_path_count`` is
+    **summed** onto the headline count — the API-side pass recorded the
+    auth/claude-base paths as ``skipped`` (never in ``deleted_paths``), so the
+    worker's actual deletions are net-new and never double-counted — and the
+    ``worker_reclaim`` sub-object is attached. If the worker's own reap was
+    ``partial`` the headline status is downgraded so the operator is not told a
+    self-protected sweep fully succeeded.
+
+    ``total_estimated_bytes`` is **not** summed: the base value is the API GC
+    *plan* total, a directory-scan estimate that already includes the auth-dir
+    estimate even though that path was skipped at execution time. The worker
+    re-estimates the same auth dir it removes, so adding its plan total would
+    double-count those bytes (~1.7GB per workspace). The headline keeps the base
+    plan total; the worker's own estimate stays visible on ``worker_reclaim``.
 
     On a non-success delegation (worker unavailable / timeout / reclaim failed)
     the headline status is downgraded to ``partial`` with the delegation reason
@@ -135,9 +143,6 @@ def fold_worker_reclaim(
     if outcome.succeeded:
         folded["deleted_path_count"] = (
             _as_int(base.get("deleted_path_count")) + outcome.deleted_path_count
-        )
-        folded["total_estimated_bytes"] = (
-            _as_int(base.get("total_estimated_bytes")) + outcome.total_estimated_bytes
         )
         if outcome.worker_partial and base.get("status") == "succeeded":
             folded["status"] = "partial"

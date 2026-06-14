@@ -64,7 +64,9 @@ def _stub_api_side_reclaim(monkeypatch: pytest.MonkeyPatch) -> None:
     This isolates the delegation assertions from real filesystem GC: the API-side
     pass reclaims worktree/compose only (here: nothing), and crucially records the
     auth/claude-base paths as ``deleted_path_count: 0`` — proving the worker's
-    fold is additive, not a double-count.
+    path-count fold is additive, not a double-count. ``total_estimated_bytes`` is
+    held at 0 here; the headline keeps this base plan total (bytes are never summed,
+    since the real base plan total already includes the auth-dir estimate).
     """
     from unittest.mock import AsyncMock
 
@@ -153,13 +155,17 @@ async def test_execute_folds_worker_reclaim_into_headline(
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["status"] == "succeeded"
-    # Headline = API-side (0 auth) + worker reclaim (3 paths, ~1.7 GB).
+    # Path count folds additively: API-side (0 auth) + worker reclaim (3 paths).
     assert payload["deleted_path_count"] == 3
-    assert payload["total_estimated_bytes"] == 1_700_000_000
+    # Bytes are NOT summed: the headline keeps the base plan total (0 in this stub).
+    # The worker's ~1.7 GB estimate is the same auth dir the base plan already
+    # estimates, so summing would double-count it; it stays on the sub-object.
+    assert payload["total_estimated_bytes"] == 0
     worker_reclaim = payload["worker_reclaim"]
     assert worker_reclaim["status"] == "completed"
     assert worker_reclaim["reason_code"] == "SERVICE_GC_WORKER_RECLAIMED"
     assert worker_reclaim["deleted_path_count"] == 3
+    assert worker_reclaim["total_estimated_bytes"] == 1_700_000_000
     assert worker_reclaim["report"] == worker_report
 
 

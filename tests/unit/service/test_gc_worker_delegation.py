@@ -43,15 +43,22 @@ def test_fold_sums_worker_reclaim_into_headline() -> None:
 
     folded = fold_worker_reclaim(_api_base(), outcome)
 
-    # Headline numbers are the API-side reclaim PLUS the worker's reclaim.
+    # ``deleted_path_count`` is genuinely additive: the API-side pass recorded the
+    # auth/claude-base paths as ``skipped`` (never in ``deleted_paths``), so the
+    # worker's actual deletions are net-new.
     assert folded["deleted_path_count"] == 5
-    assert folded["total_estimated_bytes"] == 1_700_000_100
+    # ``total_estimated_bytes`` must NOT be summed: the API plan total already
+    # includes the auth-dir estimate (it is a directory-scan estimate, independent
+    # of the skip), and the worker re-estimates the same auth dir it removes. Adding
+    # them double-counts ~1.7GB per workspace, so the base plan total is kept.
+    assert folded["total_estimated_bytes"] == 100
     assert folded["status"] == "succeeded"
     worker_reclaim = folded["worker_reclaim"]
     assert isinstance(worker_reclaim, dict)
     assert worker_reclaim["status"] == "completed"
     assert worker_reclaim["reason_code"] == SERVICE_GC_WORKER_RECLAIMED
     assert worker_reclaim["deleted_path_count"] == 3
+    # The worker's own reclaim estimate stays visible on the sub-object.
     assert worker_reclaim["total_estimated_bytes"] == 1_700_000_000
     assert worker_reclaim["report"] == report
 
