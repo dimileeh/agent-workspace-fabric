@@ -76,6 +76,17 @@ class TestLeadingExecutable:
             ("set -e; set -x; ruff check .", "ruff"),
             # A guard followed by an env-assignment prefix still probes the tool.
             ("set -e; FOO=bar ruff check .", "ruff"),
+            # The common ``env`` wrapper forms name the real tool *after* env's own
+            # assignments. Probing the wrapper (``env``) only checks ``command -v
+            # env`` — almost always present — so an uninstalled pytest/ruff would
+            # slip past the handoff and die later in ``monitoring_pr``. Unwrap env
+            # and probe the program it execs.
+            ("env PYTHONPATH=src pytest -q", "pytest"),
+            ("/usr/bin/env pytest -q", "pytest"),
+            ("env pytest", "pytest"),
+            ("env FOO=bar PYTHONPATH=src mypy src", "mypy"),
+            # A leading shell guard before the env wrapper is still skipped.
+            ("set -e; env PYTHONPATH=src pytest -q", "pytest"),
         ],
     )
     def test_extracts_leading_executable(self, command: str, expected: str) -> None:
@@ -142,6 +153,21 @@ class TestLeadingExecutable:
             # A guard with no following command names no tool, so fail open.
             "set -euo pipefail",
             "shopt -s globstar",
+            # ``env`` wrapper forms the shared-PATH probe cannot faithfully
+            # replay fail open after unwrapping rather than probing ``env``:
+            # ``-i`` clears the environment (and thus PATH), any other option
+            # flag (``-u NAME``) consumes a value the parser cannot place, an
+            # ``env PATH=...`` binding makes the tool resolvable off the shared
+            # PATH, and an ``env``-wrapped shell-expanded path is expanded only by
+            # the real ``sh -lc``.
+            "env -i pytest",
+            "env -u PATH pytest",
+            "env PATH=/opt/bin:$PATH eslint .",
+            "env $HOME/.local/bin/ruff check .",
+            # An ``env`` wrapper that names only assignments (or nothing) execs no
+            # program, so there is no tool to probe.
+            "env",
+            "env FOO=bar",
         ],
     )
     def test_unprobeable_leading_token_returns_none(self, command: str) -> None:
@@ -209,6 +235,13 @@ class TestLeadingExecutables:
 
     def test_comment_only_command_yields_no_tools(self) -> None:
         assert _leading_executables("# just a note, no command here") == []
+
+    def test_env_wrapped_chained_tools_probe_each_real_program(self) -> None:
+        # Each ``&&``-chained ``env`` wrapper is unwrapped to the program it
+        # execs, so both real tools are probed rather than ``env`` twice.
+        assert _leading_executables(
+            "env PYTHONPATH=src pytest -q && /usr/bin/env ruff check ."
+        ) == ["pytest", "ruff"]
 
 
 @pytest.mark.unit
@@ -300,6 +333,21 @@ class TestValidateCommandProbeTargets:
             _profile_with_validate(["$HOME/.local/bin/ruff check .", "mypy src"])
         )
         assert [(t.tool, t.command) for t in targets] == [("mypy", "mypy src")]
+
+    def test_probes_real_tool_behind_env_wrapper(self) -> None:
+        # A profile that runs its validate tool through the common ``env`` wrapper
+        # (``env PYTHONPATH=src pytest -q``) must probe ``pytest``, not ``env`` —
+        # otherwise an unprovisioned pytest passes the ``command -v env`` check and
+        # dies later in ``monitoring_pr`` instead of failing the handoff with
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. The full command stays as the
+        # representative for the operator message.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["env PYTHONPATH=src pytest -q", "mypy src"])
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("pytest", "env PYTHONPATH=src pytest -q"),
+            ("mypy", "mypy src"),
+        ]
 
     def test_probes_tool_after_leading_comment_line(self) -> None:
         # A YAML block command opening with a shell comment line (``# run lint``)

@@ -380,6 +380,39 @@ def _assignment_prefix_sets_path(assignments: list[str]) -> bool:
     return any(assignment.split("=", 1)[0] == "PATH" for assignment in assignments)
 
 
+def _resolve_env_wrapper(tokens: list[str], index: int) -> int | object:
+    """Advance past an ``env`` wrapper to the program it will exec.
+
+    ``index`` points at an ``env``/``/usr/bin/env`` token. Returns the index of the
+    program ``env`` execs, having skipped env's leading ``NAME=VALUE`` assignments,
+    so a common wrapper form like ``env PYTHONPATH=src pytest`` or
+    ``/usr/bin/env pytest`` is probed for the real tool (``pytest``) rather than for
+    ``env`` — whose presence is almost always satisfied, so an uninstalled
+    ``pytest``/``ruff`` would otherwise slip past the handoff and die later in
+    ``monitoring_pr`` instead of failing early as
+    PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+
+    Fails open with :data:`_STOP_PROBE` for wrapper forms the shared-PATH probe
+    cannot faithfully replay: any option flag (``-i`` clears the environment — and
+    thus ``PATH`` —, ``-u NAME``/``--chdir DIR`` consume a following value the
+    parser cannot place) or an assignment that rebinds ``PATH``. Returns
+    :data:`_SKIP_STATEMENT` when the wrapper names no program to exec (only
+    assignments).
+    """
+    index += 1  # step past the ``env`` token itself
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("-"):
+            return _STOP_PROBE
+        if _ENV_ASSIGNMENT_RE.fullmatch(token):
+            if token.split("=", 1)[0] == "PATH":
+                return _STOP_PROBE
+            index += 1
+            continue
+        return index
+    return _SKIP_STATEMENT
+
+
 # Leading shell *guard* commands configure the shell (error/option flags,
 # resource limits) without naming a project tool, and conventionally prefix the
 # real command in a sequence (``set -e; ruff check .``). The probe skips such a
@@ -480,6 +513,17 @@ def _statement_leading_executable(statement: str) -> str | object:
         # Only env assignments in this statement (``FOO=bar``); nothing to probe
         # here, so move on to the next statement.
         return _SKIP_STATEMENT
+    # An ``env`` wrapper (``env PYTHONPATH=src pytest``, ``/usr/bin/env pytest``)
+    # would otherwise make the probe target ``env`` itself — almost always present
+    # — and let an unprovisioned ``pytest``/``ruff`` slip past the handoff. Unwrap
+    # it (looping so a nested ``env env ...`` resolves) and probe the program env
+    # execs, so the remaining subshell/expansion/builtin checks run against the
+    # real command.
+    while _command_token_name(tokens[index]) == "env":
+        resolved = _resolve_env_wrapper(tokens, index)
+        if resolved is _STOP_PROBE or resolved is _SKIP_STATEMENT:
+            return resolved
+        index = resolved  # type: ignore[assignment]
     leading = tokens[index]
     # A leading subshell opener (``(cd frontend && npm test)`` -> ``(cd``, or
     # ``( cd ... )`` -> ``(`` when spaced) is shell grouping the real runner
