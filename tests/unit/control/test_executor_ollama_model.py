@@ -365,6 +365,7 @@ async def test_ensure_derives_urls_from_profile_ollama_base_url(
     assert any("gateway.docker.internal:11434" in url for url in seen["tags_urls"])
     assert any("gateway.docker.internal:11434" in url for url in seen["pull_urls"])
     assert all("host.docker.internal" not in url for url in seen["tags_urls"])
+    assert all("host.docker.internal" not in url for url in seen["pull_urls"])
 
 
 @pytest.mark.unit
