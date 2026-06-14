@@ -99,6 +99,9 @@ def test_service_gc_maps_flags_to_request_body() -> None:
         "limit": 5,
         "statuses": ["completed"],
         "exclude_statuses": ["failed"],
+        # #582: execute delegates the capability-gated reclaim to the worker and
+        # passes the worker-delegation budget (the default --timeout-seconds).
+        "worker_delegation_timeout_seconds": 900.0,
     }
 
 
@@ -136,6 +139,7 @@ def test_service_gc_can_target_superseded_status() -> None:
         "execute": True,
         "statuses": ["superseded"],
         "exclude_statuses": ["superseded"],
+        "worker_delegation_timeout_seconds": 900.0,
     }
 
 
@@ -161,7 +165,12 @@ def test_service_gc_uses_long_default_timeout() -> None:
         result = _runner.invoke(app, ["service", "gc", "--execute"])
 
     assert result.exit_code == 0, result.output
-    assert mock.call_args.kwargs["timeout"] == 900.0
+    # #582: the execute HTTP timeout carries a buffer above the worker-delegation
+    # budget so the server's structured timeout response arrives before the client
+    # socket timeout; the worker budget itself is the unbuffered 900s default.
+    assert mock.call_args.kwargs["timeout"] == 930.0
+    body = mock.call_args.kwargs["json"]
+    assert body["worker_delegation_timeout_seconds"] == 900.0
 
 
 @pytest.mark.unit
@@ -174,7 +183,8 @@ def test_service_gc_honors_timeout_override() -> None:
         )
 
     assert result.exit_code == 0, result.output
-    assert mock.call_args.kwargs["timeout"] == 3600.0
+    assert mock.call_args.kwargs["timeout"] == 3630.0
+    assert mock.call_args.kwargs["json"]["worker_delegation_timeout_seconds"] == 3600.0
 
 
 @pytest.mark.unit
@@ -238,6 +248,76 @@ def test_service_gc_partial_without_overlay_failure_omits_warning() -> None:
 
     assert result.exit_code == 1
     assert "could not be unmounted" not in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_gc_worker_unavailable_warns_and_exits_nonzero() -> None:
+    # #582: execute delegated to a down worker -> structured worker-unavailable
+    # outcome -> non-zero exit + an actionable stderr hint to start the worker.
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "SERVICE_GC_WORKER_UNAVAILABLE",
+            "deleted_path_count": 0,
+            "worker_reclaim": {
+                "status": "unavailable",
+                "reason_code": "SERVICE_GC_WORKER_UNAVAILABLE",
+                "message": "no fresh control-worker heartbeat for node 'local'",
+            },
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    combined = _combined_output(result)
+    assert "no running control-worker was available" in combined
+    assert "Start the control-worker" in combined
+
+
+@pytest.mark.unit
+def test_service_gc_worker_timeout_warns_and_exits_nonzero() -> None:
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "SERVICE_GC_WORKER_DELEGATION_TIMEOUT",
+            "worker_reclaim": {
+                "status": "timeout",
+                "reason_code": "SERVICE_GC_WORKER_DELEGATION_TIMEOUT",
+            },
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    assert "did not finish the reclaim in time" in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_gc_successful_worker_delegation_exits_zero() -> None:
+    # A clean execute run with a successful worker reclaim must not warn or fail.
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+            "deleted_path_count": 3,
+            "worker_reclaim": {
+                "status": "completed",
+                "reason_code": "SERVICE_GC_WORKER_RECLAIMED",
+                "deleted_path_count": 3,
+            },
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 0, result.output
+    combined = _combined_output(result)
+    assert "control-worker" not in combined
 
 
 @pytest.mark.unit

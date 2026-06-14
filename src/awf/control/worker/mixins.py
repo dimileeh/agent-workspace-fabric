@@ -44,6 +44,10 @@ class WorkerDelegatesMixin:
     _maybe_reap_classified_orphans = _cleanup._maybe_reap_classified_orphans
     _maybe_reap_superseded_claude_bases = _cleanup._maybe_reap_superseded_claude_bases
     _maybe_reap_terminal_workspace_gc = _cleanup._maybe_reap_terminal_workspace_gc
+    _maybe_consume_service_gc_trigger = _cleanup._maybe_consume_service_gc_trigger
+    _claim_service_gc_trigger = _cleanup._claim_service_gc_trigger
+    _run_claimed_service_gc_trigger = _cleanup._run_claimed_service_gc_trigger
+    _finish_service_gc_trigger = _cleanup._finish_service_gc_trigger
     _release_terminal_runtime_resources = _cleanup._release_terminal_runtime_resources
     _resume_pending_planning_scope_auto_retries_after_terminal_release = (
         _cleanup._resume_pending_planning_scope_auto_retries_after_terminal_release

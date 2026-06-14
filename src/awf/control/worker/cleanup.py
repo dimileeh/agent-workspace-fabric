@@ -47,6 +47,7 @@ from awf.control.worker.constants import (
     _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE,
     _PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
     _PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE,
+    _SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE,
     _TERMINAL_RELEASE_STATUSES,
     _TERMINAL_RUNTIME_RELEASE_EVENT_TYPE,
     _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,
@@ -65,7 +66,7 @@ from awf.db.models import (
     Workspace,
     WorkspaceEvent,
 )
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ServiceGCRequestRepository, WorkspaceRepository
 from awf.db.repositories.base import (
     has_terminal_runtime_released_event,
     terminal_runtime_effectively_released_expr,
@@ -83,6 +84,7 @@ from awf.service.failure_causality import (
     attach_primary_failure,
     load_primary_failure_snapshot,
 )
+from awf.service.gc_worker_delegation import SERVICE_GC_WORKER_RECLAIM_FAILED
 from awf.service.secret_leases import (
     SecretLeaseService,
 )
@@ -545,6 +547,132 @@ def _log_terminal_gc_reap_summary(report: dict[str, object]) -> None:
             # auth-dir path can't leak into the worker log.
             delete_error_count=len(cast("list[object]", report.get("delete_errors") or [])),
         )
+
+
+async def _maybe_consume_service_gc_trigger(self: Any) -> None:
+    """Consume an on-demand ``service_gc_requests`` row by running the GC reap now (#582).
+
+    The capability-less API ``/v1/service/gc --execute`` path cannot reclaim the
+    per-workspace Claude auth overlays or ``_shared/claude-base``; it writes a
+    ``pending`` row and waits for the worker instead of silently reclaiming 0. This
+    claims the oldest such row (``SELECT ... FOR UPDATE SKIP LOCKED``, so the
+    interval reaper or a second worker never double-claims), marks it ``running``,
+    runs the *already-wired* ``self._terminal_gc_reaper`` (its pass-1 already reaps
+    claude-base — calling ``self._claude_base_reaper`` separately would double-reap),
+    writes the combined report into ``result``, and marks the row ``completed``. A
+    reaper failure marks the row ``failed`` with ``SERVICE_GC_WORKER_RECLAIM_FAILED``
+    so the API surfaces a structured error instead of a false success.
+
+    Runs every poll cycle (a single indexed ``status='pending'`` lookup is cheap)
+    rather than on an interval, so the operator's on-demand trigger is picked up
+    within ~one ``poll_interval_seconds``. Deliberately not gated on the
+    ``terminal_workspace_gc_enabled`` interval kill-switch: that flag governs only
+    the periodic backstop, while this path is an explicit operator request. No-op
+    when no reaper is wired or no row is pending. Swallow-and-log discipline mirrors
+    the sibling ``_maybe_reap_*`` methods — one failed consume must never break
+    provisioning/dispatch. ``asyncio.CancelledError`` propagates for cooperative
+    shutdown.
+    """
+    if self._terminal_gc_reaper is None:
+        return
+
+    try:
+        request_id = await self._claim_service_gc_trigger()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.exception(
+            "worker.service_gc_trigger_claim_failed",
+            reason_code=_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE,
+        )
+        return
+    if request_id is None:
+        return
+
+    await self._run_claimed_service_gc_trigger(request_id)
+
+
+async def _claim_service_gc_trigger(self: Any) -> str | None:
+    """Atomically claim the oldest pending gc-trigger row for this node, if any."""
+    node_id = effective_worker_config_node_id(self._config)
+    now = datetime.now(UTC)
+
+    async def _operation(session: AsyncSession) -> str | None:
+        request = await ServiceGCRequestRepository(session).claim_oldest_pending(
+            node_id=node_id,
+            now=now,
+        )
+        return request.id if request is not None else None
+
+    return await run_db_operation_with_retry(
+        self._session_factory,
+        _operation,
+        commit=True,
+        on_retry=self._log_transient_db_retry,
+    )
+
+
+async def _run_claimed_service_gc_trigger(self: Any, request_id: str) -> None:
+    """Run the reaper for a claimed trigger row and persist its terminal outcome.
+
+    The claim and the (potentially multi-GB, multi-second) reap are in separate
+    transactions so the row lock is not held across the reap. ``CancelledError``
+    propagates; any reaper failure is recorded on the row so the polling API does
+    not hang and never reports false success.
+    """
+    try:
+        report = await self._terminal_gc_reaper()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _log.exception(
+            "worker.service_gc_trigger_reap_failed",
+            reason_code=SERVICE_GC_WORKER_RECLAIM_FAILED,
+            request_id=request_id,
+        )
+        await self._finish_service_gc_trigger(
+            request_id,
+            report=None,
+            error=f"{type(exc).__name__}: {exc}"[:480],
+        )
+        return
+
+    await self._finish_service_gc_trigger(request_id, report=report, error=None)
+    _log_terminal_gc_reap_summary(report)
+
+
+async def _finish_service_gc_trigger(
+    self: Any,
+    request_id: str,
+    *,
+    report: dict[str, object] | None,
+    error: str | None,
+) -> None:
+    """Mark a claimed gc-trigger row ``completed`` (with report) or ``failed``."""
+    now = datetime.now(UTC)
+
+    async def _operation(session: AsyncSession) -> None:
+        repo = ServiceGCRequestRepository(session)
+        if error is None:
+            await repo.mark_completed(
+                request_id=request_id,
+                result=report or {},
+                now=now,
+            )
+        else:
+            await repo.mark_failed(
+                request_id=request_id,
+                error_code=SERVICE_GC_WORKER_RECLAIM_FAILED,
+                error_message=error,
+                now=now,
+            )
+
+    await run_db_operation_with_retry(
+        self._session_factory,
+        _operation,
+        commit=True,
+        on_retry=self._log_transient_db_retry,
+    )
 
 
 async def _release_terminal_runtime_resources(self: Any) -> None:

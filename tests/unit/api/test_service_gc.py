@@ -132,8 +132,7 @@ async def test_service_gc_maps_request_params_to_entrypoint(
 
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["status"] == "succeeded"
-    assert payload["deleted_path_count"] == 3
+    # The request params are forwarded to the API-side reclaim entrypoint.
     assert captured["execute"] is True
     assert captured["min_age_hours"] == 12
     assert captured["limit"] == 5
@@ -143,6 +142,13 @@ async def test_service_gc_maps_request_params_to_entrypoint(
     # base-GC flag into the entrypoint.
     assert isinstance(captured["host_home"], Path)
     assert captured["reap_claude_bases"] is True
+    # #582: ``execute`` delegates the capability-gated reclaim to the worker. With
+    # no fresh worker heartbeat in this test env the delegation fast-fails to a
+    # structured worker-unavailable outcome (never a false ``succeeded``), while
+    # the API-side reclaim (deleted_path_count 3) is still reported.
+    assert payload["status"] == "partial"
+    assert payload["deleted_path_count"] == 3
+    assert payload["worker_reclaim"]["reason_code"] == "SERVICE_GC_WORKER_UNAVAILABLE"
 
 
 @pytest.mark.unit
@@ -253,5 +259,9 @@ async def test_service_gc_returns_partial_envelope(
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["status"] == "partial"
-    assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    # The API-side per-path delete errors still pass through unchanged.
     assert payload["delete_errors"][0]["reason_code"] == "PATH_DELETE_PERMISSION_DENIED"
+    # #582: with no fresh worker heartbeat the execute delegation downgrades the
+    # headline reason to the worker-unavailable code (the more actionable signal),
+    # while the per-path errors remain inspectable in ``delete_errors``.
+    assert payload["reason_code"] == "SERVICE_GC_WORKER_UNAVAILABLE"

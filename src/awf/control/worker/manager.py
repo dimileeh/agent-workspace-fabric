@@ -205,6 +205,7 @@ class ControlWorker(WorkerDelegatesMixin):
         await self._maybe_reap_classified_orphans()
         await self._maybe_reap_superseded_claude_bases()
         await self._maybe_reap_terminal_workspace_gc()
+        await self._maybe_consume_service_gc_trigger()
 
         if self._executor is not None:
             # Preserved-active-validation redispatches enqueued during recovery

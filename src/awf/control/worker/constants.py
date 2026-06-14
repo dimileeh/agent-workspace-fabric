@@ -290,6 +290,15 @@ raises for expected partial/skipped cases — it returns a ``WorkspaceGCResult``
 dict — so this fires only for an unexpected failure of the injected closure (e.g. the
 blocking ``rmtree`` or DB work raising an unhandled error)."""
 
+_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE = "SERVICE_GC_TRIGGER_CONSUME_FAILED"
+"""Reason code logged when consuming an on-demand ``service_gc_requests`` row fails (#582).
+
+Worker-internal structured-log reason code for the *unexpected* failure path of
+``_maybe_consume_service_gc_trigger`` — a DB error during claim/mark, etc. A
+failure of the *reaper* itself is recorded on the request row with
+``SERVICE_GC_WORKER_RECLAIM_FAILED`` so the API can surface it; this code covers
+only the surrounding bookkeeping so one bad consume cannot break dispatch."""
+
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,

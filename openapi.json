@@ -5136,6 +5136,19 @@
             },
             "title": "Statuses",
             "type": "array"
+          },
+          "worker_delegation_timeout_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On ``execute``, how long the API waits for the worker to run the capability-gated reclaim (per-workspace auth overlays + claude-base) before returning a structured worker-delegation timeout. Defaults to the server's GC delegation budget.",
+            "title": "Worker Delegation Timeout Seconds"
           }
         },
         "title": "ServiceGCRequest",
@@ -5176,6 +5189,17 @@
             "default": 0,
             "title": "Total Estimated Bytes",
             "type": "integer"
+          },
+          "worker_reclaim": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServiceGCWorkerReclaim"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present on ``execute`` runs: the worker's capability-gated reclaim of the per-workspace auth overlays + claude-base, folded into the headline counts. Absent on dry-run. See #582."
           }
         },
         "required": [
@@ -5184,6 +5208,47 @@
           "dry_run"
         ],
         "title": "ServiceGCResponse",
+        "type": "object"
+      },
+      "ServiceGCWorkerReclaim": {
+        "additionalProperties": true,
+        "description": "Worker delegation result folded into the gc response (#582).\n\n``execute`` gc delegates the capability-gated reclaim (per-workspace Claude\nauth overlays + ``_shared/claude-base``) to the worker, the only context with\n``CAP_SYS_ADMIN``. This sub-object reports the worker's actual reclamation (or\nwhy it could not run) so the operator never sees a false ``deleted_path_count:\n0`` success. ``extra=\"allow\"`` carries the worker's full reap ``report``.",
+        "properties": {
+          "deleted_path_count": {
+            "default": 0,
+            "title": "Deleted Path Count",
+            "type": "integer"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total_estimated_bytes": {
+            "default": 0,
+            "title": "Total Estimated Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "reason_code"
+        ],
+        "title": "ServiceGCWorkerReclaim",
         "type": "object"
       },
       "SloMetricsSummaryResponse": {
@@ -12774,7 +12839,7 @@
     },
     "/v1/service/gc": {
       "post": {
-        "description": "Plan or execute terminal-workspace filesystem GC in the root control-plane.",
+        "description": "Plan or execute terminal-workspace filesystem GC in the root control-plane.\n\nDry-run (default) returns the plan unchanged. ``execute`` runs the API-side\nworktree/compose/lease reclaim and then **delegates** the capability-gated\nreclaim \u2014 the per-workspace Claude auth overlays (~1.7 GB each) and\n``_shared/claude-base`` \u2014 to the worker, since the API container lacks\n``CAP_SYS_ADMIN`` and would otherwise reclaim **zero** of those dominant\nconsumers while reporting success (#582). The worker's actual reclaimed\nbytes/paths are folded into the response so the operator sees real reclamation.",
         "operationId": "trigger_service_gc_v1_service_gc_post",
         "requestBody": {
           "content": {

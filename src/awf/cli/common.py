@@ -464,6 +464,67 @@ _OVERLAY_UNMOUNT_REASON_CODES = frozenset(
     }
 )
 
+# Worker-delegation reason codes (mirrors
+# ``awf.service.gc_worker_delegation.SERVICE_GC_WORKER_DELEGATION_ERROR_REASON_CODES``;
+# duplicated here as bare literals so the thin CLI does not import the GC service
+# stack). These mean ``execute`` gc could not actually reclaim the capability-gated
+# auth overlays + claude-base — the operator must not read the run as "done" (#582).
+_WORKER_DELEGATION_UNAVAILABLE_REASON = "SERVICE_GC_WORKER_UNAVAILABLE"
+_WORKER_DELEGATION_TIMEOUT_REASON = "SERVICE_GC_WORKER_DELEGATION_TIMEOUT"
+_WORKER_DELEGATION_RECLAIM_FAILED_REASON = "SERVICE_GC_WORKER_RECLAIM_FAILED"
+_WORKER_DELEGATION_ERROR_REASON_CODES = frozenset(
+    {
+        _WORKER_DELEGATION_UNAVAILABLE_REASON,
+        _WORKER_DELEGATION_TIMEOUT_REASON,
+        _WORKER_DELEGATION_RECLAIM_FAILED_REASON,
+    }
+)
+
+
+def warn_on_worker_delegation_failure(payload: object) -> bool:
+    """Print an actionable hint when ``execute`` gc could not reclaim via the worker.
+
+    Returns ``True`` when a worker-delegation failure was surfaced (so the caller
+    can force a non-zero exit), ``False`` otherwise. The dominant disk consumers —
+    the per-workspace Claude auth overlays + ``_shared/claude-base`` — can only be
+    reclaimed by the worker (it alone holds ``CAP_SYS_ADMIN``). When the worker is
+    down or did not finish in time the run must not read as a success even though
+    the API-side worktree/compose reclaim still happened.
+    """
+    if not isinstance(payload, Mapping):
+        return False
+    worker_reclaim = payload.get("worker_reclaim")
+    reason_code = None
+    message = None
+    if isinstance(worker_reclaim, Mapping):
+        reason_code = worker_reclaim.get("reason_code")
+        message = worker_reclaim.get("message")
+    if reason_code not in _WORKER_DELEGATION_ERROR_REASON_CODES:
+        # Fall back to the headline reason code (the route downgrades it on a
+        # delegation error) so the hint still fires if ``worker_reclaim`` is absent.
+        reason_code = payload.get("reason_code")
+    if reason_code not in _WORKER_DELEGATION_ERROR_REASON_CODES:
+        return False
+    if reason_code == _WORKER_DELEGATION_UNAVAILABLE_REASON:
+        detail = (
+            "no running control-worker was available, so the per-workspace Claude auth "
+            "overlays and claude-base were NOT reclaimed"
+        )
+    elif reason_code == _WORKER_DELEGATION_TIMEOUT_REASON:
+        detail = (
+            "the control-worker did not finish the reclaim in time, so the per-workspace "
+            "Claude auth overlays and claude-base may not be reclaimed"
+        )
+    else:
+        detail = "the control-worker's reclaim of the auth overlays and claude-base failed"
+    suffix = f": {message}" if isinstance(message, str) and message else ""
+    typer.echo(
+        f"error: {detail}{suffix}. Start the control-worker and re-run "
+        "`awf service gc --execute`; the API-side worktree/compose reclaim above still applied.",
+        err=True,
+    )
+    return True
+
 
 def warn_on_overlay_unmount_failure(payload: object) -> None:
     """Print an actionable hint when GC could not unmount a Claude auth overlay.

@@ -74,6 +74,7 @@ HttpExceptionErrorResponse = _schemas_responses.HttpExceptionErrorResponse
 GCTerminalStatus = _schemas_responses.GCTerminalStatus
 ServiceGCRequest = _schemas_responses.ServiceGCRequest
 ServiceGCResponse = _schemas_responses.ServiceGCResponse
+ServiceGCWorkerReclaim = _schemas_responses.ServiceGCWorkerReclaim
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
 _DEFAULT_REPO_BASE_BRANCH = "main"
