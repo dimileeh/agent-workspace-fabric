@@ -821,39 +821,48 @@ def overlay_profile_ollama_base_url(
     # worker-side probe/pull does not pass through Compose, so resolve each declared
     # value against ``environ`` here — otherwise a literal ``${OLLAMA_HOST}`` would
     # be probed as ``http://${OLLAMA_HOST}/api/tags`` and block/fail the workspace
-    # before launch. A placeholder that resolves to empty is treated as undeclared.
-    # The required-interpolation form (``${OLLAMA_URL:?set OLLAMA_URL}``) raises when
-    # the variable is absent from ``environ``; since this overlay runs during
-    # create/retry admission before provider readiness — paths that only translate
-    # profile/readiness exceptions — an unhandled raise would escape as a 500. The
-    # worker environ is a best-effort approximation of the agent's Compose context
-    # (the agent container may still resolve the variable), so treat an unresolvable
-    # required placeholder the same as one resolving to empty: undeclared, fall back.
+    # before launch. Record the profile's ownership on *presence* in ``profile_env``
+    # (not truthiness): the launcher's agent-env merge is first-writer-wins, so a key
+    # the profile declares owns the agent's slot even when its value resolves empty —
+    # a literal empty string (``AWF_OPENCODE_OLLAMA_BASE_URL: ""``), a placeholder
+    # resolving empty, or an unset required-interpolation form
+    # (``${OLLAMA_URL:?set OLLAMA_URL}``). The required form raises when the variable
+    # is absent from ``environ``; since this overlay runs during create/retry
+    # admission before provider readiness — paths that only translate profile/
+    # readiness exceptions — an unhandled raise would escape as a 500, and the worker
+    # environ is a best-effort approximation of the agent's Compose context, so treat
+    # an unresolvable required placeholder the same as one resolving to empty: owned
+    # but empty (mask the inherited value below), never surfaced as an error.
     declared: dict[str, str] = {}
-    for key in _OLLAMA_BASE_URL_ENV_KEYS:
-        raw = profile_env.get(key)
-        if not raw:
+    owned: list[int] = []
+    for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS):
+        if key not in profile_env:
             continue
+        owned.append(index)
         try:
-            expanded = compose_expand_value(raw, environ=environ).strip()
+            expanded = compose_expand_value(profile_env[key], environ=environ).strip()
         except ComposeEnvInterpolationError:
-            continue
+            expanded = ""
         if expanded:
             declared[key] = expanded
-    if not declared:
+    if not owned:
         return result
     # The profile owns the Ollama daemon selection. ``_ollama_api_urls`` (and the
-    # OpenCode launcher) resolve the daemon from the first non-empty key in
-    # precedence order, so a higher-precedence worker-env value the profile did
-    # *not* declare would shadow the profile's chosen daemon — e.g. a profile that
-    # declares only ``OLLAMA_HOST`` while the worker env carries
-    # ``AWF_OPENCODE_OLLAMA_BASE_URL``. Apply the profile's declared keys and clear
-    # any higher-precedence worker value so the profile-selected daemon wins.
-    top = next(i for i, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS) if key in declared)
+    # OpenCode launcher) resolve the daemon from the first non-empty key in precedence
+    # order, so a higher-precedence worker-env value the profile did *not* declare
+    # would shadow the profile's chosen daemon — e.g. a profile that declares only
+    # ``OLLAMA_HOST`` while the worker env carries ``AWF_OPENCODE_OLLAMA_BASE_URL``.
+    # The compose merge masks exactly those higher-precedence keys
+    # (``_shadowing_worker_ollama_keys``), so mirror it: apply the profile's resolved
+    # values, and drop both the keys the profile owns but leaves empty and any inherited
+    # worker value above the profile's highest-precedence owned key. Otherwise an
+    # empty profile-owned slot would leave an inherited daemon in the readiness environ
+    # that the agent never reaches — admitting/pulling against the wrong daemon.
+    top = owned[0]
     for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS):
         if key in declared:
             result[key] = declared[key]
-        elif index < top:
+        elif index in owned or index < top:
             result.pop(key, None)
     return result
 

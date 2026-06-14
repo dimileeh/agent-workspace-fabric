@@ -1136,6 +1136,71 @@ def test_overlay_profile_ollama_base_url_treats_unset_required_placeholder_as_un
 
 
 @pytest.mark.unit
+def test_overlay_profile_ollama_base_url_profile_owned_key_masks_inherited() -> None:
+    """A profile-owned Ollama base-url key that resolves empty masks an inherited value.
+
+    When the worker environ already carries ``AWF_OPENCODE_OLLAMA_BASE_URL`` and the
+    profile declares the same key as a literal empty string, an unset required
+    placeholder, or one resolving empty, ``runtime.environment`` owns the agent's slot:
+    the OpenCode launcher keeps the empty value and the Compose merge does not inject the
+    inherited worker value, so the agent falls back to ``OLLAMA_HOST`` / the default
+    daemon. The overlay must drop the inherited worker value rather than leave it in the
+    readiness environ — otherwise create/retry preflight and the executor probe/pull a
+    daemon the agent never uses. Symmetric to
+    ``overlay_profile_provider_credentials``'s profile-owned masking."""
+    literal_empty = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434"},
+        {
+            "name": "ollama-mask-literal-empty",
+            "runtime": {"environment": {"AWF_OPENCODE_OLLAMA_BASE_URL": ""}},
+        },
+    )
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in literal_empty
+
+    required_placeholder = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434"},
+        {
+            "name": "ollama-mask-required-placeholder",
+            "runtime": {
+                "environment": {"AWF_OPENCODE_OLLAMA_BASE_URL": "${MISSING_URL:?set MISSING_URL}"}
+            },
+        },
+    )
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in required_placeholder
+
+    empty_placeholder = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434"},
+        {
+            "name": "ollama-mask-empty-placeholder",
+            "runtime": {"environment": {"AWF_OPENCODE_OLLAMA_BASE_URL": "${MISSING_URL}"}},
+        },
+    )
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in empty_placeholder
+
+
+@pytest.mark.unit
+def test_overlay_profile_ollama_base_url_empty_lower_key_masks_and_shadows() -> None:
+    """A profile that clears only the lower-precedence ``OLLAMA_HOST`` still owns the
+    daemon selection: the Compose merge shadows the higher-precedence worker
+    ``AWF_OPENCODE_OLLAMA_BASE_URL`` (``_shadowing_worker_ollama_keys``) and the agent
+    sees the empty ``OLLAMA_HOST``, falling back to the default daemon. The overlay must
+    drop both the inherited higher-precedence value and the owned-but-empty key so
+    readiness resolves the same default daemon."""
+    result = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        {
+            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434",
+            "OLLAMA_HOST": "http://worker-host:11434",
+        },
+        {
+            "name": "ollama-clear-host",
+            "runtime": {"environment": {"OLLAMA_HOST": ""}},
+        },
+    )
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in result
+    assert "OLLAMA_HOST" not in result
+
+
+@pytest.mark.unit
 def test_overlay_profile_provider_credentials_overlays_profile_declared_key() -> None:
     """A provider API key declared solely in the profile's runtime.environment reaches
     the agent container but not the worker process the non-Ollama credential gate runs
