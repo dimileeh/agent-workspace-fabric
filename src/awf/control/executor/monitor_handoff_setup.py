@@ -9,7 +9,10 @@ from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import ComposeExecCleanupError, cleanup_failure_message
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.control.executor.constants import PR_MONITOR_SETUP_FAILED_REASON_CODE
+from awf.control.executor.constants import (
+    PR_MONITOR_SETUP_FAILED_REASON_CODE,
+    PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE,
+)
 from awf.control.executor.helpers import _failure_reason_for_phase
 from awf.control.executor.logging_ops import (
     SETUP_DEPENDENCY_NETWORK_FAILURE,
@@ -123,6 +126,93 @@ async def _run_monitor_handoff_profile_preflight(
     return False
 
 
+async def _run_monitor_handoff_validate_toolchain_probe(
+    self: Any,
+    *,
+    workspace_id: str,
+    validation: Any,
+    compose_project: str,
+    compose_file: Path,
+    profile: Any,
+) -> bool:
+    """Fail the adopt-pr handoff early when a ``validate`` tool is unprovisioned.
+
+    Adopt-pr skips the coding agent (``PR_ADOPTION_SKIP_AGENT``), so the profile
+    ``setup`` phase is the only provisioning step. After a green setup, probe that
+    each ``validate``-phase command's executable resolves on PATH in the
+    workspace container. If one or more is missing, mark the workspace ``failed``
+    here with ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED`` — naming the tool(s)
+    and pointing at ``setup`` — instead of transitioning to ``monitoring_pr`` and
+    dying ``127`` later at ``sync_base_push``. Returns ``True`` to proceed.
+
+    Strictly scoped to the agent-skipped monitor handoff: the probe runs only
+    here, never on the create path (which provisions via the agent run). Legacy
+    ``_validation`` stubs without the probe method are a no-op. A probe-infra
+    failure (compose-exec error / timeout) is logged and treated as non-blocking
+    so it is never mis-reported as a profile gap.
+    """
+    probe = getattr(validation, "probe_validate_command_tools", None)
+    if not callable(probe):
+        return True
+    try:
+        result = await probe(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+        )
+    except Exception as exc:
+        # Non-blocking probe-infra failure: preserve the structured reason_code
+        # and a redacted error, then proceed — never fail the adoption on a probe
+        # defect, and never leak a raw traceback carrying compose-exec stderr.
+        _log.warning(
+            "executor.monitor_handoff_validate_toolchain_probe_failed",
+            workspace_id=workspace_id,
+            reason_code=getattr(exc, "reason_code", None),
+            error=redact_secrets(str(exc))[:1000],
+        )
+        return True
+
+    if result.probe_errored:
+        # The probe could not run cleanly (unreachable container / timeout); that
+        # is not evidence of a profile gap, so proceed rather than fail.
+        _log.warning(
+            "executor.monitor_handoff_validate_toolchain_probe_errored",
+            workspace_id=workspace_id,
+        )
+        return True
+
+    if not result.missing:
+        return True
+
+    missing_tools = sorted({redact_audit_text(target.tool) for target in result.missing})
+    representative = result.missing[0]
+    safe_command = redact_audit_text(representative.command)
+    safe_tool = redact_audit_text(representative.tool)
+    message = (
+        f"validate command `{safe_command}` needs `{safe_tool}`, which is not on "
+        "PATH after setup. The adopt-pr path skips the coding agent, so the "
+        "profile's setup phase must install everything validate needs (e.g. add "
+        "the install step for the missing tool to .awf/workspace.yml setup). "
+        f"Missing tools: {', '.join(missing_tools)}."
+    )[:2000]
+    # A validate tool the profile's setup never installed is a profile gap, not
+    # transient infrastructure: retrying the same .awf/workspace.yml cannot fix
+    # it. Use ``profile_resolution_failure`` (matching the analogous
+    # ``PROFILE_VALIDATION_TOOL_UNAVAILABLE`` classification) so failure analysis
+    # surfaces a profile fix instead of recommending a retry, and the scheduler
+    # withholds the infrastructure-failure retry bonus.
+    await _mark_failed_or_raise_setup_failure(
+        self,
+        workspace_id=workspace_id,
+        failure_reason=FailureReason.profile_resolution_failure,
+        message=message,
+        reason_code=PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED_REASON_CODE,
+        details={"missing_tools": missing_tools},
+    )
+    return False
+
+
 async def _run_monitor_handoff_profile_setup(
     self: Any,
     *,
@@ -227,6 +317,18 @@ async def _run_monitor_handoff_profile_setup(
                 reason_code=getattr(exc, "reason_code", None),
                 error=redact_secrets(str(exc))[:1000],
             )
+        # Adopt-pr skips the agent, so the only thing that provisions the validate
+        # toolchain is the setup phase just run. Fail early + clearly if a validate
+        # tool is still missing, before transitioning to monitoring_pr.
+        if not await _run_monitor_handoff_validate_toolchain_probe(
+            self,
+            workspace_id=workspace_id,
+            validation=validation,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+        ):
+            return False
         return await _run_monitor_handoff_profile_preflight(
             self,
             workspace_id=workspace_id,
