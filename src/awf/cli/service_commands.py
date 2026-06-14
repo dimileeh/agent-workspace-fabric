@@ -596,8 +596,15 @@ def service_gc(
         )
         raise typer.Exit(code=1) from None
     _emit(payload, fmt)
-    warn_on_overlay_unmount_failure(payload)
+    # #590: a worker-delegation failure leaves the API-side auth-overlay
+    # ``delete_errors`` in place (the success-only skip reconciliation never runs),
+    # so both hints would fire. The overlay hint points at the worker's
+    # runtime-release sweep, which directly contradicts a worker that is down or
+    # timed out — the delegation error is the accurate, superseding explanation.
+    # Surface it first and drop the now-stale overlay hint when delegation failed.
     delegation_failed = warn_on_worker_delegation_failure(payload)
+    if not delegation_failed:
+        warn_on_overlay_unmount_failure(payload)
     if delegation_failed or (isinstance(payload, dict) and payload.get("status") == "partial"):
         raise typer.Exit(code=1)
 

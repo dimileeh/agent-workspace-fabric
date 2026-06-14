@@ -299,6 +299,40 @@ def test_service_gc_worker_timeout_warns_and_exits_nonzero() -> None:
 
 
 @pytest.mark.unit
+def test_service_gc_worker_failure_suppresses_stale_overlay_hint() -> None:
+    # #590: a failed worker delegation preserves the API-side auth-overlay
+    # delete_errors. The overlay hint points at the worker's runtime-release
+    # sweep, which contradicts a worker that is down -- only the (accurate)
+    # worker-delegation hint must fire.
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "SERVICE_GC_WORKER_UNAVAILABLE",
+            "deleted_path_count": 0,
+            "delete_errors": [
+                {
+                    "kind": "auth_overlay_unmount",
+                    "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                }
+            ],
+            "worker_reclaim": {
+                "status": "unavailable",
+                "reason_code": "SERVICE_GC_WORKER_UNAVAILABLE",
+                "message": "no fresh control-worker heartbeat for node 'local'",
+            },
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    combined = _combined_output(result)
+    assert "no running control-worker was available" in combined
+    assert "could not be unmounted" not in combined
+
+
+@pytest.mark.unit
 def test_service_gc_successful_worker_delegation_exits_zero() -> None:
     # A clean execute run with a successful worker reclaim must not warn or fail.
     response = _mock_response(
