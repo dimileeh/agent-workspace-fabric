@@ -116,19 +116,28 @@ def _merge_claude_base_reaps(
     ``dict(default_report)``, so without this fold the discarded pass's reaped/planned
     bases vanish from the summary and the operator-facing ``deleted_path_count``
     (which counts reaped bases — PRRT_kwDOSJAM6s6JbAow) under-reports the GB-scale
-    reclaim. The two passes act on disjoint signatures (the first removes what it can
-    before the second runs), so each list concatenates; a signature the second pass
-    reaped or planned is dropped from the first pass's ``protected`` (its pin was still
-    on disk during the first pass). A ``partial`` in either reap wins; otherwise a pass
-    that actually reaped/planned a base supersedes a no-op ``skipped`` sibling.
+    reclaim. On ``--execute`` the two passes act on disjoint signatures (the first
+    removes what it can before the second runs), so each list concatenates; a signature
+    the second pass reaped or planned is dropped from the first pass's ``protected`` (its
+    pin was still on disk during the first pass). The API ``--execute`` *dry-run* preview
+    deletes nothing, so its second pass also previews the first pass's planned auth dirs
+    (``extra_pruned_auth_dirs``) and can re-list a base the first pass already planned —
+    so ``reaped``/``planned`` are de-duplicated (order-preserving) rather than blindly
+    concatenated (PRRT_kwDOSJAM6s6Jbinh); de-dup is a no-op for the disjoint execute
+    lists. A ``partial`` in either reap wins; otherwise a pass that actually
+    reaped/planned a base supersedes a no-op ``skipped`` sibling.
     """
     if not isinstance(default_reap, Mapping):
         return dict(discarded_reap) if isinstance(discarded_reap, Mapping) else None
     if not isinstance(discarded_reap, Mapping):
         return dict(default_reap)
     merged: dict[str, object] = dict(default_reap)
-    for key in ("scanned", "reaped", "planned", "unverifiable", "errors"):
+    for key in ("scanned", "unverifiable", "errors"):
         merged[key] = [*_as_list(default_reap.get(key)), *_as_list(discarded_reap.get(key))]
+    for key in ("reaped", "planned"):
+        merged[key] = _dedupe_preserving_order(
+            [*_as_list(default_reap.get(key)), *_as_list(discarded_reap.get(key))]
+        )
     reclaimed = {*_as_list(merged["reaped"]), *_as_list(merged["planned"])}
     protected = [
         *_as_list(default_reap.get("protected")),
@@ -158,3 +167,23 @@ def _merge_claude_base_reaps(
 def _as_list(value: object) -> list[object]:
     """Return ``value`` as a list, or an empty list when it is not one."""
     return value if isinstance(value, list) else []
+
+
+def _dedupe_preserving_order(values: list[object]) -> list[object]:
+    """Return ``values`` with later duplicates dropped, keeping first-seen order.
+
+    Unhashable entries (defensive — reaped/planned hold ``<signature>`` strings) are
+    kept as-is so a malformed payload never raises here.
+    """
+    seen: set[object] = set()
+    result: list[object] = []
+    for value in values:
+        try:
+            if value in seen:
+                continue
+            seen.add(value)
+        except TypeError:
+            result.append(value)
+            continue
+        result.append(value)
+    return result

@@ -1024,3 +1024,37 @@ def test_merge_claude_base_reaps_keeps_default_ok_when_both_reaped() -> None:
     assert merged is not None
     assert merged["status"] == "ok"
     assert merged["reaped"] == ["sigA", "sigB"]
+
+
+@pytest.mark.unit
+def test_merge_claude_base_reaps_dedupes_planned_across_passes() -> None:
+    """The API dry-run preview can plan the same base in both passes; the merge de-dups it.
+
+    Unlike ``--execute`` (where the first pass removes a base before the second scans it,
+    so the lists are disjoint), the dry-run preview deletes nothing and threads the first
+    pass's planned auth dirs into the second pass — so a base pinned only by a default
+    candidate is planned by both passes. The merged ``planned`` must list it once
+    (PRRT_kwDOSJAM6s6Jbinh), and a base pinned by *both* a default and a discarded
+    candidate (kept ``protected`` in the first pass) folds in as ``planned``, not
+    ``protected``.
+    """
+    default = _reap(
+        "ok",
+        "CLAUDE_BASE_SUPERSEDED_PLANNED",
+        scanned=["sigDefaultOnly", "sigBoth"],
+        planned=["sigDefaultOnly"],
+        protected=["sigBoth"],
+    )
+    discarded = _reap(
+        "ok",
+        "CLAUDE_BASE_SUPERSEDED_PLANNED",
+        scanned=["sigDefaultOnly", "sigBoth"],
+        planned=["sigDefaultOnly", "sigBoth"],
+        protected=[],
+    )
+
+    merged = _merge_claude_base_reaps(default, discarded)
+
+    assert merged is not None
+    assert merged["planned"] == ["sigDefaultOnly", "sigBoth"]
+    assert merged["protected"] == []

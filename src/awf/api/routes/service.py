@@ -55,6 +55,38 @@ def _plan_candidate_count(plan_payload: dict[str, object]) -> int:
     return count if isinstance(count, int) and not isinstance(count, bool) else 0
 
 
+def _plan_candidate_auth_dirs(plan_payload: dict[str, object]) -> frozenset[Path]:
+    """First-pass candidates' auth-dir paths from a gc plan payload.
+
+    Threaded into the second dry-run preview pass as ``extra_pruned_auth_dirs`` so its
+    claude-base preview treats the first pass's planned auth-dir deletions as already
+    gone — matching the worker ``--execute``, which deletes the first pass's auth dirs
+    (and their ``base.signature`` pins) before the second pass's reaper runs. Without
+    this a base pinned by *both* a default-policy and a cancelled/destroyed candidate is
+    previewed ``protected`` yet reaped on ``--execute``, breaking the plan-before-delete
+    contract (PRRT_kwDOSJAM6s6Jbinh). Read from the plan payload (not ``result.plan``),
+    mirroring ``_plan_candidate_count``, so the fold stays robust to a stubbed entrypoint
+    in tests.
+    """
+    candidates = plan_payload.get("candidates")
+    if not isinstance(candidates, list):
+        return frozenset()
+    auth_dirs: set[Path] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        paths = candidate.get("paths")
+        if not isinstance(paths, dict):
+            continue
+        auth = paths.get("auth")
+        if not isinstance(auth, dict):
+            continue
+        auth_path = auth.get("path")
+        if isinstance(auth_path, str):
+            auth_dirs.add(Path(auth_path))
+    return frozenset(auth_dirs)
+
+
 @router.post("/gc", response_model=ServiceGCResponse)
 async def trigger_service_gc(
     payload: ServiceGCRequest,
@@ -145,6 +177,13 @@ async def trigger_service_gc(
             # plan-before-delete contract (PRRT_kwDOSJAM6s6JbN6x).
             host_home=Path(settings.host_home).expanduser(),
             reap_claude_bases=settings.claude_base_gc_enabled,
+            # Treat the first pass's planned auth dirs as already pruned for this pass's
+            # claude-base preview. On ``--execute`` the worker deletes them (and their
+            # ``base.signature`` pins) before this discarded pass's reaper runs, so a base
+            # pinned by *both* a default and a cancelled/destroyed candidate is reaped
+            # then; previewing only the discarded pins here would mislabel it
+            # ``protected`` and break plan/execute parity (PRRT_kwDOSJAM6s6Jbinh).
+            extra_pruned_auth_dirs=_plan_candidate_auth_dirs(base_payload),
         )
         combined = combine_terminal_gc_reports(base_payload, discarded_result.to_dict())
         return ServiceGCResponse.model_validate(combined)

@@ -234,6 +234,56 @@ async def test_service_gc_dry_run_previews_claude_base_reap_for_discarded_pass(
 
 
 @pytest.mark.unit
+async def test_service_gc_dry_run_previews_base_pinned_by_both_passes(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A base pinned by a default *and* a discarded candidate previews as planned (PRRT_kwDOSJAM6s6Jbinh).
+
+    ``--execute`` deletes the first (default-policy) pass's auth dirs before the second
+    (cancelled/destroyed) pass's claude-base reaper runs, so a superseded base pinned by
+    *both* a completed-merged and a cancelled workspace is reaped by the second execute
+    pass. The dry-run must mirror that: previewing only the discarded pins in the second
+    pass would still see the default candidate's pin on disk and mislabel the base
+    ``protected`` even though ``--execute`` reaps it — breaking the plan-before-delete
+    contract. The second preview pass therefore treats the first pass's planned auth dirs
+    as already pruned, so the base lands in ``claude_base_reap.planned``.
+    """
+    from awf.node.auth_mounts import _shared_claude_base_dir
+
+    work_dir = tmp_path / "service"
+    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+    # A host home with no ``~/.claude`` so the superseded signature is not the current
+    # one (and is therefore reapable once unpinned).
+    monkeypatch.setenv("AWF_HOST_HOME", str(tmp_path / "home"))
+    old = datetime.now(UTC) - timedelta(hours=400)
+    completed_id = await _seed_completed_merged(engine, updated_at=old)
+    cancelled_id = await _seed_cancelled(engine, updated_at=old)
+
+    resolved_work_dir = work_dir.expanduser().resolve()
+    signature = "sigsuperseded000"
+    base = _shared_claude_base_dir(resolved_work_dir, signature)
+    base.mkdir(parents=True)
+    (base / "blob").write_text("x" * 256, encoding="utf-8")
+    # Both candidates pin the same superseded base. No overlay ``upper`` is created, so
+    # the capability-less API reaper has no unverifiable live overlay and can plan.
+    for workspace_id in (completed_id, cancelled_id):
+        pin_dir = resolved_work_dir / "auth" / workspace_id / "claude"
+        pin_dir.mkdir(parents=True)
+        (pin_dir / "base.signature").write_text(signature, encoding="utf-8")
+
+    response = await client.post("/v1/service/gc", json={"min_age_hours": 24})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    reap = payload["claude_base_reap"]
+    assert signature in reap["planned"]
+    assert signature not in reap["protected"]
+
+
+@pytest.mark.unit
 async def test_service_gc_maps_request_params_to_entrypoint(
     client: AsyncClient,
     tmp_path: Path,
