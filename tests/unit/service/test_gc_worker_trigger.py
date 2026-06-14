@@ -242,6 +242,70 @@ async def test_poll_treats_completion_past_deadline_as_timeout() -> None:
         assert outcome.reason_code == "SERVICE_GC_WORKER_DELEGATION_TIMEOUT"
 
 
+async def test_poll_treats_failure_past_deadline_as_timeout() -> None:
+    # Mirror of ``test_poll_treats_completion_past_deadline_as_timeout`` for a reap that
+    # *errors* after the row's ``deadline_at``. The worker can mark a ``running`` row
+    # ``failed`` past its deadline if the reap overran the budget and the expire sweep
+    # had not yet raced it to ``expired``. Expire-on-timeout keys the decision off
+    # ``deadline_at``, not success vs failure, so the operator must see the same timeout
+    # the expire sweep would have surfaced — not SERVICE_GC_WORKER_RECLAIM_FAILED, which
+    # would win only by race (PRRT_kwDOSJAM6s6JbgXd).
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            request = await repo.create_pending(
+                node_id=_NODE_ID,
+                requested_at=now - timedelta(seconds=10),
+                deadline_at=now - timedelta(seconds=5),
+            )
+            request_id = request.id
+            # finished_at = now, i.e. 5s past the row's deadline_at.
+            await repo.mark_failed(
+                request_id=request_id,
+                error_code="SERVICE_GC_WORKER_RECLAIM_FAILED",
+                error_message="boom",
+                now=now,
+            )
+            await session.commit()
+        outcome = await _poll_for_outcome(
+            factory, request_id=request_id, deadline_seconds=5, poll_interval_seconds=0.02
+        )
+        assert outcome.status == "timeout"
+        assert outcome.reason_code == "SERVICE_GC_WORKER_DELEGATION_TIMEOUT"
+
+
+async def test_poll_failure_within_deadline_is_reclaim_failed() -> None:
+    # The mirror of the failure-past-deadline case: a reap that errors at or before the
+    # row's ``deadline_at`` is on time, so the structured reclaim-failure reason still
+    # reaches the operator (covers the False side of the deadline comparison for failed
+    # rows).
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            request = await repo.create_pending(
+                node_id=_NODE_ID,
+                requested_at=now - timedelta(seconds=10),
+                deadline_at=now + timedelta(seconds=5),
+            )
+            request_id = request.id
+            await repo.mark_failed(
+                request_id=request_id,
+                error_code="SERVICE_GC_WORKER_RECLAIM_FAILED",
+                error_message="boom",
+                now=now,
+            )
+            await session.commit()
+        outcome = await _poll_for_outcome(
+            factory, request_id=request_id, deadline_seconds=5, poll_interval_seconds=0.02
+        )
+        assert outcome.status == "failed"
+        assert outcome.reason_code == "SERVICE_GC_WORKER_RECLAIM_FAILED"
+
+
 async def test_poll_completion_within_deadline_is_success() -> None:
     # The mirror of the past-deadline case: a reap that finishes at or before the
     # row's ``deadline_at`` is on time and folds as a normal success even though a

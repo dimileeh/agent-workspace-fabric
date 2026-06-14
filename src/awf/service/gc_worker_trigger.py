@@ -134,6 +134,19 @@ def _terminal_outcome(request: ServiceGCRequest | None) -> WorkerReclaimOutcome 
             )
         return WorkerReclaimOutcome.from_report(dict(request.result or {}))
     if request.status == SERVICE_GC_REQUEST_STATUS_FAILED:
+        # Mirror the ``completed`` branch: the worker can mark a ``running`` row
+        # ``failed`` *after* its ``deadline_at`` if the reap overran the budget and
+        # the expire sweep had not yet raced it to ``expired`` (``mark_failed`` only
+        # refuses to overwrite an already-``expired`` row). Expire-on-timeout keys the
+        # timeout decision off ``deadline_at``, not success vs failure, so a late error
+        # finish must surface the same timeout the expire sweep would have — not
+        # ``SERVICE_GC_WORKER_RECLAIM_FAILED``, which would only win by race
+        # (PRRT_kwDOSJAM6s6JbgXd).
+        if _finished_past_deadline(request):
+            return WorkerReclaimOutcome.delegation_timeout(
+                "worker failed gc reclaim only after its deadline elapsed; "
+                "the operator's budget had already run out"
+            )
         return WorkerReclaimOutcome.reclaim_failed(
             request.error_message or "worker gc reclaim failed",
             report=dict(request.result) if request.result else None,
