@@ -198,6 +198,20 @@ def _ollama_base_url_prelude() -> str:
         "      __awf_ollama_hl_port=\n"
         "      ;;\n"
         "  esac\n"
+        # Drop an IPv6 zone/scope id (``%<zone>``, e.g. ``[::1%lo]`` or its percent-
+        # encoded ``[::1%25lo]`` form) before the loopback checks below. Python's
+        # ``ipaddress.ip_address`` reports ``::1%lo`` / ``::ffff:127.0.0.1%lo`` as
+        # loopback (the zone does not change loopback-ness) and ``urlsplit().hostname``
+        # keeps the zone, so the launcher must strip it too -- otherwise the IPv6
+        # canonicalization and IPv4-mapped reductions below both skip the ``%`` form and
+        # the host-local match leaves ``::1%lo`` pointed at the agent container while
+        # preflight probes the host gateway (issue #579). Only strip for IPv6 literals
+        # (host contains ``:``); a scope id is never valid on IPv4 or ``localhost``,
+        # which Python rejects, so leaving those untouched preserves parity. Mirrors
+        # ``_normalize_host_local_host`` (``ipaddress`` accepts the scoped form).
+        '  case "$__awf_ollama_hl_host" in\n'
+        '    *:*%*) __awf_ollama_hl_host="${__awf_ollama_hl_host%%%*}" ;;\n'
+        "  esac\n"
         # Canonicalize an expanded/uncompressed IPv6 loopback (``::1``) or unspecified
         # (``::``) literal to its compressed form so the host-local case below catches
         # it. The Python source of truth uses ``ipaddress.ip_address()``, which treats

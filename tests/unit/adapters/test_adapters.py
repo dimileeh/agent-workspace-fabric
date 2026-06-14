@@ -993,6 +993,19 @@ class TestOpenCodeAdapter:
                 "http://[0:0:0:0:0:ffff:127.0.0.1]:11434",
                 "http://host.docker.internal:11434/v1",
             ),
+            # An IPv6 loopback/unspecified literal carrying a zone/scope id
+            # (``%<zone>``, or its percent-encoded ``%25`` form) is still host-local:
+            # Python's ``ipaddress`` reports ``::1%lo`` as loopback (the zone does not
+            # change loopback-ness), so the prelude must strip the zone before the
+            # loopback match or launch keeps ``::1%lo`` while preflight normalizes it to
+            # the gateway (issue #579).
+            ("http://[::1%lo]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[::1%25lo]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[::%lo]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[::ffff:127.0.0.1%lo]:11434", "http://host.docker.internal:11434/v1"),
+            # A scoped IPv6 *non*-loopback (link-local) is not host-local: stripping the
+            # zone leaves a routable literal that passes through unchanged on both sides.
+            ("http://[fe80::1%lo]:11434", "http://[fe80::1%lo]:11434/v1"),
             # A userinfo-bearing host-local value drops the credentials too.
             ("http://user:pass@127.0.0.1:11434", "http://host.docker.internal:11434/v1"),
         ],
@@ -1044,6 +1057,15 @@ class TestOpenCodeAdapter:
             "http://[::ffff:192.168.1.1]:11434",
             "http://[::127.0.0.1]:11434",
             "http://[64:ff9b::127.0.0.1]:11434",
+            # IPv6 zone/scope ids: ``ipaddress`` accepts the scoped form and keeps the
+            # underlying loopback/link-local classification, so the prelude must strip
+            # the zone and agree -- a scoped loopback normalizes, a scoped link-local
+            # passes through (issue #579).
+            "http://[::1%lo]:11434",
+            "http://[::1%25lo]:11434",
+            "http://[::%lo]:11434",
+            "http://[::ffff:127.0.0.1%lo]:11434",
+            "http://[fe80::1%lo]:11434",
             "host.docker.internal:11434",
             "ollama-sidecar:11434",
             "192.168.1.10:11434",
