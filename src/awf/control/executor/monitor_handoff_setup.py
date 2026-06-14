@@ -185,7 +185,7 @@ async def _run_monitor_handoff_validate_toolchain_probe(
     if not result.missing:
         return True
 
-    missing_tools = sorted({target.tool for target in result.missing})
+    missing_tools = sorted({redact_audit_text(target.tool) for target in result.missing})
     representative = result.missing[0]
     safe_command = redact_audit_text(representative.command)
     safe_tool = redact_audit_text(representative.tool)

@@ -293,3 +293,29 @@ class TestHandoffValidateToolchainProbe:
         assert "Missing tools: mypy, ruff." in call["message"]
         # The representative command (first missing) anchors the headline.
         assert "`ruff check .`" in call["message"]
+
+    @pytest.mark.unit
+    async def test_missing_tool_names_are_redacted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        # A custom/dynamic tool name carrying token-like content must be redacted
+        # in both the failure message and the durable ``details`` payload, just as
+        # the representative tool already is — never leaked verbatim.
+        secret_tool = "ghp_0123456789abcdef0123456789abcdef0123"
+        validation = _OkSetupValidation(
+            probe_result=ValidateToolProbeResult(
+                missing=(
+                    ValidateCommandProbeTarget(tool=secret_tool, command=f"{secret_tool} run"),
+                ),
+            )
+        )
+        executor = _RecordingExecutor(validation)
+
+        ok = await _run_setup(executor, tmp_path)
+
+        assert ok is False
+        call = executor.mark_failed_calls[0]
+        assert secret_tool not in call["message"]
+        assert secret_tool not in call["details"]["missing_tools"]
+        assert call["details"]["missing_tools"] == ["[redacted]"]
