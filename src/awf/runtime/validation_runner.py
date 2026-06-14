@@ -79,12 +79,14 @@ from awf.runtime.validation_setup import (
     _with_setup_dependency_network_metadata,
     profile_phase_command_plan,
     profile_validation_tool_preflight_findings,
+    validate_command_probe_targets,
 )
 from awf.runtime.validation_types import (
     CoverageCommandPlan,
     ProfileExecutionCommand,
     PytestFailureEvidence,
     SetupDependencyNetworkClassification,
+    ValidateToolProbeResult,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
@@ -145,6 +147,18 @@ _TOOLCHAIN_PROBE_TIMEOUT_SECONDS = 30.0
 # timeout, so a wedged Docker daemon would let the cleanup itself hang the probe
 # (and the handoff) forever — bound it too, and give up cleanup rather than block.
 _TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS = 30.0
+# One ``sh -c`` reachability probe over the ``validate``-tool list. ``command -v``
+# checks each tool, and the trailing ``true`` guarantees the exec exits 0 whenever
+# the container is reachable — so a non-zero return / timeout unambiguously signals
+# a probe-infra failure (``probe_errored``), never a genuine missing tool. Each
+# tool reachable -> ``OK <tool>``; genuinely absent -> ``MISSING <tool>``.
+_VALIDATE_TOOLCHAIN_PROBE_SCRIPT = (
+    'for t in "$@"; do '
+    'if command -v "$t" >/dev/null 2>&1; then echo "OK $t"; '
+    'else echo "MISSING $t"; fi; '
+    "done; true"
+)
+_VALIDATE_TOOLCHAIN_PROBE_MISSING_RE = re.compile(r"^MISSING (?P<tool>.+)$", re.MULTILINE)
 _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT = 1000
 _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_SCAN_LIMIT = 4 * _SETUP_DEPENDENCY_NETWORK_DIAGNOSTIC_LIMIT
 _SETUP_DEPENDENCY_NETWORK_COMMAND_LIMIT = 500
@@ -406,6 +420,86 @@ class ValidationRunner:
             )
 
         return await probe_runtime_toolchains(profile=profile, exec_in_container=_exec)
+
+    async def probe_validate_command_tools(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: WorkspaceProfile,
+    ) -> ValidateToolProbeResult:
+        """Check each ``validate`` command's executable resolves on PATH.
+
+        Adopt-pr handoff skips the coding agent, so the profile ``setup`` phase is
+        the only provisioning step; this probe runs after setup and reports any
+        ``validate`` tool that is still missing so the adoption can fail early and
+        clearly instead of dying ``127`` later at ``sync_base_push``. Skips
+        entirely (zero exec) when the profile has no probeable validate command.
+
+        Mirrors ``probe_runtime_toolchain_findings``' reachability contract: one
+        always-exit-0 in-container exec via the tracked compose-exec path, so a
+        non-zero return / timeout / ``OSError`` is classified as a probe-infra
+        error (``probe_errored``) and never mis-reported as a profile gap.
+        """
+        targets = validate_command_probe_targets(profile)
+        if not targets:
+            return ValidateToolProbeResult()
+
+        invocation = build_tracked_compose_exec(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            cli_args=[
+                "sh",
+                "-c",
+                _VALIDATE_TOOLCHAIN_PROBE_SCRIPT,
+                "validate_toolchain_probe",
+                *[target.tool for target in targets],
+            ],
+            source="validate_toolchain_probe",
+            label="validate_toolchain_probe",
+        )
+        try:
+            result = await asyncio.wait_for(
+                self._runner.run(invocation.args),
+                timeout=_TOOLCHAIN_PROBE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            # A wedged ``docker compose exec`` must not stall this handoff probe.
+            # Tear the tracked process tree down (itself bounded, since the
+            # cleanup is another unbounded exec) and report a probe-infra error so
+            # the caller proceeds instead of falsely failing the adoption.
+            with suppress(ComposeExecCleanupError, TimeoutError):
+                await asyncio.wait_for(
+                    cleanup_compose_exec_invocation(
+                        self._runner,
+                        invocation,
+                        workspace_id=workspace_id,
+                    ),
+                    timeout=_TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS,
+                )
+            return ValidateToolProbeResult(probe_errored=True)
+        except asyncio.CancelledError:
+            await cleanup_compose_exec_invocation_after_cancellation(
+                self._runner,
+                invocation,
+                workspace_id=workspace_id,
+            )
+            raise
+        except OSError:
+            # The container exec could not spawn at all: a probe-infra failure,
+            # not a genuine missing tool.
+            return ValidateToolProbeResult(probe_errored=True)
+
+        if result.returncode != 0:
+            return ValidateToolProbeResult(probe_errored=True)
+
+        missing_tools = {
+            match.group("tool").strip()
+            for match in _VALIDATE_TOOLCHAIN_PROBE_MISSING_RE.finditer(result.stdout)
+        }
+        missing_targets = tuple(target for target in targets if target.tool in missing_tools)
+        return ValidateToolProbeResult(missing=missing_targets)
 
     async def run_profile_phases(
         self,

@@ -34,6 +34,7 @@ from awf.runtime.validation_types import (
     ProfileExecutionCommand,
     ProfileValidationToolPreflightFinding,
     SetupDependencyNetworkClassification,
+    ValidateCommandProbeTarget,
     ValidationCommandResult,
 )
 
@@ -306,6 +307,72 @@ def _shell_tokens(command: str) -> list[str] | None:
         return shlex.split(command)
     except ValueError:
         return None
+
+
+# Shell builtins / keywords whose leading token is not a PATH-resolvable
+# executable. A ``validate`` command starting with one of these (``cd build``,
+# ``:`` no-op, ``echo done``) cannot be reduced to a single probeable tool, so
+# the probe skips it (fail-open) rather than emit a false UNPROVISIONED gap.
+_VALIDATE_PROBE_SHELL_BUILTINS = frozenset(
+    {
+        "cd",
+        "export",
+        ":",
+        ".",
+        "source",
+        "eval",
+        "exec",
+        "set",
+        "true",
+        "false",
+        "test",
+        "[",
+        "echo",
+    }
+)
+
+
+def _leading_executable(command: str) -> str | None:
+    """Return the leading PATH-resolvable executable of a shell command, or None.
+
+    Skips leading ``NAME=VALUE`` env assignments (``FOO=bar ruff`` -> ``ruff``)
+    and returns the program token a simple command would exec (``python`` for
+    ``python -m ruff``). Returns ``None`` for un-probeable leading tokens: a
+    parse failure (unbalanced quotes), no token after assignments, or a shell
+    builtin/keyword (``cd``, ``:``, ``echo``) — all fail-open so the probe never
+    false-positives on a command it cannot reduce to one executable.
+    """
+    tokens = _shell_tokens(command)
+    if tokens is None:
+        return None
+    index = _first_non_assignment_token_index(tokens)
+    if index >= len(tokens):
+        return None
+    leading = tokens[index]
+    if leading in _VALIDATE_PROBE_SHELL_BUILTINS:
+        return None
+    return leading
+
+
+def validate_command_probe_targets(
+    profile: WorkspaceProfile,
+) -> list[ValidateCommandProbeTarget]:
+    """Return the deduped ``validate``-tool probe targets for a profile.
+
+    One target per distinct leading executable across the profile's ``validate``
+    phase, keeping the first command that introduced each tool so an operator
+    message can name a representative command. Commands whose leading token is
+    un-probeable (see :func:`_leading_executable`) are skipped.
+    """
+    targets: list[ValidateCommandProbeTarget] = []
+    seen: set[str] = set()
+    for command in profile.phases.validate_commands:
+        tool = _leading_executable(command.command)
+        if tool is None or tool in seen:
+            continue
+        seen.add(tool)
+        targets.append(ValidateCommandProbeTarget(tool=tool, command=command.command))
+    return targets
 
 
 _SETUP_DEPENDENCY_COMMAND_VERBS: dict[str, frozenset[str]] = {

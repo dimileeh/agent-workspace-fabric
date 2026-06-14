@@ -91,6 +91,7 @@ from awf.runtime.validation_setup import (  # noqa: F401
     _is_safe_setup_dependency_host,
     _is_safe_setup_dependency_package,
     _is_setup_dependency_index_host,
+    _leading_executable,
     _looks_like_dependency_setup,
     _looks_like_uv_dependency_setup_command,
     _next_dependency_tool_subcommand_index,
@@ -118,6 +119,7 @@ from awf.runtime.validation_setup import (  # noqa: F401
     _with_setup_dependency_network_metadata,
     profile_phase_command_plan,
     profile_validation_tool_preflight_findings,
+    validate_command_probe_targets,
 )
 from awf.runtime.validation_types import (
     CoverageCommandPlan,
@@ -125,6 +127,8 @@ from awf.runtime.validation_types import (
     ProfileValidationToolPreflightFinding,
     PytestFailureEvidence,
     SetupDependencyNetworkClassification,
+    ValidateCommandProbeTarget,
+    ValidateToolProbeResult,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
@@ -137,6 +141,8 @@ __all__ = [
     "ProfileValidationToolPreflightFinding",
     "PytestFailureEvidence",
     "SetupDependencyNetworkClassification",
+    "ValidateCommandProbeTarget",
+    "ValidateToolProbeResult",
     "ValidationCommandResult",
     "ValidationCoverageResult",
     "ValidationResult",
@@ -220,6 +226,8 @@ __all__ = [
     "_missing_line_count",
     "_parse_term_missing_gaps",
     "_coverage_status",
+    "_leading_executable",
     "profile_phase_command_plan",
+    "validate_command_probe_targets",
     "ValidationRunner",
 ]
