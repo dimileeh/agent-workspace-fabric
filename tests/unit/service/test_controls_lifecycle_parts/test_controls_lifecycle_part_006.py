@@ -203,6 +203,10 @@ async def test_cancel_stop_stack_compose_down_failure_is_surfaced(
     assert response.status == WorkspaceStatus.cancelled
     assert workspace.status == WorkspaceStatus.cancelled.value
     assert operations[0].status == OperationStatus.failed.value
+    # The response message must agree with the failed operation status, not
+    # claim the cancellation succeeded when stack teardown actually failed.
+    assert response.operation_status == OperationStatus.failed.value
+    assert response.message == "workspace cancelled but stack teardown failed"
     assert operations[0].error_code == "STACK_STOP_FAILED"
     assert "compose down denied" in (operations[0].error_message or "")
     assert audit_events[0].payload["outcome"] == "failed"
@@ -225,6 +229,9 @@ async def test_stop_compose_down_failure_is_surfaced(
 
     assert response.status == WorkspaceStatus.cancelled
     assert operations[0].status == OperationStatus.failed.value
+    # The response message must reflect the failure, not the success string.
+    assert response.operation_status == OperationStatus.failed.value
+    assert response.message == "workspace stack stop failed"
     assert operations[0].error_code == "STACK_STOP_FAILED"
     assert await has_terminal_runtime_released_event(session, workspace.id) is False
 

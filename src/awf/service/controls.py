@@ -229,6 +229,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
         reason_code: str,
         audit_extra: dict[str, object | None],
         success_message: str,
+        failure_message: str,
     ) -> WorkspaceControlResponse:
         """Emit the terminal runtime release, then finish the operation.
 
@@ -239,7 +240,10 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
         finished succeeded with the teardown evidence attached. On a compose-down
         failure no release event is emitted (the runtime was *not* released) and
         the operation is finished **failed** via the shared failed-operation
-        helper so the teardown error is surfaced, not swallowed.
+        helper so the teardown error is surfaced, not swallowed. The failure
+        response carries ``failure_message`` (not ``success_message``) so the
+        response message agrees with the failed ``operation_status`` instead of
+        telling callers the stack was stopped when teardown actually failed.
         """
         if not cleanup_result.ok:
             await _finish_stack_stop_failed_operation(
@@ -252,7 +256,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
             return _control_response(
                 workspace=workspace,
                 operation=operation,
-                message=success_message,
+                message=failure_message,
             )
         compose_down_succeeded = any(
             step.name == "compose_down" and step.ok for step in cleanup_result.completed_steps
@@ -385,6 +389,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
                 reason_code=_OPERATOR_CANCEL_REASON_CODE,
                 audit_extra=audit_extra,
                 success_message="workspace cancellation requested",
+                failure_message="workspace cancelled but stack teardown failed",
             )
         # ``stop_stack=False`` did not prove the runtime stopped, so cleanup owns
         # emitting terminal release later. In the narrow pre-launch race where
@@ -492,6 +497,7 @@ class WorkspaceControlService(_WorkspaceGuideMixin):
             reason_code=_OPERATOR_STOP_REASON_CODE,
             audit_extra={"expected_version": expected_version},
             success_message="workspace stack stopped",
+            failure_message="workspace stack stop failed",
         )
 
     async def remonitor_workspace(
