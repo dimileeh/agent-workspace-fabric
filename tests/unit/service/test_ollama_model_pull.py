@@ -838,15 +838,19 @@ def test_opencode_ollama_host_probe_deferrable(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("environ", "expected"),
     [
-        # Host gateway / loopback hosts are reachable from the worker.
+        # The Docker host-gateway aliases are reachable from the worker. Host-local
+        # connection targets (``localhost``, ``127.0.0.0/8``, ``::1``, ``0.0.0.0``,
+        # ``::``) are normalized to ``host.docker.internal`` by ``_parse_ollama_base_url``
+        # (issue #579), so they reach the classifier already rewritten to the gateway
+        # and classify reachable through the same pure membership test.
         ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://host.docker.internal:11434"}, True),
         ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://gateway.docker.internal:11434"}, True),
         ({"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:11434/v1"}, True),
         ({"OLLAMA_HOST": "http://127.0.0.1:11434"}, True),
         ({"OLLAMA_HOST": "http://[::1]:11434"}, True),
-        # ``0.0.0.0`` is a valid Ollama bind address that, as a connection target,
-        # routes to the loopback like ``localhost`` — reachable from the worker even
-        # though it is not itself a loopback IP (``is_loopback`` is ``False``).
+        # ``0.0.0.0`` / ``::`` are the unspecified addresses; as a *connection* target
+        # they route to the host loopback, so they normalize to the gateway upstream
+        # and classify reachable like ``localhost``.
         ({"OLLAMA_HOST": "http://0.0.0.0:11434"}, True),
         ({"AWF_OPENCODE_OLLAMA_BASE_URL": "0.0.0.0:11434"}, True),
         # A bare host:port without scheme still classifies on the hostname.
