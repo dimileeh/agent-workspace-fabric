@@ -900,6 +900,16 @@ class TestOpenCodeAdapter:
             ("http://ollama.local:11434/", "http://ollama.local:11434/v1"),
             ("http://ollama.local:11434/v1", "http://ollama.local:11434/v1"),
             ("https://ollama.local:11434", "https://ollama.local:11434/v1"),
+            # A port-less host must inherit Ollama's default daemon port
+            # (11434) rather than collapsing to the scheme default (port 80).
+            ("ollama-sidecar", "http://ollama-sidecar:11434/v1"),
+            ("http://ollama-sidecar", "http://ollama-sidecar:11434/v1"),
+            ("https://ollama-sidecar/v1", "https://ollama-sidecar:11434/v1"),
+            ("ollama.local", "http://ollama.local:11434/v1"),
+            ("0.0.0.0", "http://0.0.0.0:11434/v1"),
+            # IPv6 literals: bracket form, with and without a port.
+            ("http://[::1]", "http://[::1]:11434/v1"),
+            ("http://[::1]:11434", "http://[::1]:11434/v1"),
         ],
     )
     async def test_launch_prelude_mirrors_ollama_host(

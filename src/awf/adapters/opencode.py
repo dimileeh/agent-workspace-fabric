@@ -115,8 +115,12 @@ def _ollama_base_url_prelude() -> str:
     the default ``host.docker.internal`` daemon — admitting the workspace against
     the wrong model source. Mirror ``OLLAMA_HOST`` into the base URL here,
     normalized to a scheme-qualified ``…/v1`` endpoint, so launch and preflight
-    resolve the same daemon. An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` still
-    wins; with neither set we fall back to the default.
+    resolve the same daemon. A port-less host (a sidecar service name like
+    ``ollama-sidecar``, or the bare default-host form) inherits Ollama's default
+    daemon port (11434) rather than collapsing to the scheme default (port 80),
+    so the agent reaches the daemon instead of failing later against the wrong
+    base URL. An explicit ``AWF_OPENCODE_OLLAMA_BASE_URL`` still wins; with
+    neither set we fall back to the default.
     """
     return (
         'if [ -z "${AWF_OPENCODE_OLLAMA_BASE_URL:-}" ]; then\n'
@@ -126,6 +130,20 @@ def _ollama_base_url_prelude() -> str:
         "      *://*) : ;;\n"
         '      *) __awf_ollama_host="http://$__awf_ollama_host" ;;\n'
         "    esac\n"
+        # Default the Ollama daemon port (11434) when the authority omits one,
+        # so a port-less OLLAMA_HOST does not resolve to port 80.
+        '    __awf_ollama_scheme="${__awf_ollama_host%%://*}"\n'
+        '    __awf_ollama_rest="${__awf_ollama_host#*://}"\n'
+        '    __awf_ollama_authority="${__awf_ollama_rest%%/*}"\n'
+        '    __awf_ollama_path="${__awf_ollama_rest#"$__awf_ollama_authority"}"\n'
+        '    case "$__awf_ollama_authority" in\n'
+        "      '['*']') __awf_ollama_authority=\"$__awf_ollama_authority:11434\" ;;\n"
+        "      '['*']:'*) : ;;\n"
+        "      *:*) : ;;\n"
+        "      '') : ;;\n"
+        '      *) __awf_ollama_authority="$__awf_ollama_authority:11434" ;;\n'
+        "    esac\n"
+        '    __awf_ollama_host="$__awf_ollama_scheme://$__awf_ollama_authority$__awf_ollama_path"\n'
         '    __awf_ollama_host="${__awf_ollama_host%/}"\n'
         '    case "$__awf_ollama_host" in\n'
         "      */v1) : ;;\n"
