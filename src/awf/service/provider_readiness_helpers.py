@@ -804,7 +804,10 @@ def overlay_profile_ollama_base_url(
     daemon than the agent reaches — admitting a workspace for a daemon the agent
     cannot use, or recording readiness against the wrong host. Overlay the
     profile-declared base URL so create-time admission and the executor pre-agent
-    step both probe the same daemon. A workspace without a resolved profile (or an
+    step both probe the same daemon. A base URL declared instead as a
+    ``kind="env"``/``provider="env"`` secret lease — which the launcher merges into the
+    agent env, never appearing in ``runtime.environment`` — is mirrored here too, symmetric
+    to ``overlay_profile_provider_credentials``. A workspace without a resolved profile (or an
     unvalidatable snapshot) falls back to *environ* unchanged.
     """
 
@@ -835,9 +838,11 @@ def overlay_profile_ollama_base_url(
     # but empty (mask the inherited value below), never surfaced as an error.
     declared: dict[str, str] = {}
     owned: list[int] = []
+    runtime_owned: set[str] = set()
     for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS):
         if key not in profile_env:
             continue
+        runtime_owned.add(key)
         owned.append(index)
         try:
             expanded = compose_expand_value(profile_env[key], environ=environ).strip()
@@ -845,6 +850,35 @@ def overlay_profile_ollama_base_url(
             expanded = ""
         if expanded:
             declared[key] = expanded
+    # A profile may instead supply an Ollama base URL via a ``kind="env"``/``provider="env"``
+    # secret lease (e.g. ``target="OLLAMA_HOST"``, ``ref="env/HOST_OLLAMA_URL"``), which the
+    # stack launcher merges into the agent env (``agent_environment_with_declared_secret_leases``)
+    # — it never appears in ``runtime.environment``. Mirror
+    # ``overlay_profile_provider_credentials``: resolve each such lease's host source against
+    # ``environ`` so create/retry preflight and the executor auto-pull probe the same daemon the
+    # agent reaches, not the inherited/default one. ``runtime.environment`` wins (the launcher
+    # merge is first-writer-wins), so a target already declared there is skipped. A lease whose
+    # provider is not ``env``, whose ref is unparseable, or whose host source is absent/empty is
+    # treated as undeclared (the launcher omits an optional lease and fails a required one); this
+    # best-effort overlay only surfaces — and only masks behind — a daemon URL it can resolve.
+    ollama_key_index = {key: index for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS)}
+    for secret in profile.secrets:
+        if secret.kind != "env" or secret.target not in ollama_key_index:
+            continue
+        if (secret.provider or "").strip().lower() != "env":
+            continue
+        if secret.target in runtime_owned:
+            continue
+        source_name = _env_secret_ref_name(secret.ref)
+        if source_name is None:
+            continue
+        value = environ.get(source_name, "").strip()
+        if not value:
+            continue
+        declared[secret.target] = value
+        index = ollama_key_index[secret.target]
+        if index not in owned:
+            owned.append(index)
     if not owned:
         return result
     # The profile owns the Ollama daemon selection. ``_ollama_api_urls`` (and the
@@ -858,7 +892,7 @@ def overlay_profile_ollama_base_url(
     # worker value above the profile's highest-precedence owned key. Otherwise an
     # empty profile-owned slot would leave an inherited daemon in the readiness environ
     # that the agent never reaches — admitting/pulling against the wrong daemon.
-    top = owned[0]
+    top = min(owned)
     for index, key in enumerate(_OLLAMA_BASE_URL_ENV_KEYS):
         if key in declared:
             result[key] = declared[key]

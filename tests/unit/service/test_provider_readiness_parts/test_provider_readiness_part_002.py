@@ -1201,6 +1201,114 @@ def test_overlay_profile_ollama_base_url_empty_lower_key_masks_and_shadows() -> 
 
 
 @pytest.mark.unit
+def test_overlay_profile_ollama_base_url_overlays_env_secret_lease() -> None:
+    """An Ollama base URL supplied through a profile ``kind="env"``/``provider="env"`` secret
+    lease (e.g. ``target="OLLAMA_HOST"``, ``ref="env/HOST_OLLAMA_URL"``) reaches the agent via
+    the launcher's secret-lease environment merge, not ``runtime.environment``. The overlay must
+    resolve the lease's host source against ``environ`` and mask any higher-precedence inherited
+    worker value — otherwise create/retry preflight and the executor auto-pull probe the
+    inherited/default daemon while the agent uses the leased one. Symmetric to
+    ``overlay_profile_provider_credentials``."""
+    result = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        {
+            "HOST_OLLAMA_URL": "http://ollama-sidecar:11434",
+            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434",
+        },
+        {
+            "name": "ollama-host-lease",
+            "secrets": [
+                {
+                    "name": "ollama-url",
+                    "kind": "env",
+                    "target": "OLLAMA_HOST",
+                    "ref": "env/HOST_OLLAMA_URL",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert result["OLLAMA_HOST"] == "http://ollama-sidecar:11434"
+    # The leased ``OLLAMA_HOST`` owns the daemon selection, so the inherited higher-precedence
+    # worker ``AWF_OPENCODE_OLLAMA_BASE_URL`` must be masked.
+    assert "AWF_OPENCODE_OLLAMA_BASE_URL" not in result
+
+
+@pytest.mark.unit
+def test_overlay_profile_ollama_base_url_env_lease_runtime_wins() -> None:
+    """``runtime.environment`` is first-writer-wins over secret leases in the agent env
+    (``merge_agent_environment``), so when both declare the same Ollama base URL key the overlay
+    keeps the runtime value rather than the lease's host source."""
+    result = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        {"HOST_OLLAMA_URL": "http://ollama-sidecar:11434"},
+        {
+            "name": "ollama-host-both",
+            "runtime": {"environment": {"OLLAMA_HOST": "http://runtime-daemon:11434"}},
+            "secrets": [
+                {
+                    "name": "ollama-url",
+                    "kind": "env",
+                    "target": "OLLAMA_HOST",
+                    "ref": "env/HOST_OLLAMA_URL",
+                    "provider": "env",
+                }
+            ],
+        },
+    )
+
+    assert result["OLLAMA_HOST"] == "http://runtime-daemon:11434"
+
+
+@pytest.mark.unit
+def test_overlay_profile_ollama_base_url_env_lease_unresolvable_undeclared() -> None:
+    """An env secret lease whose host source is absent/empty, whose ref is unparseable, or whose
+    provider is not ``env`` is treated as undeclared — the launcher omits an optional lease and
+    fails a required one, but this best-effort overlay only surfaces (and only masks behind) a
+    daemon URL it can actually resolve from the worker environ. A non-Ollama lease target is
+    ignored and a non-``env`` lease kind is left alone, so the inherited worker value survives."""
+    environ = {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://worker-daemon:11434"}
+
+    result = provider_readiness_helpers.overlay_profile_ollama_base_url(
+        environ,
+        {
+            "name": "ollama-host-unresolvable",
+            "secrets": [
+                {
+                    "name": "missing-source",
+                    "kind": "env",
+                    "target": "OLLAMA_HOST",
+                    "ref": "env/HOST_OLLAMA_URL",
+                    "provider": "env",
+                },
+                {
+                    "name": "bad-ref",
+                    "kind": "env",
+                    "target": "OLLAMA_HOST",
+                    "ref": "local-file:/host/ollama",
+                    "provider": "env",
+                },
+                {
+                    "name": "non-env-provider",
+                    "kind": "env",
+                    "target": "OLLAMA_HOST",
+                    "ref": "env/HOST_OLLAMA_URL",
+                    "provider": "vault",
+                },
+                {
+                    "name": "mounted",
+                    "kind": "mount",
+                    "target": "OLLAMA_HOST",
+                    "ref": "local-file:/host/ollama",
+                    "provider": "env",
+                },
+            ],
+        },
+    )
+
+    assert result == environ
+
+
+@pytest.mark.unit
 def test_overlay_profile_provider_credentials_overlays_profile_declared_key() -> None:
     """A provider API key declared solely in the profile's runtime.environment reaches
     the agent container but not the worker process the non-Ollama credential gate runs
