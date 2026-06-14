@@ -667,7 +667,32 @@ def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
         _ = parts.port
     except ValueError:
         parts = urlsplit(DEFAULT_OLLAMA_OPENAI_BASE_URL)
-    return parts
+    return _default_ollama_port(parts)
+
+
+def _default_ollama_port(parts: SplitResult) -> SplitResult:
+    """Default a port-less authority to Ollama's daemon port (11434).
+
+    The OpenCode launcher prelude normalizes a port-less ``OLLAMA_HOST`` (a bare
+    Compose service name such as ``ollama-sidecar``, or ``localhost`` / ``0.0.0.0``)
+    to ``:11434`` before handing the agent its base URL. The worker-side probe/pull
+    URL builder must resolve the *same* daemon, so mirror that defaulting here —
+    otherwise a port-less value would probe the scheme default (port 80) while the
+    agent talks to 11434, failing or hitting the wrong daemon at create/retry
+    preflight. A value that already carries a port (or has no host, e.g. ``://``) is
+    returned unchanged.
+    """
+
+    if parts.port is not None or not parts.hostname:
+        return parts
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    userinfo = ""
+    if parts.username is not None:
+        userinfo = parts.username
+        if parts.password is not None:
+            userinfo = f"{userinfo}:{parts.password}"
+        userinfo = f"{userinfo}@"
+    return parts._replace(netloc=f"{userinfo}{host}:11434")
 
 
 def _ollama_base_url_malformed(environ: Mapping[str, str]) -> bool:

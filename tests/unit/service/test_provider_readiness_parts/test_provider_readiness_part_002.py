@@ -987,6 +987,44 @@ def test_ollama_url_helpers_preserve_host_gateway_fallback_port() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("env", "expected_primary"),
+    [
+        # A port-less host inherits Ollama's daemon port (11434) so the worker probe
+        # resolves the same daemon as the OpenCode launcher prelude — not the scheme
+        # default (port 80).
+        ({"OLLAMA_HOST": "localhost"}, "http://localhost:11434/api/version"),
+        ({"OLLAMA_HOST": "0.0.0.0"}, "http://0.0.0.0:11434/api/version"),
+        ({"OLLAMA_HOST": "ollama-sidecar"}, "http://ollama-sidecar:11434/api/version"),
+        (
+            {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local/v1"},
+            "http://ollama.local:11434/api/version",
+        ),
+        # A port-less IPv6 literal re-brackets and defaults the port too.
+        ({"OLLAMA_HOST": "http://[::1]"}, "http://[::1]:11434/api/version"),
+    ],
+)
+def test_ollama_url_helpers_default_portless_host_to_daemon_port(
+    env: dict[str, str], expected_primary: str
+) -> None:
+    """A port-less ``OLLAMA_HOST`` / ``AWF_OPENCODE_OLLAMA_BASE_URL`` must resolve to
+    Ollama's daemon port (11434), mirroring the OpenCode launcher prelude, so the
+    worker probe/pull does not hit port 80 while the agent talks to 11434."""
+    assert provider_readiness_helpers._ollama_version_urls(env) == (expected_primary,)
+
+
+@pytest.mark.unit
+def test_ollama_url_helpers_default_portless_host_gateway_to_daemon_port() -> None:
+    """A port-less host-gateway value defaults the port on both the primary and the
+    ``localhost`` fallback so launch and preflight agree on 11434."""
+    env = {"OLLAMA_HOST": "host.docker.internal"}
+    assert provider_readiness_helpers._ollama_version_urls(env) == (
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "env",
     [
         # Unbalanced IPv6 brackets make ``urlsplit`` raise ``ValueError``.
