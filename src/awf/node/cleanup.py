@@ -277,12 +277,7 @@ class WorkspaceCleaner:
                         # vanished — or whose stored name never matched the spec
                         # default — but whose containers/network/host port are
                         # still live is still torn down (mirroring the
-                        # persisted-file vanished fallback above). When ``down``
-                        # actually ran we skip the redundant label-scoped pass:
-                        # it already freed the port, and a transient label-scoped
-                        # Docker failure must not flip an otherwise-successful
-                        # ``compose_down`` to failed and skip
-                        # ``terminal_runtime_released``.
+                        # persisted-file vanished fallback above).
                         _log.warning(
                             "cleanup.compose_down_vanished_label_fallback",
                             workspace_id=workspace_id,
@@ -293,6 +288,33 @@ class WorkspaceCleaner:
                             workspace_id=workspace_id,
                             remove_volumes=remove_volumes,
                         )
+                    else:
+                        # ``down`` actually ran and already freed the
+                        # containers/network/host port. ``docker compose down -v``
+                        # only removes the named volumes declared in the *current*
+                        # rendered compose file, so a workspace launched under an
+                        # older profile can leave project-labelled volumes that the
+                        # current file no longer renders; cancel/stop/destroy would
+                        # then report cleanup success while leaking per-workspace
+                        # volumes. Run a best-effort label-scoped reap to collect
+                        # them, but swallow a transient label failure here: the
+                        # stack was already released, and a failing reap must not
+                        # flip an otherwise-successful ``compose_down`` to failed
+                        # and skip ``terminal_runtime_released``.
+                        try:
+                            await self._compose.remove_project_by_label(
+                                project_name=project_name,
+                                workspace_id=workspace_id,
+                                remove_volumes=remove_volumes,
+                            )
+                        except ComposeOperationError as reap_exc:
+                            _log.warning(
+                                "cleanup.compose_down_post_success_label_reap_failed",
+                                workspace_id=workspace_id,
+                                project_name=project_name,
+                                reason_code=reap_exc.reason_code,
+                                stderr=reap_exc.stderr[:1000],
+                            )
             steps.append(
                 WorkspaceCleanupStepResult(
                     name="compose_down",

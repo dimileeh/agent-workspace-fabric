@@ -379,16 +379,15 @@ class TestCleanup:
         compose.remove_project_by_label.assert_awaited_once()
 
     @pytest.mark.unit
-    async def test_null_compose_file_successful_down_skips_label_removal(
+    async def test_null_compose_file_successful_down_still_reaps_labelled_volumes(
         self,
         cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
     ) -> None:
-        # When the null-file ``down`` actually runs (returns True) it has already
-        # stopped the containers and freed the host port, so the redundant
-        # label-scoped pass is skipped. Otherwise a transient label-scoped Docker
-        # failure would flip an otherwise-successful compose_down to failed and
-        # make /stop and cancel skip terminal_runtime_released even though the
-        # stack was already torn down.
+        # ``down -v`` only removes the volumes declared in the current rendered
+        # compose file, so a workspace launched under an older profile can leave
+        # project-labelled volumes the current file no longer renders. After a
+        # successful null-file ``down`` we still run a best-effort label-scoped
+        # reap to collect those leaked volumes.
         git, compose, wc = cleaner
         compose.down.return_value = True
 
@@ -402,7 +401,40 @@ class TestCleanup:
 
         assert result.ok
         compose.down.assert_awaited_once()
-        compose.remove_project_by_label.assert_not_awaited()
+        compose.remove_project_by_label.assert_awaited_once_with(
+            project_name="awf_ws_null_ok",
+            workspace_id="ws_null_ok",
+            remove_volumes=True,
+        )
+        compose_step = next(step for step in result.steps if step.name == "compose_down")
+        assert compose_step.status == "succeeded"
+
+    @pytest.mark.unit
+    async def test_null_compose_file_successful_down_swallows_label_reap_failure(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+    ) -> None:
+        # The post-success label reap is best-effort: a transient label-scoped
+        # Docker failure must NOT flip an otherwise-successful compose_down to
+        # failed, because ``down`` already freed the containers/network/host port
+        # and /stop and cancel still need to emit terminal_runtime_released.
+        git, compose, wc = cleaner
+        compose.down.return_value = True
+        compose.remove_project_by_label.side_effect = ComposeOperationError(
+            operation="volume rm", returncode=1, stdout="", stderr="docker unavailable"
+        )
+
+        result = await wc.cleanup(
+            workspace_id="ws_null_reap_fail",
+            repo_url="git@x:y.git",
+            compose_project_name="awf_ws_null_reap_fail",
+            compose_file_path=None,
+            remove_worktree=False,
+        )
+
+        assert result.ok
+        compose.down.assert_awaited_once()
+        compose.remove_project_by_label.assert_awaited_once()
         compose_step = next(step for step in result.steps if step.name == "compose_down")
         assert compose_step.status == "succeeded"
 
