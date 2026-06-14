@@ -191,11 +191,27 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
     ``&&`` and ``||`` on the opener line are kept literal so the opener tool
     stays the statement's leading token. ``<<<`` is a here-string (no body) and
     is left to ordinary splitting.
+
+    A POSIX brace group (``{ ruff check .; }``, ``ruff && { mypy src; pytest; }``)
+    runs its commands in the current shell as syntax: ``sh -lc`` treats the
+    enclosing ``{`` / ``}`` as reserved words and the inner ``;``/``&&``/``||``
+    as the group's own list separators, not top-level ones. The splitter tracks
+    brace-group depth and keeps those inner separators literal so the whole group
+    stays one statement — otherwise the closing ``}`` (or an inner command) would
+    be split off and probed as a required executable (``command -v '}'``), falsely
+    reporting PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a profile whose grouped
+    command passes once the real tools are installed. A ``{`` is only an opener
+    when it is a standalone command word (at a command boundary and followed by a
+    blank, as POSIX requires), so brace expansion (``cp a.{txt,bak}``) and the
+    ``find ... {} \\;`` placeholder are left untouched. :func:`_statement_leading_executable`
+    then fails open on the leading ``{``/``}`` token rather than guessing at the
+    grouped tools.
     """
     statements: list[tuple[str, str]] = []
     current: list[str] = []
     quote: str | None = None
     pending_heredocs: list[str] = []
+    brace_depth = 0
     index = 0
     length = len(command)
     while index < length:
@@ -286,7 +302,33 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
             while index < length and command[index] != "\n":
                 index += 1
             continue
-        if char in ";\n" and not pending_heredocs:
+        if (
+            char == "{"
+            and (not current or current[-1] in " \t\n;&|(")
+            and index + 1 < length
+            and command[index + 1] in " \t\n"
+        ):
+            # A standalone ``{`` command word opens a brace group; POSIX requires
+            # the following blank, so brace expansion (``cp a.{txt,bak}``) and the
+            # ``find ... {} \;`` placeholder — neither blank-followed — are left
+            # alone. Inner separators stay literal while ``brace_depth`` is open.
+            brace_depth += 1
+            current.append(char)
+            index += 1
+            continue
+        if (
+            char == "}"
+            and brace_depth > 0
+            and (not current or current[-1] in " \t\n;&|(")
+            and (index + 1 >= length or command[index + 1] in " \t\n;&|)")
+        ):
+            # The matching ``}`` closes the group; resume top-level splitting once
+            # ``brace_depth`` returns to zero.
+            brace_depth -= 1
+            current.append(char)
+            index += 1
+            continue
+        if char in ";\n" and not pending_heredocs and brace_depth == 0:
             statements.append(("".join(current), ";"))
             current = []
             index += 1
@@ -294,6 +336,7 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
         if (
             char in "&|"
             and not pending_heredocs
+            and brace_depth == 0
             and index + 1 < length
             and command[index + 1] == char
         ):
@@ -410,6 +453,15 @@ def _statement_leading_executable(statement: str) -> str | object:
     # validate from a subdirectory. No real executable name begins with ``(``,
     # so fail open.
     if leading.startswith("("):
+        return _STOP_PROBE
+    # A leading brace-group delimiter (``{`` opener, ``}`` closer) is shell
+    # grouping syntax ``sh -lc`` executes, not a program. :func:`_split_top_level_statements`
+    # keeps a ``{ ...; }`` group whole, so its leading token is the bare ``{``;
+    # ``shlex`` also keeps a malformed ``{cmd`` glued. Probing ``command -v '{'``
+    # / ``'}'`` would falsely report the workspace
+    # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED, so fail open — the grouped tools
+    # are not reduced to a single probeable executable here.
+    if leading.startswith("{") or leading == "}":
         return _STOP_PROBE
     # A leading token that relies on shell expansion to name the executable —
     # tilde expansion (``~/bin/ruff``) or parameter/command substitution

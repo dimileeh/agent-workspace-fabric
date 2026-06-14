@@ -406,6 +406,39 @@ class TestLeadingExecutables:
         # the final segment's tool is probed as usual.
         assert _leading_executables("grep x <<< value\nruff check .") == ["ruff"]
 
+    def test_lone_brace_group_fails_open(self) -> None:
+        # ``{ ruff check .; }`` is a POSIX brace group: ``sh -lc`` treats ``{``/``}``
+        # as reserved words and the inner ``;`` as the group's own list separator.
+        # The splitter keeps the group whole and fails open on the leading ``{``
+        # rather than splitting off the closing ``}`` and probing
+        # ``command -v '}'`` — a false PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+        assert _leading_executables("{ ruff check .; }") == []
+        assert _leading_executables("{ mypy src; pytest -q; }") == []
+
+    def test_brace_group_after_and_chain_keeps_the_preceding_tool(self) -> None:
+        # The tool required before the ``&&`` is still probed; only the brace group
+        # itself fails open, so the closing ``}`` is never mistaken for a tool.
+        assert _leading_executables("ruff check . && { mypy src; pytest -q; }") == ["ruff"]
+
+    def test_set_e_brace_group_does_not_leak_inner_commands(self) -> None:
+        # Under ``set -e`` every following segment is exit-determining, but the
+        # brace group must still stay one statement so an inner command is never
+        # split out and probed; the whole group fails open on its leading ``{``.
+        assert _leading_executables("set -e; { false; pytest -q; }") == []
+
+    def test_brace_expansion_is_not_a_brace_group(self) -> None:
+        # ``cp a.{txt,bak}`` is brace expansion (no blank after ``{``), not a
+        # group, so the real leading tool is still probed and chained tools follow.
+        assert _leading_executables("cp a.{txt,bak} && ruff check .") == ["cp", "ruff"]
+
+    def test_find_placeholder_brace_is_not_a_brace_group(self) -> None:
+        # The ``find ... {} \;`` placeholder is a single ``{}`` argument, not a
+        # group, so ``find`` is probed and the chained ``ruff`` follows.
+        assert _leading_executables("find . -exec rm {} \\; && ruff check .") == [
+            "find",
+            "ruff",
+        ]
+
 
 @pytest.mark.unit
 class TestValidateCommandProbeTargets:
@@ -462,6 +495,16 @@ class TestValidateCommandProbeTargets:
             _profile_with_validate(["cd build", "ruff check ."])
         )
         assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_skips_brace_group_commands(self) -> None:
+        # A POSIX brace-group validate command (``{ ruff check .; }``) is shell
+        # grouping syntax; it must never yield a ``}`` probe target, which would
+        # fail the handoff with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a
+        # profile whose grouped command passes. The plain command still probes.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["{ ruff check .; }", "mypy src"])
+        )
+        assert [(t.tool, t.command) for t in targets] == [("mypy", "mypy src")]
 
     def test_skips_path_modifying_commands(self) -> None:
         # A command whose env prefix binds PATH is what makes its executable
