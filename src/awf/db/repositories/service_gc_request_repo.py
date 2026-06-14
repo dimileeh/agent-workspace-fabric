@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.common.ids import new_service_gc_request_id
 from awf.db.enums import (
     SERVICE_GC_REQUEST_STATUS_COMPLETED,
+    SERVICE_GC_REQUEST_STATUS_EXPIRED,
     SERVICE_GC_REQUEST_STATUS_FAILED,
     SERVICE_GC_REQUEST_STATUS_PENDING,
     SERVICE_GC_REQUEST_STATUS_RUNNING,
@@ -72,10 +73,24 @@ class ServiceGCRequestRepository:
         interval reaper racing) sees ``None`` rather than re-claiming the same row.
         Rows with a ``NULL`` ``node_id`` are claimable by any node (single-node
         fallback), mirroring the terminal-runtime release candidate query.
+
+        Pending rows whose ``deadline_at`` (the API client's polling budget) has
+        already elapsed are excluded: the operator has been told the trigger timed
+        out, so running that destructive reap later — behind the operator's back —
+        is the hazard expire-on-timeout rejects (#590). Such rows are swept to the
+        terminal ``expired`` state by :meth:`expire_stale_requests`; the periodic
+        interval reaper remains the durable backstop for the disk reclaim itself.
+        Rows with a ``NULL`` ``deadline_at`` carry no budget and stay claimable.
         """
         stmt = (
             select(ServiceGCRequest)
             .where(ServiceGCRequest.status == SERVICE_GC_REQUEST_STATUS_PENDING)
+            .where(
+                or_(
+                    ServiceGCRequest.deadline_at.is_(None),
+                    ServiceGCRequest.deadline_at >= now,
+                )
+            )
             .where(
                 or_(
                     ServiceGCRequest.node_id == node_id,
@@ -96,29 +111,46 @@ class ServiceGCRequestRepository:
         await self._session.flush()
         return request
 
-    async def reclaim_stale_running(
+    async def expire_stale_requests(
         self,
         *,
         node_id: str,
         now: datetime,
     ) -> list[str]:
-        """Reset abandoned ``running`` rows past their ``deadline_at`` back to ``pending`` (#590).
+        """Mark ``pending``/``running`` rows past their ``deadline_at`` terminal ``expired`` (#590).
 
-        A worker cancelled (graceful shutdown) mid-reap leaves its claimed row ``running``
-        with no recovery path: :meth:`claim_oldest_pending` only selects ``pending`` rows,
-        so the row would otherwise accumulate forever. Once its ``deadline_at`` (the API
-        client's polling budget) has elapsed the original claimant is gone — the client has
-        already timed out — so the row is safe to re-queue: reset it to ``pending``
-        (clearing ``claimed_at``) so the next poll re-claims and re-runs the idempotent
-        reap. ``SELECT ... FOR UPDATE SKIP LOCKED`` skips any row a concurrent claim/finish
-        is actively holding, so a genuinely in-flight reap is never disturbed. Single-node
-        only (Phase 1): the only ``running`` rows are ones a prior incarnation of this node
-        abandoned. Rows with a ``NULL`` ``deadline_at`` are never reclaimed (no budget to
-        judge staleness against). Returns the ids reset, oldest first.
+        Expire-on-timeout: once a row's ``deadline_at`` (the API client's polling budget)
+        has elapsed the operator has already been told the trigger timed out, so the reap
+        must **not** run later behind their back — a destructive reap after a reported
+        timeout is the hazard this rejects. Rather than recover-and-re-run, the row is
+        retired to the terminal ``expired`` state (recording ``finished_at``):
+
+        * a still-``pending`` row that no worker claimed in time would otherwise be picked
+          up by a later poll/restart and run with the *current* clock + stored filters
+          (deleting workspaces that only became eligible after the timeout);
+        * a ``running`` row a worker abandoned mid-reap (cancelled on shutdown) would
+          otherwise accumulate forever, since :meth:`claim_oldest_pending` only selects
+          ``pending`` rows.
+
+        Expiring both retires them safely; the worker's periodic (~1h) interval reaper
+        stays as the durable backstop that performs the actual disk reclaim. ``SELECT ...
+        FOR UPDATE SKIP LOCKED`` skips any row a concurrent claim/finish is actively
+        holding. Single-node only (Phase 1): the only ``running`` rows are ones a prior
+        incarnation of this node abandoned (the claim and reap run in separate
+        transactions, so a genuinely in-flight reap is never one this sweep observes
+        within the same worker). Rows with a ``NULL`` ``deadline_at`` carry no budget and
+        are never expired. Returns the ids expired, oldest first.
         """
         stmt = (
             select(ServiceGCRequest)
-            .where(ServiceGCRequest.status == SERVICE_GC_REQUEST_STATUS_RUNNING)
+            .where(
+                ServiceGCRequest.status.in_(
+                    (
+                        SERVICE_GC_REQUEST_STATUS_PENDING,
+                        SERVICE_GC_REQUEST_STATUS_RUNNING,
+                    )
+                )
+            )
             .where(ServiceGCRequest.deadline_at.is_not(None))
             .where(ServiceGCRequest.deadline_at < now)
             .where(
@@ -132,14 +164,14 @@ class ServiceGCRequestRepository:
         if self._dialect_name == "postgresql":
             stmt = stmt.with_for_update(of=ServiceGCRequest, skip_locked=True)
         rows = (await self._session.execute(stmt)).scalars().all()
-        reclaimed: list[str] = []
+        expired: list[str] = []
         for request in rows:
-            request.status = SERVICE_GC_REQUEST_STATUS_PENDING
-            request.claimed_at = None
-            reclaimed.append(request.id)
-        if reclaimed:
+            request.status = SERVICE_GC_REQUEST_STATUS_EXPIRED
+            request.finished_at = now
+            expired.append(request.id)
+        if expired:
             await self._session.flush()
-        return reclaimed
+        return expired
 
     async def mark_completed(
         self,

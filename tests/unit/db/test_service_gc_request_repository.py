@@ -177,17 +177,54 @@ async def test_claim_without_for_update_on_non_postgres_dialect() -> None:
             assert claimed.status == "running"
 
 
-async def test_reclaim_stale_running_resets_only_past_deadline_rows() -> None:
-    # A ``running`` row whose ``deadline_at`` has elapsed is abandoned (the API client
-    # has timed out); it is reset to ``pending`` so a later poll can re-claim it (#590).
-    # A still-fresh ``running`` row and a ``running`` row without a ``deadline_at`` are
-    # left untouched.
+async def test_claim_excludes_pending_rows_past_deadline() -> None:
+    # Expire-on-timeout (#590): a ``pending`` row whose ``deadline_at`` has elapsed must
+    # never be claimed/run — the operator has already been told the trigger timed out, so
+    # running that destructive reap later behind their back is the hazard we reject. A
+    # fresh pending row (deadline in the future) and a NULL-deadline row stay claimable.
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
         now = datetime.now(UTC)
         async with factory() as session:
             repo = ServiceGCRequestRepository(session)
-            stale = await repo.create_pending(
+            # Past-deadline row is the oldest, so ordering would pick it first if eligible.
+            await repo.create_pending(
+                node_id="node-a",
+                requested_at=now - timedelta(seconds=120),
+                deadline_at=now - timedelta(seconds=30),
+            )
+            fresh = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now,
+                deadline_at=now + timedelta(seconds=30),
+            )
+            fresh_id = fresh.id
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            claimed = await repo.claim_oldest_pending(node_id="node-a", now=now)
+            # The past-deadline row is skipped; only the fresh row is claimable.
+            assert claimed is not None
+            assert claimed.id == fresh_id
+
+
+async def test_expire_stale_requests_expires_only_past_deadline_rows() -> None:
+    # Expire-on-timeout (#590): a ``pending`` or ``running`` row whose ``deadline_at`` has
+    # elapsed is retired to the terminal ``expired`` state (recording ``finished_at``) so
+    # the reap never runs behind the operator's back and the row does not accumulate. A
+    # still-fresh ``running`` row and a row without a ``deadline_at`` are left untouched.
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            stale_pending = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now - timedelta(seconds=180),
+                deadline_at=now - timedelta(seconds=60),
+            )
+            stale_running = await repo.create_pending(
                 node_id="node-a",
                 requested_at=now - timedelta(seconds=120),
                 deadline_at=now - timedelta(seconds=30),
@@ -202,31 +239,35 @@ async def test_reclaim_stale_running_resets_only_past_deadline_rows() -> None:
                 requested_at=now - timedelta(seconds=120),
                 deadline_at=None,
             )
-            # Move all three into ``running`` to mimic claimed-but-unfinished rows.
-            for request in (stale, fresh, no_deadline):
+            # ``stale_pending`` stays pending (never claimed); the rest move to ``running``
+            # to mimic claimed-but-unfinished rows.
+            for request in (stale_running, fresh, no_deadline):
                 request.status = "running"
                 request.claimed_at = now
             await session.flush()
-            stale_id, fresh_id, no_deadline_id = stale.id, fresh.id, no_deadline.id
+            stale_pending_id, stale_running_id = stale_pending.id, stale_running.id
+            fresh_id, no_deadline_id = fresh.id, no_deadline.id
             await session.commit()
 
         async with factory() as session:
             repo = ServiceGCRequestRepository(session)
-            reclaimed = await repo.reclaim_stale_running(node_id="node-a", now=now)
-            assert reclaimed == [stale_id]
+            expired = await repo.expire_stale_requests(node_id="node-a", now=now)
+            # Oldest first: the pending row precedes the running row by ``requested_at``.
+            assert expired == [stale_pending_id, stale_running_id]
             await session.commit()
 
         async with factory() as session:
             repo = ServiceGCRequestRepository(session)
-            reset = await repo.get(stale_id)
-            assert reset is not None
-            assert reset.status == "pending"
-            assert reset.claimed_at is None
+            for expired_id in (stale_pending_id, stale_running_id):
+                retired = await repo.get(expired_id)
+                assert retired is not None
+                assert retired.status == "expired"
+                assert retired.finished_at is not None
             assert (await repo.get(fresh_id)).status == "running"  # type: ignore[union-attr]
             assert (await repo.get(no_deadline_id)).status == "running"  # type: ignore[union-attr]
 
 
-async def test_reclaim_stale_running_excludes_other_node() -> None:
+async def test_expire_stale_requests_excludes_other_node() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
         now = datetime.now(UTC)
@@ -250,18 +291,18 @@ async def test_reclaim_stale_running_excludes_other_node() -> None:
 
         async with factory() as session:
             repo = ServiceGCRequestRepository(session)
-            # The other-node row is invisible; the NULL-node row is reclaimable.
-            reclaimed = await repo.reclaim_stale_running(node_id="node-a", now=now)
-            assert reclaimed == [null_id]
+            # The other-node row is invisible; the NULL-node row is expirable.
+            expired = await repo.expire_stale_requests(node_id="node-a", now=now)
+            assert expired == [null_id]
             await session.commit()
 
         async with factory() as session:
             repo = ServiceGCRequestRepository(session)
             assert (await repo.get(other_id)).status == "running"  # type: ignore[union-attr]
-            assert (await repo.get(null_id)).status == "pending"  # type: ignore[union-attr]
+            assert (await repo.get(null_id)).status == "expired"  # type: ignore[union-attr]
 
 
-async def test_reclaim_stale_running_returns_empty_when_none_stale() -> None:
+async def test_expire_stale_requests_returns_empty_when_none_stale() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
         now = datetime.now(UTC)
@@ -272,11 +313,11 @@ async def test_reclaim_stale_running_returns_empty_when_none_stale() -> None:
 
         async with factory() as session:
             repo = ServiceGCRequestRepository(session)
-            assert await repo.reclaim_stale_running(node_id="node-a", now=now) == []
+            assert await repo.expire_stale_requests(node_id="node-a", now=now) == []
 
 
-async def test_reclaim_stale_running_on_non_postgres_dialect() -> None:
-    # On a non-Postgres dialect the reclaim runs without ``FOR UPDATE SKIP LOCKED``;
+async def test_expire_stale_requests_on_non_postgres_dialect() -> None:
+    # On a non-Postgres dialect the expire sweep runs without ``FOR UPDATE SKIP LOCKED``;
     # the plain UPDATE still executes against the test Postgres engine.
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
@@ -295,8 +336,8 @@ async def test_reclaim_stale_running_on_non_postgres_dialect() -> None:
 
         async with factory() as session:
             repo = ServiceGCRequestRepository(session, dialect_name="sqlite")
-            reclaimed = await repo.reclaim_stale_running(node_id="node-a", now=now)
-            assert reclaimed == [stale_id]
+            expired = await repo.expire_stale_requests(node_id="node-a", now=now)
+            assert expired == [stale_id]
 
 
 async def test_mutators_return_none_for_missing_request() -> None:

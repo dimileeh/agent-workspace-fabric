@@ -299,17 +299,16 @@ failure of the *reaper* itself is recorded on the request row with
 ``SERVICE_GC_WORKER_RECLAIM_FAILED`` so the API can surface it; this code covers
 only the surrounding bookkeeping so one bad consume cannot break dispatch."""
 
-_SERVICE_GC_TRIGGER_STALE_RUNNING_RECLAIMED_REASON_CODE = (
-    "SERVICE_GC_TRIGGER_STALE_RUNNING_RECLAIMED"
-)
-"""Reason code logged when abandoned ``running`` ``service_gc_requests`` rows are re-queued (#590).
+_SERVICE_GC_TRIGGER_STALE_EXPIRED_REASON_CODE = "SERVICE_GC_TRIGGER_STALE_EXPIRED"
+"""Reason code logged when past-deadline ``service_gc_requests`` rows are expired (#590).
 
 Worker-internal structured-log reason code only, not a doctor/catalog entry (mirrors
-``_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE``). A worker cancelled mid-reap leaves
-its claimed row ``running``; ``claim_oldest_pending`` only selects ``pending`` rows, so
-such a row has no recovery path and ``deadline_at`` would never be read. Once the row's
-``deadline_at`` (the API client's polling budget) elapses the original claimant is gone,
-so the consume path resets it to ``pending`` for re-claim and logs this code as evidence."""
+``_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE``). Expire-on-timeout: once a row's
+``deadline_at`` (the API client's polling budget) elapses the operator has already been
+told the trigger timed out, so a still-``pending`` (never-claimed) or abandoned
+``running`` row must never run behind their back — the consume path retires it to the
+terminal ``expired`` state instead of re-queuing it, and logs this code as evidence. The
+periodic interval reaper remains the durable backstop for the disk reclaim itself."""
 
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,

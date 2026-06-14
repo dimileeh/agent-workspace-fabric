@@ -5,8 +5,9 @@ module under the first-party line-count guardrail. The capability-less
 ``/v1/service/gc --execute`` API path cannot reclaim the per-workspace Claude auth
 overlays or ``_shared/claude-base`` itself; it persists a ``pending`` row and waits
 for the worker. This module owns the claim → run-reaper → finish lifecycle for that
-row, plus the stale-``running`` reclaim that recovers a row abandoned by a worker
-cancelled mid-reap.
+row, plus the expire-on-timeout sweep that retires past-deadline rows (a never-claimed
+``pending`` row, or a ``running`` row abandoned by a worker cancelled mid-reap) to the
+terminal ``expired`` state so a timed-out reap never fires behind the operator's back.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from awf.control.worker.cleanup import _log_terminal_gc_reap_summary
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE,
-    _SERVICE_GC_TRIGGER_STALE_RUNNING_RECLAIMED_REASON_CODE,
+    _SERVICE_GC_TRIGGER_STALE_EXPIRED_REASON_CODE,
 )
 from awf.control.worker.logging import _log
 from awf.db.repositories import ServiceGCRequestRepository
@@ -53,21 +54,23 @@ async def _maybe_consume_service_gc_trigger(self: Any) -> None:
     provisioning/dispatch. ``asyncio.CancelledError`` propagates for cooperative
     shutdown.
 
-    Before claiming, abandoned ``running`` rows past their ``deadline_at`` are re-queued
-    (:meth:`_reclaim_stale_running_service_gc_triggers`) so a row left ``running`` by a
-    worker cancelled mid-reap is recovered instead of accumulating forever (#590). The
-    reclaim is independently guarded: a reclaim failure must not skip the claim below.
+    Before claiming, rows past their ``deadline_at`` are retired to the terminal
+    ``expired`` state (:meth:`_expire_stale_service_gc_triggers`) — a never-claimed
+    ``pending`` row or a ``running`` row a worker abandoned mid-reap — so a reap the
+    operator was already told timed out never runs later behind their back, and the row
+    does not accumulate forever (#590, expire-on-timeout). The sweep is independently
+    guarded: an expire failure must not skip the claim below.
     """
     if self._terminal_gc_reaper is None:
         return
 
     try:
-        await self._reclaim_stale_running_service_gc_triggers()
+        await self._expire_stale_service_gc_triggers()
     except asyncio.CancelledError:
         raise
     except Exception:
         _log.exception(
-            "worker.service_gc_trigger_stale_reclaim_failed",
+            "worker.service_gc_trigger_stale_expire_failed",
             reason_code=_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE,
         )
 
@@ -132,41 +135,42 @@ async def _claim_service_gc_trigger(self: Any) -> tuple[str, dict[str, Any]] | N
     )
 
 
-async def _reclaim_stale_running_service_gc_triggers(self: Any) -> None:
-    """Re-queue abandoned ``running`` gc-trigger rows past their ``deadline_at`` (#590).
+async def _expire_stale_service_gc_triggers(self: Any) -> None:
+    """Retire past-deadline gc-trigger rows to the terminal ``expired`` state (#590).
 
-    A worker cancelled (graceful shutdown) mid-reap leaves its claimed row ``running``;
-    because :meth:`_claim_service_gc_trigger` (via ``claim_oldest_pending``) only selects
-    ``pending`` rows, such a row has no recovery path and the stored ``deadline_at`` is
-    never read — it would accumulate indefinitely. Once the row's ``deadline_at`` (the API
-    client's polling budget) has elapsed the original claimant is gone, so resetting it to
-    ``pending`` lets a later poll re-claim and re-run the idempotent reap: the operator's
-    on-demand GC request is still honoured across a worker restart, even with the periodic
-    backstop kill-switch off. The repository's ``FOR UPDATE SKIP LOCKED`` skips any row a
-    concurrent claim/finish is actively holding, so a genuinely in-flight reap is never
-    disturbed. Best-effort: a reclaim count is logged for evidence; failures are surfaced
-    by the guarded caller, never here.
+    Expire-on-timeout. Once a row's ``deadline_at`` (the API client's polling budget) has
+    elapsed the operator has already been told the trigger timed out, so the reap must
+    **not** run later behind their back — a destructive reap after a reported timeout is
+    the hazard this rejects. Both a never-claimed ``pending`` row (which a later
+    poll/restart would otherwise pick up and run with the *current* clock + stored
+    filters) and a ``running`` row a worker abandoned mid-reap on shutdown (which
+    :meth:`_claim_service_gc_trigger`, via ``claim_oldest_pending``, never re-selects and
+    so would accumulate forever) are marked ``expired`` instead. The worker's periodic
+    (~1h) interval reaper remains the durable backstop that performs the actual disk
+    reclaim. The repository's ``FOR UPDATE SKIP LOCKED`` skips any row a concurrent
+    claim/finish is actively holding. Best-effort: an expired count is logged for
+    evidence; failures are surfaced by the guarded caller, never here.
     """
     node_id = effective_worker_config_node_id(self._config)
     now = datetime.now(UTC)
 
     async def _operation(session: AsyncSession) -> list[str]:
-        return await ServiceGCRequestRepository(session).reclaim_stale_running(
+        return await ServiceGCRequestRepository(session).expire_stale_requests(
             node_id=node_id,
             now=now,
         )
 
-    reclaimed = await run_db_operation_with_retry(
+    expired = await run_db_operation_with_retry(
         self._session_factory,
         _operation,
         commit=True,
         on_retry=self._log_transient_db_retry,
     )
-    if reclaimed:
+    if expired:
         _log.warning(
-            "worker.service_gc_trigger_stale_running_reclaimed",
-            reason_code=_SERVICE_GC_TRIGGER_STALE_RUNNING_RECLAIMED_REASON_CODE,
-            request_ids=reclaimed,
+            "worker.service_gc_trigger_stale_expired",
+            reason_code=_SERVICE_GC_TRIGGER_STALE_EXPIRED_REASON_CODE,
+            request_ids=expired,
         )
 
 
