@@ -280,7 +280,15 @@ async def _release_terminal_runtime_promptly(self: Any, workspace_id: str) -> No
             # swallow-and-log below — never propagate, so the terminal transition
             # is not broken.
             break
-    failure = body_task.exception()
+    # ``body_task.exception()`` *raises* ``CancelledError`` (rather than returning
+    # it) when the teardown coroutine self-cancels internally — e.g. a
+    # ``CancelledError`` propagated out of
+    # ``_release_terminal_runtime_for_candidate``'s ``except asyncio.CancelledError:
+    # raise`` guards marks ``body_task`` as cancelled, not failed. Guard with
+    # ``cancelled()`` first so such an edge case is treated as the swallow-and-log
+    # path (the cancel is still re-raised below via ``observed_cancel``) instead of
+    # propagating unintentionally and shadowing the caller's original exception.
+    failure = None if body_task.cancelled() else body_task.exception()
     if failure is not None:
         _log.warning(
             _PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE,

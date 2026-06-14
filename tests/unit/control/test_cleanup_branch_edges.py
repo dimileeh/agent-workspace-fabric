@@ -1249,6 +1249,43 @@ async def test_prompt_release_completes_across_cancellation(
     assert log.warnings == []
 
 
+@pytest.mark.unit
+async def test_prompt_release_swallows_internal_self_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the teardown coroutine self-cancels internally (a ``CancelledError``
+    propagated out of ``_release_terminal_runtime_for_candidate``'s re-raise
+    guards), ``body_task`` is marked *cancelled* — so ``body_task.exception()``
+    would itself raise. The ``cancelled()`` guard treats it as the swallow-and-log
+    path (no spurious warning), and the cancel is re-raised once via the
+    shield-and-reawait ``observed_cancel`` re-raise, never shadowing it with an
+    ``.exception()`` raise."""
+    log = _RecordingLog()
+    monkeypatch.setattr(worker_cleanup, "_log", log)
+    candidate = _candidate("ws_self_cancel")
+
+    async def _load(workspace_id: str) -> _TerminalRuntimeCandidate | None:
+        del workspace_id
+        return candidate
+
+    async def _release(_loaded: _TerminalRuntimeCandidate) -> None:
+        raise asyncio.CancelledError
+
+    worker = SimpleNamespace(
+        _runtime_cleaner=object(),
+        _load_terminal_runtime_candidate=_load,
+        _release_terminal_runtime_for_candidate=_release,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await worker_cleanup._release_terminal_runtime_promptly(  # noqa: SLF001
+            worker, "ws_self_cancel"
+        )
+
+    # The self-cancel is not double-reported as a failure warning.
+    assert log.warnings == []
+
+
 # --- _load_terminal_runtime_candidate guard branches (#583, #584) ---
 #
 # These monkeypatch ``run_db_operation_with_retry`` to return a single fetched row
