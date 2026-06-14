@@ -84,6 +84,10 @@ def test_ollama_url_helpers_default_portless_host_gateway_to_daemon_port() -> No
         # on a host the worker would otherwise treat as reachable (so the probe is
         # not deferred and the URL builder runs).
         {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:notaport"},
+        # A hostless value parses without raising but has no host to probe; it must
+        # normalize to the default rather than build ``http:///api/version``.
+        {"OLLAMA_HOST": "http://"},
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "://"},
     ],
 )
 def test_ollama_url_helpers_normalize_malformed_base_url_to_default(
@@ -109,6 +113,10 @@ def test_ollama_url_helpers_normalize_malformed_base_url_to_default(
         {"OLLAMA_HOST": "http://[::1"},
         {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://[bad:11434"},
         {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://localhost:notaport"},
+        # ``urlsplit`` accepts a hostless value without raising, but an explicit URL
+        # with no host can never reach a daemon, so it must be reported malformed.
+        {"OLLAMA_HOST": "http://"},
+        {"AWF_OPENCODE_OLLAMA_BASE_URL": "://"},
     ],
 )
 def test_ollama_base_url_malformed_detects_explicit_unparseable_value(

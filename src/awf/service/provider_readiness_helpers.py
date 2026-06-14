@@ -665,6 +665,11 @@ def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
         # surfaces here rather than at an arbitrary downstream attribute access.
         _ = parts.hostname
         _ = parts.port
+        # ``urlsplit`` accepts a hostless value (e.g. ``http://`` or ``://``) without
+        # raising; treat it like any other malformed input so it normalizes to the
+        # default rather than building a hostless ``http:///api/...`` endpoint.
+        if not parts.hostname:
+            raise ValueError("missing Ollama host")
     except ValueError:
         parts = urlsplit(DEFAULT_OLLAMA_OPENAI_BASE_URL)
     return _default_ollama_port(parts)
@@ -726,7 +731,10 @@ def _ollama_base_url_malformed(environ: Mapping[str, str]) -> bool:
         _ = parts.port
     except ValueError:
         return True
-    return False
+    # ``urlsplit`` does not raise for a hostless value (e.g. ``http://`` or ``://``),
+    # but such an explicit URL can never reach a daemon — report it malformed so
+    # admission fails closed instead of probing/pulling a hostless endpoint.
+    return not parts.hostname
 
 
 def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
