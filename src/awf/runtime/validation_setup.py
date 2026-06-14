@@ -595,6 +595,46 @@ def _segment_leading_executables(statements: list[str]) -> tuple[list[str], bool
     return tools, False
 
 
+def _required_and_suffix(segment: list[tuple[str, str]]) -> list[str]:
+    """Return the statements one ``;``-segment *requires* to succeed, in order.
+
+    ``&&`` and ``||`` share precedence and associate left-to-right under
+    ``sh -lc``, so ``ruff check . || true && mypy src`` parses as
+    ``((ruff || true) && mypy)``: ``mypy`` always runs and its ``127`` fails the
+    command, while ``ruff``'s failure is masked by the ``|| true`` arm. The
+    required statements are therefore the maximal trailing run joined by ``&&``,
+    found by scanning the inter-statement operators right-to-left and stopping at
+    the first ``||``. A segment whose last operator is ``||``
+    (``ruff check . && mypy src || true``) requires nothing — the trailing arm
+    masks every preceding failure — so it fails open with an empty result. A
+    single-statement segment (no operators) is always required.
+
+    ``segment`` is the run of ``(statement, terminator)`` pairs between two
+    ``;``/newline boundaries; the terminator of every pair but the last is the
+    ``&&``/``||`` operator that *follows* that statement.
+    """
+    statements = [statement for statement, _ in segment]
+    operators = [terminator for _, terminator in segment[:-1]]
+    last = len(statements) - 1
+    if last == 0:
+        return [statements[0]]
+    if operators[last - 1] != "&&":
+        # The final statement is reached via ``||``; its arm masks every failure,
+        # so nothing in the segment is required.
+        return []
+    required = [statements[last]]
+    for index in range(last - 1, 0, -1):
+        if operators[index - 1] != "&&":
+            # A ``||`` to the left ends the guaranteed ``&&`` run; everything
+            # further left is masked.
+            required.reverse()
+            return required
+        required.append(statements[index])
+    required.append(statements[0])
+    required.reverse()
+    return required
+
+
 def _leading_executables(command: str) -> list[str]:
     """Return every PATH-resolvable executable a shell command *requires*, in order.
 
@@ -606,15 +646,17 @@ def _leading_executables(command: str) -> list[str]:
     in ``monitoring_pr`` instead of failing early with
     PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
 
-    An OR-list — a ``;``/newline-delimited segment containing a top-level ``||``
-    (``ruff check . || true``, ``black --check . || mypy src``) — *fails open*:
-    none of its commands is collected. Under ``sh -lc`` an OR-list exits non-zero
-    only when *every* member fails, so any single member (a missing tool's ``127``
-    included) may fail while another succeeds and the command still passes.
-    Probing such a member would falsely report
-    PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a profile whose real validation
-    passes, so the safe direction is to skip the whole OR-list rather than add its
-    left-hand command as a required probe target.
+    Within a ``;``/newline-delimited segment, ``&&`` and ``||`` share precedence
+    and associate left-to-right, so only the maximal trailing ``&&`` run is
+    guaranteed to execute (see :func:`_required_and_suffix`). Thus
+    ``ruff check . || true && mypy src`` still probes ``mypy`` — it always runs —
+    while the ``|| true``-masked ``ruff`` fails open, and a segment whose last
+    operator is ``||`` (``ruff check . || true``, ``black --check . || mypy src``,
+    ``ruff && mypy || true``) requires nothing: under ``sh -lc`` such a list exits
+    non-zero only when *every* member fails, so a missing tool's ``127`` may be
+    masked by a succeeding arm and the command still passes. Probing a masked
+    member would falsely report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a
+    profile whose real validation passes, so the masked members are skipped.
 
     A leading shell *guard* statement (``set -e``) or a blank/comment-only
     statement names no tool and is skipped (see
@@ -628,22 +670,19 @@ def _leading_executables(command: str) -> list[str]:
     probeable tool.
     """
     tools: list[str] = []
-    segment: list[str] = []
-    segment_has_or = False
+    segment: list[tuple[str, str]] = []
     for statement, terminator in _split_top_level_statements(command):
-        segment.append(statement)
-        if terminator == "||":
-            segment_has_or = True
+        segment.append((statement, terminator))
         if terminator in (";", ""):
-            # End of a ``;``/newline-delimited list: probe it only when it has no
-            # top-level ``||`` (an AND-segment); an OR-list fails open.
-            if not segment_has_or:
-                segment_tools, stopped = _segment_leading_executables(segment)
+            # End of a ``;``/newline-delimited list: probe only the statements the
+            # shell guarantees to run — the maximal trailing ``&&`` run.
+            required = _required_and_suffix(segment)
+            if required:
+                segment_tools, stopped = _segment_leading_executables(required)
                 tools.extend(segment_tools)
                 if stopped:
                     break
             segment = []
-            segment_has_or = False
     return tools
 
 

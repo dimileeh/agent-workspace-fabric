@@ -212,6 +212,20 @@ class TestLeadingExecutables:
         # trailing ``|| true``, so the whole segment fails open.
         assert _leading_executables("ruff check . && mypy src || true") == []
 
+    def test_or_arm_before_and_tail_probes_the_and_tail(self) -> None:
+        # ``&&``/``||`` share precedence and associate left-to-right, so
+        # ``ruff check . || true && mypy src`` parses as
+        # ``((ruff || true) && mypy)``: ``mypy`` *always* runs and its ``127``
+        # fails the command, so it is required even though the segment contains a
+        # top-level ``||``. Only ``ruff`` (masked by ``|| true``) fails open.
+        assert _leading_executables("ruff check . || true && mypy src") == ["mypy"]
+
+    def test_or_then_and_chain_keeps_the_trailing_and_run(self) -> None:
+        # ``black --check . || mypy src && pytest`` -> ``((black || mypy) && pytest)``:
+        # only ``pytest`` is guaranteed to run; ``black``/``mypy`` are masked by the
+        # left-hand ``||`` group.
+        assert _leading_executables("black --check . || mypy src && pytest") == ["pytest"]
+
     def test_or_list_segment_does_not_suppress_other_segments(self) -> None:
         assert _leading_executables("ruff check .; black --check . || true; flake8 .") == [
             "ruff",
