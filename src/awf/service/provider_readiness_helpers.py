@@ -638,8 +638,68 @@ def _opencode_ollama_host_probe_deferrable(
     return _is_cloud_model(model) and _opencode_ollama_credentials_present(environ, host_home)
 
 
+# The Docker host-gateway alias the agent container uses to reach the *host*
+# Ollama daemon. A host-local connection target (loopback / unspecified address,
+# ``localhost``) inside the agent container resolves to the container itself, not
+# the host, so such a target is normalized to this gateway before it is used —
+# mirrored in the OpenCode launcher prelude (``_ollama_base_url_prelude``) so launch
+# and preflight resolve the same daemon (issue #579).
+_HOST_GATEWAY = "host.docker.internal"
+
+
+def _normalize_host_local_host(host: str) -> str:
+    """Translate a host-local Ollama host to the Docker host gateway.
+
+    Single source of truth for the host-local set the shell launcher prelude
+    mirrors: IPv4 loopback (``127.0.0.0/8``), IPv6 loopback (``::1``),
+    ``localhost``, the IPv4/IPv6 unspecified addresses (``0.0.0.0`` / ``::``) all
+    map to ``host.docker.internal`` — inside the agent container they would
+    otherwise resolve to the container itself rather than the host Ollama daemon.
+    Everything else passes through unchanged: a routable LAN IP, a Compose service
+    DNS name (e.g. ``ollama-sidecar``), the configured host's own hostname, and the
+    gateway aliases (``host.docker.internal`` / ``gateway.docker.internal``) — none
+    of which point the agent at itself.
+    """
+
+    bare = host.strip()
+    # ``urlsplit().hostname`` is already unbracketed, but normalize defensively so
+    # a caller passing a bracketed IPv6 literal (``[::1]``) compares correctly.
+    if bare.startswith("[") and bare.endswith("]"):
+        bare = bare[1:-1]
+    if bare.lower() == "localhost":
+        return _HOST_GATEWAY
+    try:
+        address = ipaddress.ip_address(bare)
+    except ValueError:
+        # A DNS name (Compose service, the configured hostname) is not host-local.
+        return host
+    if address.is_loopback or address.is_unspecified:
+        return _HOST_GATEWAY
+    return host
+
+
+def _normalize_host_local_authority(parts: SplitResult) -> SplitResult:
+    """Rebuild *parts* netloc as the host gateway when its host is host-local.
+
+    When ``parts.hostname`` normalizes to the host gateway, rebuild the authority as
+    ``host.docker.internal[:port]`` — keeping the resolved port and **dropping any
+    userinfo** (the gateway needs no credentials; cf. the #577 userinfo strip).
+    A non-host-local authority is returned unchanged so the #577 userinfo-port
+    behavior survives for routable hosts.
+    """
+
+    host = parts.hostname
+    if not host:
+        return parts
+    normalized = _normalize_host_local_host(host)
+    if normalized == host:
+        return parts
+    netloc = normalized if parts.port is None else f"{normalized}:{parts.port}"
+    return parts._replace(netloc=netloc)
+
+
 def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
-    """Resolve and parse the Ollama base URL, normalizing malformed input.
+    """Resolve and parse the Ollama base URL, normalizing malformed and host-local input.
 
     Both the worker reachability classifier and the probe/pull URL builder need the
     *same* resolution of ``AWF_OPENCODE_OLLAMA_BASE_URL`` / ``OLLAMA_HOST`` (falling
@@ -650,6 +710,12 @@ def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
     the ``host.docker.internal`` default exactly once — host-reachable, never a crash
     during readiness — instead of escaping as a ``ValueError`` from whichever caller
     happens to touch the offending attribute first.
+
+    After the port is defaulted (``_default_ollama_port``), a host-local authority
+    (loopback / unspecified / ``localhost``) is translated to the Docker host gateway
+    (``_normalize_host_local_authority``) so this single resolution point — shared by
+    ``_ollama_api_urls`` and ``_ollama_url_host_reachable_from_worker`` — sees the same
+    daemon the OpenCode launcher prelude resolves (issue #579).
     """
 
     raw = (
@@ -672,7 +738,7 @@ def _parse_ollama_base_url(environ: Mapping[str, str]) -> SplitResult:
             raise ValueError("missing Ollama host")
     except ValueError:
         parts = urlsplit(DEFAULT_OLLAMA_OPENAI_BASE_URL)
-    return _default_ollama_port(parts)
+    return _normalize_host_local_authority(_default_ollama_port(parts))
 
 
 def _default_ollama_port(parts: SplitResult) -> SplitResult:
@@ -752,21 +818,17 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
     return (primary,)
 
 
-# Hostnames that resolve to the host the worker runs on (Docker host gateway
-# aliases and localhost). An Ollama base URL pointing at one of these — or any
-# loopback IP — is reachable from the worker; anything else (a workspace Compose
-# service DNS name, a routable LAN IP) is not. ``0.0.0.0`` is a valid Ollama bind
-# address (``OLLAMA_HOST=0.0.0.0:11434``) that, as a *connection* target, routes
-# to the loopback just like ``localhost``; classify it reachable so a broken
-# host-bound daemon is still caught at create time rather than silently skipped
-# (``ip_address("0.0.0.0").is_loopback`` is ``False`` — the unspecified address is
-# not a loopback IP — so it would otherwise fall through to the conservative skip).
+# Hostnames that resolve to the host the worker runs on — the Docker host-gateway
+# aliases. An Ollama base URL pointing at one of these is reachable from the worker;
+# anything else (a workspace Compose service DNS name, a routable LAN IP) is not.
+# Host-local connection targets (``localhost``, ``127.0.0.0/8``, ``0.0.0.0``, ``::1``,
+# ``::``) are no longer listed here: ``_parse_ollama_base_url`` normalizes them to
+# ``host.docker.internal`` upstream (issue #579), so they reach the classifier already
+# rewritten to the gateway and a plain membership test suffices.
 _WORKER_HOST_REACHABLE_HOSTNAMES = frozenset(
     {
         "host.docker.internal",
         "gateway.docker.internal",
-        "localhost",
-        "0.0.0.0",
     }
 )
 
@@ -776,27 +838,19 @@ def _ollama_url_host_reachable_from_worker(environ: Mapping[str, str]) -> bool:
 
     The worker runs off ``awf_net`` and cannot reach a workspace Compose service
     DNS name (e.g. ``http://ollama-sidecar:11434``). Mirror ``_ollama_api_urls``'s
-    URL resolution, then classify the host: the Docker host gateway aliases,
-    ``localhost``, and loopback IPs are host-reachable; any other DNS name (a
-    Compose service) or routable IP is not. A missing/blank/garbled value resolves
-    to the ``host.docker.internal`` default and is therefore host-reachable (no
-    crash). The skip is conservative: a non-host-reachable URL defers the model
-    probe to the agent container rather than risk a false ``OLLAMA_MODEL_PROBE_FAILED``.
+    URL resolution, then classify the host with a pure membership test: only the
+    Docker host-gateway aliases are host-reachable. ``_parse_ollama_base_url``
+    normalizes every host-local target (``localhost``, loopback / unspecified IPs)
+    to ``host.docker.internal`` and resolves a missing/blank/garbled value to that
+    same gateway default, so a host-local or garbled URL is classified reachable
+    without a separate loopback branch or empty-host guard here, and any other DNS
+    name (a Compose service) or routable IP is not. The skip is conservative: a
+    non-host-reachable URL defers the model probe to the agent container rather than
+    risk a false ``OLLAMA_MODEL_PROBE_FAILED``.
     """
 
-    # ``_parse_ollama_base_url`` normalizes a malformed value (unbalanced IPv6
-    # brackets, non-numeric port) to the ``host.docker.internal`` default, which is
-    # host-reachable — so a garbled URL is treated like any other garbled value
-    # (host-reachable, never a crash) without a guard here.
-    host = (_parse_ollama_base_url(environ).hostname or "").lower()
-    if not host:
-        return True
-    if host in _WORKER_HOST_REACHABLE_HOSTNAMES:
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+    host = _parse_ollama_base_url(environ).hostname
+    return (host or "").lower() in _WORKER_HOST_REACHABLE_HOSTNAMES
 
 
 def overlay_profile_ollama_base_url(

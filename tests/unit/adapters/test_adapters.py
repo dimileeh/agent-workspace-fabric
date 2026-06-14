@@ -17,6 +17,7 @@ import inspect
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 import structlog
@@ -47,6 +48,7 @@ from awf.adapters.opencode import (
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
+from awf.service import provider_readiness_helpers
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
 _LONG_PROMPT = "Review this oversized PR comment.\n" + ("x" * 140_000)
@@ -902,7 +904,9 @@ class TestOpenCodeAdapter:
             ("http://ollama-sidecar", "http://ollama-sidecar:11434/v1"),
             ("ollama-sidecar", "http://ollama-sidecar:11434/v1"),
             ("https://ollama-sidecar/v1", "https://ollama-sidecar:11434/v1"),
-            ("http://[::1]/v1", "http://[::1]:11434/v1"),
+            # An IPv6 loopback literal is host-local: it is translated to the Docker
+            # host gateway (issue #579), keeping the defaulted daemon port.
+            ("http://[::1]/v1", "http://host.docker.internal:11434/v1"),
             # A port-less value carrying userinfo credentials still inherits the
             # default daemon port (11434): the colon in ``user:pass`` is part of
             # the credentials, not a port, so it must not suppress defaulting.
@@ -910,9 +914,12 @@ class TestOpenCodeAdapter:
                 "http://user:pass@ollama.local/v1",
                 "http://user:pass@ollama.local:11434/v1",
             ),
+            # A host-local host drops userinfo and normalizes to the host gateway:
+            # the gateway needs no credentials and the agent must reach the host
+            # daemon, not itself.
             (
                 "http://user:pass@[::1]/v1",
-                "http://user:pass@[::1]:11434/v1",
+                "http://host.docker.internal:11434/v1",
             ),
             # Userinfo with an explicit port is left intact.
             (
@@ -946,10 +953,34 @@ class TestOpenCodeAdapter:
             ("http://ollama-sidecar", "http://ollama-sidecar:11434/v1"),
             ("https://ollama-sidecar/v1", "https://ollama-sidecar:11434/v1"),
             ("ollama.local", "http://ollama.local:11434/v1"),
-            ("0.0.0.0", "http://0.0.0.0:11434/v1"),
-            # IPv6 literals: bracket form, with and without a port.
-            ("http://[::1]", "http://[::1]:11434/v1"),
-            ("http://[::1]:11434", "http://[::1]:11434/v1"),
+            # Host-local connection targets are translated to the Docker host gateway
+            # (issue #579) so the agent reaches the host Ollama daemon, not itself.
+            # The IPv4/IPv6 unspecified addresses, IPv4 loopback (any ``127.*``),
+            # ``localhost``, and the IPv6 loopback all normalize to the gateway with
+            # the resolved/defaulted daemon port kept.
+            ("0.0.0.0", "http://host.docker.internal:11434/v1"),
+            ("0.0.0.0:11434", "http://host.docker.internal:11434/v1"),
+            ("127.0.0.1:11434", "http://host.docker.internal:11434/v1"),
+            ("127.5.5.5:11434", "http://host.docker.internal:11434/v1"),
+            ("localhost", "http://host.docker.internal:11434/v1"),
+            ("http://localhost:11434", "http://host.docker.internal:11434/v1"),
+            # ``localhost`` is host-local regardless of case: the Python preflight
+            # lowercases the host, so the shell launcher must match every casing too
+            # or the two disagree on the daemon.
+            ("http://LocalHost:11434", "http://host.docker.internal:11434/v1"),
+            ("LOCALHOST:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[::]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[::1]", "http://host.docker.internal:11434/v1"),
+            ("http://[::1]:11434", "http://host.docker.internal:11434/v1"),
+            # An expanded/uncompressed IPv6 loopback or unspecified literal is
+            # canonicalized to the host gateway like ``::1`` / ``::`` -- the Python
+            # ``ipaddress`` check treats every textual form alike, so the shell must
+            # too (issue #579).
+            ("http://[0:0:0:0:0:0:0:1]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[0::1]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[0:0:0:0:0:0:0:0]:11434", "http://host.docker.internal:11434/v1"),
+            # A userinfo-bearing host-local value drops the credentials too.
+            ("http://user:pass@127.0.0.1:11434", "http://host.docker.internal:11434/v1"),
         ],
     )
     async def test_launch_prelude_mirrors_ollama_host(
@@ -965,6 +996,61 @@ class TestOpenCodeAdapter:
         """With neither variable set the prelude keeps the default daemon URL."""
         resolved = await self._resolve_ollama_base_url({})
         assert resolved == "http://host.docker.internal:11434/v1"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "env_var",
+        ["OLLAMA_HOST", "AWF_OPENCODE_OLLAMA_BASE_URL"],
+    )
+    @pytest.mark.parametrize(
+        "ollama_host",
+        [
+            "127.0.0.1:11434",
+            "http://localhost",
+            "http://LocalHost:11434",
+            "0.0.0.0:11434",
+            "http://[::1]:11434",
+            "[::]:11434",
+            # Expanded/uncompressed IPv6 loopback and unspecified literals must
+            # resolve the same daemon on both sides: the Python preflight uses
+            # ``ipaddress.ip_address()`` (every textual form is loopback/unspecified),
+            # so the shell prelude must canonicalize them too or launch keeps the
+            # IPv6 loopback while the worker probes the gateway (issue #579).
+            "http://[0:0:0:0:0:0:0:1]:11434",
+            "http://[0000:0000:0000:0000:0000:0000:0000:0001]:11434",
+            "http://[0::1]:11434",
+            "http://[0:0:0:0:0:0:0:0]:11434",
+            "http://[0::]:11434",
+            "host.docker.internal:11434",
+            "ollama-sidecar:11434",
+            "192.168.1.10:11434",
+            "ollama.local",
+            "http://user:pass@127.0.0.1:11434",
+        ],
+    )
+    async def test_launch_prelude_matches_python_preflight_resolution(
+        self, ollama_host: str, env_var: str
+    ) -> None:
+        """Parity anchor: the shell launcher prelude and the Python worker preflight
+        must resolve the *same* daemon (host + port) for every representative input.
+
+        Host-local targets normalize to ``host.docker.internal`` on both sides; routable
+        hosts pass through unchanged. Running the actual prelude under ``sh`` against
+        ``_parse_ollama_base_url`` is what keeps the two implementations honest — any
+        sh-specific bracketed-IPv6/userinfo bug, or a drift between the host-local sets,
+        surfaces as a host/port mismatch here. Both env keys are exercised because the
+        prelude (and ``_parse_ollama_base_url``) prefer ``AWF_OPENCODE_OLLAMA_BASE_URL``
+        over ``OLLAMA_HOST`` while sharing the downstream normalization, so a regression
+        specific to the preferred branch must also surface as a mismatch."""
+        env = {env_var: ollama_host}
+        resolved = await self._resolve_ollama_base_url(env)
+        shell_parts = urlsplit(resolved)
+        python_parts = provider_readiness_helpers._parse_ollama_base_url(env)
+
+        assert (shell_parts.hostname, shell_parts.port) == (
+            python_parts.hostname,
+            python_parts.port,
+        )
 
     @pytest.mark.unit
     async def test_default_opencode_invocation_omits_variant_without_effort(self) -> None:
