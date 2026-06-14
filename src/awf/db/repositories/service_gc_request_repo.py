@@ -61,6 +61,22 @@ class ServiceGCRequestRepository:
         stmt = select(ServiceGCRequest).where(ServiceGCRequest.id == request_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def _get_for_finish(self, request_id: str) -> ServiceGCRequest | None:
+        """Read a row under a row lock for a terminal finish (#590).
+
+        ``mark_completed``/``mark_failed`` read-then-write the status, so an unlocked
+        read lets a concurrent :meth:`expire_stale_requests` commit ``expired`` in the
+        window between the read and the write — the finish then lost-updates that
+        terminal state. Taking the read ``FOR UPDATE`` (blocking, *not* ``SKIP
+        LOCKED``) serializes against the expire sweep's row lock: the finish either
+        holds the row first (the expire skips it) or blocks until the expire commits
+        and then observes the terminal ``expired`` state.
+        """
+        stmt = select(ServiceGCRequest).where(ServiceGCRequest.id == request_id)
+        if self._dialect_name == "postgresql":
+            stmt = stmt.with_for_update(of=ServiceGCRequest)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def claim_oldest_pending(
         self,
         *,
@@ -185,9 +201,11 @@ class ServiceGCRequestRepository:
         Refuses to overwrite a terminal ``expired`` row (#590): expire-on-timeout has
         already told the operator the trigger timed out, so a late finish from an
         abandoned reap must not re-record that reap as ``completed``. The expired state
-        wins and the row is returned unchanged.
+        wins and the row is returned unchanged. The row is read ``FOR UPDATE`` (see
+        :meth:`_get_for_finish`) so a concurrent expire sweep cannot lost-update the
+        terminal state between this read and the status write.
         """
-        request = await self.get(request_id)
+        request = await self._get_for_finish(request_id)
         if request is None:
             return None
         if request.status == SERVICE_GC_REQUEST_STATUS_EXPIRED:
@@ -215,9 +233,11 @@ class ServiceGCRequestRepository:
         trigger timed out, so a late error finish from an abandoned reap must not
         replace ``expired`` with ``failed`` (which would surface
         ``SERVICE_GC_WORKER_RECLAIM_FAILED`` instead of the timeout). The expired
-        state wins and the row is returned unchanged.
+        state wins and the row is returned unchanged. The row is read ``FOR UPDATE``
+        (see :meth:`_get_for_finish`) so a concurrent expire sweep cannot lost-update
+        the terminal state between this read and the status write.
         """
-        request = await self.get(request_id)
+        request = await self._get_for_finish(request_id)
         if request is None:
             return None
         if request.status == SERVICE_GC_REQUEST_STATUS_EXPIRED:

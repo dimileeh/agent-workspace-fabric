@@ -7,6 +7,7 @@ worker (or the interval reaper racing the same row) from double-claiming.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -179,6 +180,83 @@ async def test_mark_failed_does_not_overwrite_expired() -> None:
             fetched = await repo.get(request_id)
             assert fetched is not None
             assert fetched.status == "expired"
+
+
+async def test_mark_completed_locks_row_against_concurrent_expire() -> None:
+    """A concurrent expire-on-timeout must not be lost-updated by a late finish (#590).
+
+    The lost-update the row lock closes: a finishing worker reads the row as
+    ``running`` *before* a concurrent :meth:`expire_stale_requests` commits ``expired``,
+    then its later UPDATE overwrites that terminal state as ``completed``. With the
+    finish read taken ``FOR UPDATE`` it blocks on the expire's row lock, so once the
+    expire commits the finish observes ``expired`` and leaves the row unchanged.
+    """
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            created = await repo.create_pending(
+                node_id="node-a",
+                requested_at=now - timedelta(seconds=60),
+                deadline_at=now - timedelta(seconds=30),
+            )
+            request_id = created.id
+            await repo.claim_oldest_pending(node_id="node-a", now=now - timedelta(seconds=40))
+            await session.commit()
+
+        # Expire sweep flushes ``expired`` and holds the row lock (not yet committed).
+        session_e = factory()
+        repo_e = ServiceGCRequestRepository(session_e)
+        assert await repo_e.expire_stale_requests(node_id="node-a", now=now) == [request_id]
+
+        # The finishing worker's locked read blocks until the expire commits.
+        async with factory() as session_m:
+            repo_m = ServiceGCRequestRepository(session_m)
+            finish = asyncio.create_task(
+                repo_m.mark_completed(
+                    request_id=request_id,
+                    result={"deleted_path_count": 4},
+                    now=now + timedelta(seconds=2),
+                )
+            )
+            await asyncio.sleep(0.2)
+            assert not finish.done()  # blocked on the expire's row lock
+            await session_e.commit()
+            await session_e.close()
+
+            result = await finish
+            assert result is not None
+            assert result.status == "expired"
+            assert result.result is None
+            await session_m.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            assert (await repo.get(request_id)).status == "expired"  # type: ignore[union-attr]
+
+
+async def test_mark_completed_finish_read_on_non_postgres_dialect() -> None:
+    # On a non-Postgres dialect the finish read runs without ``FOR UPDATE`` (sqlite has
+    # no row-lock clause); the terminal write still executes against the test engine.
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            created = await repo.create_pending(
+                node_id="node-a", requested_at=now, deadline_at=None
+            )
+            request_id = created.id
+            await session.commit()
+
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session, dialect_name="sqlite")
+            completed = await repo.mark_completed(
+                request_id=request_id, result={"deleted_path_count": 1}, now=now
+            )
+            assert completed is not None
+            assert completed.status == "completed"
 
 
 async def test_claim_oldest_pending_orders_by_requested_at() -> None:
