@@ -236,6 +236,26 @@ class TestLeadingExecutables:
     def test_comment_only_command_yields_no_tools(self) -> None:
         assert _leading_executables("# just a note, no command here") == []
 
+    def test_operator_inside_trailing_comment_is_not_a_split_point(self) -> None:
+        # ``sh -lc`` ignores the whole ``# ...`` comment, so an operator inside it
+        # is not a real terminator. Splitting on the comment's ``&&`` would probe
+        # the fragment after it (``tests``) as a required executable and falsely
+        # report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED for a profile that only
+        # runs ``ruff``.
+        assert _leading_executables("ruff check .  # run lint && tests") == ["ruff"]
+
+    def test_operator_inside_leading_comment_line_is_not_a_split_point(self) -> None:
+        # The comment line runs nothing under ``sh -lc``; only the command on the
+        # next line is probed, never the ``tests`` fragment after the comment's
+        # ``&&``.
+        assert _leading_executables("# run lint && tests\nruff check .") == ["ruff"]
+
+    def test_hash_inside_a_word_is_literal_not_a_comment(self) -> None:
+        # ``#`` only opens a comment at a word boundary, matching ``sh -lc``: in
+        # ``echo a#b`` it stays part of the word, so the ``&&`` after it is a real
+        # split point and the (builtin) leading ``echo`` still fails open.
+        assert _leading_executables("echo a#b && ruff check .") == []
+
     def test_env_wrapped_chained_tools_probe_each_real_program(self) -> None:
         # Each ``&&``-chained ``env`` wrapper is unwrapped to the program it
         # execs, so both real tools are probed rather than ``env`` twice.

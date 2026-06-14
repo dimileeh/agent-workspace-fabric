@@ -434,6 +434,15 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
     ``;`` or newline, ``"&&"``, ``"||"``, or ``""`` for the trailing statement.
     Pipes (``|``) and background (``&``) are *not* split points: the leading
     token of a pipeline/job is still the tool to probe.
+
+    A ``#`` that begins a word (at the start, or after unquoted whitespace)
+    starts a comment that ``sh -lc`` ignores to end of line, so the splitter
+    drops it *before* looking for operators — otherwise an operator inside a
+    comment (``ruff check . # run lint && tests``) would be treated as a real
+    terminator, and the fragment after it (``tests``) probed as a required
+    executable, falsely reporting PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED even
+    though the real command only runs ``ruff``. The newline that ends the
+    comment is still honoured as a statement separator.
     """
     statements: list[tuple[str, str]] = []
     current: list[str] = []
@@ -461,6 +470,14 @@ def _split_top_level_statements(command: str) -> list[tuple[str, str]]:
             current.append(char)
             current.append(command[index + 1])
             index += 2
+            continue
+        if char == "#" and (not current or current[-1] in " \t"):
+            # ``#`` at a word boundary opens a comment ``sh -lc`` ignores to the
+            # end of the line; skip its text (operators included) so it never
+            # splits the statement. The terminating newline, if any, falls
+            # through to the separator handling below.
+            while index < length and command[index] != "\n":
+                index += 1
             continue
         if char in ";\n":
             statements.append(("".join(current), ";"))
