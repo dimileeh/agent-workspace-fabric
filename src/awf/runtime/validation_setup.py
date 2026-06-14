@@ -520,10 +520,18 @@ def validate_command_probe_targets(
 ) -> list[ValidateCommandProbeTarget]:
     """Return the deduped ``validate``-tool probe targets for a profile.
 
-    One target per distinct leading executable across the profile's ``validate``
-    phase, keeping the first command that introduced each tool so an operator
-    message can name a representative command. Commands whose leading token is
-    un-probeable (see :func:`_leading_executable`) are skipped.
+    One target per distinct leading executable across every command the validate
+    phase actually executes, keeping the first command that introduced each tool
+    so an operator message can name a representative command. Commands whose
+    leading token is un-probeable (see :func:`_leading_executable`) are skipped.
+
+    The targets cover the profile's ``database.pre_validation_refresh`` hooks as
+    well as its ``validate`` phase: :func:`profile_phase_command_plan` prepends
+    the refresh hooks (``alembic upgrade head``, ``psql ...``) as required
+    ``db_refresh`` gates whenever the validate phase runs, so a refresh tool that
+    setup did not install would otherwise slip past this early probe and die
+    ``127`` later during pre-push validation. Refresh targets come first, matching
+    runtime execution order.
 
     Advisory commands (``required: false``) are skipped too: ``ValidationRunner``
     records their non-zero/``127`` result without blocking validation, so a
@@ -533,7 +541,10 @@ def validate_command_probe_targets(
     """
     targets: list[ValidateCommandProbeTarget] = []
     seen: set[str] = set()
-    for command in profile.phases.validate_commands:
+    for command in (
+        *profile.database.pre_validation_refresh,
+        *profile.phases.validate_commands,
+    ):
         if not command.required:
             continue
         tool = _leading_executable(command.command)

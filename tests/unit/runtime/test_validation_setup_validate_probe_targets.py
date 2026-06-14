@@ -27,6 +27,20 @@ def _profile_with_validate_objects(commands: list[dict[str, object]]) -> Workspa
     )
 
 
+def _profile_with_refresh_and_validate(
+    *,
+    pre_validation_refresh: list[object],
+    validate: list[object],
+) -> WorkspaceProfile:
+    return WorkspaceProfile.model_validate(
+        {
+            "name": "validate-profile",
+            "phases": {"validate": validate},
+            "database": {"pre_validation_refresh": pre_validation_refresh},
+        }
+    )
+
+
 @pytest.mark.unit
 class TestLeadingExecutable:
     @pytest.mark.parametrize(
@@ -248,6 +262,63 @@ class TestValidateCommandProbeTargets:
                     {"command": "advisory-lint .", "required": False},
                     {"command": "ruff check ."},
                 ]
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_probes_pre_validation_refresh_tools_before_validate(self) -> None:
+        # ``profile_phase_command_plan`` prepends ``database.pre_validation_refresh``
+        # commands as required DB-refresh gates whenever the validate phase runs, so
+        # a refresh hook like ``alembic upgrade head`` whose tool setup did not
+        # install must be probed too — otherwise the missing tool slips past the
+        # handoff and dies 127 later during pre-push validation. Refresh targets
+        # come first, matching runtime execution order.
+        targets = validate_command_probe_targets(
+            _profile_with_refresh_and_validate(
+                pre_validation_refresh=["alembic upgrade head"],
+                validate=["ruff check ."],
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("alembic", "alembic upgrade head"),
+            ("ruff", "ruff check ."),
+        ]
+
+    def test_dedupes_refresh_tool_shared_with_validate(self) -> None:
+        # A tool that appears in both a refresh hook and a validate command
+        # collapses to a single probe target, keeping the first (refresh) command
+        # as the representative for the operator message.
+        targets = validate_command_probe_targets(
+            _profile_with_refresh_and_validate(
+                pre_validation_refresh=["python -m alembic upgrade head"],
+                validate=["python -m pytest -q"],
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("python", "python -m alembic upgrade head"),
+        ]
+
+    def test_skips_advisory_required_false_refresh_commands(self) -> None:
+        # An advisory (``required: false``) refresh hook is non-blocking in the
+        # runner, so it must not fail the handoff with
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Only the required validate
+        # command yields a probe target.
+        targets = validate_command_probe_targets(
+            _profile_with_refresh_and_validate(
+                pre_validation_refresh=[{"command": "alembic upgrade head", "required": False}],
+                validate=["ruff check ."],
+            )
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_skips_unprobeable_refresh_commands(self) -> None:
+        # A refresh hook whose leading token is un-probeable (a ``psql`` heredoc
+        # guarded by ``cd``) fails open like any other validate command rather than
+        # reporting a false missing toolchain.
+        targets = validate_command_probe_targets(
+            _profile_with_refresh_and_validate(
+                pre_validation_refresh=["cd db"],
+                validate=["ruff check ."],
             )
         )
         assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
