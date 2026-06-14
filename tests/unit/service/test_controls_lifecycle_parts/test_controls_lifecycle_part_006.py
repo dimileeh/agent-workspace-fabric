@@ -209,6 +209,40 @@ async def test_stop_absent_stack_is_no_op_success(
 
 
 @pytest.mark.unit
+async def test_stop_compose_file_only_records_runtime_released(
+    session: AsyncSession,
+) -> None:
+    """A legacy/partial workspace with a compose_file_path but null project releases.
+
+    The cleaner derives the default ``awf_<workspace_id>`` project and tears the
+    stack down, and ``find_host_port_conflicts`` treats a non-null
+    ``compose_file_path`` as runtime evidence. Without recording the release the
+    host port would stay blocked until a later worker sweep, so the file-path-only
+    successful cleanup must emit ``terminal_runtime_released`` — mirroring the
+    destroy/worker paths (contrast ``test_stop_absent_stack_is_no_op_success``
+    where both locators are null and there is nothing to release).
+    """
+    workspace = await _workspace(session, status=WorkspaceStatus.running)
+    compose_file_path = workspace.compose_file_path
+    assert compose_file_path is not None
+    workspace.compose_project_name = None
+    await session.flush()
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    await service.stop_workspace(workspace.id, reason="halt")
+    release_events = _release_events(await _events(session, workspace.id))
+
+    assert cleaner.calls[0].compose_project_name is None
+    assert str(cleaner.calls[0].compose_file_path) == compose_file_path
+    assert await has_terminal_runtime_released_event(session, workspace.id) is True
+    assert len(release_events) == 1
+    assert release_events[0].payload["compose_project_name"] is None
+    assert release_events[0].payload["compose_file_path"] == compose_file_path
+    assert release_events[0].payload["source"] == "stop_workspace"
+
+
+@pytest.mark.unit
 async def test_cancel_stop_stack_compose_down_failure_is_surfaced(
     session: AsyncSession,
 ) -> None:
