@@ -73,11 +73,28 @@ class WorkerReclaimOutcome:
 
     @classmethod
     def from_report(cls, report: dict[str, object]) -> WorkerReclaimOutcome:
-        """Build a success outcome from the worker's combined reap report."""
+        """Build a success outcome from the worker's combined reap report.
+
+        The worker's ``run_service_workspace_gc`` report records its
+        ``_shared/claude-base`` reclaim under the nested ``claude_base_reap.reaped``
+        payload, *outside* the top-level ``deleted_path_count``/``deleted_paths`` (those
+        cover only the per-workspace candidates). A worker pass that reaps only
+        superseded bases — for example no per-workspace auth candidates but stale bases
+        exist — would otherwise surface ``deleted_path_count: 0`` and hide a GB-scale
+        shared-base reclaim from the operator. So the reaped bases are folded into the
+        count here (and, via ``_worker_reclaimed_path_strs``, into the merged
+        ``deleted_paths``) so ``worker_reclaim`` and the headline report the real
+        reclamation (PRRT_kwDOSJAM6s6JbAow). ``total_estimated_bytes`` stays the
+        top-level value: the claude-base reaper lists signatures, not byte sizes, so no
+        per-base estimate is available to add.
+        """
         return cls(
             status="completed",
             reason_code=SERVICE_GC_WORKER_RECLAIMED,
-            deleted_path_count=_as_int(report.get("deleted_path_count")),
+            deleted_path_count=(
+                _as_int(report.get("deleted_path_count"))
+                + len(_claude_base_reaped_path_strs(report))
+            ),
             total_estimated_bytes=_as_int(report.get("total_estimated_bytes")),
             worker_partial=report.get("status") == "partial",
             report=report,
@@ -253,16 +270,47 @@ def _reconcile_worker_reclaimed_skips(folded: dict[str, object]) -> None:
 def _worker_reclaimed_path_strs(outcome: WorkerReclaimOutcome) -> list[str]:
     """The worker's actually-deleted paths as an ordered list of strings.
 
-    Merged into the folded headline ``deleted_paths`` so the
-    ``deleted_path_count == len(deleted_paths)`` invariant survives the fold, and
-    reused (as a set) to prove which API-side auth-unmount skips a worker reap
-    superseded.
+    Combines the top-level ``deleted_paths`` (per-workspace candidates) with the
+    nested ``claude_base_reap`` reaped bases, which the worker removes but records
+    outside the top-level totals (see ``_claude_base_reaped_path_strs``). Merged into
+    the folded headline ``deleted_paths`` so the
+    ``deleted_path_count == len(deleted_paths)`` invariant survives the fold (the count
+    in ``from_report`` includes both), and reused (as a set) to prove which API-side
+    auth-unmount skips a worker reap superseded.
     """
     report = outcome.report or {}
+    paths: list[str] = []
     deleted = report.get("deleted_paths")
     if isinstance(deleted, list):
-        return [str(path) for path in deleted]
-    return []
+        paths.extend(str(path) for path in deleted)
+    paths.extend(_claude_base_reaped_path_strs(report))
+    return paths
+
+
+def _claude_base_reaped_path_strs(report: dict[str, object]) -> list[str]:
+    """The shared ``claude-base`` signature dirs the worker actually reaped, as paths.
+
+    ``run_service_workspace_gc`` records its ``_shared/claude-base`` reclaim under the
+    nested ``claude_base_reap`` object (``reaped`` lists the removed ``<signature>`` dir
+    names, ``base_root`` the dir that holds them) rather than in the top-level
+    ``deleted_paths``. Reconstruct ``<base_root>/<signature>`` for each reaped base so
+    the count and the merged headline ``deleted_paths`` reflect bases the worker removed
+    that the top-level totals omit — otherwise a base-only reap reads as 0 reclaimed
+    (PRRT_kwDOSJAM6s6JbAow). Falls back to bare signature names if the report carries no
+    ``base_root``. Only the ``reaped`` (actually-removed) list counts — ``planned`` /
+    ``protected`` / ``unverifiable`` bases were not deleted.
+    """
+    claude_base = report.get("claude_base_reap")
+    if not isinstance(claude_base, Mapping):
+        return []
+    reaped = claude_base.get("reaped")
+    if not isinstance(reaped, list):
+        return []
+    base_root = claude_base.get("base_root")
+    if isinstance(base_root, str) and base_root:
+        prefix = base_root.rstrip("/")
+        return [f"{prefix}/{signature}" for signature in reaped]
+    return [str(signature) for signature in reaped]
 
 
 def _worker_reclaimed_paths(outcome: WorkerReclaimOutcome) -> frozenset[str]:

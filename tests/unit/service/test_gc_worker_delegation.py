@@ -117,6 +117,106 @@ def test_fold_worker_partial_merges_reclaimed_deleted_paths() -> None:
     assert folded["deleted_path_count"] == len(folded["deleted_paths"])
 
 
+def test_from_report_counts_claude_base_only_reaps() -> None:
+    # When the worker reaps only superseded ``_shared/claude-base`` bases (no
+    # per-workspace auth candidates), ``run_service_workspace_gc`` keeps those
+    # deletions under the nested ``claude_base_reap.reaped`` payload while the
+    # top-level ``deleted_path_count`` stays the (zero) workspace-candidate total.
+    # The outcome must still surface the reaped bases or the operator sees 0
+    # reclaimed even though GB-scale shared bases were removed (PRRT_kwDOSJAM6s6JbAow).
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "claude_base_reap": {
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigA", "sigB"],
+        },
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+
+    assert outcome.deleted_path_count == 2
+
+
+def test_fold_surfaces_claude_base_only_worker_reclaim() -> None:
+    # The headline scenario this change exists for: the API-side pass reclaimed
+    # nothing the worker did not, and the worker only reaped shared bases. The
+    # folded report and ``worker_reclaim`` must reflect the reaped bases (count and
+    # merged paths) rather than reporting 0 reclaimed (PRRT_kwDOSJAM6s6JbAow).
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "claude_base_reap": {
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigA", "sigB"],
+        },
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=0, deleted_paths=[], total_estimated_bytes=0)
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["deleted_path_count"] == 2
+    assert folded["deleted_paths"] == [
+        "/work/auth/_shared/claude-base/sigA",
+        "/work/auth/_shared/claude-base/sigB",
+    ]
+    # The headline invariant survives the fold.
+    assert folded["deleted_path_count"] == len(folded["deleted_paths"])
+    worker_reclaim = folded["worker_reclaim"]
+    assert isinstance(worker_reclaim, dict)
+    assert worker_reclaim["deleted_path_count"] == 2
+
+
+def test_from_report_counts_claude_base_reaps_alongside_candidates() -> None:
+    # Per-workspace candidates *and* shared-base reaps both count: the top-level
+    # ``deleted_path_count`` covers the candidates, the nested reap adds the bases.
+    report = {
+        "status": "succeeded",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/auth/ws-1"],
+        "claude_base_reap": {
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigA"],
+        },
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=0, deleted_paths=[])
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert outcome.deleted_path_count == 2
+    assert folded["deleted_paths"] == [
+        "/work/auth/ws-1",
+        "/work/auth/_shared/claude-base/sigA",
+    ]
+    assert folded["deleted_path_count"] == len(folded["deleted_paths"])
+
+
+def test_from_report_ignores_claude_base_reap_without_base_root() -> None:
+    # A reap report missing ``base_root`` still counts the reaped bases (by bare
+    # signature name) rather than silently dropping them.
+    report = {
+        "status": "succeeded",
+        "deleted_path_count": 0,
+        "claude_base_reap": {"status": "ok", "reaped": ["sigA", "sigB"]},
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+
+    assert outcome.deleted_path_count == 2
+    base = _api_base(deleted_path_count=0, deleted_paths=[])
+    folded = fold_worker_reclaim(base, outcome)
+    assert folded["deleted_paths"] == ["sigA", "sigB"]
+
+
 def test_fold_does_not_mutate_base() -> None:
     base = _api_base(deleted_paths=["/work/worktrees/ws-1"])
     outcome = WorkerReclaimOutcome.from_report(
