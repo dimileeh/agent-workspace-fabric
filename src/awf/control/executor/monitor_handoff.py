@@ -958,6 +958,22 @@ async def _build_handoff_pr_monitor(
             message=f"{build_failed_message_prefix}no PR monitor configured",
         )
         return None
+
+    # Monitor-only handoffs (``sync_feature_pr`` / ``sync_release_pr``, including
+    # adopted PRs that persist ``sync_feature_pr``) reach the PR monitor without
+    # ever running ``execute``'s pre-agent Ollama auto-pull step: that block sits
+    # after ``_dispatch_non_feature_task_kind`` returns. Create-time readiness can
+    # admit an absent local model as ``OLLAMA_MODEL_PULL_PENDING`` (deferring the
+    # pull to that step), so for an OpenCode/Ollama workspace the requested model
+    # may still be missing here. The monitor's first PR repair invokes the agent
+    # CLI, so ensure/pull the model now — while still ``running`` — instead of
+    # letting OpenCode fail later as an opaque ``AGENT_CLI_FAILED``. No-op for
+    # non-OpenCode runtimes and for a sidecar daemon unreachable from the worker.
+    if not await self._ensure_ollama_model_or_mark_failed(
+        workspace_id=workspace_id,
+        ws=workspace,
+    ):
+        return None
     return monitor
 
 
