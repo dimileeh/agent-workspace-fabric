@@ -644,6 +644,7 @@ async def test_workspace_service_control_wrappers_commit_results(
     class RecordingCleaner:
         def __init__(self) -> None:
             self.calls: list[str] = []
+            self.call_details: list[dict[str, object]] = []
 
         async def cleanup(
             self,
@@ -661,9 +662,14 @@ async def test_workspace_service_control_wrappers_commit_results(
             assert repo_url == "git@github.com:example/controls.git"
             assert compose_file_path is None
             assert worktree_host_path is None
-            assert remove_volumes is False
-            assert remove_worktree is True
             self.calls.append(workspace_id)
+            self.call_details.append(
+                {
+                    "workspace_id": workspace_id,
+                    "remove_volumes": remove_volumes,
+                    "remove_worktree": remove_worktree,
+                }
+            )
             return []
 
     stopper = RecordingStopper()
@@ -725,8 +731,14 @@ async def test_workspace_service_control_wrappers_commit_results(
     assert cancel_response.status == WorkspaceStatus.cancelled
     assert stop_response.status == WorkspaceStatus.cancelled
     assert destroy_response.status == WorkspaceStatus.destroyed
-    assert stopper.calls == ["awf_stop"]
-    assert cleaner.calls == [destroyed_id]
+    # cancel(stop_stack=False) leaves teardown to cleanup, but stop now runs a
+    # full compose down (preserving the worktree), and destroy removes it.
+    assert stopper.calls == []
+    assert cleaner.calls == [stopped_id, destroyed_id]
+    assert cleaner.call_details == [
+        {"workspace_id": stopped_id, "remove_volumes": True, "remove_worktree": False},
+        {"workspace_id": destroyed_id, "remove_volumes": False, "remove_worktree": True},
+    ]
 
 
 @pytest.mark.unit
