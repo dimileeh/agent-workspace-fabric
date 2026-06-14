@@ -74,6 +74,12 @@ class TestLeadingExecutable:
             # falsely reported PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
             "PATH=/workspace/node_modules/.bin:$PATH eslint .",
             "FOO=bar PATH=/opt/bin:$PATH mypy src",
+            # A leading subshell opener is shell grouping the runner executes
+            # under ``sh -lc``; ``shlex`` glues the ``(`` to the first word
+            # (``(cd``) or keeps it standalone (``(``), so probing it would
+            # falsely report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Fail open.
+            "(cd frontend && npm test)",
+            "( cd frontend && npm test )",
         ],
     )
     def test_unprobeable_leading_token_returns_none(self, command: str) -> None:
@@ -124,6 +130,17 @@ class TestValidateCommandProbeTargets:
             _profile_with_validate(
                 ["PATH=/workspace/node_modules/.bin:$PATH eslint .", "ruff check ."]
             )
+        )
+        assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_skips_subshell_wrapped_commands(self) -> None:
+        # A subshell-wrapped command (``(cd frontend && npm test)``) is shell
+        # grouping the runner executes under ``sh -lc``; its leading token is
+        # the glued ``(cd``, not a probeable tool, so it fails open rather than
+        # failing the handoff with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. The
+        # plain command still probes.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["(cd frontend && npm test)", "ruff check ."])
         )
         assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
 

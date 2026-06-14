@@ -400,6 +400,15 @@ def _leading_executable(command: str) -> str | None:
     if index >= len(tokens):
         return None
     leading = tokens[index]
+    # A leading subshell opener (``(cd frontend && npm test)`` -> ``(cd``, or
+    # ``( cd ... )`` -> ``(`` when spaced) is shell grouping the real runner
+    # executes under ``sh -lc``. ``shlex`` keeps the ``(`` glued to the first
+    # word, so probing ``command -v "(cd"`` would falsely report the workspace
+    # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED and block monorepo profiles that
+    # validate from a subdirectory. No real executable name begins with ``(``,
+    # so fail open.
+    if leading.startswith("("):
+        return None
     if leading in _VALIDATE_PROBE_SHELL_BUILTINS:
         return None
     return leading
