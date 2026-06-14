@@ -264,9 +264,9 @@ def test_fold_does_not_touch_partial_unrelated_to_auth_or_base() -> None:
 
 
 def test_fold_keeps_partial_when_worker_reap_partial_even_with_auth_skip() -> None:
-    # If the worker's own reap was partial it may not have reclaimed every auth
-    # dir, so the loud auth-unmount skip stays and the run stays partial — the
-    # reconcile only fires on a fully completed worker reclaim.
+    # If the worker's own reap was partial and gives no ``deleted_paths`` proof, it
+    # may not have reclaimed the auth dir, so the loud auth-unmount skip stays and
+    # the run stays partial — an unproven partial reclaim never drops the skip.
     base = _api_base(
         status="partial",
         reason_code="CLEANUP_EXECUTION_PARTIAL",
@@ -279,6 +279,75 @@ def test_fold_keeps_partial_when_worker_reap_partial_even_with_auth_skip() -> No
         ],
     )
     outcome = WorkerReclaimOutcome.from_report({"status": "partial", "deleted_path_count": 1})
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    remaining = folded["delete_errors"]
+    assert isinstance(remaining, list)
+    assert [error["kind"] for error in remaining] == ["auth_overlay_unmount"]
+
+
+def test_fold_drops_reclaimed_auth_skip_when_worker_partial_for_unrelated_step() -> None:
+    # The worker's combined reap is overall ``partial`` for an unrelated sub-step
+    # (e.g. a companion-image prune failure), but its ``deleted_paths`` prove it
+    # actually removed the auth dir the API container could not unmount. That makes
+    # the API-side auth-unmount skip stale: it must be dropped so the CLI does not
+    # warn the auth dir was preserved although it was reclaimed — while the headline
+    # stays partial for the unrelated failure (PRRT…Ja64r).
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "path": "/work/_shared/auth/ws-1",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "deleted_path_count": 1,
+            "deleted_paths": ["/work/_shared/auth/ws-1"],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # Headline stays partial for the unrelated worker failure...
+    assert folded["status"] == "partial"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    # ...but the stale auth-unmount skip for the reclaimed path is dropped.
+    assert folded["delete_errors"] == []
+
+
+def test_fold_keeps_auth_skip_when_worker_partial_did_not_reclaim_it() -> None:
+    # A partial worker reap whose ``deleted_paths`` do NOT include the auth dir
+    # leaves the auth-unmount skip in place: the worker genuinely failed to reclaim
+    # it, so the loud skip must stay even as other reclaimed paths are dropped.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "path": "/work/_shared/auth/ws-1",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "partial",
+            "deleted_path_count": 1,
+            "deleted_paths": ["/work/_shared/auth/ws-2"],
+        }
+    )
 
     folded = fold_worker_reclaim(base, outcome)
 

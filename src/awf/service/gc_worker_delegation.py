@@ -175,6 +175,12 @@ def fold_worker_reclaim(
                 folded["status"] = "partial"
                 report = outcome.report or {}
                 folded["reason_code"] = report.get("reason_code") or CLEANUP_EXECUTION_PARTIAL
+            # Even on a partial worker reap, any auth dir the worker *did* reclaim
+            # (proven by its ``deleted_paths``) makes the API-side auth-unmount skip
+            # stale: drop those specific skips so the CLI does not warn the dir was
+            # preserved although it was reclaimed, while keeping the run partial for
+            # the unrelated failure that drove the worker partial.
+            _drop_worker_reclaimed_auth_skips(folded, _worker_reclaimed_paths(outcome))
             return folded
         _reconcile_worker_reclaimed_skips(folded)
         return folded
@@ -232,6 +238,48 @@ def _reconcile_worker_reclaimed_skips(folded: dict[str, object]) -> None:
         reconciled["reason_code"] = SERVICE_GC_WORKER_RECLAIMED
         reconciled["reconciled_by_worker"] = True
         folded["claude_base_reap"] = reconciled
+
+
+def _worker_reclaimed_paths(outcome: WorkerReclaimOutcome) -> frozenset[str]:
+    """The paths the worker actually deleted, per its reap report.
+
+    Used to prove which API-side auth-unmount skips a *partial* worker reap
+    nonetheless superseded — a full reclaim drops them wholesale, a partial one
+    only drops what it can prove it removed.
+    """
+    report = outcome.report or {}
+    deleted = report.get("deleted_paths")
+    if isinstance(deleted, list):
+        return frozenset(str(path) for path in deleted)
+    return frozenset()
+
+
+def _drop_worker_reclaimed_auth_skips(
+    folded: dict[str, object], reclaimed_paths: frozenset[str]
+) -> None:
+    """Drop auth-unmount skip errors for paths a partial worker reap proved reclaimed.
+
+    On a partial worker reap the headline must stay partial for the unrelated
+    failure, but any auth dir whose path appears in the worker's ``deleted_paths``
+    was genuinely removed — its API-side ``CLAUDE_AUTH_OVERLAY_UNMOUNT_*``
+    ``delete_errors`` entry is stale and would otherwise make the CLI warn the auth
+    dir was preserved. Auth skips for paths the worker did *not* reclaim, and every
+    non-auth failure, are preserved verbatim.
+    """
+    if not reclaimed_paths:
+        return
+    errors = folded.get("delete_errors")
+    if not isinstance(errors, list):
+        return
+    folded["delete_errors"] = [
+        error
+        for error in errors
+        if not (
+            isinstance(error, Mapping)
+            and error.get("reason_code") in _AUTH_OVERLAY_UNMOUNT_RECONCILED_REASON_CODES
+            and error.get("path") in reclaimed_paths
+        )
+    ]
 
 
 def _has_unreconciled_failure(
