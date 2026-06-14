@@ -37,6 +37,12 @@ class TestLeadingExecutable:
             ("FOO=bar ruff check .", "ruff"),
             ("FOO=bar BAZ=qux mypy src", "mypy"),
             ("/usr/local/bin/pytest -q", "/usr/local/bin/pytest"),
+            # A YAML block command opening with a shell comment line runs the
+            # real command under ``sh -lc`` (which ignores ``#`` comments), so
+            # the probe must look past the comment to the actual executable.
+            ("# run lint\nruff check .", "ruff"),
+            ("  # leading comment\nmypy src", "mypy"),
+            ("ruff check . # trailing comment", "ruff"),
         ],
     )
     def test_extracts_leading_executable(self, command: str, expected: str) -> None:
@@ -91,6 +97,9 @@ class TestLeadingExecutable:
             "${HOME}/bin/ruff check .",
             "FOO=bar $HOME/.local/bin/mypy src",
             "`which ruff` check .",
+            # A command that is nothing but a shell comment reduces to no tokens
+            # under ``sh -lc``; there is no executable to probe, so fail open.
+            "# just a note, no command here",
         ],
     )
     def test_unprobeable_leading_token_returns_none(self, command: str) -> None:
@@ -165,6 +174,20 @@ class TestValidateCommandProbeTargets:
             _profile_with_validate(["$HOME/.local/bin/ruff check .", "mypy src"])
         )
         assert [(t.tool, t.command) for t in targets] == [("mypy", "mypy src")]
+
+    def test_probes_tool_after_leading_comment_line(self) -> None:
+        # A YAML block command opening with a shell comment line (``# run lint``)
+        # runs the real command under ``sh -lc``, which ignores the comment, so
+        # the probe must target the actual tool rather than the literal ``#`` —
+        # otherwise a valid command falsely fails the handoff with
+        # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["# run lint\nruff check .", "mypy src"])
+        )
+        assert [(t.tool, t.command) for t in targets] == [
+            ("ruff", "# run lint\nruff check ."),
+            ("mypy", "mypy src"),
+        ]
 
     def test_skips_advisory_required_false_commands(self) -> None:
         # An advisory (``required: false``) validate command is not probed: its

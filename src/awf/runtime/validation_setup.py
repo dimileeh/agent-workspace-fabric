@@ -302,9 +302,9 @@ def _uv_tokens_include_dev_scope(tokens: list[str]) -> bool:
     return False
 
 
-def _shell_tokens(command: str) -> list[str] | None:
+def _shell_tokens(command: str, *, comments: bool = False) -> list[str] | None:
     try:
-        return shlex.split(command)
+        return shlex.split(command, comments=comments)
     except ValueError:
         return None
 
@@ -390,8 +390,15 @@ def _leading_executable(command: str) -> str | None:
     builtin/keyword (``cd``, ``:``, ``echo``), or a leading ``PATH=...`` env
     assignment the shared-PATH probe cannot replay — all fail-open so the probe
     never false-positives on a command it cannot reduce to one probeable tool.
+
+    Tokenization strips shell comments (``comments=True``) because the real
+    runner executes the command under ``sh -lc``, which ignores ``#`` comments.
+    A YAML block command that opens with a comment line (``# run lint\nruff
+    check .``) really runs ``ruff``; without comment handling ``shlex`` would
+    keep the literal ``#`` as the leading token and the probe would falsely
+    report ``PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED`` for a valid command.
     """
-    tokens = _shell_tokens(command)
+    tokens = _shell_tokens(command, comments=True)
     if tokens is None:
         return None
     index = _first_non_assignment_token_index(tokens)
