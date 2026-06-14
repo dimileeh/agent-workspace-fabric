@@ -119,6 +119,12 @@ def test_ollama_url_helpers_default_portless_host_gateway_to_daemon_port() -> No
         "::1",
         "::",
         "[::1]",
+        # IPv4-mapped IPv6 literals (``::ffff:<v4>``) carry the embedded IPv4's
+        # loopback/unspecified status, so a mapped loopback/unspecified is host-local
+        # too. The shell launcher prelude mirrors this; these anchor the Python source
+        # of truth the prelude is held against (issue #579).
+        "::ffff:127.0.0.1",
+        "::ffff:0.0.0.0",
     ],
 )
 def test_normalize_host_local_host_maps_host_local_to_gateway(host: str) -> None:
@@ -137,6 +143,11 @@ def test_normalize_host_local_host_maps_host_local_to_gateway(host: str) -> None
         "ollama.local",
         "host.docker.internal",
         "gateway.docker.internal",
+        # A mapped *routable* IPv4 is not host-local, and an IPv4-*compatible*
+        # ``::127.0.0.1`` is not reported as loopback by ``ipaddress`` -- both pass
+        # through unchanged, matching the shell prelude.
+        "::ffff:192.168.1.1",
+        "::127.0.0.1",
     ],
 )
 def test_normalize_host_local_host_passes_through_routable(host: str) -> None:

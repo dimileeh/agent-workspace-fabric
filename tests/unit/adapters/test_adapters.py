@@ -979,6 +979,20 @@ class TestOpenCodeAdapter:
             ("http://[0:0:0:0:0:0:0:1]:11434", "http://host.docker.internal:11434/v1"),
             ("http://[0::1]:11434", "http://host.docker.internal:11434/v1"),
             ("http://[0:0:0:0:0:0:0:0]:11434", "http://host.docker.internal:11434/v1"),
+            # An IPv4-mapped IPv6 literal (``::ffff:<v4>``) inherits the embedded
+            # IPv4's host-local status: Python's ``ipaddress`` reports a mapped
+            # loopback/unspecified as such, but the dotted form is skipped by the
+            # IPv6 canonicalization, so the prelude must reduce it to the embedded
+            # IPv4 or launch keeps ``::ffff:127.0.0.1`` while preflight normalizes it
+            # to the gateway (issue #579). The ``ffff`` prefix matches case-insensitively.
+            ("http://[::ffff:127.0.0.1]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[::ffff:127.5.5.5]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[::ffff:0.0.0.0]:11434", "http://host.docker.internal:11434/v1"),
+            ("http://[::FFFF:127.0.0.1]:11434", "http://host.docker.internal:11434/v1"),
+            (
+                "http://[0:0:0:0:0:ffff:127.0.0.1]:11434",
+                "http://host.docker.internal:11434/v1",
+            ),
             # A userinfo-bearing host-local value drops the credentials too.
             ("http://user:pass@127.0.0.1:11434", "http://host.docker.internal:11434/v1"),
         ],
@@ -1021,6 +1035,15 @@ class TestOpenCodeAdapter:
             "http://[0::1]:11434",
             "http://[0:0:0:0:0:0:0:0]:11434",
             "http://[0::]:11434",
+            # IPv4-mapped IPv6 literals carry the embedded IPv4's host-local status on
+            # the Python side; the prelude must agree. A mapped loopback/unspecified
+            # normalizes; a mapped routable IPv4, and an IPv4-*compatible* ``::127.0.0.1``
+            # (which Python does not treat as loopback), pass through unchanged.
+            "http://[::ffff:127.0.0.1]:11434",
+            "http://[::ffff:0.0.0.0]:11434",
+            "http://[::ffff:192.168.1.1]:11434",
+            "http://[::127.0.0.1]:11434",
+            "http://[64:ff9b::127.0.0.1]:11434",
             "host.docker.internal:11434",
             "ollama-sidecar:11434",
             "192.168.1.10:11434",

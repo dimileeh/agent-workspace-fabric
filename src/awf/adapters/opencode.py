@@ -241,6 +241,31 @@ def _ollama_base_url_prelude() -> str:
         "      esac\n"
         "      ;;\n"
         "  esac\n"
+        # Reduce an IPv4-mapped IPv6 literal (``::ffff:127.0.0.1``) to its embedded IPv4
+        # so the host-local match below catches a mapped loopback/unspecified target.
+        # Python's ``ipaddress.ip_address`` reports ``::ffff:<v4>`` as loopback/unspecified
+        # when the embedded IPv4 is, but the IPv6 canonicalization above skips this form
+        # (it contains ``.``) -- without this rewrite the launcher would leave
+        # ``::ffff:127.0.0.1`` pointed at the agent container while preflight normalizes it
+        # to the host gateway (issue #579). Only a genuine IPv4-mapped prefix (all-zero
+        # groups then ``ffff``, matched case-insensitively) qualifies; an IPv4-compatible
+        # ``::127.0.0.1`` -- which Python does *not* treat as loopback -- is left untouched.
+        # Mirrors ``_normalize_host_local_host``.
+        '  case "$__awf_ollama_hl_host" in\n'
+        "    *:*.*.*.*)\n"
+        '      __awf_v4mapped_embedded="${__awf_ollama_hl_host##*:}"\n'
+        '      __awf_v4mapped_prefix="${__awf_ollama_hl_host%:*}"\n'
+        '      case "$__awf_v4mapped_prefix" in\n'
+        "        *:[Ff][Ff][Ff][Ff])\n"
+        '          __awf_v4mapped_rest="${__awf_v4mapped_prefix%:[Ff][Ff][Ff][Ff]}"\n'
+        '          case "$__awf_v4mapped_rest" in\n'
+        "            *[!0:]*) : ;;\n"
+        '            *) __awf_ollama_hl_host="$__awf_v4mapped_embedded" ;;\n'
+        "          esac\n"
+        "          ;;\n"
+        "      esac\n"
+        "      ;;\n"
+        "  esac\n"
         # ``localhost`` is matched case-insensitively (POSIX bracket expansion, no
         # bashism) because the Python side lowercases the host (``urlsplit().hostname``
         # plus ``host.lower() == "localhost"``), so a value like ``http://LocalHost``
