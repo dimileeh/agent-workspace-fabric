@@ -92,6 +92,19 @@ async def _poll_for_outcome(
         request = await _get_request(session_factory, request_id)
         if request is not None:
             if request.status == SERVICE_GC_REQUEST_STATUS_COMPLETED:
+                # The worker can mark a ``running`` row ``completed`` *after* its
+                # ``deadline_at`` if the reap overran the budget and the expire sweep
+                # had not yet raced it to ``expired`` (``mark_completed`` only refuses
+                # to overwrite an already-``expired`` row). Folding that late report as
+                # a successful ``execute`` gc would contradict expire-on-timeout, which
+                # keys the timeout decision off ``deadline_at`` — not on which of the
+                # API's monotonic budget and the row's deadline won the race. Surface
+                # the timeout instead (comment 4493490434).
+                if _finished_past_deadline(request):
+                    return WorkerReclaimOutcome.delegation_timeout(
+                        "worker completed gc reclaim only after its deadline elapsed; "
+                        "the operator's budget had already run out"
+                    )
                 return WorkerReclaimOutcome.from_report(dict(request.result or {}))
             if request.status == SERVICE_GC_REQUEST_STATUS_FAILED:
                 return WorkerReclaimOutcome.reclaim_failed(
@@ -114,6 +127,19 @@ async def _poll_for_outcome(
                 f"worker did not complete gc reclaim within {deadline_seconds:.1f}s"
             )
         await asyncio.sleep(min(interval, remaining) if interval > 0 else remaining)
+
+
+def _finished_past_deadline(request: ServiceGCRequest) -> bool:
+    """Whether the worker finished the reap strictly after the row's ``deadline_at``.
+
+    A row with no ``deadline_at`` carries no budget (never late); a completed row
+    always records ``finished_at`` via :meth:`ServiceGCRequestRepository.mark_completed`,
+    but the ``finished_at is None`` guard keeps the comparison defensive and mypy happy.
+    Kept on a single expression so the deadline comparison is one branch point.
+    """
+    deadline_at = request.deadline_at
+    finished_at = request.finished_at
+    return deadline_at is not None and finished_at is not None and finished_at > deadline_at
 
 
 async def _latest_heartbeat(

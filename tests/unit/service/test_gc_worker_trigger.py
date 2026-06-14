@@ -209,6 +209,67 @@ async def test_poll_returns_timeout_when_request_is_expired() -> None:
         assert outcome.reason_code == "SERVICE_GC_WORKER_DELEGATION_TIMEOUT"
 
 
+async def test_poll_treats_completion_past_deadline_as_timeout() -> None:
+    # A reap that finishes *after* the row's ``deadline_at`` must be reported as a
+    # timeout, not a success. The worker can mark a ``running`` row ``completed`` past
+    # its deadline if the reap overran the budget and the expire sweep had not yet
+    # raced the row to ``expired``; folding that late report as a successful execute
+    # GC would contradict expire-on-timeout — the same invariant the ``expired``
+    # branch enforces. The poll keys the decision off ``deadline_at``, not which clock
+    # won the race (PRRT comment 4493490434).
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            request = await repo.create_pending(
+                node_id=_NODE_ID,
+                requested_at=now - timedelta(seconds=10),
+                deadline_at=now - timedelta(seconds=5),
+            )
+            request_id = request.id
+            # finished_at = now, i.e. 5s past the row's deadline_at.
+            await repo.mark_completed(
+                request_id=request_id,
+                result={"deleted_path_count": 9, "total_estimated_bytes": 17},
+                now=now,
+            )
+            await session.commit()
+        outcome = await _poll_for_outcome(
+            factory, request_id=request_id, deadline_seconds=5, poll_interval_seconds=0.02
+        )
+        assert outcome.status == "timeout"
+        assert outcome.reason_code == "SERVICE_GC_WORKER_DELEGATION_TIMEOUT"
+
+
+async def test_poll_completion_within_deadline_is_success() -> None:
+    # The mirror of the past-deadline case: a reap that finishes at or before the
+    # row's ``deadline_at`` is on time and folds as a normal success even though a
+    # ``deadline_at`` is set (covers the False side of the deadline comparison).
+    async with postgres_test_engine() as engine:
+        factory = make_session_factory(engine)
+        now = datetime.now(UTC)
+        async with factory() as session:
+            repo = ServiceGCRequestRepository(session)
+            request = await repo.create_pending(
+                node_id=_NODE_ID,
+                requested_at=now - timedelta(seconds=10),
+                deadline_at=now + timedelta(seconds=5),
+            )
+            request_id = request.id
+            await repo.mark_completed(
+                request_id=request_id,
+                result={"deleted_path_count": 4, "total_estimated_bytes": 8},
+                now=now,
+            )
+            await session.commit()
+        outcome = await _poll_for_outcome(
+            factory, request_id=request_id, deadline_seconds=5, poll_interval_seconds=0.02
+        )
+        assert outcome.status == "completed"
+        assert outcome.deleted_path_count == 4
+
+
 async def test_poll_times_out_when_request_stays_pending() -> None:
     async with postgres_test_engine() as engine:
         factory = make_session_factory(engine)
