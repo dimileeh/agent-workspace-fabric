@@ -80,6 +80,17 @@ class TestLeadingExecutable:
             # falsely report PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Fail open.
             "(cd frontend && npm test)",
             "( cd frontend && npm test )",
+            # A leading token that names the executable via shell expansion —
+            # tilde or parameter/command substitution — is expanded by the
+            # ``sh -lc`` the real runner uses, but ``shlex`` keeps the literal
+            # token and the probe passes it quoted to ``command -v "$t"`` where
+            # it is not re-expanded. Probing it would falsely report
+            # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED, so fail open.
+            "~/bin/ruff check .",
+            "$HOME/.local/bin/ruff check .",
+            "${HOME}/bin/ruff check .",
+            "FOO=bar $HOME/.local/bin/mypy src",
+            "`which ruff` check .",
         ],
     )
     def test_unprobeable_leading_token_returns_none(self, command: str) -> None:
@@ -143,6 +154,17 @@ class TestValidateCommandProbeTargets:
             _profile_with_validate(["(cd frontend && npm test)", "ruff check ."])
         )
         assert [(t.tool, t.command) for t in targets] == [("ruff", "ruff check .")]
+
+    def test_skips_shell_expanded_leading_token_commands(self) -> None:
+        # A command whose leading executable is named via shell expansion
+        # (``$HOME/.local/bin/ruff``) resolves under the runner's ``sh -lc`` but
+        # not under the quoted ``command -v "$t"`` probe, so it fails open rather
+        # than failing the handoff with PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED.
+        # The plain command still probes.
+        targets = validate_command_probe_targets(
+            _profile_with_validate(["$HOME/.local/bin/ruff check .", "mypy src"])
+        )
+        assert [(t.tool, t.command) for t in targets] == [("mypy", "mypy src")]
 
     def test_skips_advisory_required_false_commands(self) -> None:
         # An advisory (``required: false``) validate command is not probed: its

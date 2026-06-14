@@ -409,6 +409,17 @@ def _leading_executable(command: str) -> str | None:
     # so fail open.
     if leading.startswith("("):
         return None
+    # A leading token that relies on shell expansion to name the executable —
+    # tilde expansion (``~/bin/ruff``) or parameter/command substitution
+    # (``$HOME/.local/bin/ruff``, ``${HOME}/bin/ruff``, ``` `which ruff` ```) —
+    # is expanded by the ``sh -lc`` the real runner uses, so the command
+    # resolves. ``shlex`` keeps the literal ``~``/``$``/`` ` `` token, and the
+    # probe passes it *quoted* to ``command -v "$t"``, where it is not
+    # re-expanded, so probing it would falsely report the workspace
+    # PROFILE_VALIDATE_TOOLCHAIN_UNPROVISIONED. Fail open rather than probe a
+    # token whose real value the shared-shell probe cannot reproduce.
+    if leading.startswith("~") or "$" in leading or "`" in leading:
+        return None
     if leading in _VALIDATE_PROBE_SHELL_BUILTINS:
         return None
     return leading
