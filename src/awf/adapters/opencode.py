@@ -195,8 +195,12 @@ def _ollama_base_url_prelude() -> str:
         "      __awf_ollama_hl_port=\n"
         "      ;;\n"
         "  esac\n"
+        # ``localhost`` is matched case-insensitively (POSIX bracket expansion, no
+        # bashism) because the Python side lowercases the host (``urlsplit().hostname``
+        # plus ``host.lower() == "localhost"``), so a value like ``http://LocalHost``
+        # must normalize on both sides or launch and preflight disagree on the daemon.
         '  case "$__awf_ollama_hl_host" in\n'
-        "    localhost|0.0.0.0|::|::1|127.*)\n"
+        "    [Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|0.0.0.0|::|::1|127.*)\n"
         '      if [ -n "$__awf_ollama_hl_port" ]; then\n'
         '        __awf_ollama_authority="host.docker.internal:$__awf_ollama_hl_port"\n'
         "      else\n"

@@ -964,6 +964,11 @@ class TestOpenCodeAdapter:
             ("127.5.5.5:11434", "http://host.docker.internal:11434/v1"),
             ("localhost", "http://host.docker.internal:11434/v1"),
             ("http://localhost:11434", "http://host.docker.internal:11434/v1"),
+            # ``localhost`` is host-local regardless of case: the Python preflight
+            # lowercases the host, so the shell launcher must match every casing too
+            # or the two disagree on the daemon.
+            ("http://LocalHost:11434", "http://host.docker.internal:11434/v1"),
+            ("LOCALHOST:11434", "http://host.docker.internal:11434/v1"),
             ("http://[::]:11434", "http://host.docker.internal:11434/v1"),
             ("http://[::1]", "http://host.docker.internal:11434/v1"),
             ("http://[::1]:11434", "http://host.docker.internal:11434/v1"),
@@ -991,6 +996,7 @@ class TestOpenCodeAdapter:
         [
             "127.0.0.1:11434",
             "http://localhost",
+            "http://LocalHost:11434",
             "0.0.0.0:11434",
             "http://[::1]:11434",
             "[::]:11434",
