@@ -63,13 +63,71 @@ def test_fold_sums_worker_reclaim_into_headline() -> None:
     assert worker_reclaim["report"] == report
 
 
+def test_fold_merges_worker_deleted_paths_into_headline_list() -> None:
+    # ``WorkspaceGCResult.to_dict()`` guarantees ``deleted_path_count ==
+    # len(deleted_paths)``. A successful worker reclaim sums its count onto the
+    # headline, so its actually-removed paths must also be merged into the headline
+    # ``deleted_paths`` (the API recorded them as ``skipped`` — never in
+    # ``deleted_paths`` — so they are net-new and never duplicated). Otherwise the
+    # payload reports ``deleted_path_count > len(deleted_paths)`` and audit consumers
+    # miss the paths that were actually removed.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 2,
+        "deleted_paths": ["/work/_shared/auth/ws-1", "/work/_shared/claude-base"],
+        "total_estimated_bytes": 1_700_000_000,
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=1, deleted_paths=["/work/worktrees/ws-1"])
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["deleted_path_count"] == 3
+    assert folded["deleted_paths"] == [
+        "/work/worktrees/ws-1",
+        "/work/_shared/auth/ws-1",
+        "/work/_shared/claude-base",
+    ]
+    # The headline invariant survives the fold.
+    assert folded["deleted_path_count"] == len(folded["deleted_paths"])
+
+
+def test_fold_worker_partial_merges_reclaimed_deleted_paths() -> None:
+    # Even a partial worker reap merges the paths it proved it removed, so the
+    # headline ``deleted_paths`` stays consistent with the (additive) count.
+    report = {
+        "status": "partial",
+        "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-1"],
+        "total_estimated_bytes": 10,
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=1, deleted_paths=["/work/worktrees/ws-1"])
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    assert folded["deleted_path_count"] == 2
+    assert folded["deleted_paths"] == [
+        "/work/worktrees/ws-1",
+        "/work/_shared/auth/ws-1",
+    ]
+    assert folded["deleted_path_count"] == len(folded["deleted_paths"])
+
+
 def test_fold_does_not_mutate_base() -> None:
-    base = _api_base()
-    outcome = WorkerReclaimOutcome.from_report({"deleted_path_count": 1})
+    base = _api_base(deleted_paths=["/work/worktrees/ws-1"])
+    outcome = WorkerReclaimOutcome.from_report(
+        {"deleted_path_count": 1, "deleted_paths": ["/work/_shared/auth/ws-1"]}
+    )
 
     fold_worker_reclaim(base, outcome)
 
     assert base["deleted_path_count"] == 2
+    # Merging the worker's reclaimed paths must not mutate the caller's list.
+    assert base["deleted_paths"] == ["/work/worktrees/ws-1"]
     assert "worker_reclaim" not in base
 
 

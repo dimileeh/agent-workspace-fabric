@@ -166,6 +166,16 @@ def fold_worker_reclaim(
         folded["deleted_path_count"] = (
             _as_int(base.get("deleted_path_count")) + outcome.deleted_path_count
         )
+        # Merge the worker's actually-removed paths into the headline list so the
+        # ``deleted_path_count == len(deleted_paths)`` invariant of
+        # ``WorkspaceGCResult.to_dict()`` survives the fold. The API-side pass recorded
+        # these auth/claude-base paths as ``skipped`` (never in ``deleted_paths``), so
+        # they are net-new and never duplicate an existing entry; build a fresh list so
+        # the caller's ``base`` stays untouched.
+        base_deleted = base.get("deleted_paths")
+        merged_paths: list[object] = list(base_deleted) if isinstance(base_deleted, list) else []
+        merged_paths.extend(_worker_reclaimed_path_strs(outcome))
+        folded["deleted_paths"] = merged_paths
         if outcome.worker_partial:
             # The worker's own reap was partial — it leaked disk it could not
             # reclaim, so a previously-clean run must not still read as success and
@@ -240,6 +250,21 @@ def _reconcile_worker_reclaimed_skips(folded: dict[str, object]) -> None:
         folded["claude_base_reap"] = reconciled
 
 
+def _worker_reclaimed_path_strs(outcome: WorkerReclaimOutcome) -> list[str]:
+    """The worker's actually-deleted paths as an ordered list of strings.
+
+    Merged into the folded headline ``deleted_paths`` so the
+    ``deleted_path_count == len(deleted_paths)`` invariant survives the fold, and
+    reused (as a set) to prove which API-side auth-unmount skips a worker reap
+    superseded.
+    """
+    report = outcome.report or {}
+    deleted = report.get("deleted_paths")
+    if isinstance(deleted, list):
+        return [str(path) for path in deleted]
+    return []
+
+
 def _worker_reclaimed_paths(outcome: WorkerReclaimOutcome) -> frozenset[str]:
     """The paths the worker actually deleted, per its reap report.
 
@@ -247,11 +272,7 @@ def _worker_reclaimed_paths(outcome: WorkerReclaimOutcome) -> frozenset[str]:
     nonetheless superseded — a full reclaim drops them wholesale, a partial one
     only drops what it can prove it removed.
     """
-    report = outcome.report or {}
-    deleted = report.get("deleted_paths")
-    if isinstance(deleted, list):
-        return frozenset(str(path) for path in deleted)
-    return frozenset()
+    return frozenset(_worker_reclaimed_path_strs(outcome))
 
 
 def _drop_worker_reclaimed_auth_skips(
