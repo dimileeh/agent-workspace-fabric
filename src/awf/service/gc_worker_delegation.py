@@ -262,6 +262,15 @@ def fold_worker_reclaim(
         # empty candidate list, contradicting the dry-run preview that lists that same
         # candidate (PRRT_kwDOSJAM6s6Jcixj).
         _fold_worker_only_candidates(folded, base, outcome.report or {})
+        # Fold the worker-only *preserved* rows the same way. A too-young
+        # cancelled/destroyed workspace is returned by the worker's discarded-status
+        # pass under ``preserved`` (within ``--min-age-hours`` / cleanup disabled), not
+        # as a candidate — and the API default pass never classifies those statuses at
+        # all. Without this the headline ``preserved``/``preserved_count`` stay
+        # API-only, so an ``--execute`` response reports zero preserved rows while the
+        # worker report and dry-run preview (``combine_terminal_gc_reports``) considered
+        # and preserved one, contradicting the plan/execute summary (PRRT_kwDOSJAM6s6JdGCK).
+        _fold_worker_only_preserved(folded, base, outcome.report or {})
         if outcome.worker_partial:
             # The worker's own reap was partial — it leaked disk it could not
             # reclaim, so a previously-clean run must not still read as success and
@@ -605,12 +614,60 @@ def _fold_worker_only_candidates(
     folded["candidate_count"] = len(merged)
 
 
+def _fold_worker_only_preserved(
+    folded: dict[str, object], base: dict[str, object], report: dict[str, object]
+) -> None:
+    """Append preserved rows the worker considered that the API plan never carried.
+
+    The headline ``preserved``/``preserved_count`` come from the API default-policy
+    pass only. The worker's discarded-status augmentation pass also classifies the
+    cancelled/destroyed rows the API plan never sees (see
+    ``_combine_terminal_gc_reports``), and a too-young or cleanup-disabled one is
+    returned under ``preserved`` rather than deleted. Those entries are net-new and
+    must reach the headline — otherwise an ``--execute`` response reports zero
+    preserved rows while the dry-run preview (which concatenates both passes'
+    ``preserved`` via ``combine_terminal_gc_reports``) lists that same workspace, so
+    the operator-facing summary disagrees with the plan (PRRT_kwDOSJAM6s6JdGCK).
+    Identified by ``workspace_id`` (any worker preserved row absent from the API
+    plan's preserved set), mirroring ``_fold_worker_only_candidates`` so an
+    API-preserved row is never duplicated; rows without a ``workspace_id`` are skipped
+    (cannot prove they are net-new). A fresh list is built so the caller's ``base``
+    stays untouched.
+    """
+    base_ids = {
+        preserved.get("workspace_id")
+        for preserved in _preserved_dicts(base)
+        if preserved.get("workspace_id") is not None
+    }
+    worker_only = [
+        dict(preserved)
+        for preserved in _preserved_dicts(report)
+        if preserved.get("workspace_id") is not None
+        and preserved.get("workspace_id") not in base_ids
+    ]
+    if not worker_only:
+        return
+    existing = folded.get("preserved")
+    merged: list[object] = list(existing) if isinstance(existing, list) else []
+    merged.extend(worker_only)
+    folded["preserved"] = merged
+    folded["preserved_count"] = len(merged)
+
+
 def _candidate_dicts(payload: dict[str, object]) -> list[Mapping[str, object]]:
     """The candidate entries of a gc report/plan dict, skipping non-mapping noise."""
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
         return []
     return [candidate for candidate in candidates if isinstance(candidate, Mapping)]
+
+
+def _preserved_dicts(payload: dict[str, object]) -> list[Mapping[str, object]]:
+    """The preserved entries of a gc report/plan dict, skipping non-mapping noise."""
+    preserved = payload.get("preserved")
+    if not isinstance(preserved, list):
+        return []
+    return [entry for entry in preserved if isinstance(entry, Mapping)]
 
 
 def _as_int(value: object) -> int:

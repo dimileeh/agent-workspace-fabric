@@ -1235,3 +1235,120 @@ def test_fold_worker_partial_adds_worker_only_candidate_to_headline_list() -> No
     assert folded["status"] == "partial"
     assert folded["candidates"] == [candidate]
     assert folded["candidate_count"] == 1
+
+
+def test_fold_adds_worker_only_preserved_to_headline_preserved_list() -> None:
+    # PRRT_kwDOSJAM6s6JdGCK: a too-young cancelled/destroyed workspace is returned by
+    # the worker's discarded-status pass under ``preserved`` (within ``--min-age-hours``)
+    # rather than as a candidate, and the API default policy never classifies those
+    # statuses. That preserved row must surface on the headline
+    # ``preserved``/``preserved_count`` — otherwise the ``--execute`` response reports
+    # zero preserved rows while the dry-run preview lists that same workspace.
+    preserved = {
+        "workspace_id": "ws-cancelled",
+        "status": "cancelled",
+        "reason_code": "WORKSPACE_WITHIN_RETENTION",
+    }
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "preserved": [preserved],
+        "preserved_count": 1,
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        preserved=[],
+        preserved_count=0,
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["preserved"] == [preserved]
+    assert folded["preserved_count"] == 1
+    # The caller's base list is left untouched (a fresh list is built).
+    assert base["preserved"] == []
+    assert base["preserved_count"] == 0
+
+
+def test_fold_does_not_duplicate_api_preserved_row_in_headline_list() -> None:
+    # A worker preserved row already carried by the API plan (same ``workspace_id``,
+    # the shared default pass) is not re-appended — duplicating it would inflate
+    # ``preserved_count`` and the preserved list.
+    api_preserved = {"workspace_id": "ws-1", "status": "failed"}
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "preserved": [{"workspace_id": "ws-1", "status": "failed"}],
+        "preserved_count": 1,
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        preserved=[api_preserved],
+        preserved_count=1,
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["preserved"] == [api_preserved]
+    assert folded["preserved_count"] == 1
+
+
+def test_fold_skips_worker_only_preserved_without_workspace_id() -> None:
+    # A preserved row with no ``workspace_id`` cannot be proven net-new against the API
+    # plan, so it is skipped rather than inflating the headline preserved count.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "preserved": [{"status": "cancelled", "reason_code": "WORKSPACE_WITHIN_RETENTION"}],
+        "preserved_count": 1,
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        preserved=[],
+        preserved_count=0,
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["preserved"] == []
+    assert folded["preserved_count"] == 0
+
+
+def test_fold_appends_worker_only_preserved_when_base_lacks_preserved_list() -> None:
+    # Defensive: a base payload without a ``preserved`` list (robust to a stubbed or
+    # garbled payload) still surfaces the worker-only preserved row.
+    preserved = {"workspace_id": "ws-cancelled", "status": "cancelled"}
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "preserved": [preserved],
+        "preserved_count": 1,
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=0, deleted_paths=[], total_estimated_bytes=0)
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["preserved"] == [preserved]
+    assert folded["preserved_count"] == 1
