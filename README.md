@@ -8,6 +8,10 @@
 
 ![AWF — one control plane conducting an orchestra of AI coding agents, each in its own isolated workspace, producing merged pull requests](docs/assets/awf-orchestra.svg)
 
+> The AWF operator console: five agents running in parallel against one codebase — each in its own isolated workspace, each monitored through its own PR, all merging through one governed queue.
+
+![AWF operator console showing five parallel agent workspaces, live resource capacity, and a governed merge queue](docs/assets/awf-console.png)
+
 📐 **[Interactive architecture diagram](docs/architecture.html)** &nbsp;·&nbsp; 🧭 **[Concepts &amp; glossary](docs/CONCEPTS.md)** &nbsp;·&nbsp; 🚀 **[Quickstart](docs/QUICKSTART.md)**
 
 **AWF is an industrial workspace fabric for AI coding agents.**
