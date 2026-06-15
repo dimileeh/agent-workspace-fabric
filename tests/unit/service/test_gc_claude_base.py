@@ -526,6 +526,57 @@ def test_reap_one_base_refuses_symlinked_child(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_reap_loop_refuses_symlinked_candidate_before_estimation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A symlinked ``<signature>`` child of the base root is rejected *before* the byte
+    # estimator runs, so the estimator never ``rglob``s through the link target (a tree
+    # outside the base root). ``base_root.iterdir()`` yields the link because ``is_dir``
+    # follows it, and ``<sig>/.claude`` resolves through it too — without the in-loop
+    # precheck ``_estimate_bytes`` would size the external tree before the guard refused
+    # it (PRRT_kwDOSJAM6s6JdHQU). Fail loudly if the estimator is ever reached.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+
+    base_root = work_dir / "auth" / "_shared" / "claude-base"
+    base_root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    (outside / ".claude").mkdir(parents=True)
+    (outside / ".claude" / "precious").write_text("keep me")
+    link = base_root / "sigsymlink00000"
+    link.symlink_to(outside, target_is_directory=True)
+
+    def _explode(_path: Path) -> int:
+        raise AssertionError("estimator must not touch a rejected candidate")
+
+    monkeypatch.setattr(gc_claude_base_mod, "_estimate_bytes", _explode)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=tmp_path / "absent-mounts",
+        execute=True,
+        capability_probe=lambda: True,
+    )
+
+    assert report["reaped"] == []
+    assert report["reaped_estimated_bytes"] == 0
+    assert report["status"] == "partial"
+    assert report["reason_code"] == CLAUDE_BASE_REAP_PARTIAL
+    assert report["errors"] == [
+        {
+            "signature": "sigsymlink00000",
+            "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+            "error": "refused to reap a base outside the shared base root",
+        }
+    ]
+    # The link and its target tree are untouched.
+    assert link.is_symlink()
+    assert (outside / ".claude" / "precious").read_text() == "keep me"
+
+
+@pytest.mark.unit
 def test_pinned_dir_scan_tolerates_missing_auth_root(tmp_path: Path) -> None:
     # ``work_dir`` with no ``auth`` dir at all (overlay never used): the pin scan is a
     # clean empty set and the whole reaper is a no-op, never an error.
