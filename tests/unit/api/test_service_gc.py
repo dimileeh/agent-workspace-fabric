@@ -234,6 +234,59 @@ async def test_service_gc_dry_run_previews_claude_base_reap_for_discarded_pass(
 
 
 @pytest.mark.unit
+async def test_service_gc_dry_run_discarded_pass_budget_exhausted_passes_limit_zero(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the first pass exhausts the shared batch the discarded pass gets ``limit=0``.
+
+    The two preview passes share one cleanup-batch budget
+    (``discarded_limit = candidate_limit - first-pass candidates``) so the dry-run can
+    never list more candidates than ``--execute`` could reap in one batch
+    (PRRT_kwDOSJAM6s6JcnXh). If the first (default-policy) pass already fills the limit,
+    the second (cancelled/destroyed) preview must be budgeted to 0 — ``plan_terminal_workspace_gc``
+    clamps that to ``.limit(0)`` and lists nothing, so the plan does not over-list.
+    """
+    monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
+    calls: list[dict[str, object]] = []
+
+    def _payload(candidate_count: int) -> dict[str, object]:
+        return {
+            "dry_run": True,
+            "status": "dry_run",
+            "reason_code": "CLEANUP_DRY_RUN",
+            "candidate_count": candidate_count,
+            "candidates": [],
+            "deleted_paths": [],
+            "delete_errors": [],
+            "preserved_count": 0,
+            "deleted_path_count": 0,
+            "total_estimated_bytes": 0,
+        }
+
+    async def _fake_entrypoint(_session_factory: object, **kwargs: object) -> _FakeGCResult:
+        calls.append(kwargs)
+        # First (default) pass fills the whole ``--limit 1`` batch so the discarded
+        # pass's share is ``1 - 1 == 0``.
+        return _FakeGCResult(_payload(1 if len(calls) == 1 else 0))
+
+    with patch(
+        "awf.service.gc_request.run_service_workspace_gc",
+        new=AsyncMock(side_effect=_fake_entrypoint),
+    ):
+        response = await client.post(
+            "/v1/service/gc",
+            json={"min_age_hours": 24, "limit": 1},
+        )
+
+    assert response.status_code == 200, response.text
+    assert len(calls) == 2
+    assert calls[0]["limit"] == 1
+    assert calls[1]["limit"] == 0
+
+
+@pytest.mark.unit
 async def test_service_gc_dry_run_previews_base_pinned_by_both_passes(
     client: AsyncClient,
     engine: AsyncEngine,
