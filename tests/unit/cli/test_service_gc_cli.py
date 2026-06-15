@@ -526,5 +526,71 @@ def test_service_gc_skips_service_env_when_overrides_present(
     assert mock.call_args.kwargs["headers"]["Authorization"] == "Bearer flag-token"
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("payload", [None, [], "not-a-mapping", 42])
+def test_warn_on_worker_delegation_failure_ignores_non_mapping(
+    payload: object, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Worker JSON can be malformed (e.g. a non-JSON-object body decoded to a
+    # list/None); a non-Mapping payload is not a delegation failure, so the
+    # helper returns False and prints no hint.
+    from awf.cli.common import warn_on_worker_delegation_failure
+
+    assert warn_on_worker_delegation_failure(payload) is False
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+@pytest.mark.unit
+def test_warn_on_worker_delegation_failure_unrelated_reason_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A Mapping with no worker_reclaim error and an unrelated headline reason
+    # code (here a successful execute) is not a delegation failure: the helper
+    # falls back to payload["reason_code"], still doesn't match, returns False,
+    # and prints nothing.
+    from awf.cli.common import warn_on_worker_delegation_failure
+
+    payload = {
+        "dry_run": False,
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+    }
+    assert warn_on_worker_delegation_failure(payload) is False
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+@pytest.mark.unit
+def test_warn_on_worker_delegation_failure_reclaim_failed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The RECLAIM_FAILED reason code is neither "unavailable" nor "timeout", so
+    # the helper falls through to the generic failure detail, emits the hint on
+    # stderr, and returns True.
+    from awf.cli.common import warn_on_worker_delegation_failure
+
+    payload = {
+        "dry_run": False,
+        "status": "partial",
+        "reason_code": "SERVICE_GC_WORKER_RECLAIM_FAILED",
+        "worker_reclaim": {
+            "status": "failed",
+            "reason_code": "SERVICE_GC_WORKER_RECLAIM_FAILED",
+            "message": "overlay busy",
+        },
+    }
+    assert warn_on_worker_delegation_failure(payload) is True
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "the control-worker's reclaim of the auth overlays and claude-base failed" in (
+        captured.err
+    )
+    assert "overlay busy" in captured.err
+    assert "Start the control-worker" in captured.err
+
+
 def _combined_output(result: Any) -> str:
     return f"{result.stdout}{getattr(result, 'stderr', '')}"
