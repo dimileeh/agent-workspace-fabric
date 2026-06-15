@@ -83,7 +83,7 @@ def _stub_api_side_reclaim(monkeypatch: pytest.MonkeyPatch) -> None:
             }
 
     monkeypatch.setattr(
-        "awf.api.routes.service.run_service_workspace_gc",
+        "awf.service.gc_request.run_service_workspace_gc",
         AsyncMock(return_value=_Result()),
     )
 
@@ -377,17 +377,18 @@ async def test_execute_shrinks_worker_deadline_by_api_phase_elapsed(
     monkeypatch.setenv("AWF_WORK_DIR", str(tmp_path / "service"))
     from awf.api.routes import service as service_route
     from awf.api.schemas import ServiceGCRequest
+    from awf.service import gc_request as gc_request_module
     from awf.service.gc_worker_delegation import WorkerReclaimOutcome
 
     # api_phase_start = 0.0, then elapsed read = 250.0 → 250s API phase.
-    monkeypatch.setattr(service_route, "monotonic", iter([0.0, 250.0]).__next__)
+    monkeypatch.setattr(gc_request_module, "monotonic", iter([0.0, 250.0]).__next__)
     captured: dict[str, float] = {}
 
     async def _capture(*_args: object, deadline_seconds: float, **_kwargs: object) -> object:
         captured["deadline_seconds"] = deadline_seconds
         return WorkerReclaimOutcome.delegation_timeout("captured")
 
-    monkeypatch.setattr(service_route, "delegate_service_gc_to_worker", _capture)
+    monkeypatch.setattr(gc_request_module, "delegate_service_gc_to_worker", _capture)
 
     await service_route.trigger_service_gc(
         ServiceGCRequest(execute=True, worker_delegation_timeout_seconds=200.0),

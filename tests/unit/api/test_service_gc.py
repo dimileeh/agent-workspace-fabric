@@ -220,7 +220,7 @@ async def test_service_gc_dry_run_previews_claude_base_reap_for_discarded_pass(
         return _FakeGCResult(_payload(1 if len(calls) == 1 else 0))
 
     with patch(
-        "awf.api.routes.service.run_service_workspace_gc",
+        "awf.service.gc_request.run_service_workspace_gc",
         new=AsyncMock(side_effect=_fake_entrypoint),
     ):
         response = await client.post("/v1/service/gc", json={"min_age_hours": 24})
@@ -307,7 +307,7 @@ async def test_service_gc_maps_request_params_to_entrypoint(
         )
 
     with patch(
-        "awf.api.routes.service.run_service_workspace_gc",
+        "awf.service.gc_request.run_service_workspace_gc",
         new=AsyncMock(side_effect=_fake_entrypoint),
     ):
         response = await client.post(
@@ -367,7 +367,7 @@ async def test_service_gc_passes_disabled_base_reap_flag(
         )
 
     with patch(
-        "awf.api.routes.service.run_service_workspace_gc",
+        "awf.service.gc_request.run_service_workspace_gc",
         new=AsyncMock(side_effect=_fake_entrypoint),
     ):
         response = await client.post("/v1/service/gc", json={})
@@ -404,7 +404,7 @@ async def test_service_gc_accepts_superseded_status_filter(
         )
 
     with patch(
-        "awf.api.routes.service.run_service_workspace_gc",
+        "awf.service.gc_request.run_service_workspace_gc",
         new=AsyncMock(side_effect=_fake_entrypoint),
     ):
         response = await client.post(
@@ -442,7 +442,7 @@ async def test_service_gc_returns_partial_envelope(
     )
 
     with patch(
-        "awf.api.routes.service.run_service_workspace_gc",
+        "awf.service.gc_request.run_service_workspace_gc",
         new=AsyncMock(return_value=fake),
     ):
         response = await client.post("/v1/service/gc", json={"execute": True})
@@ -467,7 +467,7 @@ def test_plan_candidate_auth_dirs_skips_malformed_candidates() -> None:
     dict, and one whose ``auth['path']`` is not a string must all be dropped,
     leaving exactly the single fully well-formed auth ``Path``.
     """
-    from awf.api.routes.service import _plan_candidate_auth_dirs
+    from awf.service.gc_request import _plan_candidate_auth_dirs
 
     plan_payload = {
         "candidates": [
