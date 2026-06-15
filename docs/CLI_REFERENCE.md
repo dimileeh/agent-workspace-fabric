@@ -267,11 +267,16 @@ Request workspace control actions:
 ```bash
 uv run --python 3.12 --extra dev awf workspace cancel ws_123 --reason "No longer needed"
 uv run --python 3.12 --extra dev awf workspace stop ws_123 --reason "Stack unstable"
+uv run --python 3.12 --extra dev awf workspace retry ws_123 --reason "Re-run after a transient infrastructure failure"
 uv run --python 3.12 --extra dev awf workspace refresh ws_123 --reason "Target branch advanced"
 uv run --python 3.12 --extra dev awf workspace validate ws_123 --requested-tier 2
 uv run --python 3.12 --extra dev awf workspace rebase ws_123 --reason "Recover merge conflicts"
+uv run --python 3.12 --extra dev awf workspace remonitor ws_123 --reason "Re-attach the PR monitor after recovery"
 uv run --python 3.12 --extra dev awf workspace destroy ws_123 --if-match 7
 ```
+
+`retry` re-runs a failed or cancelled workspace as a fresh attempt; `remonitor`
+requests PR-monitor recovery for a workspace that is monitoring a PR.
 
 Control commands send an `Idempotency-Key` header. The CLI generates one when
 `--idempotency-key` is omitted, which is convenient for one-off operator
@@ -279,6 +284,21 @@ commands. If a request times out or the response is dropped, rerun the command
 with an explicit `--idempotency-key <stable-key>` value so AWF can replay the
 same operation instead of starting a fresh one. Pass `--if-match <version>` when
 you want optimistic concurrency against a workspace version or ETag.
+
+Steer a live PR-monitoring workspace without cancelling it:
+
+```bash
+uv run --python 3.12 --extra dev awf workspace guide ws_123 \
+  --directive "Resolve the remaining low-value review nits via DEFER replies, then auto-merge on green CI." \
+  --reason "operator convergence nudge"
+```
+
+`awf workspace guide` (alias `awf workspace instruct`, issue #447) injects an
+operator directive into a workspace that is actively monitoring a PR. It is the
+intended way to respond when AWF escalates a monitor for human attention: the
+monitor resumes with the directive in context, so you steer it instead of
+cancelling and re-adopting. The `--directive` value is capped at 1024
+characters.
 
 Inspect workspace observability data:
 
