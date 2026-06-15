@@ -282,6 +282,89 @@ class TestPushAndOpen:
         assert len([call for call in runner.calls if call.args[:3] == ["gh", "pr", "create"]]) == 1
 
     @pytest.mark.unit
+    async def test_github_duplicate_pr_create_retries_failed_lookup(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        duplicate_error = (
+            'a pull request for branch "awf/ws_x" into branch "development" already exists'
+        )
+        runner.queue_result(returncode=0)  # push succeeds
+        runner.queue_result(returncode=1, stderr=duplicate_error)
+        runner.queue_result(returncode=1, stderr="gh api timeout")
+        runner.queue_result(returncode=1, stderr=duplicate_error)
+        runner.queue_result(
+            returncode=0,
+            stdout=_open_pr_list_payload(number=89, branch="awf/ws_x"),
+        )
+
+        creator = PullRequestCreator(
+            runner,
+            pr_create_transient_initial_backoff_seconds=0,
+        )
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_x",
+            base_branch="development",
+            title="t",
+            body="b",
+            forge_client=GitHubClient(runner),
+            repo_url=_GH_REPO_URL,
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/89"
+        assert result.open_metadata is not None
+        assert result.open_metadata["strategy"] == "reconciled_after_duplicate"
+        lookups = result.open_metadata["reconcile_lookups"]
+        assert isinstance(lookups, list)
+        assert lookups[0]["status"] == "failed"
+        assert lookups[0]["reason_code"] == "OPEN_PR_LOOKUP_FAILED"
+        assert lookups[1]["status"] == "found"
+        failures = result.open_metadata["failures"]
+        assert isinstance(failures, list)
+        assert failures[0]["will_retry"] is True
+        create_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "create"]]
+        list_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "list"]]
+        assert len(create_calls) == 2
+        assert len(list_calls) == 2
+
+    @pytest.mark.unit
+    async def test_github_duplicate_pr_create_reports_exhausted_lookup_failure(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push succeeds
+        runner.queue_result(
+            returncode=1,
+            stderr='a pull request for branch "awf/ws_x" into branch "development" already exists',
+        )
+        runner.queue_result(returncode=1, stderr="gh api timeout")
+
+        creator = PullRequestCreator(
+            runner,
+            pr_create_transient_max_retries=0,
+            pr_create_transient_initial_backoff_seconds=0,
+        )
+        with pytest.raises(PullRequestError) as exc:
+            await creator.push_and_open(
+                worktree_path=_WORKTREE,
+                branch_name="awf/ws_x",
+                base_branch="development",
+                title="t",
+                body="b",
+                forge_client=GitHubClient(runner),
+                repo_url=_GH_REPO_URL,
+            )
+
+        assert exc.value.details is not None
+        assert exc.value.details["strategy"] == "duplicate_lookup_failed"
+        lookups = exc.value.details["reconcile_lookups"]
+        assert isinstance(lookups, list)
+        assert lookups[0]["status"] == "failed"
+        assert lookups[0]["reason_code"] == "OPEN_PR_LOOKUP_FAILED"
+        failures = exc.value.details["failures"]
+        assert isinstance(failures, list)
+        assert failures[0]["will_retry"] is False
+
+    @pytest.mark.unit
     async def test_github_transient_pr_create_ignores_fork_pr_collision(self) -> None:
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)

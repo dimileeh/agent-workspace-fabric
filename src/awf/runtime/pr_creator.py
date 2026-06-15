@@ -457,12 +457,36 @@ class PullRequestCreator:
                         open_metadata=metadata,
                     )
 
+                lookup_failed = lookup_detail.get("status") == "failed"
+                if duplicate and lookup_failed and attempt <= self._pr_create_transient_max_retries:
+                    wait_seconds = self._pr_create_retry_wait_seconds(attempt)
+                    failure["will_retry"] = True
+                    failure["wait_seconds"] = wait_seconds
+                    _log.warning(
+                        "pr_creator.github_pr_create_duplicate_lookup_retrying",
+                        repo=repo.slug(),
+                        branch=branch_name,
+                        base_branch=base_branch,
+                        attempt=attempt,
+                        max_retries=self._pr_create_transient_max_retries,
+                        wait_seconds=wait_seconds,
+                        reason_code=lookup_detail.get("reason_code"),
+                        error=failure["error_message"],
+                    )
+                    if wait_seconds > 0:
+                        await self._sleep(wait_seconds)
+                    continue
+
                 if duplicate:
                     raise _pull_request_error_from_github(
                         exc,
                         head_sha=head_sha,
                         details=_github_pr_create_details(
-                            strategy="duplicate_lookup_missed",
+                            strategy=(
+                                "duplicate_lookup_failed"
+                                if lookup_failed
+                                else "duplicate_lookup_missed"
+                            ),
                             attempts=attempt,
                             max_retries=self._pr_create_transient_max_retries,
                             failures=failures,
