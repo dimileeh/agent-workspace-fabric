@@ -39,8 +39,9 @@ phases run against the real stack; if they pass, AWF pushes the branch and opens
 a PR against the base branch — then **keeps running** in a `monitoring_pr`
 state, resolving review comments, fixing CI, and syncing the base until the PR
 merges (feature flow) or is declared ready for a human (release flow). If any
-step fails, the workspace is left in `failed` with a structured `failure_reason`
-and the stack stays up for post-mortem.
+step fails, the workspace is left in `failed` with a structured `failure_reason`;
+its worktree, logs, and `failed` row are preserved for post-mortem (the runtime
+stack itself is reclaimed promptly, like any terminal workspace — see §12).
 
 ## 2 — First: AWF is a persistent local service
 
@@ -419,8 +420,11 @@ awf service logs --service worker   # service-level (api|worker|migrate|postgres
 `infrastructure_failure`, `policy_failure`, `cleanup_failure`,
 `profile_resolution_failure`, `service_startup_failure`, `phase_timeout`,
 `health_check_failure` (detail codes in `docs/REASON_CATALOG.md`). Low-level
-fallback: `docker logs awf-<workspace_id>-<service>` and
-`docker exec -it awf-<workspace_id>-agent bash`.
+fallback **while the stack is still live** (the worker reclaims a terminal
+workspace's containers + network promptly): `docker logs
+awf-<workspace_id>-<service>` and `docker exec -it awf-<workspace_id>-agent bash`.
+After reclaim, the persisted `awf workspace logs <id>` and the preserved worktree
+are the triage surface.
 
 Common failure modes + fixes:
 
@@ -436,15 +440,36 @@ Common failure modes + fixes:
 
 ## 12 — Cleanup
 
-AWF does NOT auto-cleanup on failure (intentional — so you can post-mortem).
+**Every terminal workspace — `failed` included — has its runtime stack reclaimed**
+promptly by the worker on the terminal transition, with a ~1h
+interval backstop. So you do **not** post-mortem a failed run by exec'ing into a
+live container — that stack is gone. A `failed` workspace instead **preserves its
+triage state**: the worktree (`remove_worktree=False`), its auth dir, its logs,
+and the `failed` row with `failure_reason`. Triage via `awf workspace
+show`/`events`/`logs` (§11) and the worktree on disk.
 
-- **Bulk reclaim (canonical):** `awf service gc` (or `POST /v1/service/gc`).
-  Dry-run by default; `--execute` to delete; filters `--status`,
-  `--min-age-hours N`, `--limit`. It runs **inside the api/control container**
-  with correct ownership — a host UID-1000 CLI cannot delete root-owned per-
-  workspace auth dirs, so this is the path that actually frees disk.
+- **Per-ws runtime + auth overlays auto-reclaim, worker-side.** The biggest disk
+  consumer is each workspace's provider-auth overlay (`auth/<id>/…`, up to
+  ~1–2 GB). On the terminal transition — for **any** terminal status, `failed`
+  included — the worker eagerly tears the runtime down: `compose down` of the
+  agent+postgres containers and the `-net` network, then the auth-overlay
+  unmount, emitting `terminal_runtime_released`, with a periodic scan
+  as backstop. Unmounting the overlay needs `CAP_SYS_ADMIN`, which **only the
+  worker holds**, so this reclaim always runs in the worker — never a host `rm`
+  or a synchronous API call. The auth *dir* itself is then reclaimed by the
+  disk-gc (next bullet), which **deliberately keeps `failed` dirs** for triage.
+- **On-demand bulk reclaim — `awf service gc`** (or `POST /v1/service/gc`).
+  Dry-run by default (plans, deletes nothing); `--execute` to act; filters
+  `--status`, `--min-age-hours N`, `--limit`. The API container can't unmount the
+  capability-gated paths itself, so on `--execute` it **delegates the per-ws auth
+  overlays + `_shared/claude-base` reclaim to the worker** (the only
+  `CAP_SYS_ADMIN` context), waits for it, and folds the worker's real reclamation
+  into the response. So `gc --execute` **is** the on-demand way to
+  reclaim auth-dir disk under pressure — it routes those dirs through the worker
+  rather than skipping them. (It does not delete workspace DB rows — use
+  `DELETE /v1/workspaces/{id}` for a single record.)
 - **Single workspace:** `DELETE /v1/workspaces/{id}`.
-- **Manual fallback:**
+- **Manual fallback (stack only):**
   `docker compose --project-name awf_<ws_id> down -v`. Find stacks by label, not
   name prefix: `docker ps -a --filter 'label=com.docker.compose.project=awf_<ws_id>'`.
   Volumes are `awf-<ws_id>-*`, network `awf-<ws_id>-net`; per-ws state lives
