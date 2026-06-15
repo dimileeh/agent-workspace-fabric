@@ -14,6 +14,8 @@ from awf.service.gc_worker_delegation import (
     SERVICE_GC_WORKER_RECLAIMED,
     SERVICE_GC_WORKER_UNAVAILABLE,
     WorkerReclaimOutcome,
+    _claude_base_reaped_path_strs,
+    _reconcile_candidate_auth,
     bounded_worker_deadline_seconds,
     fold_worker_reclaim,
 )
@@ -759,3 +761,175 @@ def test_fold_keeps_auth_skip_when_worker_partial_did_not_reclaim_it() -> None:
     remaining = folded["delete_errors"]
     assert isinstance(remaining, list)
     assert [error["kind"] for error in remaining] == ["auth_overlay_unmount"]
+
+
+def test_claude_base_reaped_paths_empty_when_reaped_not_a_list() -> None:
+    # ``reaped`` is external worker JSON; a malformed non-list value (e.g. the worker
+    # serialized a scalar instead of an array) must yield no reaped base paths rather
+    # than iterating a string/int — the documented fallback is the empty list.
+    report = {
+        "claude_base_reap": {
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": "sigA",
+        }
+    }
+
+    assert _claude_base_reaped_path_strs(report) == []
+
+
+def test_reconcile_candidate_auth_returns_non_mapping_candidate_unchanged() -> None:
+    # ``candidates`` entries come from external worker JSON; a non-mapping element
+    # (e.g. a bare string) is returned verbatim so the caller leaves the list as-is.
+    sentinel = "not-a-candidate-mapping"
+
+    result = _reconcile_candidate_auth(sentinel, frozenset({"/work/_shared/auth/ws-1"}))
+
+    assert result is sentinel
+
+
+def test_reconcile_candidate_auth_returns_candidate_when_auth_not_a_mapping() -> None:
+    # ``paths.auth`` is malformed (a scalar rather than the expected entry object); the
+    # candidate is returned unchanged so the per-candidate audit view is left verbatim.
+    candidate = {
+        "workspace_id": "ws-1",
+        "paths": {"auth": "garbled-auth-entry"},
+    }
+
+    result = _reconcile_candidate_auth(candidate, frozenset({"/work/_shared/auth/ws-1"}))
+
+    assert result is candidate
+
+
+def test_fold_keeps_partial_when_companion_image_prune_failed() -> None:
+    # The auth-unmount skip is reconcilable, but an unrelated companion-image prune
+    # failure (a Mapping with ``status: failed``) is a failure the worker reclaim does
+    # not supersede, so the headline must stay partial.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "path": "/work/_shared/auth/ws-1",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+        companion_image_prune={"status": "failed", "error": "docker image prune failed"},
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "succeeded",
+            "deleted_path_count": 1,
+            "deleted_paths": ["/work/_shared/auth/ws-1"],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # The reconcilable auth skip is dropped, but the run stays partial for the prune.
+    assert folded["status"] == "partial"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    assert folded["delete_errors"] == []
+
+
+def test_fold_keeps_partial_when_reservation_release_carries_error() -> None:
+    # ``reservation_releases`` is a Mapping of workspace_id -> release outcome. One
+    # release carrying an ``error`` is an unreconciled failure, so even after dropping
+    # the reconcilable auth skip the headline stays partial.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "path": "/work/_shared/auth/ws-1",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+        reservation_releases={
+            "ws-1": {"error": None},
+            "ws-2": {"error": "lease release failed"},
+        },
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "succeeded",
+            "deleted_path_count": 1,
+            "deleted_paths": ["/work/_shared/auth/ws-1"],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+
+
+def test_fold_restores_success_when_reservation_releases_all_clean() -> None:
+    # When every ``reservation_releases`` entry is a Mapping with no ``error``, there is
+    # no unreconciled failure: dropping the stale auth skip restores the headline to
+    # succeeded.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "path": "/work/_shared/auth/ws-1",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+        reservation_releases={
+            "ws-1": {"error": None},
+            "ws-2": {"error": None},
+        },
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "succeeded",
+            "deleted_path_count": 1,
+            "deleted_paths": ["/work/_shared/auth/ws-1"],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "succeeded"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_SUCCEEDED"
+
+
+def test_fold_skips_worker_only_candidate_with_non_mapping_estimate() -> None:
+    # A worker-only candidate (workspace_id absent from the API plan) whose
+    # ``estimated_bytes`` is malformed external JSON (a scalar, not the expected
+    # per-path Mapping) contributes nothing: the headline keeps the base plan total
+    # rather than crashing or guessing a byte count.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-cancelled"],
+        "total_estimated_bytes": 1_700_000_000,
+        "candidates": [
+            {
+                "workspace_id": "ws-cancelled",
+                "status": "cancelled",
+                "estimated_bytes": 1_700_000_000,
+            }
+        ],
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=100,
+        candidates=[],
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # The scalar estimate is not a Mapping, so no net-new bytes are summed.
+    assert folded["total_estimated_bytes"] == 100
