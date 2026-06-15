@@ -447,17 +447,19 @@ runtime reclaimed automatically (next bullet).
   down — `compose down` of the agent+postgres containers and the `-net`
   network, then unmount + remove the auth overlay, emitting
   `terminal_runtime_released` (#583/#584) — with a periodic scan as backstop.
-  That unmount needs `CAP_SYS_ADMIN`, which **only the worker holds**, so auth
-  dirs are not something you reclaim from the host or the API. Failed-workspace
-  auth dirs are deliberately preserved.
-- **Bulk reclaim of stacks/rows:** `awf service gc` (or `POST /v1/service/gc`).
-  Dry-run by default; `--execute` to delete; filters `--status`,
-  `--min-age-hours N`, `--limit`. It reclaims workspace Docker stacks
-  (containers, `-net` network, volumes), worktrees, and DB rows. But the
-  capability-less API path **cannot** unmount the per-ws auth overlays: it
-  records every auth path `skipped` and frees no auth-dir disk (that is the
-  worker's job, above). So `gc` alone will **not** shrink a disk that filled
-  with `auth/<id>/…` overlays — that reclaim is automatic on terminal release.
+  Unmounting the overlay needs `CAP_SYS_ADMIN`, which **only the worker holds**,
+  so this reclaim always runs in the worker — never a host `rm` or a synchronous
+  API call. Failed-workspace auth dirs are deliberately preserved.
+- **On-demand bulk reclaim — `awf service gc`** (or `POST /v1/service/gc`).
+  Dry-run by default (plans, deletes nothing); `--execute` to act; filters
+  `--status`, `--min-age-hours N`, `--limit`. The API container can't unmount the
+  capability-gated paths itself, so on `--execute` it **delegates the per-ws auth
+  overlays + `_shared/claude-base` reclaim to the worker** (the only
+  `CAP_SYS_ADMIN` context), waits for it, and folds the worker's real reclamation
+  into the response (#582/#590). So `gc --execute` **is** the on-demand way to
+  reclaim auth-dir disk under pressure — it routes those dirs through the worker
+  rather than skipping them. (It does not delete workspace DB rows — use
+  `DELETE /v1/workspaces/{id}` for a single record.)
 - **Single workspace:** `DELETE /v1/workspaces/{id}`.
 - **Manual fallback (stack only):**
   `docker compose --project-name awf_<ws_id> down -v`. Find stacks by label, not
