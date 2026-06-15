@@ -436,15 +436,30 @@ Common failure modes + fixes:
 
 ## 12 — Cleanup
 
-AWF does NOT auto-cleanup on failure (intentional — so you can post-mortem).
+A **failed** workspace is left up on purpose — stack running, `failure_reason`
+on the row — so you can post-mortem; AWF does not auto-clean it. A workspace
+that reaches a terminal state *cleanly* (merged / released / cancelled) has its
+runtime reclaimed automatically (next bullet).
 
-- **Bulk reclaim (canonical):** `awf service gc` (or `POST /v1/service/gc`).
+- **Per-ws runtime + auth overlays auto-reclaim, worker-side.** The biggest disk
+  consumer is each workspace's provider-auth overlay (`auth/<id>/…`, up to
+  ~1–2 GB). On a clean terminal transition the worker eagerly tears the runtime
+  down — `compose down` of the agent+postgres containers and the `-net`
+  network, then unmount + remove the auth overlay, emitting
+  `terminal_runtime_released` (#583/#584) — with a periodic scan as backstop.
+  That unmount needs `CAP_SYS_ADMIN`, which **only the worker holds**, so auth
+  dirs are not something you reclaim from the host or the API. Failed-workspace
+  auth dirs are deliberately preserved.
+- **Bulk reclaim of stacks/rows:** `awf service gc` (or `POST /v1/service/gc`).
   Dry-run by default; `--execute` to delete; filters `--status`,
-  `--min-age-hours N`, `--limit`. It runs **inside the api/control container**
-  with correct ownership — a host UID-1000 CLI cannot delete root-owned per-
-  workspace auth dirs, so this is the path that actually frees disk.
+  `--min-age-hours N`, `--limit`. It reclaims workspace Docker stacks
+  (containers, `-net` network, volumes), worktrees, and DB rows. But the
+  capability-less API path **cannot** unmount the per-ws auth overlays: it
+  records every auth path `skipped` and frees no auth-dir disk (that is the
+  worker's job, above). So `gc` alone will **not** shrink a disk that filled
+  with `auth/<id>/…` overlays — that reclaim is automatic on terminal release.
 - **Single workspace:** `DELETE /v1/workspaces/{id}`.
-- **Manual fallback:**
+- **Manual fallback (stack only):**
   `docker compose --project-name awf_<ws_id> down -v`. Find stacks by label, not
   name prefix: `docker ps -a --filter 'label=com.docker.compose.project=awf_<ws_id>'`.
   Volumes are `awf-<ws_id>-*`, network `awf-<ws_id>-net`; per-ws state lives
