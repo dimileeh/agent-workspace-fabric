@@ -975,6 +975,30 @@ def test_merge_claude_base_reaps_folds_reaped_and_deconflicts_protected() -> Non
 
 
 @pytest.mark.unit
+def test_merge_claude_base_reaps_sums_reaped_estimated_bytes_across_passes() -> None:
+    """Each pass reaps disjoint signatures, so their measured byte estimates sum.
+
+    Without folding the byte total, ``dict(default_reap)`` would keep only the first
+    pass's bytes and a base the discarded pass reaped would report 0 bytes despite a
+    GB-scale removal (PRRT_kwDOSJAM6s6Jcixk).
+    """
+    default = _reap(
+        "ok", "CLAUDE_BASE_SUPERSEDED_REAPED", reaped=["sigA"], reaped_estimated_bytes=1_000
+    )
+    discarded = _reap(
+        "ok",
+        "CLAUDE_BASE_SUPERSEDED_REAPED",
+        reaped=["sigB"],
+        reaped_estimated_bytes=1_700_000_000,
+    )
+
+    merged = _merge_claude_base_reaps(default, discarded)
+
+    assert merged is not None
+    assert merged["reaped_estimated_bytes"] == 1_700_001_000
+
+
+@pytest.mark.unit
 def test_merge_claude_base_reaps_partial_in_discarded_pass_wins() -> None:
     """A ``partial`` discarded reap drives the merged reap ``partial`` with its reason."""
     default = _reap("ok", "CLAUDE_BASE_SUPERSEDED_REAPED", reaped=["sigA"])

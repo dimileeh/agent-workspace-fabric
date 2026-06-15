@@ -99,6 +99,55 @@ def test_reaps_only_superseded_bases(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_reaped_estimated_bytes_measured_before_removal(tmp_path: Path) -> None:
+    # The reaper lists ``<signature>`` names, not byte sizes, so the worker GC totals
+    # would report a 0-byte reclaim for a base-only reap unless the size is captured
+    # before ``rmtree`` (PRRT_kwDOSJAM6s6Jcixk). Seed a superseded base with a known
+    # payload and assert the report carries its on-disk size.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+
+    base = _shared_claude_base_dir(work_dir, "sigsuper0000000")
+    base.mkdir(parents=True)
+    (base / "blob").write_text("x" * 4096)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=tmp_path / "absent-mounts",
+        execute=True,
+    )
+
+    assert report["reaped"] == ["sigsuper0000000"]
+    # Only the 4096-byte blob lives under the reaped ``<signature>`` tree.
+    assert report["reaped_estimated_bytes"] == 4096
+
+
+@pytest.mark.unit
+def test_reaped_estimated_bytes_zero_when_nothing_reaped(tmp_path: Path) -> None:
+    # A dry-run plans without deleting, so no bytes are reclaimed: the field stays 0
+    # (it counts only bases actually removed, mirroring ``reaped``).
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base = _shared_claude_base_dir(work_dir, "sigsuper0000000")
+    base.mkdir(parents=True)
+    (base / "blob").write_text("x" * 4096)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=tmp_path / "absent-mounts",
+        execute=False,
+    )
+
+    assert report["planned"] == ["sigsuper0000000"]
+    assert report["reaped"] == []
+    assert report["reaped_estimated_bytes"] == 0
+
+
+@pytest.mark.unit
 def test_current_signature_base_preserved_even_when_unmounted_and_unpinned(
     tmp_path: Path,
 ) -> None:

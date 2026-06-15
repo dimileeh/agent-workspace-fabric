@@ -84,9 +84,11 @@ class WorkerReclaimOutcome:
         shared-base reclaim from the operator. So the reaped bases are folded into the
         count here (and, via ``_worker_reclaimed_path_strs``, into the merged
         ``deleted_paths``) so ``worker_reclaim`` and the headline report the real
-        reclamation (PRRT_kwDOSJAM6s6JbAow). ``total_estimated_bytes`` stays the
-        top-level value: the claude-base reaper lists signatures, not byte sizes, so no
-        per-base estimate is available to add.
+        reclamation (PRRT_kwDOSJAM6s6JbAow). ``total_estimated_bytes`` likewise sums the
+        top-level workspace-candidate total with the reaped bases' on-disk size (now that
+        the reaper measures each base before removal), so a base-only reap no longer
+        reports ``total_estimated_bytes: 0`` next to GB-scale deletions
+        (PRRT_kwDOSJAM6s6Jcixk).
         """
         return cls(
             status="completed",
@@ -95,7 +97,10 @@ class WorkerReclaimOutcome:
                 _as_int(report.get("deleted_path_count"))
                 + len(_claude_base_reaped_path_strs(report))
             ),
-            total_estimated_bytes=_as_int(report.get("total_estimated_bytes")),
+            total_estimated_bytes=(
+                _as_int(report.get("total_estimated_bytes"))
+                + _claude_base_reaped_estimated_bytes(report)
+            ),
             worker_partial=report.get("status") == "partial",
             report=report,
         )
@@ -228,12 +233,18 @@ def fold_worker_reclaim(
         folded["deleted_paths"] = merged_paths
         # Add the bytes of workspaces the worker reaped that the API plan never
         # estimated (the discarded-status augmentation pass — cancelled/destroyed
-        # rows the API default policy omits). Without this the headline reports
-        # GB-scale ``deleted_path_count`` next to the bare API plan total — often 0 —
-        # so callers see GB deletions with 0 bytes reclaimed (PRRT_kwDOSJAM6s6JbHKg).
-        folded["total_estimated_bytes"] = _as_int(
-            base.get("total_estimated_bytes")
-        ) + _worker_only_estimated_bytes(base, outcome.report or {})
+        # rows the API default policy omits), plus the reaped shared ``claude-base``
+        # dirs (which the API plan never estimates — they live outside the
+        # per-workspace candidates). Without this the headline reports GB-scale
+        # ``deleted_path_count`` next to the bare API plan total — often 0 — so callers
+        # see GB deletions with 0 bytes reclaimed (PRRT_kwDOSJAM6s6JbHKg /
+        # PRRT_kwDOSJAM6s6Jcixk).
+        worker_report = outcome.report or {}
+        folded["total_estimated_bytes"] = (
+            _as_int(base.get("total_estimated_bytes"))
+            + _worker_only_estimated_bytes(base, worker_report)
+            + _claude_base_reaped_estimated_bytes(worker_report)
+        )
         # The fold reconciles the headline (``deleted_paths``, ``delete_errors``,
         # status, nested ``claude_base_reap``), but the already-serialized
         # ``candidates[*].paths.auth`` entry still reads ``status: skipped,
@@ -369,6 +380,22 @@ def _claude_base_reaped_path_strs(report: dict[str, object]) -> list[str]:
         prefix = base_root.rstrip("/")
         return [f"{prefix}/{signature}" for signature in reaped]
     return [str(signature) for signature in reaped]
+
+
+def _claude_base_reaped_estimated_bytes(report: dict[str, object]) -> int:
+    """On-disk bytes of the shared ``claude-base`` dirs the worker actually reaped.
+
+    ``reap_superseded_claude_bases`` measures each base before ``rmtree`` and records the
+    summed size under the nested ``claude_base_reap.reaped_estimated_bytes`` — outside the
+    top-level ``total_estimated_bytes`` (which covers only the per-workspace candidates).
+    Surfaced here so both ``worker_reclaim.total_estimated_bytes`` and the folded headline
+    reflect the GB-scale shared-base reclaim a base-only reap would otherwise report as 0
+    bytes (PRRT_kwDOSJAM6s6Jcixk). A missing or non-numeric field contributes 0.
+    """
+    claude_base = report.get("claude_base_reap")
+    if not isinstance(claude_base, Mapping):
+        return 0
+    return _as_int(claude_base.get("reaped_estimated_bytes"))
 
 
 def _worker_reclaimed_paths(outcome: WorkerReclaimOutcome) -> frozenset[str]:

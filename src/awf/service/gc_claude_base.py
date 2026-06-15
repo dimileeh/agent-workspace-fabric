@@ -41,6 +41,7 @@ from awf.node.auth_mounts import (
     _shared_claude_base_dir,
     iter_overlay_lowerdirs,
 )
+from awf.service.gc_classify import _estimate_bytes
 
 _log = get_logger(__name__)
 
@@ -272,7 +273,10 @@ def reap_superseded_claude_bases(
 
     ``status`` (``ok`` / ``partial`` / ``skipped``), ``execute``, ``base_root``,
     ``scanned`` / ``protected`` / ``reaped`` / ``planned`` / ``unverifiable``
-    signature lists, and per-signature ``errors``. A permission-denied removal makes
+    signature lists, ``reaped_estimated_bytes`` (the on-disk size of the reaped bases,
+    measured before removal so the worker GC totals report real reclamation rather than
+    0 — only execute passes that actually remove a base contribute), and per-signature
+    ``errors``. A permission-denied removal makes
     ``status`` ``partial`` (reason ``CLAUDE_BASE_REAP_PARTIAL``); the per-error reason
     distinguishes a permission denial (``CLAUDE_BASE_REAP_PERMISSION_DENIED``) from
     other ``OSError``.
@@ -305,6 +309,7 @@ def reap_superseded_claude_bases(
         "scanned": [],
         "protected": [],
         "reaped": [],
+        "reaped_estimated_bytes": 0,
         "planned": [],
         "unverifiable": [],
         "errors": [],
@@ -337,6 +342,7 @@ def reap_superseded_claude_bases(
     scanned: list[str] = []
     protected_names: list[str] = []
     reaped: list[str] = []
+    reaped_estimated_bytes = 0
     planned: list[str] = []
     unverifiable: list[str] = []
     errors: list[dict[str, str]] = []
@@ -365,15 +371,23 @@ def reap_superseded_claude_bases(
         if not execute:
             planned.append(signature_dir.name)
             continue
+        # Size the base *before* removal so the worker totals carry real bytes: the
+        # reaper lists ``<signature>`` names, not byte sizes, so without this a pass
+        # that reaps only superseded bases would surface a 0-byte reclaim despite
+        # deleting GB-scale dirs (PRRT_kwDOSJAM6s6Jcixk). Only successfully reaped
+        # bases contribute — a failed ``rmtree`` reclaimed nothing.
+        estimated = _estimate_bytes(signature_dir)
         error = _reap_one_base(signature_dir, base_root=base_root)
         if error is None:
             reaped.append(signature_dir.name)
+            reaped_estimated_bytes += estimated
         else:
             errors.append({"signature": signature_dir.name, **error})
 
     report["scanned"] = scanned
     report["protected"] = protected_names
     report["reaped"] = reaped
+    report["reaped_estimated_bytes"] = reaped_estimated_bytes
     report["planned"] = planned
     report["unverifiable"] = unverifiable
     report["errors"] = errors

@@ -14,6 +14,7 @@ from awf.service.gc_worker_delegation import (
     SERVICE_GC_WORKER_RECLAIMED,
     SERVICE_GC_WORKER_UNAVAILABLE,
     WorkerReclaimOutcome,
+    _claude_base_reaped_estimated_bytes,
     _claude_base_reaped_path_strs,
     _reconcile_candidate_auth,
     bounded_worker_deadline_seconds,
@@ -293,6 +294,87 @@ def test_fold_surfaces_claude_base_only_worker_reclaim() -> None:
     worker_reclaim = folded["worker_reclaim"]
     assert isinstance(worker_reclaim, dict)
     assert worker_reclaim["deleted_path_count"] == 2
+
+
+def test_from_report_sums_claude_base_reaped_bytes() -> None:
+    # The reaper now measures each base before removal and records the total under
+    # ``claude_base_reap.reaped_estimated_bytes``, outside the top-level workspace-
+    # candidate ``total_estimated_bytes``. The outcome must sum both so a base-only
+    # reap no longer reports 0 bytes despite GB-scale deletions (PRRT_kwDOSJAM6s6Jcixk).
+    report = {
+        "status": "succeeded",
+        "deleted_path_count": 0,
+        "total_estimated_bytes": 200,
+        "claude_base_reap": {
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigA", "sigB"],
+            "reaped_estimated_bytes": 1_700_000_000,
+        },
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+
+    assert outcome.total_estimated_bytes == 1_700_000_200
+
+
+def test_fold_surfaces_claude_base_reaped_bytes_in_headline() -> None:
+    # The headline scenario: the API plan estimated nothing (no eligible candidates)
+    # and the worker reaped only shared bases. Both the folded headline and
+    # ``worker_reclaim`` must carry the reaped bases' bytes rather than 0
+    # (PRRT_kwDOSJAM6s6Jcixk).
+    report = {
+        "status": "succeeded",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "claude_base_reap": {
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigA"],
+            "reaped_estimated_bytes": 1_700_000_000,
+        },
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=0, deleted_paths=[], total_estimated_bytes=0)
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["total_estimated_bytes"] == 1_700_000_000
+    worker_reclaim = folded["worker_reclaim"]
+    assert isinstance(worker_reclaim, dict)
+    assert worker_reclaim["total_estimated_bytes"] == 1_700_000_000
+
+
+def test_fold_adds_claude_base_bytes_on_top_of_api_plan_total() -> None:
+    # Reaped-base bytes are net-new: the API plan total covers per-workspace
+    # candidates, never the shared base, so the two sum without double-counting.
+    report = {
+        "status": "succeeded",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "claude_base_reap": {
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigA"],
+            "reaped_estimated_bytes": 1_700_000_000,
+        },
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=2, total_estimated_bytes=500)
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["total_estimated_bytes"] == 1_700_000_500
+
+
+def test_claude_base_reaped_estimated_bytes_handles_missing_or_garbled_reap() -> None:
+    assert _claude_base_reaped_estimated_bytes({}) == 0
+    assert _claude_base_reaped_estimated_bytes({"claude_base_reap": "nope"}) == 0
+    assert (
+        _claude_base_reaped_estimated_bytes({"claude_base_reap": {"reaped_estimated_bytes": None}})
+        == 0
+    )
 
 
 def test_from_report_counts_claude_base_reaps_alongside_candidates() -> None:

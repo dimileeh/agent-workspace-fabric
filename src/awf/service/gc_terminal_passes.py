@@ -132,6 +132,13 @@ def _merge_claude_base_reaps(
     if not isinstance(discarded_reap, Mapping):
         return dict(default_reap)
     merged: dict[str, object] = dict(default_reap)
+    # Each pass reaps disjoint signatures on execute (the first removes what it can
+    # before the second runs), so their reaped-byte estimates are net-new and sum —
+    # without this ``dict(default_reap)`` would keep only the first pass's bytes and a
+    # base the discarded pass reaped would report 0 bytes (PRRT_kwDOSJAM6s6Jcixk).
+    merged["reaped_estimated_bytes"] = cast(
+        "int", default_reap.get("reaped_estimated_bytes") or 0
+    ) + cast("int", discarded_reap.get("reaped_estimated_bytes") or 0)
     for key in ("scanned", "unverifiable", "errors"):
         merged[key] = [*_as_list(default_reap.get(key)), *_as_list(discarded_reap.get(key))]
     for key in ("reaped", "planned"):
