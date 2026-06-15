@@ -95,7 +95,9 @@ async def trigger_service_gc(
 ) -> ServiceGCResponse:
     """Plan or execute terminal-workspace filesystem GC in the root control-plane.
 
-    Dry-run (default) returns the plan unchanged. ``execute`` runs the API-side
+    Dry-run (default) neither triggers the worker nor deletes anything, but it
+    still runs the discarded-status preview pass and combines the reports so the
+    plan mirrors exactly what ``execute`` reaps. ``execute`` runs the API-side
     worktree/compose/lease reclaim and then **delegates** the capability-gated
     reclaim — the per-workspace Claude auth overlays (~1.7 GB each) and
     ``_shared/claude-base`` — to the worker, since the API container lacks

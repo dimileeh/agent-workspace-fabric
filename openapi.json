@@ -12839,7 +12839,7 @@
     },
     "/v1/service/gc": {
       "post": {
-        "description": "Plan or execute terminal-workspace filesystem GC in the root control-plane.\n\nDry-run (default) returns the plan unchanged. ``execute`` runs the API-side\nworktree/compose/lease reclaim and then **delegates** the capability-gated\nreclaim \u2014 the per-workspace Claude auth overlays (~1.7 GB each) and\n``_shared/claude-base`` \u2014 to the worker, since the API container lacks\n``CAP_SYS_ADMIN`` and would otherwise reclaim **zero** of those dominant\nconsumers while reporting success (#582). The worker's actual reclaimed\nbytes/paths are folded into the response so the operator sees real reclamation.",
+        "description": "Plan or execute terminal-workspace filesystem GC in the root control-plane.\n\nDry-run (default) neither triggers the worker nor deletes anything, but it\nstill runs the discarded-status preview pass and combines the reports so the\nplan mirrors exactly what ``execute`` reaps. ``execute`` runs the API-side\nworktree/compose/lease reclaim and then **delegates** the capability-gated\nreclaim \u2014 the per-workspace Claude auth overlays (~1.7 GB each) and\n``_shared/claude-base`` \u2014 to the worker, since the API container lacks\n``CAP_SYS_ADMIN`` and would otherwise reclaim **zero** of those dominant\nconsumers while reporting success (#582). The worker's actual reclaimed\nbytes/paths are folded into the response so the operator sees real reclamation.",
         "operationId": "trigger_service_gc_v1_service_gc_post",
         "requestBody": {
           "content": {
