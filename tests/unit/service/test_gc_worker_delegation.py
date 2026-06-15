@@ -905,6 +905,84 @@ def test_fold_drops_reclaimed_auth_skip_when_worker_partial_for_unrelated_step()
     assert folded["delete_errors"] == []
 
 
+def test_fold_worker_partial_folds_worker_delete_errors_into_headline() -> None:
+    # PRRT_kwDOSJAM6s6Jdtiz: a partial worker reap driven by a delete failure on a
+    # worker-only candidate (the cancelled/destroyed augmentation pass hitting a
+    # permission/EBUSY error) records that failure in the worker report's top-level
+    # ``delete_errors`` (``combine_terminal_gc_reports`` concatenates both passes').
+    # The fold downgrades the headline to partial but must also surface those errors
+    # at the top level — otherwise a consumer auditing the headline ``delete_errors``
+    # sees a partial run with no failed path, having to drill into
+    # ``worker_reclaim.report`` to find the cause.
+    worker_error = {
+        "workspace_id": "ws-cancelled",
+        "kind": "auth",
+        "path": "/work/_shared/auth/ws-cancelled",
+        "reason_code": "WORKSPACE_GC_PATH_DELETE_FAILED",
+        "error": "[Errno 16] Device or resource busy",
+    }
+    base = _api_base(status="succeeded", reason_code="CLEANUP_EXECUTION_SUCCEEDED")
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "deleted_path_count": 0,
+            "deleted_paths": [],
+            "delete_errors": [worker_error],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    # The worker's failed-path error now surfaces on the headline...
+    assert folded["delete_errors"] == [worker_error]
+    # ...while the nested worker report stays intact for the full breakdown.
+    worker_reclaim = folded["worker_reclaim"]
+    assert isinstance(worker_reclaim, dict)
+    nested = worker_reclaim["report"]
+    assert isinstance(nested, dict)
+    assert nested["delete_errors"] == [worker_error]
+    # The caller's base is never mutated.
+    assert "delete_errors" not in base
+
+
+def test_fold_worker_partial_appends_worker_errors_after_api_errors() -> None:
+    # The worker's delete errors are concatenated onto any API-side errors already on
+    # the headline (the two passes act on disjoint paths), so both the API-side and
+    # worker-side failures stay visible at the top level.
+    api_error = {
+        "kind": "compose_teardown",
+        "path": "/work/worktrees/ws-api",
+        "reason_code": "WORKSPACE_GC_COMPOSE_TEARDOWN_FAILED",
+        "error": "compose down failed",
+    }
+    worker_error = {
+        "workspace_id": "ws-cancelled",
+        "kind": "auth",
+        "path": "/work/_shared/auth/ws-cancelled",
+        "reason_code": "WORKSPACE_GC_PATH_DELETE_FAILED",
+        "error": "[Errno 16] Device or resource busy",
+    }
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[api_error],
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "delete_errors": [worker_error],
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    assert folded["delete_errors"] == [api_error, worker_error]
+
+
 def test_fold_reconciles_claude_base_when_worker_partial_for_unrelated_step() -> None:
     # PRRT_kwDOSJAM6s6JdOQz: the API-side claude-base reap is partial/unverifiable
     # (no CAP_SYS_ADMIN), and the worker later reaps those bases but reports overall

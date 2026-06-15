@@ -313,6 +313,14 @@ def fold_worker_reclaim(
             # preserved although it was reclaimed, while keeping the run partial for
             # the unrelated failure that drove the worker partial.
             _drop_worker_reclaimed_auth_skips(folded, reclaimed)
+            # The failure that drove the worker partial — a permission/EBUSY delete
+            # error on a worker-only candidate (the cancelled/destroyed augmentation
+            # pass) — lands in the worker report's top-level ``delete_errors`` but is
+            # otherwise only reachable via ``worker_reclaim.report``. Fold those
+            # delete errors onto the headline so a consumer auditing the top-level
+            # ``delete_errors`` sees which path failed instead of a partial run with
+            # no visible cause (PRRT_kwDOSJAM6s6Jdtiz).
+            _fold_worker_delete_errors(folded, outcome.report or {})
             # Likewise, when the worker actually reaped the shared ``claude-base`` dirs
             # (proven by its ``claude_base_reap.reaped``) the API-side nested
             # ``claude_base_reap`` partial/unverifiable object is stale: the headline
@@ -549,6 +557,33 @@ def _drop_worker_reclaimed_auth_skips(
             and error.get("path") in reclaimed_paths
         )
     ]
+
+
+def _fold_worker_delete_errors(folded: dict[str, object], worker_report: dict[str, object]) -> None:
+    """Merge the worker reap's own ``delete_errors`` into the headline ``delete_errors``.
+
+    A partial worker reap can be driven by a delete failure on a worker-only candidate
+    — the discarded-status augmentation pass (cancelled/destroyed rows the API default
+    policy never classifies) hitting a permission/EBUSY error deleting its auth dir.
+    ``combine_terminal_gc_reports`` records that failure in the worker report's
+    top-level ``delete_errors``, but the fold otherwise only attaches the worker report
+    under ``worker_reclaim.report``. So a consumer auditing the headline
+    ``delete_errors`` (the CLI overlay-unmount warning helper, ``WorkspaceGCResult``
+    JSON consumers) sees a ``partial`` run with no failed path unless it drills into the
+    nested report (PRRT_kwDOSJAM6s6Jdtiz). Concatenate the worker's delete errors onto
+    the headline — mirroring ``combine_terminal_gc_reports``; the API-side and worker
+    errors are disjoint (the worker-only candidate is one the API plan never carried) —
+    so the failed paths surface at the top level while ``worker_reclaim.report`` stays
+    intact. A fresh list is built so the caller's ``base`` is untouched; a worker report
+    with no (or non-list) delete errors is a no-op.
+    """
+    worker_errors = worker_report.get("delete_errors")
+    if not isinstance(worker_errors, list) or not worker_errors:
+        return
+    existing = folded.get("delete_errors")
+    merged: list[object] = list(existing) if isinstance(existing, list) else []
+    merged.extend(worker_errors)
+    folded["delete_errors"] = merged
 
 
 def _reconcile_worker_reclaimed_auth_candidates(
