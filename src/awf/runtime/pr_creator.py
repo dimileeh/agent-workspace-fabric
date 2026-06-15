@@ -540,6 +540,13 @@ class PullRequestCreator:
                     returncode=0,
                     stderr="forge returned an empty PR URL",
                     head_sha=head_sha,
+                    details=_github_pr_create_details(
+                        strategy="failed",
+                        attempts=attempt,
+                        max_retries=self._pr_create_transient_max_retries,
+                        failures=failures,
+                        lookups=lookups,
+                    ),
                 )
             open_metadata = (
                 _github_pr_create_details(

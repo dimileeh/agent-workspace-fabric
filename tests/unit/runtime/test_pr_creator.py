@@ -20,7 +20,7 @@ from awf.common.bitbucket_client import (
     BitbucketClientError,
 )
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClient, RepoRef
+from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 
 _WORKTREE = Path("/fake/worktree")
@@ -85,6 +85,29 @@ class _FakeForgeClient:
         if self._error is not None:
             raise self._error
         return self._url
+
+
+class _SequencedForgeClient:
+    """Returns or raises one queued PR-create outcome per call."""
+
+    def __init__(self, outcomes: list[str | Exception]) -> None:
+        self._outcomes = list(outcomes)
+        self.calls: list[dict[str, object]] = []
+
+    async def create_pull_request(
+        self,
+        *,
+        repo: RepoRef,
+        base: str,
+        head: str,
+        title: str,
+        body: str,
+    ) -> str:
+        self.calls.append({"repo": repo, "base": base, "head": head, "title": title, "body": body})
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 class _RaisingForgeClient:
@@ -208,6 +231,53 @@ class TestPushAndOpen:
         list_calls = [call for call in runner.calls if call.args[:3] == ["gh", "pr", "list"]]
         assert len(create_calls) == 2
         assert len(list_calls) == 1
+
+    @pytest.mark.unit
+    async def test_github_transient_pr_create_failure_then_empty_url_preserves_retry_details(
+        self,
+    ) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # push succeeds
+        runner.queue_result(returncode=0, stdout="[]")  # reconcile lookup: none
+        forge = _SequencedForgeClient(
+            [
+                GitHubClientError(
+                    operation="gh pr create",
+                    returncode=1,
+                    stderr='Post "https://api.github.com/graphql": dial tcp: i/o timeout',
+                ),
+                "",
+            ]
+        )
+
+        creator = PullRequestCreator(
+            runner,
+            pr_create_transient_max_retries=1,
+            pr_create_transient_initial_backoff_seconds=0,
+        )
+        with pytest.raises(PullRequestError) as exc:
+            await creator.push_and_open(
+                worktree_path=_WORKTREE,
+                branch_name="awf/ws_x",
+                base_branch="development",
+                title="t",
+                body="b",
+                forge_client=forge,
+                repo_url=_GH_REPO_URL,
+            )
+
+        assert "no URL" in exc.value.operation
+        assert exc.value.details is not None
+        assert exc.value.details["strategy"] == "failed"
+        assert exc.value.details["attempts"] == 2
+        assert exc.value.details["retry_count"] == 1
+        failures = exc.value.details["failures"]
+        assert isinstance(failures, list)
+        assert failures[0]["will_retry"] is True
+        lookups = exc.value.details["reconcile_lookups"]
+        assert isinstance(lookups, list)
+        assert lookups[0]["status"] == "not_found"
 
     @pytest.mark.unit
     async def test_github_transient_pr_create_reconciles_existing_same_repo_pr(self) -> None:
