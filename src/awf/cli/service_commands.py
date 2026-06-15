@@ -18,6 +18,7 @@ from awf.cli.common import (
     _emit,
     _handle_response,
     warn_on_overlay_unmount_failure,
+    warn_on_worker_delegation_failure,
 )
 from awf.cli.init_ops import (
     _add_env_migration_payload,
@@ -555,12 +556,26 @@ def service_gc(
         body["statuses"] = [item.value for item in status]
     if exclude_status:
         body["exclude_statuses"] = [item.value for item in exclude_status]
+    if execute:
+        # #582: ``execute`` delegates the capability-gated reclaim (per-workspace
+        # auth overlays + claude-base) to the worker and waits for it. Give the
+        # server the same budget as the CLI timeout for that worker phase.
+        body["worker_delegation_timeout_seconds"] = timeout_seconds
 
+    # #590: an ``execute`` request runs *two* sequential server phases -- the
+    # API-side worktree/compose reclaim (itself minutes for large reclaims) and
+    # only *then* the worker-delegation deadline (``timeout_seconds``). Budgeting
+    # just ``timeout_seconds + 30`` covered only the worker phase, so an API-side
+    # phase longer than 30s let httpx abort before the server could return its
+    # structured worker-timeout response -- exactly the false timeout the buffer
+    # exists to avoid. Allow each phase the full ``timeout_seconds`` plus a final
+    # 30s settle margin so the structured response always arrives first.
+    http_timeout = 2.0 * timeout_seconds + 30.0 if execute else timeout_seconds
     response = _call(
         "POST",
         "/v1/service/gc",
         base_url=_base_url(resolved_base_url),
-        timeout=timeout_seconds,
+        timeout=http_timeout,
         json=body,
         headers=_api_token_headers(resolved_api_token),
     )
@@ -581,8 +596,16 @@ def service_gc(
         )
         raise typer.Exit(code=1) from None
     _emit(payload, fmt)
-    warn_on_overlay_unmount_failure(payload)
-    if isinstance(payload, dict) and payload.get("status") == "partial":
+    # #590: a worker-delegation failure leaves the API-side auth-overlay
+    # ``delete_errors`` in place (the success-only skip reconciliation never runs),
+    # so both hints would fire. The overlay hint points at the worker's
+    # runtime-release sweep, which directly contradicts a worker that is down or
+    # timed out — the delegation error is the accurate, superseding explanation.
+    # Surface it first and drop the now-stale overlay hint when delegation failed.
+    delegation_failed = warn_on_worker_delegation_failure(payload)
+    if not delegation_failed:
+        warn_on_overlay_unmount_failure(payload)
+    if delegation_failed or (isinstance(payload, dict) and payload.get("status") == "partial"):
         raise typer.Exit(code=1)
 
 

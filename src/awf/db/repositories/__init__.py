@@ -84,6 +84,9 @@ from awf.db.repositories.quality_repo import (
     _claims_non_docs_path,
     sync_candidate_readiness,
 )
+from awf.db.repositories.service_gc_request_repo import (
+    ServiceGCRequestRepository,
+)
 from awf.db.repositories.system_repo import (
     EgressAuditRepository,
     ProviderModelCircuitBreakerRepository,
@@ -195,6 +198,7 @@ __all__ = [
     "ProviderModelCircuitBreakerRepository",
     "QueueDecisionRepository",
     "WorkerHeartbeatRepository",
+    "ServiceGCRequestRepository",
     "new_workspace_id",
     "AGE_BOOST_MAX",
     "AGE_BOOST_INTERVAL_SECONDS",

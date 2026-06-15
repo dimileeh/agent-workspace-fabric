@@ -99,6 +99,55 @@ def test_reaps_only_superseded_bases(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_reaped_estimated_bytes_measured_before_removal(tmp_path: Path) -> None:
+    # The reaper lists ``<signature>`` names, not byte sizes, so the worker GC totals
+    # would report a 0-byte reclaim for a base-only reap unless the size is captured
+    # before ``rmtree`` (PRRT_kwDOSJAM6s6Jcixk). Seed a superseded base with a known
+    # payload and assert the report carries its on-disk size.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+
+    base = _shared_claude_base_dir(work_dir, "sigsuper0000000")
+    base.mkdir(parents=True)
+    (base / "blob").write_text("x" * 4096)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=tmp_path / "absent-mounts",
+        execute=True,
+    )
+
+    assert report["reaped"] == ["sigsuper0000000"]
+    # Only the 4096-byte blob lives under the reaped ``<signature>`` tree.
+    assert report["reaped_estimated_bytes"] == 4096
+
+
+@pytest.mark.unit
+def test_reaped_estimated_bytes_zero_when_nothing_reaped(tmp_path: Path) -> None:
+    # A dry-run plans without deleting, so no bytes are reclaimed: the field stays 0
+    # (it counts only bases actually removed, mirroring ``reaped``).
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+    base = _shared_claude_base_dir(work_dir, "sigsuper0000000")
+    base.mkdir(parents=True)
+    (base / "blob").write_text("x" * 4096)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=tmp_path / "absent-mounts",
+        execute=False,
+    )
+
+    assert report["planned"] == ["sigsuper0000000"]
+    assert report["reaped"] == []
+    assert report["reaped_estimated_bytes"] == 0
+
+
+@pytest.mark.unit
 def test_current_signature_base_preserved_even_when_unmounted_and_unpinned(
     tmp_path: Path,
 ) -> None:
@@ -474,6 +523,112 @@ def test_reap_one_base_refuses_symlinked_child(tmp_path: Path) -> None:
     assert link.is_symlink()  # the link itself is left in place, not rmtree'd
     assert outside.is_dir()  # the link target tree is untouched
     assert (outside / "precious").read_text() == "keep me"
+
+
+@pytest.mark.unit
+def test_reap_loop_refuses_symlinked_candidate_before_estimation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A symlinked ``<signature>`` child of the base root is rejected *before* the byte
+    # estimator runs, so the estimator never ``rglob``s through the link target (a tree
+    # outside the base root). ``base_root.iterdir()`` yields the link because ``is_dir``
+    # follows it, and ``<sig>/.claude`` resolves through it too — without the in-loop
+    # precheck ``_estimate_bytes`` would size the external tree before the guard refused
+    # it (PRRT_kwDOSJAM6s6JdHQU). Fail loudly if the estimator is ever reached.
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+
+    base_root = work_dir / "auth" / "_shared" / "claude-base"
+    base_root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    (outside / ".claude").mkdir(parents=True)
+    (outside / ".claude" / "precious").write_text("keep me")
+    link = base_root / "sigsymlink00000"
+    link.symlink_to(outside, target_is_directory=True)
+
+    def _explode(_path: Path) -> int:
+        raise AssertionError("estimator must not touch a rejected candidate")
+
+    monkeypatch.setattr(gc_claude_base_mod, "_estimate_bytes", _explode)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=tmp_path / "absent-mounts",
+        execute=True,
+        capability_probe=lambda: True,
+    )
+
+    assert report["reaped"] == []
+    assert report["reaped_estimated_bytes"] == 0
+    assert report["status"] == "partial"
+    assert report["reason_code"] == CLAUDE_BASE_REAP_PARTIAL
+    assert report["errors"] == [
+        {
+            "signature": "sigsymlink00000",
+            "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+            "error": "refused to reap a base outside the shared base root",
+        }
+    ]
+    # The link and its target tree are untouched.
+    assert link.is_symlink()
+    assert (outside / ".claude" / "precious").read_text() == "keep me"
+
+
+@pytest.mark.unit
+def test_reap_refuses_symlinked_base_root_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The leaf-only guard in ``_is_base_outside_root`` is not enough when an *ancestor*
+    # of the candidates is a symlink: ``base_root`` is ``.resolve()``d before the reaper
+    # iterates, and ``resolve`` follows every symlink in the path. If ``claude-base``
+    # itself points outside, ``base_root`` becomes the link target, its children satisfy
+    # ``parent == base_root`` and are not themselves symlinks, so the leaf guard passes
+    # and the estimator/``rmtree`` would run on a tree outside ``work_dir``. The whole
+    # pass must be refused up front before resolving or iterating
+    # (PRRT_kwDOSJAM6s6JdOUu).
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+
+    shared = work_dir / "auth" / "_shared"
+    shared.mkdir(parents=True)
+    outside = tmp_path / "outside-base-root"
+    _make_base(outside, "sigsuper0000000")  # a plausible superseded base in the target
+    (outside / "sigsuper0000000" / ".claude").mkdir(parents=True)
+    (outside / "sigsuper0000000" / ".claude" / "precious").write_text("keep me")
+    # ``claude-base`` itself is the symlink that escapes ``work_dir``.
+    (shared / "claude-base").symlink_to(outside, target_is_directory=True)
+
+    def _explode(_path: Path) -> int:
+        raise AssertionError("estimator must not touch a symlink-escaped base root")
+
+    monkeypatch.setattr(gc_claude_base_mod, "_estimate_bytes", _explode)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=tmp_path / "absent-mounts",
+        execute=True,
+        capability_probe=lambda: True,
+    )
+
+    assert report["status"] == "partial"
+    assert report["reason_code"] == CLAUDE_BASE_REAP_PARTIAL
+    assert report["reaped"] == []
+    assert report["reaped_estimated_bytes"] == 0
+    assert report["scanned"] == []
+    assert report["planned"] == []
+    assert report["errors"] == [
+        {
+            "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+            "error": "refused to reap: a shared base root component is a symlink",
+        }
+    ]
+    # The symlink and the tree it points at are untouched.
+    assert (shared / "claude-base").is_symlink()
+    assert (outside / "sigsuper0000000" / ".claude" / "precious").read_text() == "keep me"
 
 
 @pytest.mark.unit

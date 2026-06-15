@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -24,7 +25,7 @@ from awf.common.github_client import BranchOpenPullRequestResolver
 from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
-from awf.db.enums import TaskKind, WorkspaceStatus
+from awf.db.enums import TaskKind
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
@@ -47,12 +48,18 @@ from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_relea
 from awf.runtime.validation import ValidationRunner
 from awf.runtime.workspace_prompt_context import render_workspace_runtime_context
 from awf.service.config import ServiceSettings
-from awf.service.gc import CLEANUP_EXECUTION_PARTIAL, run_service_workspace_gc
+from awf.service.gc import run_service_workspace_gc
 from awf.service.gc_claude_base import reap_superseded_claude_bases
 from awf.service.gc_reconcile import (
     OrphanDirReconcileResult,
     build_default_compose_teardown,
     reconcile_orphaned_workspace_dirs,
+)
+from awf.service.gc_terminal_passes import (
+    combine_terminal_gc_reports as _combine_terminal_gc_reports,
+)
+from awf.service.gc_terminal_passes import (
+    terminal_gc_discarded_statuses as _terminal_gc_discarded_statuses,
 )
 from awf.service.node_identity import effective_service_node_id
 from awf.service.orphan_resources import (
@@ -106,36 +113,6 @@ def _release_forge_client_after_build_error(gh: ForgeClient) -> None:
     closer = loop.create_task(gh.aclose())
     _PENDING_FORGE_CLIENT_CLOSERS.add(closer)
     closer.add_done_callback(_PENDING_FORGE_CLIENT_CLOSERS.discard)
-
-
-def _combine_terminal_gc_reports(
-    default_report: dict[str, object], discarded_report: dict[str, object]
-) -> dict[str, object]:
-    """Fold the discarded-status (cancelled/destroyed) GC pass into the default pass.
-
-    The worker runs the terminal-workspace GC twice — once under the conservative
-    default policy and once with an explicit ``include_statuses`` for the
-    cancelled/destroyed rows that policy never classifies (#513) — and the cleanup
-    loop logs a single summary, so the two reports are merged here. The passes act on
-    disjoint status sets and never reclaim the same path, so deleted paths /
-    candidates / delete-errors concatenate and preserved counts sum. A ``partial``
-    from either pass wins (it leaked disk it could not reclaim), so a self-protected
-    sweep is never masked behind the other's clean success.
-    """
-    combined = dict(default_report)
-    for key in ("deleted_paths", "candidates", "delete_errors"):
-        first = cast("list[object]", default_report.get(key) or [])
-        second = cast("list[object]", discarded_report.get(key) or [])
-        combined[key] = [*first, *second]
-    combined["deleted_path_count"] = len(cast("list[object]", combined["deleted_paths"]))
-    combined["candidate_count"] = len(cast("list[object]", combined["candidates"]))
-    combined["preserved_count"] = cast("int", default_report.get("preserved_count") or 0) + cast(
-        "int", discarded_report.get("preserved_count") or 0
-    )
-    if "partial" in (default_report.get("status"), discarded_report.get("status")):
-        combined["status"] = "partial"
-        combined["reason_code"] = CLEANUP_EXECUTION_PARTIAL
-    return combined
 
 
 def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
@@ -363,7 +340,14 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             execute=True,
         )
 
-    async def _reap_terminal_workspace_gc() -> dict[str, object]:
+    async def _reap_terminal_workspace_gc(
+        *,
+        min_age_hours: float | None = None,
+        limit: int | None = None,
+        statuses: Sequence[str] | None = None,
+        exclude_statuses: Sequence[str] | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
         """Reap per-workspace terminal-workspace auth dirs from the worker (#513).
 
         The per-workspace ``auth/<id>/`` dirs (~1.7 GB each) of completed/cancelled/
@@ -397,45 +381,88 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         destroyed). Those discarded rows carry no merged-PR work to preserve, so a second
         explicit ``include_statuses`` pass reaps them by age without disturbing the first
         pass's completed-merged / failed-preservation / superseded age-cap nuance. The
-        global claude-base reap and companion-image prune already ran in the first pass,
-        so the second pass leaves them off. Both reports are folded into one summary.
+        companion-image prune already ran in the first pass, so the second pass leaves it
+        off — but the claude-base reap runs in *both* passes: a superseded
+        ``_shared/claude-base`` pinned only by a cancelled/destroyed workspace stays
+        protected through the first pass (its ``base.signature`` pin is still on disk
+        there) and becomes reapable only once this second pass deletes that auth dir, so
+        without a second reap the GB-scale base would leak until a later GC
+        (PRRT_kwDOSJAM6s6JbT1B). Both reports are folded into one summary.
+
+        An on-demand ``awf service gc --execute`` delegation forwards the operator's
+        resolved ``min_age_hours``/``limit`` and ``--status``/``--exclude-status`` filters
+        so this capability-gated reap matches the scope of the API-side worktree/compose
+        pass the operator just ran instead of diverging onto the worker's server defaults
+        (#590). An explicit ``--status`` set scopes the first pass directly (so the
+        augmentation pass is skipped — see ``_terminal_gc_discarded_statuses``);
+        ``--exclude-status`` removes statuses from both passes so an excluded auth dir is
+        never reclaimed. ``now`` is the API's retention-cutoff anchor (its invocation
+        clock): forwarding it to both passes derives the same ``cutoff_at`` the API-side
+        pass used rather than recomputing eligibility from this worker's (minutes-later)
+        claim clock, so a workspace just under ``--min-age-hours`` at invocation is never
+        reaped behind a plan/dry-run that excluded it (PRRT_kwDOSJAM6s6JbriQ). The periodic
+        backstop and the test wiring call with no overrides, falling back to the configured
+        retention/batch defaults, the full two-pass sweep, and the live clock.
         """
+        retention_hours = (
+            settings.completed_workspace_retention_hours if min_age_hours is None else min_age_hours
+        )
+        batch_limit = settings.workspace_cleanup_batch_limit if limit is None else limit
+        requested_statuses = tuple(statuses) if statuses else None
+        excluded_statuses = tuple(exclude_statuses) if exclude_statuses else None
         default_result = await run_service_workspace_gc(
             session_factory,
             work_dir=work_dir,
             execute=True,
-            min_age_hours=settings.completed_workspace_retention_hours,
-            limit=settings.workspace_cleanup_batch_limit,
+            min_age_hours=retention_hours,
+            limit=batch_limit,
+            include_statuses=requested_statuses,
+            exclude_statuses=excluded_statuses,
             cleanup_enabled=settings.workspace_cleanup_enabled,
             companion_image_cache_enabled=settings.companion_image_cache_enabled,
             companion_image_retention_hours=settings.companion_image_retention_hours,
             host_home=host_home,
             reap_claude_bases=settings.claude_base_gc_enabled,
             compose_manager=compose,
+            now=now,
         )
+        # The conservative default policy never classifies cancelled/destroyed rows, so a
+        # second explicit pass reaps those discarded auth dirs that would otherwise leak
+        # (#513) — but only for the statuses the first pass did not already cover and the
+        # operator did not exclude (#590). When that set is empty (an explicit ``--status``
+        # scope, or both discarded statuses excluded) the first pass is the whole sweep.
+        discarded_statuses = _terminal_gc_discarded_statuses(requested_statuses, excluded_statuses)
+        if not discarded_statuses:
+            return _combine_terminal_gc_reports(default_result.to_dict(), {})
         # Share one cleanup-batch budget across both passes. ``plan_terminal_workspace_gc``
-        # caps each call to ``workspace_cleanup_batch_limit`` candidates (the
-        # "maximum cleanup candidates per batch" invariant), but giving the
-        # discarded-status pass the full limit again would let a single sweep reclaim
-        # up to ~2x the configured guard. Subtract the first pass's selected candidates
-        # so the combined sweep never exceeds one batch budget; a fully-spent budget
-        # makes the second pass a no-op (``limit=0`` selects nothing).
+        # caps each call to the batch limit candidates (the "maximum cleanup candidates
+        # per batch" invariant), but giving the discarded-status pass the full limit
+        # again would let a single sweep reclaim up to ~2x the budget. Subtract the
+        # first pass's selected candidates so the combined sweep never exceeds one batch
+        # budget; a fully-spent budget makes the second pass a no-op (``limit=0`` selects
+        # nothing).
         discarded_limit = max(
-            settings.workspace_cleanup_batch_limit - len(default_result.plan.candidates),
+            batch_limit - len(default_result.plan.candidates),
             0,
         )
         discarded_result = await run_service_workspace_gc(
             session_factory,
             work_dir=work_dir,
             execute=True,
-            min_age_hours=settings.completed_workspace_retention_hours,
+            min_age_hours=retention_hours,
             limit=discarded_limit,
             cleanup_enabled=settings.workspace_cleanup_enabled,
-            include_statuses=(
-                WorkspaceStatus.cancelled.value,
-                WorkspaceStatus.destroyed.value,
-            ),
+            include_statuses=discarded_statuses,
+            # Re-run the claude-base reap on this pass. The reaper runs *after* the
+            # pass deletes its candidate auth dirs (and their ``base.signature`` pins),
+            # so a superseded base pinned only by a cancelled/destroyed workspace — kept
+            # protected through the first pass while its pin was still on disk — is reaped
+            # now instead of leaking until a later GC (PRRT_kwDOSJAM6s6JbT1B). The
+            # companion-image prune stays off (it already ran in the first pass).
+            host_home=host_home,
+            reap_claude_bases=settings.claude_base_gc_enabled,
             compose_manager=compose,
+            now=now,
         )
         return _combine_terminal_gc_reports(default_result.to_dict(), discarded_result.to_dict())
 

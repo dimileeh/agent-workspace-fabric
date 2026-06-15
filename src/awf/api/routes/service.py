@@ -5,11 +5,12 @@ container runs as root and owns the per-workspace state, so the deletion happens
 in-container with correct ownership (the host CLI, running as uid 1000, silently
 could not remove root-owned auth dirs) and a volume-removing compose teardown
 reaps the per-workspace Docker volumes that GC previously leaked.
+
+The route is request/response translation only; all GC orchestration lives in
+``awf.service.gc_request`` (per the api/ no-business-logic guideline).
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,8 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.deps import get_db_session_factory, require_api_token
 from awf.api.responses import API_TOKEN_AUTH_ERROR_RESPONSES
 from awf.api.schemas import ServiceGCRequest, ServiceGCResponse
-from awf.service.config import resolve_service_settings
-from awf.service.gc import run_service_workspace_gc
+from awf.service.gc_request import run_service_gc_request
 
 router = APIRouter(
     prefix="/v1/service",
@@ -33,33 +33,18 @@ async def trigger_service_gc(
     payload: ServiceGCRequest,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
 ) -> ServiceGCResponse:
-    """Plan or execute terminal-workspace filesystem GC in the root control-plane."""
-    settings = resolve_service_settings()
-    retention_hours = (
-        settings.completed_workspace_retention_hours
-        if payload.min_age_hours is None
-        else payload.min_age_hours
-    )
-    candidate_limit = (
-        payload.limit if payload.limit is not None else settings.workspace_cleanup_batch_limit
-    )
-    # NOTE: this awaits the full GC run synchronously. For large --execute
-    # reclaims (many workspaces, Docker teardowns, multi-GB rmtree) this can
-    # take several minutes. The CLI defaults to --timeout-seconds 900; ensure
-    # any upstream proxy (nginx/traefik) has a matching or higher read timeout
-    # so the connection is not dropped while the run is still in progress.
-    result = await run_service_workspace_gc(
+    """Plan or execute terminal-workspace filesystem GC in the root control-plane.
+
+    Thin translation: forward the request fields to the service-layer
+    orchestration and wrap its payload in ``ServiceGCResponse``.
+    """
+    result_payload = await run_service_gc_request(
         session_factory,
-        work_dir=Path(settings.work_dir).expanduser().resolve(),
         execute=payload.execute,
-        min_age_hours=retention_hours,
-        limit=candidate_limit,
-        include_statuses=payload.statuses or None,
-        exclude_statuses=payload.exclude_statuses or None,
-        cleanup_enabled=settings.workspace_cleanup_enabled,
-        companion_image_cache_enabled=settings.companion_image_cache_enabled,
-        companion_image_retention_hours=settings.companion_image_retention_hours,
-        host_home=Path(settings.host_home).expanduser(),
-        reap_claude_bases=settings.claude_base_gc_enabled,
+        min_age_hours=payload.min_age_hours,
+        limit=payload.limit,
+        statuses=payload.statuses,
+        exclude_statuses=payload.exclude_statuses,
+        worker_delegation_timeout_seconds=payload.worker_delegation_timeout_seconds,
     )
-    return ServiceGCResponse.model_validate(result.to_dict())
+    return ServiceGCResponse.model_validate(result_payload)
