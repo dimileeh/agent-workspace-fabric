@@ -59,9 +59,15 @@ def combine_terminal_gc_reports(
     cancelled/destroyed rows that policy never classifies (#513) — and the cleanup
     loop logs a single summary, so the two reports are merged here. The passes act on
     disjoint status sets and never reclaim the same path, so deleted paths /
-    candidates / delete-errors concatenate, the per-workspace detail maps
-    (compose teardowns, secret leases, worktree removes, reservation releases)
-    union, and preserved counts and byte estimates sum. Folding those detail maps
+    candidates / delete-errors / preserved entries concatenate, the per-workspace
+    detail maps (compose teardowns, secret leases, worktree removes, reservation
+    releases) union, and preserved counts and byte estimates sum. The ``preserved``
+    payload must concatenate alongside ``preserved_count``: when the discarded pass
+    only preserves a cancelled/destroyed workspace (still inside ``--min-age-hours``
+    or cleanup disabled) and deletes nothing, keeping the default pass's
+    ``preserved`` list would bump ``preserved_count`` while hiding the workspace id
+    and reason that explain why the pass did not delete (PRRT_kwDOSJAM6s6JdGCI).
+    Folding those detail maps
     matters when the discarded pass goes ``partial`` for a non-delete side effect —
     a ``reservation_releases`` entry with an error, a failed compose teardown — that
     never lands in ``delete_errors``: keeping only the default pass's (clean) maps
@@ -75,7 +81,7 @@ def combine_terminal_gc_reports(
     self-protected sweep is never masked behind the other's clean success.
     """
     combined = dict(default_report)
-    for key in ("deleted_paths", "candidates", "delete_errors"):
+    for key in ("deleted_paths", "candidates", "delete_errors", "preserved"):
         first = cast("list[object]", default_report.get(key) or [])
         second = cast("list[object]", discarded_report.get(key) or [])
         combined[key] = [*first, *second]

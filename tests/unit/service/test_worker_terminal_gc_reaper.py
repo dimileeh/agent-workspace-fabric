@@ -716,6 +716,47 @@ async def test_worker_terminal_gc_no_status_scope_runs_full_two_pass_sweep(
 
 
 @pytest.mark.unit
+def test_combine_terminal_gc_reports_concatenates_preserved_payload() -> None:
+    """The discarded pass's ``preserved`` entries survive the fold (PRRT_kwDOSJAM6s6JdGCI).
+
+    When the discarded cancelled/destroyed pass only preserves a workspace (still
+    inside ``--min-age-hours`` or cleanup disabled) and deletes nothing, the combiner
+    must concatenate its ``preserved`` payload — not just sum ``preserved_count`` —
+    so the merged report still carries the workspace id and reason that explain why
+    the pass reaped nothing.
+    """
+    default_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [],
+        "preserved": [],
+        "preserved_count": 0,
+        "total_estimated_bytes": 0,
+    }
+    discarded_report: dict[str, Any] = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_paths": [],
+        "candidates": [],
+        "delete_errors": [],
+        "preserved": [
+            {"workspace_id": "ws_cancelled", "reason_code": "WORKSPACE_WITHIN_RETENTION"}
+        ],
+        "preserved_count": 1,
+        "total_estimated_bytes": 0,
+    }
+
+    combined = worker_mod._combine_terminal_gc_reports(default_report, discarded_report)
+
+    assert combined["preserved"] == [
+        {"workspace_id": "ws_cancelled", "reason_code": "WORKSPACE_WITHIN_RETENTION"}
+    ]
+    assert combined["preserved_count"] == 1
+
+
+@pytest.mark.unit
 def test_combine_terminal_gc_reports_concatenates_and_sums() -> None:
     """A clean default pass + clean discarded pass fold into one ``succeeded`` summary."""
     default_report: dict[str, Any] = {
