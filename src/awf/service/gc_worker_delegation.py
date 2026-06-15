@@ -286,6 +286,15 @@ def fold_worker_reclaim(
             # preserved although it was reclaimed, while keeping the run partial for
             # the unrelated failure that drove the worker partial.
             _drop_worker_reclaimed_auth_skips(folded, reclaimed)
+            # Likewise, when the worker actually reaped the shared ``claude-base`` dirs
+            # (proven by its ``claude_base_reap.reaped``) the API-side nested
+            # ``claude_base_reap`` partial/unverifiable object is stale: the headline
+            # now lists the reaped ``_shared/claude-base/<sig>`` paths under
+            # ``deleted_paths`` while the nested report still reads ``partial``, telling
+            # operators the same base was both reclaimed and preserved. Reconcile the
+            # nested object while keeping the headline partial for the unrelated worker
+            # failure (PRRT_kwDOSJAM6s6JdOQz).
+            _reconcile_worker_reaped_claude_base(folded, outcome.report or {})
             return folded
         _reconcile_worker_reclaimed_skips(folded)
         return folded
@@ -343,6 +352,37 @@ def _reconcile_worker_reclaimed_skips(folded: dict[str, object]) -> None:
         reconciled["reason_code"] = SERVICE_GC_WORKER_RECLAIMED
         reconciled["reconciled_by_worker"] = True
         folded["claude_base_reap"] = reconciled
+
+
+def _reconcile_worker_reaped_claude_base(
+    folded: dict[str, object], worker_report: dict[str, object]
+) -> None:
+    """Reconcile the nested API-side ``claude_base_reap`` a partial worker reap superseded.
+
+    On a partial worker reap the headline must stay ``partial`` for the unrelated
+    failure (companion-image prune, reservation release), so the full restore path
+    (``_reconcile_worker_reclaimed_skips``) never runs. But when the worker actually
+    reaped the shared ``claude-base`` dirs (proven by a non-empty
+    ``claude_base_reap.reaped`` in its own report), the API-side nested
+    ``claude_base_reap`` — recorded ``partial``/unverifiable because the capability-less
+    API container could not verify its own reap — is stale: the fold already merged the
+    reaped ``_shared/claude-base/<signature>`` paths into the headline ``deleted_paths``,
+    so leaving the nested object ``partial`` tells operators the same base was both
+    reclaimed and preserved. Rewrite the nested object to ``succeeded`` (recording the
+    supersession via ``reconciled_by_worker``) while leaving the headline status alone.
+    Copy before mutating so the caller's ``base`` is left untouched; if the worker reaped
+    no base, or the nested object is not partial, leave it verbatim.
+    """
+    if not _claude_base_reaped_path_strs(worker_report):
+        return
+    claude_base = folded.get("claude_base_reap")
+    if not (isinstance(claude_base, Mapping) and claude_base.get("status") == "partial"):
+        return
+    reconciled = dict(claude_base)
+    reconciled["status"] = "succeeded"
+    reconciled["reason_code"] = SERVICE_GC_WORKER_RECLAIMED
+    reconciled["reconciled_by_worker"] = True
+    folded["claude_base_reap"] = reconciled
 
 
 def _worker_reclaimed_path_strs(outcome: WorkerReclaimOutcome) -> list[str]:

@@ -749,6 +749,94 @@ def test_fold_drops_reclaimed_auth_skip_when_worker_partial_for_unrelated_step()
     assert folded["delete_errors"] == []
 
 
+def test_fold_reconciles_claude_base_when_worker_partial_for_unrelated_step() -> None:
+    # PRRT_kwDOSJAM6s6JdOQz: the API-side claude-base reap is partial/unverifiable
+    # (no CAP_SYS_ADMIN), and the worker later reaps those bases but reports overall
+    # partial for an UNRELATED side effect (companion-image prune / reservation
+    # release). The fold merges the reaped ``_shared/claude-base/<sig>`` path into the
+    # headline ``deleted_paths``, so the nested ``claude_base_reap`` must not stay
+    # ``partial`` — otherwise operators are told the same base was both reclaimed and
+    # preserved. It is reconciled while the headline stays partial for the unrelated
+    # failure.
+    nested = {
+        "status": "partial",
+        "reason_code": "CLAUDE_BASE_REAP_PARTIAL",
+        "unverifiable": ["sig-a"],
+    }
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        claude_base_reap=nested,
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "claude_base_reap": {
+                "status": "succeeded",
+                "base_root": "/work/_shared/claude-base",
+                "reaped": ["sig-a"],
+            },
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # Headline stays partial for the unrelated worker failure...
+    assert folded["status"] == "partial"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    # ...but the reaped base reaches the headline deleted_paths...
+    assert "/work/_shared/claude-base/sig-a" in folded["deleted_paths"]
+    # ...and the nested claude-base report is reconciled so it no longer reads partial
+    # next to a reclaimed-base headline; diagnostics preserved, marker recorded.
+    reconciled = folded["claude_base_reap"]
+    assert isinstance(reconciled, dict)
+    assert reconciled["status"] == "succeeded"
+    assert reconciled["reason_code"] == SERVICE_GC_WORKER_RECLAIMED
+    assert reconciled["reconciled_by_worker"] is True
+    assert reconciled["unverifiable"] == ["sig-a"]
+    # The base's nested object is not mutated in place.
+    assert nested["status"] == "partial"
+    assert "reconciled_by_worker" not in nested
+
+
+def test_fold_keeps_claude_base_partial_when_worker_partial_did_not_reap_it() -> None:
+    # PRRT_kwDOSJAM6s6JdOQz guard: when the partial worker reap did NOT reap any
+    # claude-base (its ``claude_base_reap.reaped`` is empty), the API-side nested
+    # partial is genuine — the base really was not reclaimed — so it must be left
+    # verbatim rather than reconciled to a false success.
+    nested = {
+        "status": "partial",
+        "reason_code": "CLAUDE_BASE_REAP_PARTIAL",
+        "unverifiable": ["sig-a"],
+    }
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        claude_base_reap=nested,
+    )
+    outcome = WorkerReclaimOutcome.from_report(
+        {
+            "status": "partial",
+            "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+            "claude_base_reap": {
+                "status": "partial",
+                "base_root": "/work/_shared/claude-base",
+                "reaped": [],
+                "unverifiable": ["sig-a"],
+            },
+        }
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    reap = folded["claude_base_reap"]
+    assert isinstance(reap, dict)
+    assert reap["status"] == "partial"
+    assert "reconciled_by_worker" not in reap
+
+
 def _candidate_with_skipped_auth(workspace_id: str, auth_path: str) -> dict[str, object]:
     # Mirrors the API-side serialization of a candidate whose auth dir the
     # capability-less API container could not unmount: the per-path entry reads
