@@ -822,8 +822,13 @@ const searchParams = useSearchParams();
       {
         id: "running",
         label: "Running",
-        value: counts ? counts.running : dash,
-        tone: counts?.running ? "info" : undefined,
+        // "Running" is the active-execution phase (running + validating + pushing) so a
+        // workspace does not vanish from this KPI while it validates or pushes.
+        value: counts ? counts.running + counts.validating + counts.pushing : dash,
+        tone:
+          counts && counts.running + counts.validating + counts.pushing > 0
+            ? "info"
+            : undefined,
         stale: saturationStale,
       },
       {
