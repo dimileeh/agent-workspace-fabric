@@ -11,7 +11,7 @@ schemas, the state machine, and tests without pulling in SQLAlchemy.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Final, Literal
 
 ForgeKind = Literal["github", "bitbucket"]
 """Concrete code-forge vocabulary persisted on ``resolved_profile.forge``.
@@ -205,3 +205,20 @@ class EgressDecision(StrEnum):
     allow = "allow"
     deny = "deny"
     deferred = "deferred"
+
+
+ServiceGCRequestStatus = Literal["pending", "running", "completed", "failed", "expired"]
+"""Lifecycle vocabulary for an on-demand ``service_gc_requests`` row (#582).
+
+The API writes ``pending``; the worker claims it (``running``) and finishes it
+``completed``/``failed``. A ``pending``/``running`` row whose ``deadline_at`` (the
+API client's polling budget) has elapsed is marked terminal ``expired`` instead of
+ever running — a timed-out reap must never fire behind the operator's back (#590,
+expire-on-timeout). Stored as a plain string (no SQL enum), per the "status is
+stored as strings" convention, so new states never need a migration."""
+
+SERVICE_GC_REQUEST_STATUS_PENDING: Final = "pending"
+SERVICE_GC_REQUEST_STATUS_RUNNING: Final = "running"
+SERVICE_GC_REQUEST_STATUS_COMPLETED: Final = "completed"
+SERVICE_GC_REQUEST_STATUS_FAILED: Final = "failed"
+SERVICE_GC_REQUEST_STATUS_EXPIRED: Final = "expired"

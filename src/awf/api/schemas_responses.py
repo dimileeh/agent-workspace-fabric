@@ -238,6 +238,35 @@ class ServiceGCRequest(BaseModel):
         default_factory=list,
         description="Status filter to remove from the eligible terminal set.",
     )
+    worker_delegation_timeout_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "On ``execute``, how long the API waits for the worker to run the "
+            "capability-gated reclaim (per-workspace auth overlays + claude-base) "
+            "before returning a structured worker-delegation timeout. Defaults to "
+            "the server's GC delegation budget."
+        ),
+    )
+
+
+class ServiceGCWorkerReclaim(BaseModel):
+    """Worker delegation result folded into the gc response (#582).
+
+    ``execute`` gc delegates the capability-gated reclaim (per-workspace Claude
+    auth overlays + ``_shared/claude-base``) to the worker, the only context with
+    ``CAP_SYS_ADMIN``. This sub-object reports the worker's actual reclamation (or
+    why it could not run) so the operator never sees a false ``deleted_path_count:
+    0`` success. ``extra="allow"`` carries the worker's full reap ``report``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    reason_code: str
+    deleted_path_count: int = 0
+    total_estimated_bytes: int = 0
+    message: str | None = None
 
 
 class ServiceGCResponse(BaseModel):
@@ -257,3 +286,11 @@ class ServiceGCResponse(BaseModel):
     preserved_count: int = 0
     deleted_path_count: int = 0
     total_estimated_bytes: int = 0
+    worker_reclaim: ServiceGCWorkerReclaim | None = Field(
+        default=None,
+        description=(
+            "Present on ``execute`` runs: the worker's capability-gated reclaim of "
+            "the per-workspace auth overlays + claude-base, folded into the headline "
+            "counts. Absent on dry-run. See #582."
+        ),
+    )

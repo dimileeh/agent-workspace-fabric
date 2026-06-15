@@ -410,10 +410,11 @@ async def test_replay_same_key_returns_same_operation_without_duplicate_rows(
     assert first_payload["operation_status"] == OperationStatus.succeeded.value
     assert replay_payload["operation_status"] == OperationStatus.succeeded.value
     assert after_counts == before_counts
-    if action in {"cancel", "stop"}:
-        assert len(stop_calls) == 1
-    if action == "destroy":
+    # cancel/stop now run a full compose down through the cleaner (issue #588 /
+    # #583), so the bare docker-stop project_stopper is never invoked.
+    if action in {"cancel", "stop", "destroy"}:
         assert len(cleaner_calls) == 1
+    assert stop_calls == []
 
 
 @pytest.mark.unit
@@ -450,10 +451,11 @@ async def test_same_key_with_different_payload_returns_idempotency_conflict(
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
     assert after_counts == before_counts
-    if action in {"cancel", "stop"}:
-        assert len(stop_calls) == 1
-    if action == "destroy":
+    # cancel/stop now run a full compose down through the cleaner (issue #588 /
+    # #583), so the bare docker-stop project_stopper is never invoked.
+    if action in {"cancel", "stop", "destroy"}:
         assert len(cleaner_calls) == 1
+    assert stop_calls == []
 
 
 @pytest.mark.unit
@@ -493,10 +495,11 @@ async def test_same_key_with_different_if_match_returns_idempotency_conflict(
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
     assert after_counts == before_counts
-    if action in {"cancel", "stop"}:
-        assert len(stop_calls) == 1
-    if action == "destroy":
+    # cancel/stop now run a full compose down through the cleaner (issue #588 /
+    # #583), so the bare docker-stop project_stopper is never invoked.
+    if action in {"cancel", "stop", "destroy"}:
         assert len(cleaner_calls) == 1
+    assert stop_calls == []
 
 
 @pytest.mark.unit

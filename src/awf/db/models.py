@@ -1268,6 +1268,47 @@ class WorkerHeartbeat(Base):
     )
 
 
+class ServiceGCRequest(Base):
+    """On-demand request for the worker to run its capability-gated GC reap (#582).
+
+    ``awf service gc --execute`` resolves in the API container, which lacks
+    ``CAP_SYS_ADMIN`` and so cannot unmount/reclaim the per-workspace Claude auth
+    overlays or ``_shared/claude-base``. Only the worker can. The API and worker
+    are separate processes whose only shared channel is this control-plane DB, so
+    the API inserts a ``pending`` row here and the worker — discovering it on its
+    poll loop — claims it (``SELECT ... FOR UPDATE SKIP LOCKED``), runs the
+    existing terminal-workspace + claude-base reap, and writes the reclaimed
+    report back into ``result`` before marking it ``completed``. The API folds that
+    report into the gc response so the operator sees real reclamation instead of
+    ``deleted_path_count: 0``. Mirrors the system-scoped ``worker_heartbeats``
+    table pattern (no ``workspace_id``, since gc is service-scoped).
+    """
+
+    __tablename__ = "service_gc_requests"
+    __table_args__ = (
+        Index("ix_service_gc_requests_status", "status"),
+        Index("ix_service_gc_requests_requested_at", "requested_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+
 def _queue_decision_summary(decision: QueueDecision) -> dict[str, Any]:
     return {
         "id": decision.id,

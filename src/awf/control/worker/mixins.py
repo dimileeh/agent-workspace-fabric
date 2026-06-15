@@ -5,6 +5,7 @@ from __future__ import annotations
 from awf.control.worker import claims as _claims
 from awf.control.worker import cleanup as _cleanup
 from awf.control.worker import cleanup_auth_overlay as _cleanup_auth_overlay
+from awf.control.worker import cleanup_service_gc as _cleanup_service_gc
 from awf.control.worker import dispatch_methods as _dispatch_methods
 from awf.control.worker import recovery as _recovery
 from awf.control.worker import scheduler_methods as _scheduler_methods
@@ -38,10 +39,17 @@ class WorkerDelegatesMixin:
     _maybe_expire_due_secret_leases = _cleanup._maybe_expire_due_secret_leases
     _expire_due_secret_leases = _cleanup._expire_due_secret_leases
     _maybe_release_terminal_runtime = _cleanup._maybe_release_terminal_runtime
+    _load_terminal_runtime_candidate = _cleanup._load_terminal_runtime_candidate
+    _release_terminal_runtime_promptly = _cleanup._release_terminal_runtime_promptly
     _maybe_reconcile_orphan_dirs = _cleanup._maybe_reconcile_orphan_dirs
     _maybe_reap_classified_orphans = _cleanup._maybe_reap_classified_orphans
     _maybe_reap_superseded_claude_bases = _cleanup._maybe_reap_superseded_claude_bases
     _maybe_reap_terminal_workspace_gc = _cleanup._maybe_reap_terminal_workspace_gc
+    _maybe_consume_service_gc_trigger = _cleanup_service_gc._maybe_consume_service_gc_trigger
+    _expire_stale_service_gc_triggers = _cleanup_service_gc._expire_stale_service_gc_triggers
+    _claim_service_gc_trigger = _cleanup_service_gc._claim_service_gc_trigger
+    _run_claimed_service_gc_trigger = _cleanup_service_gc._run_claimed_service_gc_trigger
+    _finish_service_gc_trigger = _cleanup_service_gc._finish_service_gc_trigger
     _release_terminal_runtime_resources = _cleanup._release_terminal_runtime_resources
     _resume_pending_planning_scope_auto_retries_after_terminal_release = (
         _cleanup._resume_pending_planning_scope_auto_retries_after_terminal_release
@@ -83,6 +91,9 @@ class WorkerDelegatesMixin:
     )
     _has_terminal_auth_overlay_unmount_terminal_event = (
         _cleanup_auth_overlay._has_terminal_auth_overlay_unmount_terminal_event
+    )
+    _has_current_cycle_terminal_auth_overlay_unmount_marker = (
+        _cleanup_auth_overlay._has_current_cycle_terminal_auth_overlay_unmount_marker
     )
     _record_terminal_auth_overlay_unmount_resolved = (
         _cleanup_auth_overlay._record_terminal_auth_overlay_unmount_resolved

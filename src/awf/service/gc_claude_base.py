@@ -41,6 +41,7 @@ from awf.node.auth_mounts import (
     _shared_claude_base_dir,
     iter_overlay_lowerdirs,
 )
+from awf.service.gc_classify import _estimate_bytes
 
 _log = get_logger(__name__)
 
@@ -85,6 +86,30 @@ def _claude_base_root(work_dir: Path) -> Path:
     """Return the shared overlay-base root ``auth/_shared/claude-base`` under work_dir."""
 
     return work_dir / "auth" / _SHARED_AUTH_DIRNAME / _CLAUDE_BASE_DIRNAME
+
+
+def _symlinked_base_component(work_dir: Path) -> Path | None:
+    """Return the first ``auth/_shared/claude-base`` component below ``work_dir`` that is a symlink.
+
+    ``reap_superseded_claude_bases`` resolves ``base_root`` with ``Path.resolve`` so it
+    lines up with the kernel-resolved lowerdir paths read from ``/proc/mounts`` even when
+    ``work_dir`` is reached via a symlink. ``resolve`` follows *every* symlink in the path,
+    though, so a symlink at the ``auth``, ``_shared``, or ``claude-base`` component would
+    rewrite ``base_root`` to the link target. ``_is_base_outside_root`` only ever sees the
+    already-resolved root, so every child of that outside target would satisfy
+    ``parent == base_root`` while not itself being a symlink — bypassing the leaf-only guard
+    and letting the estimator/``rmtree`` run outside ``work_dir``. Detect such an escaping
+    component up front. ``work_dir`` is resolved first so the supported "work_dir reached via
+    a symlink" case is preserved: only the components strictly below the real work root are
+    inspected (PRRT_kwDOSJAM6s6JdOUu).
+    """
+
+    current = work_dir.resolve(strict=False)
+    for part in ("auth", _SHARED_AUTH_DIRNAME, _CLAUDE_BASE_DIRNAME):
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
 
 
 def _pinned_base_dirs(
@@ -272,7 +297,10 @@ def reap_superseded_claude_bases(
 
     ``status`` (``ok`` / ``partial`` / ``skipped``), ``execute``, ``base_root``,
     ``scanned`` / ``protected`` / ``reaped`` / ``planned`` / ``unverifiable``
-    signature lists, and per-signature ``errors``. A permission-denied removal makes
+    signature lists, ``reaped_estimated_bytes`` (the on-disk size of the reaped bases,
+    measured before removal so the worker GC totals report real reclamation rather than
+    0 — only execute passes that actually remove a base contribute), and per-signature
+    ``errors``. A permission-denied removal makes
     ``status`` ``partial`` (reason ``CLAUDE_BASE_REAP_PARTIAL``); the per-error reason
     distinguishes a permission denial (``CLAUDE_BASE_REAP_PERMISSION_DENIED``) from
     other ``OSError``.
@@ -291,6 +319,36 @@ def reap_superseded_claude_bases(
 
     work_dir = Path(work_dir).expanduser()
     host_home = Path(host_home).expanduser()
+    # A symlink at the ``auth/_shared/claude-base`` ancestor would make the ``resolve``
+    # below rewrite ``base_root`` to the link target, slipping past the leaf-only
+    # ``_is_base_outside_root`` guard so candidates outside ``work_dir`` get estimated and
+    # ``rmtree``'d. Refuse the whole pass loudly *before* resolving or iterating that target
+    # rather than reap a tree outside the shared base root (PRRT_kwDOSJAM6s6JdOUu).
+    escaping_component = _symlinked_base_component(work_dir)
+    if escaping_component is not None:
+        _log.warning(
+            "gc.claude_base_reap_symlinked_base_root",
+            reason_code=CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+            base_component=str(escaping_component),
+        )
+        return {
+            "status": "partial",
+            "reason_code": CLAUDE_BASE_REAP_PARTIAL,
+            "execute": execute,
+            "base_root": str(_claude_base_root(work_dir)),
+            "scanned": [],
+            "protected": [],
+            "reaped": [],
+            "reaped_estimated_bytes": 0,
+            "planned": [],
+            "unverifiable": [],
+            "errors": [
+                {
+                    "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+                    "error": "refused to reap: a shared base root component is a symlink",
+                }
+            ],
+        }
     # Resolve the base root to its canonical form so it matches the kernel-resolved
     # lowerdir paths read from ``/proc/mounts`` in ``_protected_signature_dirs`` even
     # when ``work_dir`` is reached via a symlink. ``iterdir()`` below then yields
@@ -305,6 +363,7 @@ def reap_superseded_claude_bases(
         "scanned": [],
         "protected": [],
         "reaped": [],
+        "reaped_estimated_bytes": 0,
         "planned": [],
         "unverifiable": [],
         "errors": [],
@@ -337,6 +396,7 @@ def reap_superseded_claude_bases(
     scanned: list[str] = []
     protected_names: list[str] = []
     reaped: list[str] = []
+    reaped_estimated_bytes = 0
     planned: list[str] = []
     unverifiable: list[str] = []
     errors: list[dict[str, str]] = []
@@ -365,15 +425,38 @@ def reap_superseded_claude_bases(
         if not execute:
             planned.append(signature_dir.name)
             continue
+        if _is_base_outside_root(signature_dir, base_root=base_root):
+            # Refuse an outside-root/symlinked candidate *before* the estimator runs:
+            # ``_estimate_bytes`` would otherwise ``rglob`` through a symlinked
+            # ``<signature>`` dir's target (a tree outside ``base_root``) just to size a
+            # base we are about to reject — exactly the top-level-symlink traversal the
+            # ``is_symlink`` guard exists to prevent (PRRT_kwDOSJAM6s6JdHQU). The same
+            # structural reason code as ``_reap_one_base``'s guard keeps alerting uniform.
+            errors.append(
+                {
+                    "signature": signature_dir.name,
+                    "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+                    "error": "refused to reap a base outside the shared base root",
+                }
+            )
+            continue
+        # Size the base *before* removal so the worker totals carry real bytes: the
+        # reaper lists ``<signature>`` names, not byte sizes, so without this a pass
+        # that reaps only superseded bases would surface a 0-byte reclaim despite
+        # deleting GB-scale dirs (PRRT_kwDOSJAM6s6Jcixk). Only successfully reaped
+        # bases contribute — a failed ``rmtree`` reclaimed nothing.
+        estimated = _estimate_bytes(signature_dir)
         error = _reap_one_base(signature_dir, base_root=base_root)
         if error is None:
             reaped.append(signature_dir.name)
+            reaped_estimated_bytes += estimated
         else:
             errors.append({"signature": signature_dir.name, **error})
 
     report["scanned"] = scanned
     report["protected"] = protected_names
     report["reaped"] = reaped
+    report["reaped_estimated_bytes"] = reaped_estimated_bytes
     report["planned"] = planned
     report["unverifiable"] = unverifiable
     report["errors"] = errors
@@ -438,6 +521,21 @@ def _reap_status(
     return "skipped", CLAUDE_BASE_GC_NOOP
 
 
+def _is_base_outside_root(signature_dir: Path, *, base_root: Path) -> bool:
+    """Return ``True`` if ``signature_dir`` must not be touched as a reap candidate.
+
+    A base is rejected when it is not a direct child of ``base_root`` or when it is a
+    symlink. ``Path.parent`` is purely lexical, so a *symlinked* direct child still
+    satisfies ``parent == base_root``; rejecting symlinks explicitly keeps both the
+    byte estimator and ``shutil.rmtree`` from ever following a top-level link to a
+    tree outside the base root. Shared by the in-loop precheck (so a rejected path is
+    never traversed by the estimator) and ``_reap_one_base``'s pre-``rmtree`` guard so
+    the two sites can never drift apart.
+    """
+
+    return signature_dir.parent != base_root or signature_dir.is_symlink()
+
+
 def _reap_one_base(signature_dir: Path, *, base_root: Path) -> dict[str, str] | None:
     """Remove one superseded ``<signature>`` dir; return an error dict or ``None``.
 
@@ -447,14 +545,11 @@ def _reap_one_base(signature_dir: Path, *, base_root: Path) -> dict[str, str] | 
     and distinguished from other ``OSError``. Base contents/secrets are never logged.
     """
 
-    if signature_dir.parent != base_root or signature_dir.is_symlink():
-        # Defensive: every candidate comes from ``base_root.iterdir()`` so this
-        # cannot trigger in practice, but refuse to ``rmtree`` anything outside the
-        # base root rather than trust the caller. ``Path.parent`` is purely lexical,
-        # so a *symlinked* direct child still satisfies ``parent == base_root``;
-        # reject symlinks explicitly so the guard never relies on ``shutil.rmtree``'s
-        # incidental refusal to follow a top-level link to keep a tree outside the
-        # base root from being reaped.
+    if _is_base_outside_root(signature_dir, base_root=base_root):
+        # Defensive: in the live flow the in-loop precheck already rejected such a
+        # candidate, but refuse to ``rmtree`` anything outside the base root rather
+        # than trust a direct caller — see :func:`_is_base_outside_root` for why a
+        # lexical ``parent`` check is not enough on its own.
         return {
             "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
             "error": "refused to reap a base outside the shared base root",

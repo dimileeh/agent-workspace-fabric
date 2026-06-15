@@ -249,6 +249,23 @@ _TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "workspace.terminal_runtime_releas
 _TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "TERMINAL_RUNTIME_RELEASE_FAILED"
 """Reason code accompanying the ``terminal_runtime_release_failed`` event."""
 
+_PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_EVENT_TYPE = "worker.prompt_terminal_runtime_release_failed"
+"""Structured-log event for a prompt terminal-runtime release that failed (#583, #584).
+
+Emitted by ``_release_terminal_runtime_promptly`` when the eager release fired on a
+terminal transition raises. A prompt-release failure is swallowed-and-logged so it can
+never break the terminal transition itself; the periodic ``_maybe_release_terminal_runtime``
+interval remains the backstop that reclaims the miss."""
+
+_PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED_REASON_CODE = "PROMPT_TERMINAL_RUNTIME_RELEASE_FAILED"
+"""Reason code paired with the ``prompt_terminal_runtime_release_failed`` structured-log event.
+
+Worker-internal structured-log reason code only, not a doctor/catalog entry (mirrors
+``_CLASSIFIED_ORPHAN_REAP_FAILED_REASON_CODE``). Kept distinct from
+``TERMINAL_RUNTIME_RELEASE_FAILED`` (the periodic-path candidate failure event) so operators
+can tell apart a failed *prompt* release (eager, on the terminal transition) from a failed
+*periodic* release attempt."""
+
 _ORPHAN_DIR_RECONCILE_FAILED_REASON_CODE = "ORPHAN_DIR_RECONCILE_FAILED"
 """Reason code logged when an orphan-dir reconcile sweep fails non-transiently."""
 
@@ -272,6 +289,26 @@ Worker-internal structured-log reason code only, not a doctor/catalog entry
 raises for expected partial/skipped cases — it returns a ``WorkspaceGCResult`` report
 dict — so this fires only for an unexpected failure of the injected closure (e.g. the
 blocking ``rmtree`` or DB work raising an unhandled error)."""
+
+_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE = "SERVICE_GC_TRIGGER_CONSUME_FAILED"
+"""Reason code logged when consuming an on-demand ``service_gc_requests`` row fails (#582).
+
+Worker-internal structured-log reason code for the *unexpected* failure path of
+``_maybe_consume_service_gc_trigger`` — a DB error during claim/mark, etc. A
+failure of the *reaper* itself is recorded on the request row with
+``SERVICE_GC_WORKER_RECLAIM_FAILED`` so the API can surface it; this code covers
+only the surrounding bookkeeping so one bad consume cannot break dispatch."""
+
+_SERVICE_GC_TRIGGER_STALE_EXPIRED_REASON_CODE = "SERVICE_GC_TRIGGER_STALE_EXPIRED"
+"""Reason code logged when past-deadline ``service_gc_requests`` rows are expired (#590).
+
+Worker-internal structured-log reason code only, not a doctor/catalog entry (mirrors
+``_SERVICE_GC_TRIGGER_CONSUME_FAILED_REASON_CODE``). Expire-on-timeout: once a row's
+``deadline_at`` (the API client's polling budget) elapses the operator has already been
+told the trigger timed out, so a still-``pending`` (never-claimed) or abandoned
+``running`` row must never run behind their back — the consume path retires it to the
+terminal ``expired`` state instead of re-queuing it, and logs this code as evidence. The
+periodic interval reaper remains the durable backstop for the disk reclaim itself."""
 
 _TERMINAL_RELEASE_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.failed,

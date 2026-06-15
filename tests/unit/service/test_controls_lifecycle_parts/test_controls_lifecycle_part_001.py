@@ -29,16 +29,17 @@ from awf.service.controls import (
     WorkspaceNotFoundError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
-    WorkspaceStackStopError,
 )
 from tests.postgres import postgres_test_session
 from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import (
-    FailingStopper,
+    RecordingCleaner,
     _events,
     _operations,
     _service,
     _workspace,
     _workspace_with_candidate,
+    compose_down_failed_result,
+    compose_down_succeeded_result,
 )
 
 
@@ -53,7 +54,8 @@ async def test_cancel_active_workspace_stops_stack_transitions_and_replays(
     session: AsyncSession,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.ready)
-    service, stopper, _cleaner = _service(session)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
     expected_version = workspace.version
 
     response = await service.cancel_workspace(
@@ -81,7 +83,9 @@ async def test_cancel_active_workspace_stops_stack_transitions_and_replays(
     assert response.message == "workspace cancellation requested"
     assert response.status == WorkspaceStatus.cancelled
     assert workspace.status == WorkspaceStatus.cancelled.value
-    assert stopper.calls == [workspace.compose_project_name]
+    # A full compose down runs via the cleaner, never a bare docker stop.
+    assert stopper.calls == []
+    assert [call.compose_project_name for call in cleaner.calls] == [workspace.compose_project_name]
     assert [operation.type for operation in operations] == [OperationType.cancel.value]
     assert operations[0].status == "succeeded"
     assert operations[0].payload == {
@@ -93,7 +97,8 @@ async def test_cancel_active_workspace_stops_stack_transitions_and_replays(
         "stop_stack": True,
         "expected_version": 1,
     }
-    assert operations[0].result == {"status": WorkspaceStatus.cancelled.value}
+    assert operations[0].result["status"] == WorkspaceStatus.cancelled.value
+    assert operations[0].result["cleanup"]["status"] == "succeeded"
     assert len(audit_events) == 1
     assert audit_events[0].payload == {
         "schema": "control_audit.v1",
@@ -143,7 +148,8 @@ async def test_stop_active_workspace_cancels_and_terminal_workspace_records_even
         status=WorkspaceStatus.completed,
         title="terminal stop",
     )
-    service, stopper, _cleaner = _service(session)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
 
     active_response = await service.stop_workspace(active.id, reason="halt")
     terminal_response = await service.stop_workspace(terminal.id, reason="already done")
@@ -158,7 +164,12 @@ async def test_stop_active_workspace_cancels_and_terminal_workspace_records_even
     assert terminal_response.status == WorkspaceStatus.completed
     assert active.status == WorkspaceStatus.cancelled.value
     assert terminal.status == WorkspaceStatus.completed.value
-    assert stopper.calls == [active.compose_project_name, terminal.compose_project_name]
+    # Each stop runs a full compose down via the cleaner, not a bare docker stop.
+    assert stopper.calls == []
+    assert [call.compose_project_name for call in cleaner.calls] == [
+        active.compose_project_name,
+        terminal.compose_project_name,
+    ]
     stack_event = next(
         event for event in terminal_events if event.event_type == "workspace.stack_stopped"
     )
@@ -176,7 +187,8 @@ async def test_stop_workspace_replays_existing_idempotent_operation(
     session: AsyncSession,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.completed)
-    service, stopper, _cleaner = _service(session)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
 
     response = await service.stop_workspace(
         workspace.id,
@@ -193,7 +205,9 @@ async def test_stop_workspace_replays_existing_idempotent_operation(
     assert response.operation_id == replay.operation_id
     assert replay.message == "workspace stack stopped"
     assert replay.status == WorkspaceStatus.completed
-    assert stopper.calls == [workspace.compose_project_name]
+    # First call tears the stack down via the cleaner; the replay does not.
+    assert stopper.calls == []
+    assert [call.compose_project_name for call in cleaner.calls] == [workspace.compose_project_name]
     assert [operation.id for operation in operations] == [response.operation_id]
 
 
@@ -302,15 +316,16 @@ async def test_stop_stack_failure_finishes_operation_failed_with_audit(
     session: AsyncSession,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.ready)
-    stopper = FailingStopper()
-    service, _stopper, _cleaner = _service(session, stopper=stopper)
+    cleaner = RecordingCleaner(result=compose_down_failed_result(error="compose down denied"))
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
 
-    with pytest.raises(WorkspaceStackStopError) as exc_info:
-        await service.stop_workspace(
-            workspace.id,
-            reason="operator stop",
-            idempotency_key="stop-fails",
-        )
+    # The compose-down failure is surfaced through the operation (not raised),
+    # and the workspace still reaches its terminal status (issue #588 / #583).
+    await service.stop_workspace(
+        workspace.id,
+        reason="operator stop",
+        idempotency_key="stop-fails",
+    )
     operations = await _operations(session, workspace.id)
     audit_events = await WorkspaceEventRepository(session).list(
         workspace_id=workspace.id,
@@ -318,13 +333,13 @@ async def test_stop_stack_failure_finishes_operation_failed_with_audit(
         limit=10,
     )
 
-    assert exc_info.value.error_code == "STACK_STOP_FAILED"
-    assert stopper.calls == [workspace.compose_project_name]
-    assert workspace.status == WorkspaceStatus.ready.value
+    assert stopper.calls == []
+    assert len(cleaner.calls) == 1
+    assert workspace.status == WorkspaceStatus.cancelled.value
     assert len(operations) == 1
     assert operations[0].status == OperationStatus.failed.value
     assert operations[0].error_code == "STACK_STOP_FAILED"
-    assert "compose stop denied" in (operations[0].error_message or "")
+    assert "compose down denied" in (operations[0].error_message or "")
     assert operations[0].payload == {
         "owner": "operator_api",
         "source": "operator_api",
@@ -341,7 +356,7 @@ async def test_stop_stack_failure_finishes_operation_failed_with_audit(
     assert audit_events[0].payload["outcome"] == "failed"
     assert audit_events[0].payload["operation_id"] == operations[0].id
     assert audit_events[0].payload["evidence"]["error_message"] == (
-        "docker stop failed (exit=17): compose stop denied"
+        "docker compose down failed (exit=1): compose down denied"
     )
 
 
@@ -350,16 +365,15 @@ async def test_cancel_stack_failure_finishes_operation_failed_with_audit(
     session: AsyncSession,
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.ready)
-    stopper = FailingStopper()
-    service, _stopper, _cleaner = _service(session, stopper=stopper)
+    cleaner = RecordingCleaner(result=compose_down_failed_result(error="compose down denied"))
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
 
-    with pytest.raises(WorkspaceStackStopError):
-        await service.cancel_workspace(
-            workspace.id,
-            reason="operator cancel",
-            stop_stack=True,
-            idempotency_key="cancel-fails",
-        )
+    await service.cancel_workspace(
+        workspace.id,
+        reason="operator cancel",
+        stop_stack=True,
+        idempotency_key="cancel-fails",
+    )
     operations = await _operations(session, workspace.id)
     audit_events = await WorkspaceEventRepository(session).list(
         workspace_id=workspace.id,
@@ -367,12 +381,13 @@ async def test_cancel_stack_failure_finishes_operation_failed_with_audit(
         limit=10,
     )
 
-    assert stopper.calls == [workspace.compose_project_name]
-    assert workspace.status == WorkspaceStatus.ready.value
+    assert stopper.calls == []
+    assert len(cleaner.calls) == 1
+    assert workspace.status == WorkspaceStatus.cancelled.value
     assert len(operations) == 1
     assert operations[0].status == OperationStatus.failed.value
     assert operations[0].error_code == "STACK_STOP_FAILED"
-    assert "compose stop denied" in (operations[0].error_message or "")
+    assert "compose down denied" in (operations[0].error_message or "")
     assert operations[0].payload == {
         "owner": "operator_api",
         "source": "operator_api",

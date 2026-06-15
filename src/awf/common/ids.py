@@ -83,3 +83,7 @@ def new_policy_finding_id() -> str:
 
 def new_egress_audit_record_id() -> str:
     return f"ear_{uuid4().hex[:24]}"
+
+
+def new_service_gc_request_id() -> str:
+    return f"sgc_{uuid4().hex[:24]}"

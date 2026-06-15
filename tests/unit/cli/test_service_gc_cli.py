@@ -16,9 +16,13 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from awf.cli.common import _WORKER_DELEGATION_ERROR_REASON_CODES
 from awf.cli.main import app
 from awf.cli.service_commands import GCStatusFilter
 from awf.db.enums import WorkspaceStatus
+from awf.service.gc_worker_delegation import (
+    SERVICE_GC_WORKER_DELEGATION_ERROR_REASON_CODES,
+)
 
 _runner = CliRunner()
 
@@ -99,6 +103,9 @@ def test_service_gc_maps_flags_to_request_body() -> None:
         "limit": 5,
         "statuses": ["completed"],
         "exclude_statuses": ["failed"],
+        # #582: execute delegates the capability-gated reclaim to the worker and
+        # passes the worker-delegation budget (the default --timeout-seconds).
+        "worker_delegation_timeout_seconds": 900.0,
     }
 
 
@@ -136,6 +143,7 @@ def test_service_gc_can_target_superseded_status() -> None:
         "execute": True,
         "statuses": ["superseded"],
         "exclude_statuses": ["superseded"],
+        "worker_delegation_timeout_seconds": 900.0,
     }
 
 
@@ -145,6 +153,19 @@ def test_gc_status_filter_mirrors_workspace_status_plus_superseded() -> None:
     assert {member.value for member in GCStatusFilter} == {
         member.value for member in WorkspaceStatus
     } | {"superseded"}
+
+
+@pytest.mark.unit
+def test_worker_delegation_error_reason_codes_mirror_server_set() -> None:
+    """The thin CLI's worker-delegation reason codes must mirror the server's set.
+
+    ``awf.cli.common`` duplicates these as bare literals so the CLI does not import
+    the GC service stack. Without this guard a server-side addition would silently
+    leave ``warn_on_worker_delegation_failure`` blind to the new code — the run would
+    still exit non-zero (the API downgrades the headline to ``partial``) but the
+    operator would lose the targeted hint. Assert the two sets stay in lockstep.
+    """
+    assert _WORKER_DELEGATION_ERROR_REASON_CODES == SERVICE_GC_WORKER_DELEGATION_ERROR_REASON_CODES
 
 
 @pytest.mark.unit
@@ -161,7 +182,13 @@ def test_service_gc_uses_long_default_timeout() -> None:
         result = _runner.invoke(app, ["service", "gc", "--execute"])
 
     assert result.exit_code == 0, result.output
-    assert mock.call_args.kwargs["timeout"] == 900.0
+    # #590: the execute HTTP timeout must budget *both* server phases. The API-side
+    # worktree/compose reclaim runs first and only then starts the worker-delegation
+    # deadline, so the client allows each phase the full --timeout-seconds plus a 30s
+    # settle margin (2 * 900 + 30); the worker budget itself is the unbuffered 900s.
+    assert mock.call_args.kwargs["timeout"] == 1830.0
+    body = mock.call_args.kwargs["json"]
+    assert body["worker_delegation_timeout_seconds"] == 900.0
 
 
 @pytest.mark.unit
@@ -174,7 +201,9 @@ def test_service_gc_honors_timeout_override() -> None:
         )
 
     assert result.exit_code == 0, result.output
-    assert mock.call_args.kwargs["timeout"] == 3600.0
+    # #590: both phases get the override budget, plus the 30s settle margin.
+    assert mock.call_args.kwargs["timeout"] == 7230.0
+    assert mock.call_args.kwargs["json"]["worker_delegation_timeout_seconds"] == 3600.0
 
 
 @pytest.mark.unit
@@ -238,6 +267,110 @@ def test_service_gc_partial_without_overlay_failure_omits_warning() -> None:
 
     assert result.exit_code == 1
     assert "could not be unmounted" not in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_gc_worker_unavailable_warns_and_exits_nonzero() -> None:
+    # #582: execute delegated to a down worker -> structured worker-unavailable
+    # outcome -> non-zero exit + an actionable stderr hint to start the worker.
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "SERVICE_GC_WORKER_UNAVAILABLE",
+            "deleted_path_count": 0,
+            "worker_reclaim": {
+                "status": "unavailable",
+                "reason_code": "SERVICE_GC_WORKER_UNAVAILABLE",
+                "message": "no fresh control-worker heartbeat for node 'local'",
+            },
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    combined = _combined_output(result)
+    assert "no running control-worker was available" in combined
+    assert "Start the control-worker" in combined
+
+
+@pytest.mark.unit
+def test_service_gc_worker_timeout_warns_and_exits_nonzero() -> None:
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "SERVICE_GC_WORKER_DELEGATION_TIMEOUT",
+            "worker_reclaim": {
+                "status": "timeout",
+                "reason_code": "SERVICE_GC_WORKER_DELEGATION_TIMEOUT",
+            },
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    assert "did not finish the reclaim in time" in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_gc_worker_failure_suppresses_stale_overlay_hint() -> None:
+    # #590: a failed worker delegation preserves the API-side auth-overlay
+    # delete_errors. The overlay hint points at the worker's runtime-release
+    # sweep, which contradicts a worker that is down -- only the (accurate)
+    # worker-delegation hint must fire.
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "partial",
+            "reason_code": "SERVICE_GC_WORKER_UNAVAILABLE",
+            "deleted_path_count": 0,
+            "delete_errors": [
+                {
+                    "kind": "auth_overlay_unmount",
+                    "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                }
+            ],
+            "worker_reclaim": {
+                "status": "unavailable",
+                "reason_code": "SERVICE_GC_WORKER_UNAVAILABLE",
+                "message": "no fresh control-worker heartbeat for node 'local'",
+            },
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 1
+    combined = _combined_output(result)
+    assert "no running control-worker was available" in combined
+    assert "could not be unmounted" not in combined
+
+
+@pytest.mark.unit
+def test_service_gc_successful_worker_delegation_exits_zero() -> None:
+    # A clean execute run with a successful worker reclaim must not warn or fail.
+    response = _mock_response(
+        payload={
+            "dry_run": False,
+            "status": "succeeded",
+            "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+            "deleted_path_count": 3,
+            "worker_reclaim": {
+                "status": "completed",
+                "reason_code": "SERVICE_GC_WORKER_RECLAIMED",
+                "deleted_path_count": 3,
+            },
+        }
+    )
+    with patch("awf.cli.common.httpx.request", return_value=response):
+        result = _runner.invoke(app, ["service", "gc", "--execute"])
+
+    assert result.exit_code == 0, result.output
+    combined = _combined_output(result)
+    assert "control-worker" not in combined
 
 
 @pytest.mark.unit
@@ -408,6 +541,72 @@ def test_service_gc_skips_service_env_when_overrides_present(
     _, url = mock.call_args.args
     assert url.startswith("http://flag-host:4321/")
     assert mock.call_args.kwargs["headers"]["Authorization"] == "Bearer flag-token"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("payload", [None, [], "not-a-mapping", 42])
+def test_warn_on_worker_delegation_failure_ignores_non_mapping(
+    payload: object, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Worker JSON can be malformed (e.g. a non-JSON-object body decoded to a
+    # list/None); a non-Mapping payload is not a delegation failure, so the
+    # helper returns False and prints no hint.
+    from awf.cli.common import warn_on_worker_delegation_failure
+
+    assert warn_on_worker_delegation_failure(payload) is False
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+@pytest.mark.unit
+def test_warn_on_worker_delegation_failure_unrelated_reason_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A Mapping with no worker_reclaim error and an unrelated headline reason
+    # code (here a successful execute) is not a delegation failure: the helper
+    # falls back to payload["reason_code"], still doesn't match, returns False,
+    # and prints nothing.
+    from awf.cli.common import warn_on_worker_delegation_failure
+
+    payload = {
+        "dry_run": False,
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+    }
+    assert warn_on_worker_delegation_failure(payload) is False
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+@pytest.mark.unit
+def test_warn_on_worker_delegation_failure_reclaim_failed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The RECLAIM_FAILED reason code is neither "unavailable" nor "timeout", so
+    # the helper falls through to the generic failure detail, emits the hint on
+    # stderr, and returns True.
+    from awf.cli.common import warn_on_worker_delegation_failure
+
+    payload = {
+        "dry_run": False,
+        "status": "partial",
+        "reason_code": "SERVICE_GC_WORKER_RECLAIM_FAILED",
+        "worker_reclaim": {
+            "status": "failed",
+            "reason_code": "SERVICE_GC_WORKER_RECLAIM_FAILED",
+            "message": "overlay busy",
+        },
+    }
+    assert warn_on_worker_delegation_failure(payload) is True
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "the control-worker's reclaim of the auth overlays and claude-base failed" in (
+        captured.err
+    )
+    assert "overlay busy" in captured.err
+    assert "Start the control-worker" in captured.err
 
 
 def _combined_output(result: Any) -> str:

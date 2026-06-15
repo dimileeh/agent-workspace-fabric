@@ -311,6 +311,27 @@ def _control_response(
     )
 
 
+def _stack_release_replay_message(
+    operation: Operation,
+    *,
+    success_message: str,
+    failure_message: str,
+) -> str:
+    """Pick the replay message for a cancel/stop stack-release operation.
+
+    The service-driven cancel/stop teardown records a **failed** operation (it
+    does not raise) when the compose down fails, returning ``failure_message``
+    on that first response. An idempotent retry with the same key is served from
+    the stored operation, whose status is ``failed`` — so the replay must echo
+    ``failure_message`` too, not the success string, or a client would see
+    ``operation_status: failed`` paired with a message claiming the teardown
+    succeeded. Any non-failed (succeeded) replay keeps ``success_message``.
+    """
+    if operation.status == OperationStatus.failed.value:
+        return failure_message
+    return success_message
+
+
 def _operation_result_warnings(operation: Operation) -> list[WorkspaceControlWarningResponse]:
     result = operation.result
     if not isinstance(result, dict):

@@ -359,9 +359,23 @@ async def run_terminal_workspace_gc(
     worktree_remover: WorkspaceGCWorktreeRemove | None = None,
     companion_image_prune: CompanionImagePrune | None = None,
     claude_base_reap: ClaudeBaseReap | None = None,
+    extra_pruned_auth_dirs: frozenset[Path] = frozenset(),
     now: datetime | None = None,
 ) -> WorkspaceGCResult:
-    """Plan terminal workspace GC and optionally delete selected directories."""
+    """Plan terminal workspace GC and optionally delete selected directories.
+
+    ``extra_pruned_auth_dirs`` only affects the **dry-run** claude-base preview: it
+    lists auth dirs an *earlier* GC pass already planned to delete, so this pass's base
+    reaper treats their ``base.signature`` pins as already gone. The API ``--execute``
+    dry-run runs two passes (default policy + cancelled/destroyed augmentation), and on
+    ``--execute`` the worker deletes the first pass's auth dirs *before* the second
+    pass's reaper runs — so a base pinned by *both* a default and a discarded candidate
+    is reaped by the second execute pass. Threading the first pass's planned auth dirs
+    in here lets the second dry-run preview mark that base ``planned`` instead of
+    ``protected``, keeping the plan in step with what ``--execute`` reaps
+    (PRRT_kwDOSJAM6s6Jbinh). Ignored on ``execute`` (the reaper reads on-disk pins
+    directly there).
+    """
 
     current_time = _to_utc(now or datetime.now(UTC))
     plan = await plan_terminal_workspace_gc(
@@ -383,7 +397,9 @@ async def run_terminal_workspace_gc(
     # pruned so a base the matching execute pass would free is previewed as ``planned``
     # rather than mislabeled ``protected`` (PRRT_kwDOSJAM6s6HIepf).
     if not execute:
-        pruned_auth_dirs = frozenset(candidate.auth.path for candidate in plan.candidates)
+        pruned_auth_dirs = (
+            frozenset(candidate.auth.path for candidate in plan.candidates) | extra_pruned_auth_dirs
+        )
         claude_base_reap_result = (
             await claude_base_reap(pruned_auth_dirs) if claude_base_reap is not None else None
         )
@@ -514,6 +530,7 @@ async def run_service_workspace_gc(
     companion_image_retention_hours: int = DEFAULT_MIN_AGE_HOURS,
     host_home: Path | str | None = None,
     reap_claude_bases: bool = False,
+    extra_pruned_auth_dirs: frozenset[Path] = frozenset(),
     compose_manager: ComposeManager | None = None,
     now: datetime | None = None,
 ) -> WorkspaceGCResult:
@@ -528,6 +545,10 @@ async def run_service_workspace_gc(
     With ``reap_claude_bases`` enabled (and ``host_home`` provided) a host-wide
     GC-B step (#389) also reaps superseded shared ``~/.claude`` overlay bases,
     preserving the current signature and any live-mounted or pinned base.
+
+    ``extra_pruned_auth_dirs`` is forwarded to the dry-run claude-base preview so a
+    later preview pass can account for an earlier pass's planned auth-dir deletions
+    (see ``run_terminal_workspace_gc``); it is a no-op on ``execute``.
     """
     normalized_work_dir = Path(work_dir).expanduser().resolve()
     manager = compose_manager
@@ -587,6 +608,7 @@ async def run_service_workspace_gc(
         compose_teardown=compose_teardown,
         companion_image_prune=companion_image_prune,
         claude_base_reap=claude_base_reap,
+        extra_pruned_auth_dirs=extra_pruned_auth_dirs,
         now=now,
     )
 
