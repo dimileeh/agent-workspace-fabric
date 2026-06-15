@@ -456,3 +456,29 @@ async def test_service_gc_returns_partial_envelope(
     # headline reason to the worker-unavailable code (the more actionable signal),
     # while the per-path errors remain inspectable in ``delete_errors``.
     assert payload["reason_code"] == "SERVICE_GC_WORKER_UNAVAILABLE"
+
+
+def test_plan_candidate_auth_dirs_skips_malformed_candidates() -> None:
+    """Only well-formed candidate auth paths survive the fold.
+
+    The candidates come from external worker JSON, so each shape guard must
+    tolerate a malformed entry and skip it. A list mixing a non-dict entry, a
+    candidate whose ``paths`` is not a dict, one whose ``paths['auth']`` is not a
+    dict, and one whose ``auth['path']`` is not a string must all be dropped,
+    leaving exactly the single fully well-formed auth ``Path``.
+    """
+    from awf.api.routes.service import _plan_candidate_auth_dirs
+
+    plan_payload = {
+        "candidates": [
+            "not-a-dict",  # line 78: candidate is not a dict
+            {"paths": "not-a-dict"},  # line 81: paths is not a dict
+            {"paths": {"auth": "not-a-dict"}},  # line 84: auth is not a dict
+            {"paths": {"auth": {"path": 1234}}},  # line 86: auth path is not a str
+            {"paths": {"auth": {"path": "/var/lib/awf/auth/good"}}},  # well-formed
+        ]
+    }
+
+    result = _plan_candidate_auth_dirs(plan_payload)
+
+    assert result == frozenset({Path("/var/lib/awf/auth/good")})
