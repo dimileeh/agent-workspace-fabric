@@ -18,14 +18,23 @@ call (``gh pr create`` for GitHub, the REST API for Bitbucket).
 
 from __future__ import annotations
 
+import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.commands import AsyncCommandRunner
 from awf.common.forge import ForgeClient
 from awf.common.git_identity import git_safe_directory_config_args
-from awf.common.github_client import GitHubClientError, RepoRef
+from awf.common.github_client import (
+    BranchOpenPullRequest,
+    GitHubClientError,
+    PullRequestMetadataError,
+    RepoRef,
+    list_open_pull_requests_for_branch,
+)
+from awf.common.github_transient import is_transient_github_error_text
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
@@ -43,6 +52,11 @@ _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/@\s]+(?::[^/@\s]+)?@")
 # exceed log-backend payload limits.
 _MAX_DIAGNOSTIC_COMMITS = 50
 _HEADS_REF_PREFIX = "refs/heads/"
+_PR_CREATE_TRANSIENT_MAX_RETRIES = 3
+_PR_CREATE_TRANSIENT_INITIAL_BACKOFF_SECONDS = 5.0
+_PR_CREATE_TRANSIENT_MAX_BACKOFF_SECONDS = 30.0
+
+_Sleep = Callable[[float], Awaitable[None]]
 
 
 def _redact_credentials(text: str) -> str:
@@ -56,11 +70,88 @@ def _short_branch_name(branch_name: str) -> str:
     return branch_name.removeprefix(_HEADS_REF_PREFIX)
 
 
+def _is_duplicate_pull_request_error(exc: GitHubClientError) -> bool:
+    return exc.returncode == 1 and "already exists" in exc.stderr.lower()
+
+
+def _short_error(text: str) -> str:
+    cleaned = text.strip() or "<no output>"
+    return cleaned[:1000]
+
+
+def _github_pr_create_failure_detail(
+    exc: GitHubClientError,
+    *,
+    attempt: int,
+    transient: bool,
+    duplicate: bool,
+) -> dict[str, object]:
+    return {
+        "attempt": attempt,
+        "operation": exc.operation,
+        "returncode": exc.returncode,
+        "error_message": _short_error(exc.stderr),
+        "transient": transient,
+        "duplicate": duplicate,
+        "will_retry": False,
+    }
+
+
+def _branch_open_pr_metadata(pr: BranchOpenPullRequest) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "number": pr.number,
+        "url": pr.url,
+        "head_ref": pr.head_ref,
+        "head_repo_slug": pr.head_repo_slug,
+    }
+    if pr.head_sha is not None:
+        metadata["head_sha"] = pr.head_sha
+    return metadata
+
+
+def _github_pr_create_details(
+    *,
+    strategy: str,
+    attempts: int,
+    max_retries: int,
+    failures: list[dict[str, object]],
+    lookups: list[dict[str, object]],
+    matched_pr: dict[str, object] | None = None,
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "strategy": strategy,
+        "attempts": attempts,
+        "retry_count": max(attempts - 1, 0),
+        "max_retries": max_retries,
+        "failures": list(failures),
+        "reconcile_lookups": list(lookups),
+    }
+    if matched_pr is not None:
+        details["matched_pr"] = matched_pr
+    return details
+
+
+def _pull_request_error_from_github(
+    exc: GitHubClientError,
+    *,
+    head_sha: str | None,
+    details: dict[str, object] | None = None,
+) -> PullRequestError:
+    return PullRequestError(
+        operation=exc.operation,
+        returncode=exc.returncode,
+        stderr=exc.stderr,
+        head_sha=head_sha,
+        details=details,
+    )
+
+
 @dataclass(frozen=True)
 class PullRequestResult:
     url: str
     branch: str
     head_sha: str | None = None
+    open_metadata: dict[str, object] | None = None
 
 
 class PullRequestError(Exception):
@@ -74,11 +165,13 @@ class PullRequestError(Exception):
         stderr: str,
         head_sha: str | None = None,
         reason_code: str | None = None,
+        details: dict[str, object] | None = None,
     ) -> None:
         self.operation = operation
         self.returncode = returncode
         self.stderr = stderr
         self.head_sha = head_sha
+        self.details = details
         # Forge clients that carry an actionable reason code (e.g.
         # ``BitbucketClientError`` with auth / rate-limit / transport codes)
         # propagate it here so the executor records the specific doctor
@@ -94,8 +187,28 @@ class PullRequestError(Exception):
 class PullRequestCreator:
     """Pushes a feature branch and opens a PR via an injected ``ForgeClient``."""
 
-    def __init__(self, runner: AsyncCommandRunner) -> None:
+    def __init__(
+        self,
+        runner: AsyncCommandRunner,
+        *,
+        pr_create_transient_max_retries: int = _PR_CREATE_TRANSIENT_MAX_RETRIES,
+        pr_create_transient_initial_backoff_seconds: float = (
+            _PR_CREATE_TRANSIENT_INITIAL_BACKOFF_SECONDS
+        ),
+        pr_create_transient_max_backoff_seconds: float = _PR_CREATE_TRANSIENT_MAX_BACKOFF_SECONDS,
+        sleep: _Sleep = asyncio.sleep,
+    ) -> None:
         self._runner = runner
+        self._pr_create_transient_max_retries: int = max(pr_create_transient_max_retries, 0)
+        self._pr_create_transient_initial_backoff_seconds: float = max(
+            pr_create_transient_initial_backoff_seconds,
+            0.0,
+        )
+        self._pr_create_transient_max_backoff_seconds: float = max(
+            pr_create_transient_max_backoff_seconds,
+            0.0,
+        )
+        self._sleep: _Sleep = sleep
 
     async def push_and_open(
         self,
@@ -201,6 +314,16 @@ class PullRequestCreator:
 
         repo = RepoRef.from_url(remote_url or repo_url)
         try:
+            if repo.forge == "github":
+                return await self._create_github_pull_request_with_redundancy(
+                    forge_client=forge_client,
+                    repo=repo,
+                    base_branch=base_branch,
+                    branch_name=branch_name,
+                    title=title,
+                    body=body,
+                    head_sha=head_sha,
+                )
             url = await forge_client.create_pull_request(
                 repo=repo,
                 base=base_branch,
@@ -208,6 +331,8 @@ class PullRequestCreator:
                 title=title,
                 body=body,
             )
+        except PullRequestError:
+            raise
         except GitHubClientError as exc:
             # Preserve the structured returncode + already-redacted stderr +
             # operation (never ``str(exc)``, which could leak unredacted output);
@@ -244,6 +369,222 @@ class PullRequestCreator:
 
         _log.info("pr.created", branch=branch_name, url=url)
         return PullRequestResult(url=url, branch=branch_name, head_sha=head_sha)
+
+    async def _create_github_pull_request_with_redundancy(
+        self,
+        *,
+        forge_client: ForgeClient,
+        repo: RepoRef,
+        base_branch: str,
+        branch_name: str,
+        title: str,
+        body: str,
+        head_sha: str | None,
+    ) -> PullRequestResult:
+        failures: list[dict[str, object]] = []
+        lookups: list[dict[str, object]] = []
+        attempt = 0
+
+        while True:
+            attempt += 1
+            try:
+                url = await forge_client.create_pull_request(
+                    repo=repo,
+                    base=base_branch,
+                    head=branch_name,
+                    title=title,
+                    body=body,
+                )
+            except GitHubClientError as exc:
+                duplicate = _is_duplicate_pull_request_error(exc)
+                transient = is_transient_github_error_text(
+                    operation=exc.operation,
+                    stderr=exc.stderr,
+                )
+                failure = _github_pr_create_failure_detail(
+                    exc,
+                    attempt=attempt,
+                    transient=transient,
+                    duplicate=duplicate,
+                )
+                failures.append(failure)
+                if not transient and not duplicate:
+                    raise _pull_request_error_from_github(
+                        exc,
+                        head_sha=head_sha,
+                        details=_github_pr_create_details(
+                            strategy="failed",
+                            attempts=attempt,
+                            max_retries=self._pr_create_transient_max_retries,
+                            failures=failures,
+                            lookups=lookups,
+                        ),
+                    ) from exc
+
+                existing_pr, lookup_detail = await self._lookup_same_repo_open_pr(
+                    repo=repo,
+                    branch_name=branch_name,
+                    base_branch=base_branch,
+                )
+                lookups.append(lookup_detail)
+                if existing_pr is not None:
+                    metadata = _github_pr_create_details(
+                        strategy=(
+                            "reconciled_after_duplicate"
+                            if duplicate
+                            else "reconciled_after_transient"
+                        ),
+                        attempts=attempt,
+                        max_retries=self._pr_create_transient_max_retries,
+                        failures=failures,
+                        lookups=lookups,
+                        matched_pr=_branch_open_pr_metadata(existing_pr),
+                    )
+                    _log.info(
+                        "pr_creator.github_pr_create_reconciled",
+                        repo=repo.slug(),
+                        branch=branch_name,
+                        base_branch=base_branch,
+                        attempt=attempt,
+                        pr_url=existing_pr.url,
+                        pr_number=existing_pr.number,
+                        strategy=metadata["strategy"],
+                    )
+                    return PullRequestResult(
+                        url=existing_pr.url,
+                        branch=existing_pr.head_ref or branch_name,
+                        head_sha=existing_pr.head_sha or head_sha,
+                        open_metadata=metadata,
+                    )
+
+                if duplicate:
+                    raise _pull_request_error_from_github(
+                        exc,
+                        head_sha=head_sha,
+                        details=_github_pr_create_details(
+                            strategy="duplicate_lookup_missed",
+                            attempts=attempt,
+                            max_retries=self._pr_create_transient_max_retries,
+                            failures=failures,
+                            lookups=lookups,
+                        ),
+                    ) from exc
+
+                if attempt > self._pr_create_transient_max_retries:
+                    details = _github_pr_create_details(
+                        strategy="transient_retry_exhausted",
+                        attempts=attempt,
+                        max_retries=self._pr_create_transient_max_retries,
+                        failures=failures,
+                        lookups=lookups,
+                    )
+                    _log.warning(
+                        "pr_creator.github_pr_create_retry_exhausted",
+                        repo=repo.slug(),
+                        branch=branch_name,
+                        base_branch=base_branch,
+                        attempt=attempt,
+                        max_retries=self._pr_create_transient_max_retries,
+                        error=failure["error_message"],
+                    )
+                    raise _pull_request_error_from_github(
+                        exc,
+                        head_sha=head_sha,
+                        details=details,
+                    ) from exc
+
+                wait_seconds = self._pr_create_retry_wait_seconds(attempt)
+                failure["will_retry"] = True
+                failure["wait_seconds"] = wait_seconds
+                _log.warning(
+                    "pr_creator.github_pr_create_retrying",
+                    repo=repo.slug(),
+                    branch=branch_name,
+                    base_branch=base_branch,
+                    attempt=attempt,
+                    max_retries=self._pr_create_transient_max_retries,
+                    wait_seconds=wait_seconds,
+                    error=failure["error_message"],
+                )
+                if wait_seconds > 0:
+                    await self._sleep(wait_seconds)
+                continue
+
+            if not url:
+                raise PullRequestError(
+                    operation="create_pull_request (no URL)",
+                    returncode=0,
+                    stderr="forge returned an empty PR URL",
+                    head_sha=head_sha,
+                )
+            open_metadata = (
+                _github_pr_create_details(
+                    strategy="created_after_retry",
+                    attempts=attempt,
+                    max_retries=self._pr_create_transient_max_retries,
+                    failures=failures,
+                    lookups=lookups,
+                )
+                if failures
+                else None
+            )
+            _log.info("pr.created", branch=branch_name, url=url, attempts=attempt)
+            return PullRequestResult(
+                url=url,
+                branch=branch_name,
+                head_sha=head_sha,
+                open_metadata=open_metadata,
+            )
+
+    async def _lookup_same_repo_open_pr(
+        self,
+        *,
+        repo: RepoRef,
+        branch_name: str,
+        base_branch: str,
+    ) -> tuple[BranchOpenPullRequest | None, dict[str, object]]:
+        try:
+            candidates = await list_open_pull_requests_for_branch(
+                runner=self._runner,
+                repo=repo,
+                branch_name=branch_name,
+                base_branch=base_branch,
+            )
+        except PullRequestMetadataError as exc:
+            lookup_failure_detail: dict[str, object] = {
+                "status": "failed",
+                "reason_code": exc.reason_code,
+                "message": exc.message[:500],
+            }
+            _log.warning(
+                "pr_creator.github_pr_create_reconcile_lookup_failed",
+                repo=repo.slug(),
+                branch=branch_name,
+                base_branch=base_branch,
+                reason_code=exc.reason_code,
+                error=exc.message[:500],
+            )
+            return None, lookup_failure_detail
+
+        repo_slug = repo.slug().lower()
+        same_repo = [
+            candidate for candidate in candidates if candidate.head_repo_slug.lower() == repo_slug
+        ]
+        lookup_detail: dict[str, object] = {
+            "status": "found" if same_repo else "not_found",
+            "candidate_count": len(candidates),
+            "same_repo_count": len(same_repo),
+            "fork_collision_count": len(candidates) - len(same_repo),
+        }
+        if not same_repo:
+            return None, lookup_detail
+        match = same_repo[0]
+        lookup_detail["matched_pr"] = _branch_open_pr_metadata(match)
+        return match, lookup_detail
+
+    def _pr_create_retry_wait_seconds(self, retry_number: int) -> float:
+        wait = self._pr_create_transient_initial_backoff_seconds * (2 ** (retry_number - 1))
+        return float(min(wait, self._pr_create_transient_max_backoff_seconds))
 
     async def _log_pre_push_diagnostics(
         self,

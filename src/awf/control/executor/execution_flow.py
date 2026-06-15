@@ -1408,6 +1408,7 @@ async def execute(
             pr_number=persisted.pr_number,
             pr_url=persisted.pr_url,
             source_head_sha=pr.head_sha,
+            evidence=pr.open_metadata,
         )
         # Resolve which monitor (if any) to hand off to. Pre-constructed
         # ``pr_monitor`` wins (tests); otherwise the factory builds one
