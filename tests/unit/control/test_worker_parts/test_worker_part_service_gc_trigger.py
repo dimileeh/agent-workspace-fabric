@@ -295,6 +295,38 @@ async def test_consume_marks_failed_on_reaper_error(
         assert "rmtree blew up" in (failed.error_message or "")
 
 
+async def test_consume_marks_failed_on_param_parse_error(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A malformed stored param marks the row ``failed``, not stuck ``running`` (PRRT_kwDOSJAM6s6JdSy-).
+
+    The API persists its cutoff anchor ``now`` as an ISO string; if that value is
+    unparseable, the worker's ``datetime.fromisoformat`` raises. That parse happens
+    *after* the row is claimed ``running``. Unless it is recorded as a terminal failure
+    the row would sit ``running`` until ``deadline_at`` while the API polls a stuck
+    request and the intended reap-failure path is skipped. The parse failure must mark
+    the row ``failed`` with the worker-reclaim reason code, exactly like a reaper error.
+    """
+    request_id = await _seed_pending(
+        session_factory,
+        params={"execute": True, "now": "not-a-timestamp"},
+    )
+
+    async def _terminal_reaper(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("reaper must not run when param parsing fails")
+
+    worker = _make_worker(session_factory, terminal_gc_reaper=_terminal_reaper)
+
+    await worker._maybe_consume_service_gc_trigger()  # noqa: SLF001
+
+    async with session_factory() as session:
+        failed = await ServiceGCRequestRepository(session).get(request_id)
+        assert failed is not None
+        assert failed.status == "failed"
+        assert failed.error_code == "SERVICE_GC_WORKER_RECLAIM_FAILED"
+        assert "not-a-timestamp" in (failed.error_message or "")
+
+
 async def test_consume_swallows_claim_failure(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

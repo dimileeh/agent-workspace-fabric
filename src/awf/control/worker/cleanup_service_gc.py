@@ -185,32 +185,37 @@ async def _run_claimed_service_gc_trigger(
     by the API and stored in ``params``) are forwarded to the reaper so the
     auth-overlay/claude-base reclaim matches the scope of the API-side pass the operator
     just ran (#590); absent keys leave the reaper on its server defaults (e.g. the
-    periodic backstop). ``CancelledError`` propagates; any reaper failure is recorded on
-    the row so the polling API does not hang and never reports false success.
+    periodic backstop). ``CancelledError`` propagates; any reaper failure — *and* a
+    failure to parse the stored params (e.g. an unparseable ``now``, which raises
+    ``ValueError`` from ``datetime.fromisoformat``) — is recorded on the row so the
+    polling API does not hang on a row stuck ``running`` until ``deadline_at`` and never
+    reports false success (PRRT_kwDOSJAM6s6JdSy-). Param parsing therefore lives *inside*
+    the guarded block, not before it.
     """
-    reaper_kwargs: dict[str, Any] = {}
-    min_age_hours = params.get("min_age_hours")
-    if min_age_hours is not None:
-        reaper_kwargs["min_age_hours"] = min_age_hours
-    limit = params.get("limit")
-    if limit is not None:
-        reaper_kwargs["limit"] = limit
-    # The API persists its retention cutoff anchor (``datetime.now(UTC)`` at invocation)
-    # as an ISO string so the worker derives the *same* ``cutoff_at`` the API-side pass
-    # used instead of recomputing it from the (minutes-later) claim clock — otherwise a
-    # workspace just under ``--min-age-hours`` at invocation could age into eligibility
-    # and be reaped though no plan/dry-run listed it (PRRT_kwDOSJAM6s6JbriQ).
-    now = params.get("now")
-    if now is not None:
-        reaper_kwargs["now"] = datetime.fromisoformat(now)
-    statuses = params.get("statuses")
-    if statuses:
-        reaper_kwargs["statuses"] = statuses
-    exclude_statuses = params.get("exclude_statuses")
-    if exclude_statuses:
-        reaper_kwargs["exclude_statuses"] = exclude_statuses
-
     try:
+        reaper_kwargs: dict[str, Any] = {}
+        min_age_hours = params.get("min_age_hours")
+        if min_age_hours is not None:
+            reaper_kwargs["min_age_hours"] = min_age_hours
+        limit = params.get("limit")
+        if limit is not None:
+            reaper_kwargs["limit"] = limit
+        # The API persists its retention cutoff anchor (``datetime.now(UTC)`` at
+        # invocation) as an ISO string so the worker derives the *same* ``cutoff_at``
+        # the API-side pass used instead of recomputing it from the (minutes-later)
+        # claim clock — otherwise a workspace just under ``--min-age-hours`` at
+        # invocation could age into eligibility and be reaped though no plan/dry-run
+        # listed it (PRRT_kwDOSJAM6s6JbriQ).
+        now = params.get("now")
+        if now is not None:
+            reaper_kwargs["now"] = datetime.fromisoformat(now)
+        statuses = params.get("statuses")
+        if statuses:
+            reaper_kwargs["statuses"] = statuses
+        exclude_statuses = params.get("exclude_statuses")
+        if exclude_statuses:
+            reaper_kwargs["exclude_statuses"] = exclude_statuses
+
         report = await self._terminal_gc_reaper(**reaper_kwargs)
     except asyncio.CancelledError:
         raise
