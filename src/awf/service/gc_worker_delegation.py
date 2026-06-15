@@ -242,6 +242,15 @@ def fold_worker_reclaim(
         # are not told a reclaimed auth dir was preserved (PRRT_kwDOSJAM6s6JbLTR).
         reclaimed = _worker_reclaimed_paths(outcome)
         _reconcile_worker_reclaimed_auth_candidates(folded, reclaimed)
+        # Fold the worker-only candidates (the discarded-status augmentation pass —
+        # cancelled/destroyed rows the API default policy omits) into the headline
+        # ``candidates``/``candidate_count``. The headline byte/path totals already
+        # include them, but without this the candidate list and count stay API-only: a
+        # default ``--execute`` run that reaped only an old cancelled workspace reports
+        # its deleted auth paths and GB-scale bytes next to ``candidate_count: 0`` and an
+        # empty candidate list, contradicting the dry-run preview that lists that same
+        # candidate (PRRT_kwDOSJAM6s6Jcixj).
+        _fold_worker_only_candidates(folded, base, outcome.report or {})
         if outcome.worker_partial:
             # The worker's own reap was partial — it leaked disk it could not
             # reclaim, so a previously-clean run must not still read as success and
@@ -525,6 +534,43 @@ def _worker_only_estimated_bytes(base: dict[str, object], report: dict[str, obje
         if isinstance(estimated, Mapping):
             total += _as_int(estimated.get("total"))
     return total
+
+
+def _fold_worker_only_candidates(
+    folded: dict[str, object], base: dict[str, object], report: dict[str, object]
+) -> None:
+    """Append candidates the worker reaped that the API plan never carried.
+
+    The headline ``candidates``/``candidate_count`` come from the API default-policy
+    pass only. The worker's discarded-status augmentation pass reaps cancelled/destroyed
+    workspaces the API plan never classified (see ``_combine_terminal_gc_reports``), so
+    their entries are net-new and must reach the headline — otherwise a default
+    ``--execute`` run that reaped only a cancelled workspace reports GB-scale deleted
+    paths/bytes alongside ``candidate_count: 0`` and an empty candidate list while the
+    dry-run preview lists that same candidate (PRRT_kwDOSJAM6s6Jcixj). Identified by
+    ``workspace_id`` (any worker candidate absent from the API plan's set), mirroring
+    ``_worker_only_estimated_bytes`` so an API-planned candidate is never duplicated;
+    candidates without a ``workspace_id`` are skipped (cannot prove they are net-new). A
+    fresh list is built so the caller's ``base`` stays untouched.
+    """
+    base_ids = {
+        candidate.get("workspace_id")
+        for candidate in _candidate_dicts(base)
+        if candidate.get("workspace_id") is not None
+    }
+    worker_only = [
+        dict(candidate)
+        for candidate in _candidate_dicts(report)
+        if candidate.get("workspace_id") is not None
+        and candidate.get("workspace_id") not in base_ids
+    ]
+    if not worker_only:
+        return
+    existing = folded.get("candidates")
+    merged: list[object] = list(existing) if isinstance(existing, list) else []
+    merged.extend(worker_only)
+    folded["candidates"] = merged
+    folded["candidate_count"] = len(merged)
 
 
 def _candidate_dicts(payload: dict[str, object]) -> list[Mapping[str, object]]:

@@ -997,3 +997,124 @@ def test_fold_skips_worker_only_candidate_with_non_mapping_estimate() -> None:
 
     # The scalar estimate is not a Mapping, so no net-new bytes are summed.
     assert folded["total_estimated_bytes"] == 100
+
+
+def test_fold_adds_worker_only_candidate_to_headline_candidate_list() -> None:
+    # PRRT_kwDOSJAM6s6Jcixj: a default ``--execute`` run whose only reclaim is the
+    # worker's discarded-status augmentation pass (a cancelled/destroyed workspace the
+    # API default policy omits) must surface that candidate on the headline
+    # ``candidates``/``candidate_count``. Otherwise the response reports its deleted
+    # auth paths and GB-scale bytes next to ``candidate_count: 0`` and an empty
+    # candidate list, contradicting the dry-run preview that lists the same candidate.
+    candidate = {
+        "workspace_id": "ws-cancelled",
+        "status": "cancelled",
+        "estimated_bytes": {"auth": 1_700_000_000, "total": 1_700_000_000},
+    }
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-cancelled"],
+        "total_estimated_bytes": 1_700_000_000,
+        "candidates": [candidate],
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        candidate_count=0,
+        candidates=[],
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["candidates"] == [candidate]
+    assert folded["candidate_count"] == 1
+    # The caller's base list is left untouched (a fresh list is built).
+    assert base["candidates"] == []
+    assert base["candidate_count"] == 0
+
+
+def test_fold_does_not_duplicate_api_planned_candidate_in_headline_list() -> None:
+    # A worker candidate already carried by the API plan (same ``workspace_id``) is not
+    # re-appended — it is the same workspace the API pass already listed, so duplicating
+    # it would inflate ``candidate_count`` and the candidate list.
+    api_candidate = {"workspace_id": "ws-1", "status": "completed"}
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-1"],
+        "total_estimated_bytes": 1_700_000_000,
+        "candidates": [{"workspace_id": "ws-1", "status": "completed"}],
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=1_700_000_000,
+        candidate_count=1,
+        candidates=[api_candidate],
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["candidates"] == [api_candidate]
+    assert folded["candidate_count"] == 1
+
+
+def test_fold_appends_worker_only_candidate_when_base_lacks_candidate_list() -> None:
+    # Defensive: a base payload without a ``candidates`` list (never the real
+    # ``WorkspaceGCResult`` shape, but robust to a stubbed/garbled payload) still
+    # surfaces the worker-only candidate rather than dropping it.
+    candidate = {"workspace_id": "ws-cancelled", "status": "cancelled"}
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-cancelled"],
+        "total_estimated_bytes": 1_700_000_000,
+        "candidates": [candidate],
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(deleted_path_count=0, deleted_paths=[], total_estimated_bytes=0)
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["candidates"] == [candidate]
+    assert folded["candidate_count"] == 1
+
+
+def test_fold_worker_partial_adds_worker_only_candidate_to_headline_list() -> None:
+    # The worker-only candidate fold also applies on a partial worker reap — the
+    # candidate was still reaped; the partial is for an unrelated side effect — so the
+    # headline candidate list stays consistent with the (folded) deleted paths/bytes.
+    candidate = {
+        "workspace_id": "ws-cancelled",
+        "status": "cancelled",
+        "estimated_bytes": {"auth": 1_700_000_000, "total": 1_700_000_000},
+    }
+    report = {
+        "status": "partial",
+        "reason_code": "CLEANUP_EXECUTION_PARTIAL",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-cancelled"],
+        "total_estimated_bytes": 1_700_000_000,
+        "candidates": [candidate],
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        candidate_count=0,
+        candidates=[],
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "partial"
+    assert folded["candidates"] == [candidate]
+    assert folded["candidate_count"] == 1
