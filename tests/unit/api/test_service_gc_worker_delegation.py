@@ -139,6 +139,11 @@ async def test_execute_folds_worker_reclaim_into_headline(
         "status": "succeeded",
         "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
         "deleted_path_count": 3,
+        "deleted_paths": [
+            "/var/lib/awf/auth/ws-1/claude",
+            "/var/lib/awf/auth/ws-2/claude",
+            "/var/lib/awf/_shared/claude-base/sig",
+        ],
         "total_estimated_bytes": 1_700_000_000,
     }
     consumer = await _run_worker_consumer(engine, worker_report)
@@ -157,6 +162,11 @@ async def test_execute_folds_worker_reclaim_into_headline(
     assert payload["status"] == "succeeded"
     # Path count folds additively: API-side (0 auth) + worker reclaim (3 paths).
     assert payload["deleted_path_count"] == 3
+    # The worker's actually-removed paths fold into the headline list too, so the
+    # ``deleted_path_count == len(deleted_paths)`` invariant survives the fold — a
+    # count/list mismatch (count without paths) would otherwise slip through.
+    assert payload["deleted_paths"] == worker_report["deleted_paths"]
+    assert payload["deleted_path_count"] == len(payload["deleted_paths"])
     # Bytes are NOT summed: the headline keeps the base plan total (0 in this stub).
     # The worker's ~1.7 GB estimate is the same auth dir the base plan already
     # estimates, so summing would double-count it; it stays on the sub-object.
