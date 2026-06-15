@@ -145,7 +145,9 @@ def _merge_claude_base_reaps(
         merged[key] = _dedupe_preserving_order(
             [*_as_list(default_reap.get(key)), *_as_list(discarded_reap.get(key))]
         )
-    reclaimed = {*_as_list(merged["reaped"]), *_as_list(merged["planned"])}
+    reclaimed = _dedupe_preserving_order(
+        [*_as_list(merged["reaped"]), *_as_list(merged["planned"])]
+    )
     protected = [
         *_as_list(default_reap.get("protected")),
         *_as_list(discarded_reap.get("protected")),

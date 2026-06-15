@@ -1087,6 +1087,36 @@ def test_merge_claude_base_reaps_dedupes_planned_across_passes() -> None:
     assert merged["protected"] == []
 
 
+def test_merge_claude_base_reaps_tolerates_unhashable_reaped_planned_entries() -> None:
+    """A malformed unhashable entry in ``reaped``/``planned`` must not crash the merge.
+
+    ``_dedupe_preserving_order`` keeps unhashable entries (a dict/list from a malformed
+    worker JSON payload) without raising, but the ``protected`` de-confliction must not
+    re-introduce the crash by expanding those lists into a set (PRRT_kwDOSJAM6s6JcnXn).
+    """
+    default = _reap(
+        "ok",
+        "CLAUDE_BASE_SUPERSEDED_REAPED",
+        reaped=[{"malformed": "reaped"}, "sigA"],
+        protected=["sigA", "sigProtected"],
+    )
+    discarded = _reap(
+        "ok",
+        "CLAUDE_BASE_SUPERSEDED_PLANNED",
+        planned=[["malformed", "planned"], "sigB"],
+        protected=["sigB"],
+    )
+
+    merged = _merge_claude_base_reaps(default, discarded)
+
+    assert merged is not None
+    assert merged["reaped"] == [{"malformed": "reaped"}, "sigA"]
+    assert merged["planned"] == [["malformed", "planned"], "sigB"]
+    # Hashable signatures still reaped/planned by either pass drop out of ``protected``;
+    # the unrelated ``sigProtected`` survives.
+    assert merged["protected"] == ["sigProtected"]
+
+
 def test_dedupe_preserving_order_keeps_unhashable_entries_without_raising() -> None:
     """Unhashable entries fall through the ``except TypeError`` arm and are kept as-is.
 
