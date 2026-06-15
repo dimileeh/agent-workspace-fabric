@@ -16,9 +16,13 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+from awf.cli.common import _WORKER_DELEGATION_ERROR_REASON_CODES
 from awf.cli.main import app
 from awf.cli.service_commands import GCStatusFilter
 from awf.db.enums import WorkspaceStatus
+from awf.service.gc_worker_delegation import (
+    SERVICE_GC_WORKER_DELEGATION_ERROR_REASON_CODES,
+)
 
 _runner = CliRunner()
 
@@ -149,6 +153,19 @@ def test_gc_status_filter_mirrors_workspace_status_plus_superseded() -> None:
     assert {member.value for member in GCStatusFilter} == {
         member.value for member in WorkspaceStatus
     } | {"superseded"}
+
+
+@pytest.mark.unit
+def test_worker_delegation_error_reason_codes_mirror_server_set() -> None:
+    """The thin CLI's worker-delegation reason codes must mirror the server's set.
+
+    ``awf.cli.common`` duplicates these as bare literals so the CLI does not import
+    the GC service stack. Without this guard a server-side addition would silently
+    leave ``warn_on_worker_delegation_failure`` blind to the new code — the run would
+    still exit non-zero (the API downgrades the headline to ``partial``) but the
+    operator would lose the targeted hint. Assert the two sets stay in lockstep.
+    """
+    assert _WORKER_DELEGATION_ERROR_REASON_CODES == SERVICE_GC_WORKER_DELEGATION_ERROR_REASON_CODES
 
 
 @pytest.mark.unit
