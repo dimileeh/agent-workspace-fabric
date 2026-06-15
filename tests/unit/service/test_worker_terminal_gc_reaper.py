@@ -1117,6 +1117,7 @@ def test_merge_claude_base_reaps_tolerates_unhashable_reaped_planned_entries() -
     assert merged["protected"] == ["sigProtected"]
 
 
+@pytest.mark.unit
 def test_dedupe_preserving_order_keeps_unhashable_entries_without_raising() -> None:
     """Unhashable entries fall through the ``except TypeError`` arm and are kept as-is.
 
