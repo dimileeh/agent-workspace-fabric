@@ -203,6 +203,16 @@ def fold_worker_reclaim(
     exactly the worker candidates whose ``workspace_id`` the API plan never carried;
     the worker's own full estimate stays visible on ``worker_reclaim``.
 
+    The API-side execute pass can itself reap stale shared ``_shared/claude-base``
+    dirs (an ``rmtree`` needs no ``CAP_SYS_ADMIN`` — only the auth-overlay unmount
+    does), recording them under ``base["claude_base_reap"].reaped`` /
+    ``reaped_estimated_bytes`` *outside* the top-level ``deleted_paths`` /
+    ``deleted_path_count`` / ``total_estimated_bytes``. The worker then sees those
+    bases already gone and contributes 0, so the fold also folds the API-side reaped
+    bases' paths/count/bytes into the headline — otherwise a run where the API reaped
+    GB-scale bases reports 0 paths/bytes reclaimed next to a nested API report showing
+    they were removed (PRRT_kwDOSJAM6s6JdfQ0).
+
     When the worker fully reclaimed the capability-gated auth overlays +
     claude-base, the API-side skip failures for *those* paths are stale: the
     auth-unmount ``delete_errors`` are dropped and a headline that was ``partial``
@@ -218,30 +228,47 @@ def fold_worker_reclaim(
     folded = dict(base)
     folded["worker_reclaim"] = outcome.to_dict()
     if outcome.succeeded:
+        # The API-side execute pass can itself reap stale shared ``_shared/claude-base``
+        # dirs — an ``rmtree`` needs no ``CAP_SYS_ADMIN`` (only the auth-overlay unmount
+        # does), so when its live-mount view is verifiable the API reaps them and records
+        # the removal under ``base["claude_base_reap"].reaped``, *outside* the top-level
+        # ``deleted_paths``/``deleted_path_count``/``total_estimated_bytes`` (those cover
+        # only the per-workspace candidates). The worker then sees those bases already
+        # gone and contributes 0, so without folding the API-side reaped bases here the
+        # headline would report 0 paths/bytes reclaimed next to a nested API report
+        # showing GB-scale bases were actually removed (PRRT_kwDOSJAM6s6JdfQ0).
+        api_base_reaped_paths = _claude_base_reaped_path_strs(base)
         folded["deleted_path_count"] = (
-            _as_int(base.get("deleted_path_count")) + outcome.deleted_path_count
+            _as_int(base.get("deleted_path_count"))
+            + len(api_base_reaped_paths)
+            + outcome.deleted_path_count
         )
-        # Merge the worker's actually-removed paths into the headline list so the
+        # Merge the actually-removed paths into the headline list so the
         # ``deleted_path_count == len(deleted_paths)`` invariant of
         # ``WorkspaceGCResult.to_dict()`` survives the fold. The API-side pass recorded
-        # these auth/claude-base paths as ``skipped`` (never in ``deleted_paths``), so
-        # they are net-new and never duplicate an existing entry; build a fresh list so
-        # the caller's ``base`` stays untouched.
+        # its auth/claude-base candidate paths as ``skipped`` (never in ``deleted_paths``)
+        # and its reaped shared bases only under ``claude_base_reap``, and the worker's
+        # reclaim is net-new (the bases it reaped are disjoint from the API's), so none
+        # duplicate an existing entry; build a fresh list so the caller's ``base`` stays
+        # untouched.
         base_deleted = base.get("deleted_paths")
         merged_paths: list[object] = list(base_deleted) if isinstance(base_deleted, list) else []
+        merged_paths.extend(api_base_reaped_paths)
         merged_paths.extend(_worker_reclaimed_path_strs(outcome))
         folded["deleted_paths"] = merged_paths
         # Add the bytes of workspaces the worker reaped that the API plan never
         # estimated (the discarded-status augmentation pass — cancelled/destroyed
         # rows the API default policy omits), plus the reaped shared ``claude-base``
-        # dirs (which the API plan never estimates — they live outside the
-        # per-workspace candidates). Without this the headline reports GB-scale
-        # ``deleted_path_count`` next to the bare API plan total — often 0 — so callers
-        # see GB deletions with 0 bytes reclaimed (PRRT_kwDOSJAM6s6JbHKg /
-        # PRRT_kwDOSJAM6s6Jcixk).
+        # dirs of *both* passes (which the plan never estimates — they live outside
+        # the per-workspace candidates; the API reaps the bases its verifiable
+        # live-mount view allows, the worker reaps the rest). Without this the headline
+        # reports GB-scale ``deleted_path_count`` next to the bare API plan total —
+        # often 0 — so callers see GB deletions with 0 bytes reclaimed
+        # (PRRT_kwDOSJAM6s6JbHKg / PRRT_kwDOSJAM6s6Jcixk / PRRT_kwDOSJAM6s6JdfQ0).
         worker_report = outcome.report or {}
         folded["total_estimated_bytes"] = (
             _as_int(base.get("total_estimated_bytes"))
+            + _claude_base_reaped_estimated_bytes(base)
             + _worker_only_estimated_bytes(base, worker_report)
             + _claude_base_reaped_estimated_bytes(worker_report)
         )

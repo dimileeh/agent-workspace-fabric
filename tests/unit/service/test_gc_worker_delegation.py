@@ -296,6 +296,93 @@ def test_fold_surfaces_claude_base_only_worker_reclaim() -> None:
     assert worker_reclaim["deleted_path_count"] == 2
 
 
+def test_fold_surfaces_api_side_claude_base_reap_when_worker_sees_bases_gone() -> None:
+    # PRRT_kwDOSJAM6s6JdfQ0: the API-side execute pass can itself reap stale shared
+    # ``_shared/claude-base`` dirs (an ``rmtree`` needs no ``CAP_SYS_ADMIN`` — only the
+    # auth-overlay unmount does), recording them under ``base["claude_base_reap"].reaped``
+    # *outside* the top-level ``deleted_paths``/``deleted_path_count``. The worker then
+    # sees those bases already gone and contributes 0, so without folding the API-side
+    # reaped bases the headline reports 0 paths/bytes reclaimed next to a nested API
+    # report showing GB-scale bases were actually removed.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "claude_base_reap": {
+            "status": "skipped",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": [],
+            "reaped_estimated_bytes": 0,
+        },
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        claude_base_reap={
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigA", "sigB"],
+            "reaped_estimated_bytes": 1_700_000_000,
+        },
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # The API-side reaped bases reach the headline count/paths/bytes.
+    assert folded["deleted_path_count"] == 2
+    assert folded["deleted_paths"] == [
+        "/work/auth/_shared/claude-base/sigA",
+        "/work/auth/_shared/claude-base/sigB",
+    ]
+    assert folded["deleted_path_count"] == len(folded["deleted_paths"])
+    assert folded["total_estimated_bytes"] == 1_700_000_000
+
+
+def test_fold_sums_api_and_worker_claude_base_reaps_into_headline() -> None:
+    # Both passes can reap disjoint shared bases in one run (the API reaps what its
+    # verifiable live-mount view allows, the worker reaps the rest). Both sets must
+    # reach the headline without dropping either.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 0,
+        "deleted_paths": [],
+        "total_estimated_bytes": 0,
+        "claude_base_reap": {
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigWorker"],
+            "reaped_estimated_bytes": 500,
+        },
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        claude_base_reap={
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigApi"],
+            "reaped_estimated_bytes": 1_000,
+        },
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["deleted_paths"] == [
+        "/work/auth/_shared/claude-base/sigApi",
+        "/work/auth/_shared/claude-base/sigWorker",
+    ]
+    assert folded["deleted_path_count"] == 2
+    assert folded["deleted_path_count"] == len(folded["deleted_paths"])
+    assert folded["total_estimated_bytes"] == 1_500
+
+
 def test_from_report_sums_claude_base_reaped_bytes() -> None:
     # The reaper now measures each base before removal and records the total under
     # ``claude_base_reap.reaped_estimated_bytes``, outside the top-level workspace-
