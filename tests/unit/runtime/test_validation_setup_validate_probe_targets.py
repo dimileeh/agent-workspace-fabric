@@ -454,6 +454,45 @@ class TestLeadingExecutables:
         # the final segment's tool is probed as usual.
         assert _leading_executables("grep x <<< value\nruff check .") == ["ruff"]
 
+    def test_heredoc_with_spaced_delimiter_attaches_body(self) -> None:
+        # POSIX allows blanks between ``<<`` and the delimiter word
+        # (``cat << EOF``); the splitter skips that whitespace, reads ``EOF`` as the
+        # delimiter, and keeps the body and closing delimiter line attached so the
+        # opener ``cat`` stays the probe target rather than a body line or the
+        # delimiter word ``EOF``.
+        assert _leading_executables("cat << EOF\nbody line\nEOF") == ["cat"]
+
+    def test_heredoc_with_backslash_escaped_delimiter_attaches_body(self) -> None:
+        # The ``cat <<\EOF`` form (a backslash before the delimiter) is the
+        # "quote the delimiter" spelling that disables expansion in the body; the
+        # backslash escape is consumed so the delimiter is still ``EOF`` and the
+        # body attaches, keeping ``cat`` the probe target rather than the delimiter
+        # word or a body line.
+        assert _leading_executables("cat <<\\EOF\nbody line\nEOF") == ["cat"]
+
+    def test_unterminated_quoted_heredoc_delimiter_fails_open(self) -> None:
+        # A malformed opener whose quoted delimiter is never closed
+        # (``cat <<'EOF`` with no closing quote) consumes the remaining input as
+        # the delimiter word, so the statement names no clean leading tool; the
+        # splitter fails open (no probe target) rather than reporting a body line
+        # or the delimiter word as a missing toolchain.
+        assert _leading_executables("cat <<'EOF\nbody line\nEOF") == []
+
+    def test_empty_quoted_heredoc_delimiter_is_not_tracked(self) -> None:
+        # An empty quoted delimiter (``cat <<''``) names no heredoc word, so no
+        # heredoc body is tracked and the following newline splits the list
+        # normally; under ``sh -lc`` the final ``;``-segment (``body line``) is the
+        # exit-determining one, so it — not the opener ``cat`` — is the probe
+        # target. The degenerate empty delimiter is the documented fallback.
+        assert _leading_executables("cat <<''\nbody line") == ["body"]
+
+    def test_unclosed_heredoc_body_runs_to_end_keeping_the_opener(self) -> None:
+        # A heredoc whose closing delimiter never appears before end-of-input
+        # (``cat <<EOF`` followed by a body with no terminating ``EOF`` line) still
+        # has its whole body attached to the opener statement, so ``cat`` stays the
+        # probe target rather than a body line being split off and probed.
+        assert _leading_executables("cat <<EOF\nbody with no close") == ["cat"]
+
     def test_lone_brace_group_fails_open(self) -> None:
         # ``{ ruff check .; }`` is a POSIX brace group: ``sh -lc`` treats ``{``/``}``
         # as reserved words and the inner ``;`` as the group's own list separator.
