@@ -511,6 +511,7 @@ async def test_service_gc_returns_partial_envelope(
     assert payload["reason_code"] == "SERVICE_GC_WORKER_UNAVAILABLE"
 
 
+@pytest.mark.unit
 def test_plan_candidate_auth_dirs_skips_malformed_candidates() -> None:
     """Only well-formed candidate auth paths survive the fold.
 
