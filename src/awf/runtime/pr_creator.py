@@ -606,8 +606,8 @@ class PullRequestCreator:
         lookup_detail["matched_pr"] = _branch_open_pr_metadata(match)
         return match, lookup_detail
 
-    def _pr_create_retry_wait_seconds(self, retry_number: int) -> float:
-        wait = self._pr_create_transient_initial_backoff_seconds * (2 ** (retry_number - 1))
+    def _pr_create_retry_wait_seconds(self, attempt: int) -> float:
+        wait = self._pr_create_transient_initial_backoff_seconds * (2 ** (attempt - 1))
         return float(min(wait, self._pr_create_transient_max_backoff_seconds))
 
     async def _log_pre_push_diagnostics(
