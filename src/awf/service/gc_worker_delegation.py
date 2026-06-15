@@ -474,6 +474,19 @@ def _has_unreconciled_failure(
     companion = folded.get("companion_image_prune")
     if isinstance(companion, Mapping) and companion.get("status") == "failed":
         return True
+    # A fallback compose teardown failure is recorded only under
+    # ``compose_teardowns`` (the single-workspace fallback path never enters the
+    # delete-paths loop that mirrors candidate teardowns into ``delete_errors`` —
+    # see ``_gc_result``/``_delete_gc_plan_paths``), yet it still drives the run
+    # ``partial``. Inspect that map too so a failed teardown the worker does not own
+    # keeps the run partial instead of being silently promoted to success — mirroring
+    # ``WorkspaceGCComposeTeardownResult.ok`` (only ``succeeded``/``skipped`` pass).
+    teardowns = folded.get("compose_teardowns")
+    if isinstance(teardowns, Mapping) and any(
+        isinstance(teardown, Mapping) and teardown.get("status") not in {"succeeded", "skipped"}
+        for teardown in teardowns.values()
+    ):
+        return True
     reservations = folded.get("reservation_releases")
     if isinstance(reservations, Mapping):
         return any(

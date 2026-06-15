@@ -524,6 +524,70 @@ def test_fold_preserves_unrelated_failure_while_dropping_auth_skip() -> None:
     assert [error["kind"] for error in remaining] == ["compose_teardown"]
 
 
+def test_fold_keeps_partial_for_fallback_compose_teardown_failure() -> None:
+    # PRRT_kwDOSJAM6s6JciIz: a *fallback* compose teardown failure is recorded only
+    # under ``compose_teardowns`` (the single-workspace fallback path never enters the
+    # delete-paths loop that mirrors candidate teardowns into ``delete_errors``), yet
+    # it still drives the run partial. With only a reconcilable auth-unmount skip in
+    # ``delete_errors``, the fold must NOT promote the headline to success — the failed
+    # compose teardown the worker does not own keeps the run partial.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+        compose_teardowns={
+            "ws-1": {
+                "status": "failed",
+                "reason_code": "COMPOSE_COMMAND_FAILED",
+                "error": "docker compose down failed",
+            }
+        },
+    )
+    outcome = WorkerReclaimOutcome.from_report({"status": "succeeded", "deleted_path_count": 2})
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # The auth skip is reconciled away, but the unowned compose teardown failure
+    # keeps the run partial — a genuinely failed cleanup never reads as success.
+    assert folded["status"] == "partial"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    # The stale auth-unmount skip is still dropped — the worker reclaimed it.
+    assert folded["delete_errors"] == []
+
+
+def test_fold_promotes_when_compose_teardowns_all_succeeded_or_skipped() -> None:
+    # A successful/skipped compose teardown is not a failure, so it must not block the
+    # restore-to-success once the only other partial driver (the auth-unmount skip) is
+    # reconciled by the completed worker reclaim — mirrors ``...TeardownResult.ok``.
+    base = _api_base(
+        status="partial",
+        reason_code="CLEANUP_EXECUTION_PARTIAL",
+        delete_errors=[
+            {
+                "kind": "auth_overlay_unmount",
+                "reason_code": "CLAUDE_AUTH_OVERLAY_UNMOUNT_INCAPABLE",
+                "error": "no CAP_SYS_ADMIN",
+            }
+        ],
+        compose_teardowns={
+            "ws-1": {"status": "succeeded", "reason_code": "COMPOSE_TEARDOWN_OK"},
+            "ws-2": {"status": "skipped", "reason_code": "COMPOSE_TEARDOWN_SKIPPED"},
+        },
+    )
+    outcome = WorkerReclaimOutcome.from_report({"status": "succeeded", "deleted_path_count": 1})
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    assert folded["status"] == "succeeded"
+    assert folded["reason_code"] == "CLEANUP_EXECUTION_SUCCEEDED"
+
+
 def test_fold_does_not_touch_partial_unrelated_to_auth_or_base() -> None:
     # A run partial only for a reservation release error has nothing for the worker
     # reclaim to reconcile, so the headline stays partial and is left untouched.
