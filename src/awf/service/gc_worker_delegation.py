@@ -327,7 +327,46 @@ def fold_worker_reclaim(
         return folded
     folded["status"] = "partial"
     folded["reason_code"] = outcome.reason_code
+    # Even when worker delegation never completed (unavailable / timeout / reclaim
+    # failed), the API-side execute pass may already have reaped GB-scale shared
+    # ``_shared/claude-base`` dirs — an ``rmtree`` needs no ``CAP_SYS_ADMIN`` (only the
+    # auth-overlay unmount does), so the API records them under
+    # ``base["claude_base_reap"].reaped`` / ``reaped_estimated_bytes`` *outside* the
+    # top-level ``deleted_paths``/``deleted_path_count``/``total_estimated_bytes``. The
+    # success path folds those into the headline; do the same on the failure path so a
+    # delegation that did not succeed does not report 0 paths/bytes reclaimed next to a
+    # nested API report showing the bases were removed (PRRT_kwDOSJAM6s6Jdq_P).
+    _fold_api_reaped_claude_base(folded, base)
     return folded
+
+
+def _fold_api_reaped_claude_base(folded: dict[str, object], base: dict[str, object]) -> None:
+    """Fold the API-side reaped ``_shared/claude-base`` dirs into the headline totals.
+
+    The API-side execute pass reaps stale shared bases with an ``rmtree`` (no
+    ``CAP_SYS_ADMIN`` needed) and records them under ``base["claude_base_reap"]``
+    *outside* the top-level ``deleted_paths`` / ``deleted_path_count`` /
+    ``total_estimated_bytes``. The successful-delegation fold merges those inline; this
+    is the same fold for the worker-delegation-failure path, where the worker
+    contributed nothing but the API may still have removed GB-scale bases — otherwise
+    the headline reports 0 paths/bytes next to a nested report showing the removals
+    (PRRT_kwDOSJAM6s6Jdq_P). A run with no API-side reap leaves the headline verbatim
+    (the conservative no-op default).
+    """
+    api_base_reaped_paths = _claude_base_reaped_path_strs(base)
+    api_base_reaped_bytes = _claude_base_reaped_estimated_bytes(base)
+    if not api_base_reaped_paths and not api_base_reaped_bytes:
+        return
+    folded["deleted_path_count"] = _as_int(base.get("deleted_path_count")) + len(
+        api_base_reaped_paths
+    )
+    base_deleted = base.get("deleted_paths")
+    merged_paths: list[object] = list(base_deleted) if isinstance(base_deleted, list) else []
+    merged_paths.extend(api_base_reaped_paths)
+    folded["deleted_paths"] = merged_paths
+    folded["total_estimated_bytes"] = (
+        _as_int(base.get("total_estimated_bytes")) + api_base_reaped_bytes
+    )
 
 
 def _reconcile_worker_reclaimed_skips(folded: dict[str, object]) -> None:

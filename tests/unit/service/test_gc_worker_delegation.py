@@ -553,6 +553,75 @@ def test_fold_worker_unavailable_downgrades_and_preserves_api_reclaim() -> None:
     assert worker_reclaim["deleted_path_count"] == 0
 
 
+@pytest.mark.parametrize(
+    ("outcome", "expected_reason_code"),
+    [
+        (
+            WorkerReclaimOutcome.unavailable("no fresh worker heartbeat for node node-a"),
+            SERVICE_GC_WORKER_UNAVAILABLE,
+        ),
+        (
+            WorkerReclaimOutcome.delegation_timeout("deadline exceeded"),
+            SERVICE_GC_WORKER_DELEGATION_TIMEOUT,
+        ),
+        (
+            WorkerReclaimOutcome.reclaim_failed("boom", report={"status": "failed"}),
+            SERVICE_GC_WORKER_RECLAIM_FAILED,
+        ),
+    ],
+)
+def test_fold_failure_path_surfaces_api_side_claude_base_reap(
+    outcome: WorkerReclaimOutcome, expected_reason_code: str
+) -> None:
+    # PRRT_kwDOSJAM6s6Jdq_P: the API-side execute pass can itself reap stale shared
+    # ``_shared/claude-base`` dirs (an ``rmtree`` needs no ``CAP_SYS_ADMIN``), recording
+    # them under ``base["claude_base_reap"].reaped`` *outside* the top-level
+    # ``deleted_paths``/``deleted_path_count``/``total_estimated_bytes``. That reap
+    # happens regardless of whether worker delegation succeeds, so when delegation is
+    # unavailable / times out / fails the headline must still surface those GB-scale
+    # API removals — otherwise it reports 0 paths/bytes next to a nested report showing
+    # the bases were removed.
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=0,
+        claude_base_reap={
+            "status": "ok",
+            "base_root": "/work/auth/_shared/claude-base",
+            "reaped": ["sigA", "sigB"],
+            "reaped_estimated_bytes": 1_700_000_000,
+        },
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # The run is still downgraded for the failed delegation.
+    assert folded["status"] == "partial"
+    assert folded["reason_code"] == expected_reason_code
+    # But the API-side reaped bases reach the headline count/paths/bytes.
+    assert folded["deleted_path_count"] == 2
+    assert folded["deleted_paths"] == [
+        "/work/auth/_shared/claude-base/sigA",
+        "/work/auth/_shared/claude-base/sigB",
+    ]
+    assert folded["deleted_path_count"] == len(folded["deleted_paths"])
+    assert folded["total_estimated_bytes"] == 1_700_000_000
+
+
+def test_fold_failure_path_leaves_headline_untouched_without_api_base_reap() -> None:
+    # No API-side claude-base reap → the failure fold is a no-op on the headline totals,
+    # preserving the API-side worktree/compose reclaim verbatim (never inflated).
+    folded = fold_worker_reclaim(
+        _api_base(deleted_path_count=2, deleted_paths=["/work/ws-a", "/work/ws-b"]),
+        WorkerReclaimOutcome.unavailable("no worker"),
+    )
+
+    assert folded["status"] == "partial"
+    assert folded["deleted_path_count"] == 2
+    assert folded["deleted_paths"] == ["/work/ws-a", "/work/ws-b"]
+    assert folded["total_estimated_bytes"] == 100
+
+
 def test_fold_timeout_and_failed_reason_codes() -> None:
     timed_out = fold_worker_reclaim(
         _api_base(), WorkerReclaimOutcome.delegation_timeout("deadline exceeded")
