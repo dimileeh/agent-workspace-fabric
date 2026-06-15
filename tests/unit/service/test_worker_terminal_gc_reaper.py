@@ -31,7 +31,10 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeTeardownResult
 from awf.service import worker as worker_mod
-from awf.service.gc_terminal_passes import _merge_claude_base_reaps
+from awf.service.gc_terminal_passes import (
+    _dedupe_preserving_order,
+    _merge_claude_base_reaps,
+)
 from tests.unit.service.test_worker import (
     _in_process_merge_coordinator,
     _settings,
@@ -1058,3 +1061,19 @@ def test_merge_claude_base_reaps_dedupes_planned_across_passes() -> None:
     assert merged is not None
     assert merged["planned"] == ["sigDefaultOnly", "sigBoth"]
     assert merged["protected"] == []
+
+
+def test_dedupe_preserving_order_keeps_unhashable_entries_without_raising() -> None:
+    """Unhashable entries fall through the ``except TypeError`` arm and are kept as-is.
+
+    The merge helpers de-dup ``<signature>`` strings, but a malformed worker JSON
+    payload could carry unhashable entries (a dict or list) in those positions.
+    ``value in seen`` raises ``TypeError`` for those, and the documented defensive
+    behavior keeps each one (no exception), while still collapsing hashable
+    duplicates in first-seen order.
+    """
+    result = _dedupe_preserving_order([{"a": 1}, "x", {"a": 1}, "x"])
+
+    # The hashable duplicate ("x") is collapsed to a single first-seen entry, while
+    # both unhashable dicts are preserved (kept as-is, not deduped) in order.
+    assert result == [{"a": 1}, "x", {"a": 1}]
