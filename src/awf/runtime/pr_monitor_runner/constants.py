@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import re
 
+from awf.common.github_transient import (
+    AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS,
+    NON_TRANSIENT_GITHUB_ERROR_MARKERS,
+    TRANSIENT_GITHUB_ERROR_MARKERS,
+)
 from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.runtime.pr_monitor_operations import RETRYABLE_MONITOR_OPERATION_STATUSES
 from awf.service.staleness import (
@@ -43,51 +48,8 @@ _TASK_TAG_UNSET = _TaskTagUnset()
 # on a valid token (#515) and is handled as bounded-retryable below. These strong
 # markers are checked first in ``_is_transient_github_client_error`` and win, so a
 # 401 combined with e.g. ``Bad credentials`` still fails fast.
-_NON_TRANSIENT_GITHUB_ERROR_MARKERS = (
-    "bad credentials",
-    "not logged in",
-    "please run gh auth login",
-    "not found",
-    "could not resolve to a repository",
-    "could not resolve to a node",
-)
-
-_TRANSIENT_GITHUB_ERROR_MARKERS = (
-    "http 500",
-    "http 502",
-    "http 503",
-    "http 504",
-    "500 internal server",
-    "502 bad gateway",
-    "503 service unavailable",
-    "504 gateway timeout",
-    "bad gateway",
-    "gateway timeout",
-    "internal server error",
-    "returned error: 500",
-    "returned error: 502",
-    "returned error: 503",
-    "returned error: 504",
-    "service unavailable",
-    "temporarily unavailable",
-    "try again",
-    "timed out",
-    "timeout",
-    "connection reset",
-    "connection refused",
-    "connection aborted",
-    "tls handshake timeout",
-    "network",
-    "eof",
-    "rate limit",
-    "secondary rate limit",
-    "abuse detection",
-    "something went wrong",
-    "could not resolve host",
-    "temporary failure in name resolution",
-    "name or service not known",
-    "could not resolve proxy",
-)
+_NON_TRANSIENT_GITHUB_ERROR_MARKERS = NON_TRANSIENT_GITHUB_ERROR_MARKERS
+_TRANSIENT_GITHUB_ERROR_MARKERS = TRANSIENT_GITHUB_ERROR_MARKERS
 
 # Ambiguous auth blips: a bare ``HTTP 401`` / ``Requires authentication`` with no
 # strong permanent marker is a recoverable transient on the GitHub *API* client
@@ -100,10 +62,7 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
 # substring), which must fail fast rather than be bounded-retried. They are
 # therefore deliberately kept out of ``_TRANSIENT_GITHUB_ERROR_MARKERS`` so
 # ``_is_transient_base_fetch_error`` never matches them.
-_AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = (
-    "http 401",
-    "requires authentication",
-)
+_AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS = AMBIGUOUS_GITHUB_AUTH_TRANSIENT_MARKERS
 
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 
