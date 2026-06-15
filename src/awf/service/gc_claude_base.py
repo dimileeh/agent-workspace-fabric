@@ -88,6 +88,30 @@ def _claude_base_root(work_dir: Path) -> Path:
     return work_dir / "auth" / _SHARED_AUTH_DIRNAME / _CLAUDE_BASE_DIRNAME
 
 
+def _symlinked_base_component(work_dir: Path) -> Path | None:
+    """Return the first ``auth/_shared/claude-base`` component below ``work_dir`` that is a symlink.
+
+    ``reap_superseded_claude_bases`` resolves ``base_root`` with ``Path.resolve`` so it
+    lines up with the kernel-resolved lowerdir paths read from ``/proc/mounts`` even when
+    ``work_dir`` is reached via a symlink. ``resolve`` follows *every* symlink in the path,
+    though, so a symlink at the ``auth``, ``_shared``, or ``claude-base`` component would
+    rewrite ``base_root`` to the link target. ``_is_base_outside_root`` only ever sees the
+    already-resolved root, so every child of that outside target would satisfy
+    ``parent == base_root`` while not itself being a symlink — bypassing the leaf-only guard
+    and letting the estimator/``rmtree`` run outside ``work_dir``. Detect such an escaping
+    component up front. ``work_dir`` is resolved first so the supported "work_dir reached via
+    a symlink" case is preserved: only the components strictly below the real work root are
+    inspected (PRRT_kwDOSJAM6s6JdOUu).
+    """
+
+    current = work_dir.resolve(strict=False)
+    for part in ("auth", _SHARED_AUTH_DIRNAME, _CLAUDE_BASE_DIRNAME):
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
+
+
 def _pinned_base_dirs(
     work_dir: Path, *, pruned_auth_dirs: frozenset[Path] = frozenset()
 ) -> set[Path]:
@@ -295,6 +319,36 @@ def reap_superseded_claude_bases(
 
     work_dir = Path(work_dir).expanduser()
     host_home = Path(host_home).expanduser()
+    # A symlink at the ``auth/_shared/claude-base`` ancestor would make the ``resolve``
+    # below rewrite ``base_root`` to the link target, slipping past the leaf-only
+    # ``_is_base_outside_root`` guard so candidates outside ``work_dir`` get estimated and
+    # ``rmtree``'d. Refuse the whole pass loudly *before* resolving or iterating that target
+    # rather than reap a tree outside the shared base root (PRRT_kwDOSJAM6s6JdOUu).
+    escaping_component = _symlinked_base_component(work_dir)
+    if escaping_component is not None:
+        _log.warning(
+            "gc.claude_base_reap_symlinked_base_root",
+            reason_code=CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+            base_component=str(escaping_component),
+        )
+        return {
+            "status": "partial",
+            "reason_code": CLAUDE_BASE_REAP_PARTIAL,
+            "execute": execute,
+            "base_root": str(_claude_base_root(work_dir)),
+            "scanned": [],
+            "protected": [],
+            "reaped": [],
+            "reaped_estimated_bytes": 0,
+            "planned": [],
+            "unverifiable": [],
+            "errors": [
+                {
+                    "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+                    "error": "refused to reap: a shared base root component is a symlink",
+                }
+            ],
+        }
     # Resolve the base root to its canonical form so it matches the kernel-resolved
     # lowerdir paths read from ``/proc/mounts`` in ``_protected_signature_dirs`` even
     # when ``work_dir`` is reached via a symlink. ``iterdir()`` below then yields

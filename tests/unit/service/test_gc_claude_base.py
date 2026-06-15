@@ -577,6 +577,61 @@ def test_reap_loop_refuses_symlinked_candidate_before_estimation(
 
 
 @pytest.mark.unit
+def test_reap_refuses_symlinked_base_root_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The leaf-only guard in ``_is_base_outside_root`` is not enough when an *ancestor*
+    # of the candidates is a symlink: ``base_root`` is ``.resolve()``d before the reaper
+    # iterates, and ``resolve`` follows every symlink in the path. If ``claude-base``
+    # itself points outside, ``base_root`` becomes the link target, its children satisfy
+    # ``parent == base_root`` and are not themselves symlinks, so the leaf guard passes
+    # and the estimator/``rmtree`` would run on a tree outside ``work_dir``. The whole
+    # pass must be refused up front before resolving or iterating
+    # (PRRT_kwDOSJAM6s6JdOUu).
+    work_dir = tmp_path / "work"
+    host_home = tmp_path / "host-home"
+    _seed_host_claude(host_home)
+
+    shared = work_dir / "auth" / "_shared"
+    shared.mkdir(parents=True)
+    outside = tmp_path / "outside-base-root"
+    _make_base(outside, "sigsuper0000000")  # a plausible superseded base in the target
+    (outside / "sigsuper0000000" / ".claude").mkdir(parents=True)
+    (outside / "sigsuper0000000" / ".claude" / "precious").write_text("keep me")
+    # ``claude-base`` itself is the symlink that escapes ``work_dir``.
+    (shared / "claude-base").symlink_to(outside, target_is_directory=True)
+
+    def _explode(_path: Path) -> int:
+        raise AssertionError("estimator must not touch a symlink-escaped base root")
+
+    monkeypatch.setattr(gc_claude_base_mod, "_estimate_bytes", _explode)
+
+    report = reap_superseded_claude_bases(
+        work_dir=work_dir,
+        host_home=host_home,
+        proc_mounts=tmp_path / "absent-mounts",
+        execute=True,
+        capability_probe=lambda: True,
+    )
+
+    assert report["status"] == "partial"
+    assert report["reason_code"] == CLAUDE_BASE_REAP_PARTIAL
+    assert report["reaped"] == []
+    assert report["reaped_estimated_bytes"] == 0
+    assert report["scanned"] == []
+    assert report["planned"] == []
+    assert report["errors"] == [
+        {
+            "reason_code": CLAUDE_BASE_REAP_PATH_OUTSIDE_ROOT,
+            "error": "refused to reap: a shared base root component is a symlink",
+        }
+    ]
+    # The symlink and the tree it points at are untouched.
+    assert (shared / "claude-base").is_symlink()
+    assert (outside / "sigsuper0000000" / ".claude" / "precious").read_text() == "keep me"
+
+
+@pytest.mark.unit
 def test_pinned_dir_scan_tolerates_missing_auth_root(tmp_path: Path) -> None:
     # ``work_dir`` with no ``auth`` dir at all (overlay never used): the pin scan is a
     # clean empty set and the whole reaper is a no-op, never an error.
