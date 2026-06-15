@@ -555,7 +555,12 @@ def _worker_only_estimated_bytes(base: dict[str, object], report: dict[str, obje
     }
     total = 0
     for candidate in _candidate_dicts(report):
-        if candidate.get("workspace_id") in base_ids:
+        workspace_id = candidate.get("workspace_id")
+        # A candidate with no ``workspace_id`` cannot be matched against the API plan's
+        # candidate set, so it cannot be confirmed net-new; fold it as 0 to honour the
+        # documented "missing/garbled payloads contribute 0" no-double-count default
+        # rather than treating it as worker-only and inflating the headline bytes.
+        if workspace_id is None or workspace_id in base_ids:
             continue
         estimated = candidate.get("estimated_bytes")
         if isinstance(estimated, Mapping):

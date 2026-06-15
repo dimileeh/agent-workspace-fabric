@@ -1081,6 +1081,41 @@ def test_fold_skips_worker_only_candidate_with_non_mapping_estimate() -> None:
     assert folded["total_estimated_bytes"] == 100
 
 
+def test_fold_skips_worker_candidate_missing_workspace_id() -> None:
+    # PRRT_kwDOSJAM6s6JcnXo: a worker candidate with NO ``workspace_id`` cannot be
+    # matched against the API plan's candidate set (which excludes missing IDs), so it
+    # must not be treated as worker-only. Even when it carries a well-formed
+    # ``estimated_bytes.total``, it contributes 0 to the headline — honouring the
+    # documented no-double-count default rather than inflating bytes for malformed
+    # payloads.
+    report = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_EXECUTION_SUCCEEDED",
+        "deleted_path_count": 1,
+        "deleted_paths": ["/work/_shared/auth/ws-cancelled"],
+        "total_estimated_bytes": 1_700_000_000,
+        "candidates": [
+            {
+                "status": "cancelled",
+                "estimated_bytes": {"auth": 1_700_000_000, "total": 1_700_000_000},
+            }
+        ],
+    }
+    outcome = WorkerReclaimOutcome.from_report(report)
+    base = _api_base(
+        deleted_path_count=0,
+        deleted_paths=[],
+        total_estimated_bytes=100,
+        candidates=[],
+    )
+
+    folded = fold_worker_reclaim(base, outcome)
+
+    # No workspace_id means the candidate is not confirmable as net-new, so the base
+    # plan total is left untouched instead of inflated by the worker-only bytes.
+    assert folded["total_estimated_bytes"] == 100
+
+
 def test_fold_adds_worker_only_candidate_to_headline_candidate_list() -> None:
     # PRRT_kwDOSJAM6s6Jcixj: a default ``--execute`` run whose only reclaim is the
     # worker's discarded-status augmentation pass (a cancelled/destroyed workspace the
