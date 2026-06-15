@@ -147,7 +147,9 @@ _TOOLCHAIN_PROBE_TIMEOUT_SECONDS = 30.0
 # timeout, so a wedged Docker daemon would let the cleanup itself hang the probe
 # (and the handoff) forever — bound it too, and give up cleanup rather than block.
 _TOOLCHAIN_PROBE_CLEANUP_TIMEOUT_SECONDS = 30.0
-# One ``sh -c`` reachability probe over the ``validate``-tool list. ``command -v``
+# One ``sh -lc`` reachability probe over the ``validate``-tool list (login shell,
+# so ``_VENV_ACTIVATE_PREAMBLE`` runs first — see ``probe_validate_command_tools``).
+# ``command -v``
 # checks each tool, and the trailing ``true`` guarantees the exec exits 0 whenever
 # the container is reachable — so a non-zero return / timeout unambiguously signals
 # a probe-infra failure (``probe_errored``), never a genuine missing tool. Each
