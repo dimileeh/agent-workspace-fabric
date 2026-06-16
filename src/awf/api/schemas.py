@@ -788,7 +788,8 @@ class WorkspaceBlockStateResponse(BaseModel):
     """Operator-facing block details surfaced while a workspace is ``blocked``.
 
     Projects the persisted ``block_*`` columns so ``GET /v1/workspaces/{id}``
-    exposes the violating paths and block age, not just ``status=blocked``.
+    exposes the violating paths and the ``blocked_at`` timestamp, not just
+    ``status=blocked``.
     """
 
     model_config = ConfigDict(from_attributes=True)

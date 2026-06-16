@@ -7319,7 +7319,7 @@
         "type": "object"
       },
       "WorkspaceBlockStateResponse": {
-        "description": "Operator-facing block details surfaced while a workspace is ``blocked``.\n\nProjects the persisted ``block_*`` columns so ``GET /v1/workspaces/{id}``\nexposes the violating paths and block age, not just ``status=blocked``.",
+        "description": "Operator-facing block details surfaced while a workspace is ``blocked``.\n\nProjects the persisted ``block_*`` columns so ``GET /v1/workspaces/{id}``\nexposes the violating paths and the ``blocked_at`` timestamp, not just\n``status=blocked``.",
         "properties": {
           "block_epoch": {
             "default": 0,
