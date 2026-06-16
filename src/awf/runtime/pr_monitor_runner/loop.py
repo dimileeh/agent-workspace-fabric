@@ -112,6 +112,94 @@ async def _post_workflow_scope_notification_best_effort(
         )
 
 
+async def _post_protected_block_notification_best_effort(
+    self: Any,
+    *,
+    workspace_id: str,
+    repo: RepoRef,
+    pr_number: int,
+    state: MonitorState,
+    push_result: Any,
+) -> None:
+    """Post the operator block notification as a PR comment, deduped by epoch.
+
+    A post-PR protected-scope pause preserves the offending commit and waits for
+    an operator. Surface that on the PR so a human knows it is blocked (not
+    silently failed). Deduped on the block epoch + violation content so a SECOND,
+    different violation (or changed directive) re-notifies, while an identical
+    re-evaluation within the same epoch stays quiet. Best-effort: a forge comment
+    fault degrades to a logged warning and never escapes the pause handling."""
+    from awf.runtime.pr_monitor_runner.helpers import _protected_block_notification_key
+
+    details = push_result.details or {}
+    block_epoch = details.get("block_epoch") if isinstance(details, dict) else None
+    paths = details.get("paths", []) if isinstance(details, dict) else []
+    protected_patterns = details.get("protected_patterns", []) if isinstance(details, dict) else []
+    key = _protected_block_notification_key(
+        block_epoch=block_epoch if isinstance(block_epoch, int) else None,
+        paths=paths if isinstance(paths, list) else [],
+        protected_patterns=protected_patterns if isinstance(protected_patterns, list) else [],
+    )
+    if state.threads_addressed_ids.get(key) == "notified":
+        _log.info(
+            "monitor.protected_block_notification_already_posted",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            block_epoch=block_epoch,
+        )
+        return
+    path_list = ", ".join(paths) if isinstance(paths, list) and paths else "protected file(s)"
+    body = (
+        f"AWF paused PR #{pr_number} for an operator decision.\n\n"
+        f"A monitor repair commit changed protected quality-gate file(s) outside the "
+        f"workspace's declared ownership: {path_list}. The commit is **preserved** "
+        f"(not reverted) and the workspace is now `blocked` awaiting an operator.\n\n"
+        f"Resolve with `awf workspace guide`:\n"
+        f"- approve and keep the change: `--grant <path> --approve-policy-downgrade`\n"
+        f'- revert the change: `--directive "revert the protected-file edit"`'
+    )
+    try:
+        await self._deps.gh.post_comment(repo=repo, pr_number=pr_number, body=body)
+    except ForgeClientError as exc:
+        _log.warning(
+            "monitor.protected_block_notification_failed",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            block_epoch=block_epoch,
+            error=_redact_and_truncate_forge_error(str(exc)),
+        )
+        return
+    state.mark_addressed(key, "notified")
+
+
+async def _handle_paused_into_blocked(
+    self: Any,
+    *,
+    workspace_id: str,
+    repo: RepoRef,
+    pr_number: int,
+    state: MonitorState,
+    push_result: Any,
+) -> bool:
+    """Finalize a post-PR protected-scope pause: notify + persist, stop cleanly.
+
+    The workspace is already ``blocked`` (the push-repair transitioned it). Post
+    the epoch-deduped operator notification and persist ``MonitorState`` so any
+    review comments addressed/known at block time survive the pause, then return
+    True to stop the monitor cycle WITHOUT marking the workspace failed — it
+    resumes only on an operator decision."""
+    await _post_protected_block_notification_best_effort(
+        self,
+        workspace_id=workspace_id,
+        repo=repo,
+        pr_number=pr_number,
+        state=state,
+        push_result=push_result,
+    )
+    await self._persist_state(workspace_id, state)
+    return True
+
+
 async def _execute(
     self: Any,
     *,
@@ -419,6 +507,15 @@ async def _execute(
                     status=status,
                     state=state,
                     blocker_reason=push_result.error_message or push_result.reason_code,
+                )
+            if push_result.paused_into_blocked:
+                return await _handle_paused_into_blocked(
+                    self,
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    state=state,
+                    push_result=push_result,
                 )
             if push_result.terminal_monitor_failure or push_result.workflow_scope_required:
                 await self._terminate_failed(
@@ -849,6 +946,15 @@ async def _execute(
                     state=state,
                     blocker_reason=push_result.error_message or push_result.reason_code,
                 )
+            if push_result.paused_into_blocked:
+                return await _handle_paused_into_blocked(
+                    self,
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    state=state,
+                    push_result=push_result,
+                )
             if push_result.terminal_monitor_failure or push_result.workflow_scope_required:
                 await self._terminate_failed(
                     workspace_id,
@@ -1003,6 +1109,15 @@ async def _execute(
                     state=state,
                     blocker_reason=push_result.error_message or push_result.reason_code,
                 )
+            if push_result.paused_into_blocked:
+                return await _handle_paused_into_blocked(
+                    self,
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    state=state,
+                    push_result=push_result,
+                )
             if push_result.terminal_monitor_failure:
                 await self._terminate_failed(
                     workspace_id,
@@ -1126,6 +1241,15 @@ async def _execute(
                 error_code=reason_code,
                 error_message=push_result.error_message,
             )
+            if push_result.paused_into_blocked:
+                return await _handle_paused_into_blocked(
+                    self,
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    state=state,
+                    push_result=push_result,
+                )
             if push_result.terminal_monitor_failure:
                 await self._persist_state(workspace_id, state)
                 await self._terminate_failed(

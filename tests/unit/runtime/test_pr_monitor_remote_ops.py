@@ -83,6 +83,28 @@ def test_git_push_failure_outcome_defaults_to_git_push_failed() -> None:
 
 
 @pytest.mark.unit
+def test_git_push_paused_into_blocked_is_not_terminal() -> None:
+    """A post-PR protected-scope PAUSE preserves the commit and is non-terminal.
+
+    It must NOT be treated as ``terminal_monitor_failure`` (which fails the
+    workspace) nor as the legacy ``protected_scope_blocked`` rollback reason."""
+    paused = _make_push_result("PROTECTED_SCOPE_PAUSED_FOR_OPERATOR")
+    assert paused.paused_into_blocked is True
+    assert paused.terminal_monitor_failure is False
+    assert paused.protected_scope_blocked is False
+    assert _git_push_failure_outcome(paused) == "protected_scope_paused_for_operator"
+
+
+@pytest.mark.unit
+def test_git_push_legacy_push_blocked_remains_terminal() -> None:
+    """The legacy diff-unavailable/push-blocked reasons stay terminal + not paused."""
+    blocked = _make_push_result("PROTECTED_SCOPE_PUSH_BLOCKED")
+    assert blocked.paused_into_blocked is False
+    assert blocked.terminal_monitor_failure is True
+    assert _make_push_result("UNKNOWN_FAILURE").paused_into_blocked is False
+
+
+@pytest.mark.unit
 def test_remote_ops_worktree_constants_match_validation_worktree() -> None:
     """Remote-op worktree reason codes should remain aligned with canonical constants."""
     assert REMOTE_OPS_VALIDATION_WORKTREE_CLEANUP_FAILED == VALIDATION_WORKTREE_CLEANUP_FAILED

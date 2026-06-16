@@ -230,6 +230,17 @@ _BLOCKED_RESUME_REASON_CODE = "OPERATOR_GRANT_RESUME"
 """Reason code for the worker's ``blocked -> running`` resume transition after
 an operator resolved a protected quality-gate violation via ``guide``."""
 
+_MONITOR_BLOCKED_RESUME_REASON_CODE = "OPERATOR_GRANT_MONITOR_RESUME"
+"""Reason code for the worker's ``blocked -> monitoring_pr`` resume transition:
+a POST-PR protected-scope block resolved via ``guide`` resumes back INTO the PR
+monitor (re-validate + re-run decide() gates) rather than the executor."""
+
+_MONITOR_BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE = "MONITOR_BLOCKED_RESUME_DISPATCH_ABORTED"
+"""Reason code for reverting ``monitoring_pr -> blocked`` when a post-PR
+blocked-resume won the ``blocked -> monitoring_pr`` claim but the dispatch
+aborted before the monitor resume task started — the paused state is restored
+instead of being left in ``monitoring_pr`` without a running monitor."""
+
 _BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE = "BLOCKED_RESUME_NO_EXECUTOR"
 """Reason code for reverting ``running -> blocked`` when a blocked-resume won the
 ``blocked -> running`` claim but the worker had no executor to drive it — the

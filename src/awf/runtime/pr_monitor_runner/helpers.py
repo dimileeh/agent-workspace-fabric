@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import (
     UTC,
@@ -825,6 +825,27 @@ def _base_fetch_retry_wait_seconds(
 def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
     reason = blocker_reason or "ready-to-merge"
     return f"__awf_notify__:{head_sha}:{reason}"
+
+
+def _protected_block_notification_key(
+    *,
+    block_epoch: int | None,
+    paths: Sequence[str],
+    protected_patterns: Sequence[str],
+) -> str:
+    """Dedupe key for a post-PR protected-block operator notification.
+
+    Keyed on the ``block_epoch`` AND a stable hash of the violation
+    paths/patterns (NOT the workspace lifetime): a SECOND, different protected
+    violation (a fresh ``block_epoch``) or a changed directive produces a new
+    key and re-notifies, while an identical re-evaluation within the same epoch
+    stays deduped. Mirrors the persistence model of ``_notification_key`` (stored
+    in ``state.threads_addressed_ids``)."""
+    import hashlib
+
+    content = "|".join(sorted(paths)) + "##" + "|".join(sorted(protected_patterns))
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    return f"__awf_protected_block__:{block_epoch}:{digest}"
 
 
 def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:

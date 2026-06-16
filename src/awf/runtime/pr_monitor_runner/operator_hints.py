@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.common.github_client import RepoRef
+from awf.control.protected_block import consume_active_operator_grants
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
 from awf.runtime.operator_hints import (
@@ -63,61 +64,71 @@ async def _run_operator_hint_cycle(
     # Resolve the workspace's optional Jira issue key once for this repair path
     # and thread it into the commit sink so the cycle does not re-query the DB.
     task_tag = await self._resolve_task_tag(workspace_id)
-    prompt = operator_hint_prompt(
-        pr_number=pr_number,
-        repo_slug=repo.slug(),
-        reason=hint.reason,
-        directive=hint.directive,
-        operation_id=hint.operation_id,
-        workspace_runtime_context=self._workspace_runtime_context,
-        task_tag=task_tag,
-    )
-    try:
-        verdict = await self._invoke_cli_for_verdict_result(
-            workspace_id=workspace_id,
-            prompt=prompt,
-            commit_message="fix: address operator hint",
-            compose_project=compose_project,
-            compose_file=compose_file,
-            state=state,
+
+    # Grant-only (approve-and-keep) resume: an operator armed a scoped grant with
+    # NO directive. Mirror the executor's ``resume_skip_agent`` — do not re-invoke
+    # the CLI (no tokens, no new edits that the single-use grant could silently
+    # suppress). Just re-run the grant-aware protected-scope check on the
+    # PRESERVED commit and push it. A directive resume (revert/redo) still runs
+    # the agent below.
+    grant_specs = await self._active_operator_grant_specs(workspace_id)
+    grant_only = not hint.directive and bool(grant_specs)
+    if not grant_only:
+        prompt = operator_hint_prompt(
+            pr_number=pr_number,
+            repo_slug=repo.slug(),
+            reason=hint.reason,
+            directive=hint.directive,
+            operation_id=hint.operation_id,
+            workspace_runtime_context=self._workspace_runtime_context,
             task_tag=task_tag,
         )
-    except ProtectedScopeDiffError as exc:
-        push_result = cast(
-            _GitPushResult,
-            await self._protected_scope_diff_unavailable_push_result(
+        try:
+            verdict = await self._invoke_cli_for_verdict_result(
                 workspace_id=workspace_id,
-                remote_branch=remote_branch,
-                exc=exc,
-            ),
-        )
-        reason = (
-            push_result.stderr or str(exc)
-        ).strip() or "protected-scope policy could not verify the operator hint repair push"
-        mark_operator_hint_needs_human(state, reason)
-        return push_result
-    except _MonitorPolicyBlockedError as exc:
-        reason = str(exc) or "monitor policy blocked the operator hint repair"
-        mark_operator_hint_needs_human(state, reason)
-        return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
-    except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
-        reason = str(exc) or "agent runtime ownership repair failed"
-        mark_operator_hint_needs_human(state, reason)
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=reason,
-            reason_code=exc.reason_code,
-        )
-    if verdict.verdict == "agent_failed":
-        reason = _operator_hint_block_reason(verdict)
-        mark_operator_hint_agent_failed(state, reason)
-        return _GitPushResult(pushed=False, failed=False, returncode=0)
-    if verdict.verdict in {"needs_human", "defer", "false_positive"}:
-        reason = _operator_hint_block_reason(verdict)
-        mark_operator_hint_needs_human(state, reason)
-        return _GitPushResult(pushed=False, failed=False, returncode=0)
+                prompt=prompt,
+                commit_message="fix: address operator hint",
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+                task_tag=task_tag,
+            )
+        except ProtectedScopeDiffError as exc:
+            push_result = cast(
+                _GitPushResult,
+                await self._protected_scope_diff_unavailable_push_result(
+                    workspace_id=workspace_id,
+                    remote_branch=remote_branch,
+                    exc=exc,
+                ),
+            )
+            reason = (
+                push_result.stderr or str(exc)
+            ).strip() or "protected-scope policy could not verify the operator hint repair push"
+            mark_operator_hint_needs_human(state, reason)
+            return push_result
+        except _MonitorPolicyBlockedError as exc:
+            reason = str(exc) or "monitor policy blocked the operator hint repair"
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
+        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+            reason = str(exc) or "agent runtime ownership repair failed"
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=reason,
+                reason_code=exc.reason_code,
+            )
+        if verdict.verdict == "agent_failed":
+            reason = _operator_hint_block_reason(verdict)
+            mark_operator_hint_agent_failed(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=0)
+        if verdict.verdict in {"needs_human", "defer", "false_positive"}:
+            reason = _operator_hint_block_reason(verdict)
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=0)
 
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
@@ -162,6 +173,12 @@ async def _run_operator_hint_cycle(
             reason = (push_result.stderr or "").strip() or default_reason
             mark_operator_hint_needs_human(state, reason)
         return cast(_GitPushResult, push_result)
+    if grant_specs:
+        # The resume cleared the protected gate with the grant-aware push (no
+        # block, no pause). Consume the active grants so they are strictly
+        # single-use: a later DIFFERENT change must be granted again. Mirrors the
+        # executor's consume-on-clear.
+        await consume_active_operator_grants(self._deps.session_factory, workspace_id)
     if not push_result.pushed:
         # A fixed verdict can reflect non-code PR work (for example posting an
         # allowed reply) where there is no commit to publish. A successful no-op

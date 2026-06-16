@@ -59,9 +59,13 @@ class TestValidTransitions:
             (WorkspaceStatus.blocked, WorkspaceStatus.running),
             (WorkspaceStatus.blocked, WorkspaceStatus.validating),
             (WorkspaceStatus.blocked, WorkspaceStatus.pushing),
+            # A post-PR block resumes back into the PR monitor.
+            (WorkspaceStatus.blocked, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.blocked, WorkspaceStatus.failed),
             (WorkspaceStatus.blocked, WorkspaceStatus.cancelled),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.completed),
+            # The PR monitor pauses into blocked on a protected-scope violation.
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.blocked),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.failed),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.cancelled),
             (WorkspaceStatus.completed, WorkspaceStatus.destroying),
@@ -100,15 +104,15 @@ class TestInvalidTransitions:
             (WorkspaceStatus.running, WorkspaceStatus.ready),
             (WorkspaceStatus.completed, WorkspaceStatus.running),
             # blocked is non-terminal but cannot jump straight to completed /
-            # monitoring_pr / destroying — only resume or terminate.
+            # destroying — only resume (running/validating/pushing/monitoring_pr)
+            # or terminate.
             (WorkspaceStatus.blocked, WorkspaceStatus.completed),
-            (WorkspaceStatus.blocked, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.blocked, WorkspaceStatus.destroying),
             (WorkspaceStatus.blocked, WorkspaceStatus.blocked),
             # Cannot self-transition.
             (WorkspaceStatus.running, WorkspaceStatus.running),
-            # monitoring_pr is a dead-end for its own inputs — only the
-            # monitor owns transitions out, and only to completed/failed/cancelled.
+            # monitoring_pr only exits to ready/completed/failed/cancelled or
+            # pauses into blocked — never back to pushing/validating.
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.pushing),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.validating),

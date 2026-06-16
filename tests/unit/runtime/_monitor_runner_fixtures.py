@@ -324,6 +324,23 @@ async def seed_monitoring_workspace(
         return ws.id
 
 
+async def race_workspace_out_of_monitoring(
+    factory: async_sessionmaker[AsyncSession], workspace_id: str
+) -> None:
+    """Move a seeded workspace out of ``monitoring_pr`` (simulate a raced row).
+
+    Used by the post-PR protected-scope pause tests to force the CAS-lost
+    fallback path of ``_repair_protected_scope_commits_before_push``: the
+    ``monitoring_pr -> blocked`` pause transition cannot win, so the legacy
+    transactional rollback runs instead of pausing into ``blocked``."""
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="RACED")
+        await s.commit()
+
+
 def make_runner(
     *,
     factory: async_sessionmaker[AsyncSession],

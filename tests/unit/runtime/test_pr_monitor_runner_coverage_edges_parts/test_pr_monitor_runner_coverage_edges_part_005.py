@@ -49,10 +49,12 @@ from awf.runtime.pr_monitor_runner.types import (
 from awf.service.merge_queue import MergeQueueBlocker
 from awf.service.supply_chain_policy import SupplyChainPolicyRefreshService
 from tests.postgres import postgres_test_engine
+from tests.shared.monitor_runner import DefaultMergeMethodGitHubClient
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    race_workspace_out_of_monitoring,
     seed_monitoring_workspace,
 )
 
@@ -127,6 +129,17 @@ def _queue_protected_workflow_diff(
     cmd.queue_result(returncode=0, stdout=old_text)
     cmd.queue_result(returncode=0)  # cat-file HEAD:path
     cmd.queue_result(returncode=0, stdout=new_text)
+
+
+class _RecordingCommentGitHub(DefaultMergeMethodGitHubClient):
+    """GitHub client double that records ``post_comment`` instead of posting."""
+
+    def __init__(self, cmd: FakeCommandRunner) -> None:
+        super().__init__(cmd)
+        self.posted_comments: list[dict] = []
+
+    async def post_comment(self, *, repo: RepoRef, pr_number: int, body: str) -> None:
+        self.posted_comments.append({"repo": repo, "pr_number": pr_number, "body": body})
 
 
 class _FailingLogSink:
@@ -778,26 +791,19 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
 
     assert push_result.failed is True
     assert push_result.pushed is False
-    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
-    assert ".github/workflows/ci.yml" in push_result.stderr
+    # New post-PR behavior: pause into blocked and PRESERVE the commit, rather
+    # than the legacy rollback/terminal push-blocked.
+    assert push_result.reason_code == "PROTECTED_SCOPE_PAUSED_FOR_OPERATOR"
+    assert push_result.paused_into_blocked is True
     assert len(adapter.calls) == 1
     assert push_result.details is not None
-    assert push_result.details["branch_restored"] is True
-    assert push_result.details["reverted_paths"] == [".github/workflows/ci.yml", "src/fix.py"]
+    assert push_result.details["commit_preserved"] is True
+    assert push_result.details["block_epoch"] == 1
     call_args = [call.args for call in cmd.calls]
-    assert any(
-        args[:1] == ["git"] and "status" in args and args[-1:] == ["--untracked-files=all"]
-        for args in call_args
+    # Commit PRESERVED: no reset before an operator resolves the block.
+    assert not any(
+        args[:1] == ["git"] and "reset" in args and "--hard" in args for args in call_args
     )
-    assert any(
-        args[:1] == ["git"]
-        and "diff" in args
-        and "--name-status" in args
-        and "-z" in args
-        and "merge-base-sha..HEAD" in args
-        for args in call_args
-    )
-    assert _git_worktree_command(worktree, "reset", "--hard", "abc1234567890def") in call_args
     assert not any(args[:1] == ["git"] and "push" in args for args in call_args)
     async with factory() as s:
         events = await WorkspaceEventRepository(s).list(
@@ -805,10 +811,13 @@ async def test_ci_fix_blocks_committed_protected_quality_gate_edits_after_retry(
             event_type="workspace.monitor_protected_scope_push_blocked",
             limit=10,
         )
+        workspace = await WorkspaceRepository(s).get(workspace_id)
     assert len(events) == 1
     assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.blocked.value
 
 
 @pytest.mark.unit
@@ -863,10 +872,16 @@ async def test_unpushed_commit_protected_scope_detects_rename_source(
 
 
 @pytest.mark.unit
-async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_protected_scope(
+async def test_execute_ci_fix_pauses_into_blocked_when_local_commit_touches_protected_scope(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    """A protected-scope edit in a CI-fix commit PAUSES into blocked (preserved).
+
+    Post-PR, AWF no longer silently rolls the commit back and fails the
+    workspace: it pauses into ``blocked`` for an operator, preserves the commit
+    (NO ``git reset --hard``), posts an operator PR comment, and stops the
+    monitor cycle cleanly without a push."""
     workspace_id = await seed_monitoring_workspace(factory)
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
@@ -883,26 +898,16 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
     cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
     _queue_protected_workflow_diff(cmd)
     cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # attempted HEAD
-    cmd.queue_result(
-        returncode=0,
-        stdout=_name_status_z(
-            ".github/workflows/ci.yml",
-            "src/fix.py",
-            "tests/unit/control/test_ci_workflow_toolchain.py",
-            "plans/PR282_CI_SETUP_UV_PLAN.md",
-        ),
-    )
-    cmd.queue_result(returncode=0, stdout="")  # status before rollback
-    cmd.queue_result(returncode=0, stdout="HEAD is now at abc1234\n")  # reset
-    cmd.queue_result(returncode=0, stdout="")  # clean
     adapter = FakeAdapter()
     adapter.queue(stdout="Committed locally.")
+    gh = _RecordingCommentGitHub(cmd)
     runner = make_runner(
         factory=factory,
         cmd=cmd,
         adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
+        gh=gh,
     )
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
@@ -932,6 +937,15 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
         call.args for call in cmd.calls if call.args[:1] == ["git"] and "push" in call.args
     ]
     assert push_calls == []
+    # Commit PRESERVED: no reset before an operator resolves the block.
+    assert not any(
+        call.args[:1] == ["git"] and "reset" in call.args and "--hard" in call.args
+        for call in cmd.calls
+    )
+    # Operator notification posted to the PR exactly once.
+    assert len(gh.posted_comments) == 1
+    assert gh.posted_comments[0]["pr_number"] == 42
+
     async with factory() as s:
         workspace = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
@@ -942,46 +956,20 @@ async def test_execute_ci_fix_rolls_back_whole_delta_when_local_commit_touches_p
         )
 
     assert workspace is not None
-    assert workspace.status == WorkspaceStatus.failed.value
+    assert workspace.status == WorkspaceStatus.blocked.value
+    assert workspace.block_epoch == 1
+    assert workspace.block_resume_phase == "monitor_pr_protected_push"
     ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
     assert ci_operation.status == OperationStatus.failed.value
-    assert ci_operation.result["outcome"] == "protected_scope_push_blocked"
-    assert ci_operation.result["failure_evidence"]["branch_restored"] is True
-    assert ci_operation.result["failure_evidence"]["reverted_paths"] == [
-        ".github/workflows/ci.yml",
-        "plans/PR282_CI_SETUP_UV_PLAN.md",
-        "src/fix.py",
-        "tests/unit/control/test_ci_workflow_toolchain.py",
-    ]
-    requested_event = next(
-        event for event in push_events if event.payload and event.payload["outcome"] == "requested"
-    )
-    rollback_event = next(
+    assert ci_operation.result["outcome"] == "protected_scope_paused_for_operator"
+    pause_event = next(
         event
         for event in push_events
-        if event.payload
-        and event.payload["action"] == "protected_scope_transactional_rollback"
-        and event.payload["outcome"] == "succeeded"
+        if event.payload and event.payload["action"] == "protected_scope_pause_for_operator"
     )
-    failed_event = next(
-        event
-        for event in push_events
-        if event.payload and event.payload["action"] == "ci_repair_push"
-    )
-    assert requested_event.payload is not None
-    assert requested_event.payload["action"] == "protected_scope_transactional_rollback"
-    assert requested_event.payload["outcome"] == "requested"
-    assert rollback_event.payload is not None
-    assert rollback_event.payload["evidence"]["branch_restored"] is True
-    assert failed_event.payload is not None
-    assert failed_event.payload["outcome"] == "failed"
-    assert failed_event.payload["evidence"]["branch_restored"] is True
-    assert _git_worktree_command(worktree, "reset", "--hard", "abc1234567890def") in [
-        call.args for call in cmd.calls
-    ]
-    assert not any(
-        call.args == _git_worktree_command(worktree, "clean", "-fd") for call in cmd.calls
-    )
+    assert pause_event.payload is not None
+    assert pause_event.payload["outcome"] == "paused"
+    assert pause_event.payload["evidence"]["commit_preserved"] is True
 
 
 @pytest.mark.unit
@@ -990,6 +978,9 @@ async def test_protected_scope_commit_repair_rolls_back_delta_without_agent_or_p
     tmp_path: Path,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
+    # Force the CAS-lost fallback: the row left monitoring_pr before the
+    # pause could win, so the legacy transactional rollback runs.
+    await race_workspace_out_of_monitoring(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
@@ -1087,6 +1078,9 @@ async def test_protected_scope_rollback_failed_reset_omits_unattempted_clean_res
     tmp_path: Path,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
+    # Force the CAS-lost fallback: the row left monitoring_pr before the
+    # pause could win, so the legacy transactional rollback runs.
+    await race_workspace_out_of_monitoring(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
@@ -1136,6 +1130,9 @@ async def test_protected_scope_rollback_distinguishes_reset_from_incomplete_clea
     tmp_path: Path,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
+    # Force the CAS-lost fallback: the row left monitoring_pr before the
+    # pause could win, so the legacy transactional rollback runs.
+    await race_workspace_out_of_monitoring(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
@@ -1196,6 +1193,9 @@ async def test_protected_scope_commit_repair_missing_start_head_does_not_push_or
     tmp_path: Path,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
+    # Force the CAS-lost fallback: the row left monitoring_pr before the
+    # pause could win, so the legacy transactional rollback runs.
+    await race_workspace_out_of_monitoring(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()

@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from time import monotonic
 from typing import Any, cast
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.control.worker.admission import (
@@ -28,6 +29,7 @@ from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
     _BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
     _BLOCKED_RESUME_REASON_CODE,
+    _MONITOR_BLOCKED_RESUME_REASON_CODE,
     _MONITOR_RECOVERY_EVENT_TYPE,
     _MONITOR_RECOVERY_REASON_CODE,
     _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL,
@@ -74,7 +76,7 @@ from awf.db.enums import (
     OperationType,
     WorkspaceStatus,
 )
-from awf.db.models import Workspace
+from awf.db.models import OperatorGrantAuditRecord, Workspace
 from awf.db.repositories import (
     OperationRepository,
     QueueDecisionRepository,
@@ -681,6 +683,157 @@ async def _claim_blocked_resume_ids(
         if await self._claim_blocked_for_resume(workspace_id):
             claimed.append(workspace_id)
     return claimed
+
+
+async def _partition_blocked_by_resume_phase(
+    self: Any, workspace_ids: list[str]
+) -> tuple[list[str], list[str]]:
+    """Split operator-cleared ``blocked`` ids into (pre-PR executor, post-PR monitor).
+
+    A POST-PR protected-scope block carries the monitor resume-phase sentinel in
+    ``block_resume_phase`` so its resume returns INTO the PR monitor; every other
+    block resumes through the executor. Order is preserved within each bucket so
+    the FIFO fairness of ``list_resumable_blocked_ids`` survives the split."""
+    from awf.runtime.pr_monitor_runner.constants import (
+        MONITOR_PR_PROTECTED_PUSH_RESUME_PHASE,
+    )
+
+    if not workspace_ids:
+        return [], []
+    pre_pr: list[str] = []
+    post_pr: list[str] = []
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        for workspace_id in workspace_ids:
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                continue
+            if ws.block_resume_phase == MONITOR_PR_PROTECTED_PUSH_RESUME_PHASE:
+                post_pr.append(workspace_id)
+            else:
+                pre_pr.append(workspace_id)
+    return pre_pr, post_pr
+
+
+async def _claim_blocked_for_monitor_resume(self: Any, workspace_id: str) -> bool:
+    """Atomically claim a POST-PR ``blocked`` workspace back into the PR monitor.
+
+    The ``blocked -> monitoring_pr`` transition is the CAS (exactly one worker
+    wins). The monitor claim lease is stamped so the dispatched monitor-resume's
+    heartbeat owns it, and the operator decision (a directive in
+    ``pending_operator_hint`` or an active grant) is bridged into the monitor
+    state so the monitor's ``decide()`` returns ``AddressOperatorHint`` on
+    re-entry and re-runs its full gate order. ``pending_operator_hint`` is left
+    in place so a restore-to-``blocked`` (aborted dispatch) keeps the row
+    resumable; a successful resolution moves the row terminal and a re-block
+    clears it via the shared block-column writes."""
+    now = datetime.now(UTC)
+    lease_expires_at = now + timedelta(seconds=self._config.monitor_claim_lease_seconds)
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.blocked,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code=_MONITOR_BLOCKED_RESUME_REASON_CODE,
+        )
+        if ws is None:
+            return False
+        ws.monitor_claimed_by = self._worker_id
+        ws.monitor_claim_expires_at = lease_expires_at
+        await _bridge_blocked_operator_hint_into_monitor_state(session, ws)
+        await session.commit()
+        return True
+
+
+async def _bridge_blocked_operator_hint_into_monitor_state(
+    session: AsyncSession, ws: Workspace
+) -> None:
+    """Surface the operator's block resolution into the monitor-state hint map.
+
+    A directive (``pending_operator_hint``) resumes the agent; an approve-and-keep
+    grant (no directive) synthesizes a grant-only hint so the monitor's
+    ``decide()`` returns ``AddressOperatorHint`` and the operator-hint cycle's
+    grant-only branch re-checks and pushes the preserved commit. No-op when
+    neither is present (the resumable query guarantees at least one)."""
+    from awf.runtime.operator_hints import (
+        persist_operator_hint,
+        pre_pr_operator_hint_from_payload,
+    )
+    from awf.runtime.pr_monitor import OperatorHint
+
+    column_hint = pre_pr_operator_hint_from_payload(ws.pending_operator_hint)
+    hint: OperatorHint | None = None
+    if column_hint is not None and column_hint.directive:
+        hint = column_hint
+    else:
+        grant_exists = await session.scalar(
+            select(OperatorGrantAuditRecord.id)
+            .where(
+                OperatorGrantAuditRecord.workspace_id == ws.id,
+                OperatorGrantAuditRecord.consumed_at.is_(None),
+                OperatorGrantAuditRecord.revoked_at.is_(None),
+                OperatorGrantAuditRecord.block_epoch == ws.block_epoch,
+            )
+            .limit(1)
+        )
+        if grant_exists is not None:
+            hint = OperatorHint(
+                reason="operator approved the protected-scope change (grant)",
+                directive=None,
+                operation_id=f"protected-block:{ws.id}:{ws.block_epoch}",
+                reason_code="OPERATOR_GUIDE",
+                status="pending",
+            )
+    if hint is None:
+        return
+    threads = dict(ws.monitor_threads_addressed or {})
+    ws.monitor_threads_addressed = persist_operator_hint(threads, hint)
+
+
+async def _claim_blocked_for_monitor_resume_ids(
+    self: Any, workspace_ids: list[str], *, limit: int
+) -> list[str]:
+    """Claim each post-PR ``blocked`` workspace back into the monitor, in order."""
+    claimed: list[str] = []
+    for workspace_id in workspace_ids:
+        if len(claimed) >= limit:
+            break
+        if workspace_id in self._execution_tasks:
+            continue
+        if await self._claim_blocked_for_monitor_resume(workspace_id):
+            claimed.append(workspace_id)
+    return claimed
+
+
+async def _restore_monitor_blocked_resume_claim(
+    self: Any, workspace_id: str, *, reason_code: str
+) -> None:
+    """Revert a won post-PR blocked-resume back to ``blocked`` when undispatched.
+
+    Mirrors ``_restore_blocked_resume_claim`` for the monitor branch: the
+    ``blocked -> monitoring_pr`` CAS commits before dispatch, so an aborted
+    dispatch must restore the paused state rather than leave the row in
+    ``monitoring_pr`` with no running monitor. Owner-gated on the monitor claim so
+    a newer claimant is never clobbered. ``pending_operator_hint`` was left intact
+    at claim time, so the next cycle re-selects and re-bridges cleanly."""
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.monitoring_pr,
+                to=WorkspaceStatus.blocked,
+                reason_code=reason_code,
+                extra_conditions=(Workspace.monitor_claimed_by == self._worker_id,),
+            )
+            if ws is not None:
+                await session.commit()
+    except Exception:
+        _log.exception(
+            "worker.monitor_blocked_resume_restore_failed",
+            workspace_id=workspace_id,
+            worker_id=self._worker_id,
+        )
 
 
 async def _safely_resume_claimed_pr_monitor(

@@ -147,6 +147,11 @@ class RunnerDelegatesMixin:
         _remote_repair._protected_scope_diff_unavailable_push_result
     )
     _protected_scope_push_block = _remote_repair._protected_scope_push_block
+    _enter_blocked_for_monitor_protected_violation = (
+        _remote_repair._enter_blocked_for_monitor_protected_violation
+    )
+    _current_block_epoch = _remote_repair._current_block_epoch
+    _active_operator_grant_specs = _remote_repair._active_operator_grant_specs
     _protected_scope_repair_prompt = _remote_prompt_ops._protected_scope_repair_prompt
     _protected_scope_committed_repair_prompt = (
         _remote_prompt_ops._protected_scope_committed_repair_prompt

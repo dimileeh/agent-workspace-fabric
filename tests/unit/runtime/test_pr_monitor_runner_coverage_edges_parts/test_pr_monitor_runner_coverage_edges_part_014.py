@@ -46,6 +46,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    race_workspace_out_of_monitoring,
     seed_monitoring_workspace,
 )
 
@@ -151,6 +152,8 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_and_keeps_comment_unad
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
+    # Force the CAS-lost fallback so the legacy transactional rollback runs.
+    await race_workspace_out_of_monitoring(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
@@ -251,6 +254,8 @@ async def test_fix_cycle_rolls_back_protected_scope_delta_when_diff_path_parse_f
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
+    # Force the CAS-lost fallback so the legacy transactional rollback runs.
+    await race_workspace_out_of_monitoring(factory, workspace_id)
     worktree = tmp_path / "worktrees" / workspace_id
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()

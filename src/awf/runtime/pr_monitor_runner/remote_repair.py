@@ -22,15 +22,21 @@ from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag
+from awf.control.protected_block import (
+    apply_protected_block_columns,
+    load_active_operator_grant_specs,
+)
 from awf.control.protected_file_diffs import (
     protected_file_diffs_for_committed_paths,
 )
 from awf.control.quality_gates import (
+    PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
     QualityGateViolation,
     find_protected_quality_gate_changes,
     quality_gate_violation_details,
     quality_gate_violation_message,
 )
+from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
     WorkspaceEventCreate,
@@ -52,11 +58,13 @@ from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+    _PROTECTED_SCOPE_PAUSED_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_START_HEAD_UNAVAILABLE_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
     _TASK_TAG_UNSET,
+    MONITOR_PR_PROTECTED_PUSH_RESUME_PHASE,
     _TaskTagUnset,
 )
 from awf.runtime.pr_monitor_runner.git_utils import (
@@ -487,7 +495,20 @@ async def _repair_protected_scope_commits_before_push(
     operation_start_head: str | None = None,
     source_head_sha: str | None = None,
 ) -> _GitPushResult:
-    """Roll back a protected-scope repair delta before any push occurs."""
+    """Pause the workspace into ``blocked`` for an operator, PRESERVING the commit.
+
+    A protected-scope violation in a monitor repair commit no longer silently
+    ``git reset --hard``s the offending commit away and fails the workspace.
+    Instead the workspace pauses into ``blocked`` (reusing the WS-1 block
+    machinery, but from ``monitoring_pr``) with the commit PRESERVED, so an
+    operator can approve-and-keep (a scoped grant lets the preserved commit push
+    on resume) or revert (a directive re-runs the agent to drop it).
+
+    The legacy transactional rollback is retained only as the CAS-lost fallback:
+    if the ``monitoring_pr -> blocked`` transition does not win (the row already
+    left ``monitoring_pr`` — cancelled / raced), no partial repair may be pushed,
+    so the old reset-to-operation-start behavior applies.
+    """
 
     del compose_project, compose_file, state
 
@@ -507,6 +528,66 @@ async def _repair_protected_scope_commits_before_push(
     paths = _quality_gate_violation_paths(violations)
     worktree_path = self._worktrees_root / workspace_id
     attempted_head = await self._rev_parse_head(worktree_path)
+
+    # Primary path: pause into ``blocked`` and PRESERVE the commit (no reset).
+    paused = await self._enter_blocked_for_monitor_protected_violation(
+        workspace_id=workspace_id,
+        violations=violations,
+    )
+    if paused:
+        block_epoch = await self._current_block_epoch(workspace_id)
+        paused_details: dict[str, object] = {
+            "phase": "pre_push_committed_diff",
+            "paths": paths,
+            "protected_patterns": [violation.protected_pattern for violation in violations],
+            "violations": quality_gate_violation_details(violations),
+            "message": protected_scope_block.message,
+            "attempted_head_sha": attempted_head,
+            "block_epoch": block_epoch,
+            "resolution": "paused_into_blocked_commit_preserved",
+            "commit_preserved": True,
+            "pushed": False,
+        }
+        await self._record_pr_monitor_audit_event(
+            workspace_id=workspace_id,
+            event_type=_AUDIT_GIT_PUSH_EVENT,
+            action="protected_scope_pause_for_operator",
+            outcome="paused",
+            reason_code=_PROTECTED_SCOPE_PAUSED_REASON,
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            monitor_log=monitor_log,
+            source_head_sha=source_head_sha or operation_start_head,
+            evidence=paused_details,
+        )
+        _log.warning(
+            "monitor.protected_scope_paused_for_operator",
+            workspace_id=workspace_id,
+            paths=paths,
+            block_epoch=block_epoch,
+            attempted_head=attempted_head,
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=(
+                f"{protected_scope_block.message}\n"
+                "AWF paused this workspace for an operator decision and preserved "
+                "the offending commit. Use `awf workspace guide` to approve-and-keep "
+                "(--grant) or revert (--directive)."
+            ),
+            reason_code=_PROTECTED_SCOPE_PAUSED_REASON,
+            details=paused_details,
+        )
+
+    # CAS lost: the row left ``monitoring_pr`` before we could pause it. Fall
+    # back to the legacy transactional rollback so a partial repair is never
+    # pushed behind whatever moved the row on.
     await self._record_pr_monitor_audit_event(
         workspace_id=workspace_id,
         event_type=_AUDIT_GIT_PUSH_EVENT,
@@ -1228,10 +1309,12 @@ async def _protected_scope_violations_for_unpushed_commits(
             "against the remote PR branch for validation: "
             f"{exc}"
         ) from exc
+    operator_granted_paths = await self._active_operator_grant_specs(workspace_id)
     return find_protected_quality_gate_changes(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=operator_granted_paths,
     )
 
 
@@ -1308,10 +1391,12 @@ async def _protected_scope_violations_for_sync_base_push(
             "against the remote PR branch for validation: "
             f"{exc}"
         ) from exc
+    operator_granted_paths = await self._active_operator_grant_specs(workspace_id)
     return find_protected_quality_gate_changes(
         changed_paths=sync_base_authored_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=operator_granted_paths,
     )
 
 
@@ -1428,3 +1513,62 @@ async def _protected_scope_push_block(
         reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
         violations=tuple(violations),
     )
+
+
+async def _enter_blocked_for_monitor_protected_violation(
+    self: Any,
+    *,
+    workspace_id: str,
+    violations: Sequence[QualityGateViolation],
+) -> bool:
+    """Pause a ``monitoring_pr`` workspace into ``blocked`` (post-PR variant).
+
+    The monitor-side counterpart to the executor's pre-PR
+    ``enter_blocked_for_protected_violation``: it performs the
+    ``monitoring_pr -> blocked`` CAS and stamps the SAME block-state columns via
+    the shared :func:`apply_protected_block_columns` (block type/reason, epoch
+    bump, cleared directive). The ``block_resume_phase`` is the monitor sentinel
+    so the worker routes the resume back INTO the PR monitor. Returns ``True``
+    only when the CAS won (the row was still ``monitoring_pr``); a lost CAS means
+    the row already moved on and the caller must not claim a pause.
+    """
+    normalized = quality_gate_violation_details(violations)
+    async with self._deps.session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            to=WorkspaceStatus.blocked,
+            reason_code=PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
+            payload={
+                "block_type": "protected_quality_gate",
+                "resume_phase": MONITOR_PR_PROTECTED_PUSH_RESUME_PHASE,
+                "violations": normalized,
+                "phase": "monitoring_pr",
+            },
+        )
+        if ws is None:
+            return False
+        apply_protected_block_columns(
+            ws,
+            violations_normalized=normalized,
+            resume_phase=MONITOR_PR_PROTECTED_PUSH_RESUME_PHASE,
+        )
+        await session.commit()
+        return True
+
+
+async def _current_block_epoch(self: Any, workspace_id: str) -> int | None:
+    """Return the workspace's current ``block_epoch`` for block notifications."""
+    async with self._deps.session_factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        return ws.block_epoch if ws is not None else None
+
+
+async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[Any]:
+    """Load the workspace's active-epoch operator grants for the monitor gate.
+
+    Thin runner wrapper over the shared single source of truth so the post-PR
+    protected-scope check honors an operator's approve-and-keep grant exactly
+    like the pre-PR executor path."""
+    return await load_active_operator_grant_specs(self._deps.session_factory, workspace_id)

@@ -41,6 +41,11 @@ from awf.control.executor.recovery_payloads import (
 )
 from awf.control.executor.status_helpers import _is_callback_terminal_status
 from awf.control.executor.types import _PlanningValidationHandoff
+from awf.control.protected_block import (
+    apply_protected_block_columns,
+    consume_active_operator_grants,
+    load_active_operator_grant_specs,
+)
 from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
@@ -54,7 +59,7 @@ from awf.db.enums import (
     OperationStatus,
     WorkspaceStatus,
 )
-from awf.db.models import OperatorGrantAuditRecord, Workspace
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
@@ -509,19 +514,15 @@ async def enter_blocked_for_protected_violation(
                     )
                 await session.commit()
             return False
-        ws.block_reason_code = QUALITY_GATE_POLICY_CHANGED_REASON_CODE
-        ws.block_type = PROTECTED_QUALITY_GATE_BLOCK_TYPE
-        ws.block_violations = normalized
-        ws.block_resume_phase = resume_phase
-        ws.block_epoch = (ws.block_epoch or 0) + 1
-        ws.blocked_at = datetime.now(UTC)
-        # A re-block supersedes any operator directive from the prior block
-        # instance: the resume that produced this re-block already applied that
-        # directive. Grants are epoch-fenced and invalidated by the bumped
-        # block_epoch above, but the directive is not, so clear it explicitly —
-        # otherwise the resume path would re-apply a stale directive (and could
-        # override a fresh approve-and-keep grant issued for this new epoch).
-        ws.pending_operator_hint = None
+        # Shared block-column writes (block type/reason, violations, resume
+        # phase, epoch bump, blocked_at, cleared pending_operator_hint). The
+        # epoch bump invalidates prior grants; the cleared directive ensures a
+        # re-block supersedes the directive from the prior block instance — the
+        # resume that produced this re-block already applied it. Single source of
+        # truth shared with the post-PR monitor pause.
+        apply_protected_block_columns(
+            ws, violations_normalized=normalized, resume_phase=resume_phase
+        )
         # A workspace that blocks mid-recovery (a validate/rebase recovery fix
         # pass produced the protected edit) must not leave the recovery
         # Operation active: ``execute`` reloads it via
@@ -601,57 +602,17 @@ async def _persist_block_planning_conformance_handoff(
 async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[GrantSpec]:
     """Return the operator grants active for the workspace's CURRENT block epoch.
 
-    A grant authorizes the protected gate only while it is unconsumed, unrevoked,
-    and scoped to ``workspace.block_epoch`` (a re-block bumps the epoch and
-    invalidates prior grants). Empty for a normal run — grant rows only exist
-    after an operator resolves a ``blocked`` workspace — so threading this into
-    every gate caller is a no-op outside the resume path."""
-    async with self._session_factory() as session:
-        ws = await WorkspaceRepository(session).get(workspace_id)
-        if ws is None:
-            return []
-        rows = await session.execute(
-            select(OperatorGrantAuditRecord).where(
-                OperatorGrantAuditRecord.workspace_id == workspace_id,
-                OperatorGrantAuditRecord.consumed_at.is_(None),
-                OperatorGrantAuditRecord.revoked_at.is_(None),
-                OperatorGrantAuditRecord.block_epoch == ws.block_epoch,
-            )
-        )
-        return [
-            GrantSpec(
-                path=record.normalized_path,
-                approve_policy_downgrade=record.approve_policy_downgrade,
-            )
-            for record in rows.scalars().all()
-        ]
+    Thin executor wrapper over the shared single source of truth so the pre-PR
+    and post-PR pauses load grants identically."""
+    return await load_active_operator_grant_specs(self._session_factory, workspace_id)
 
 
 async def _consume_active_operator_grants(self: Any, workspace_id: str) -> int:
     """Mark the workspace's active (current-epoch) operator grants as consumed.
 
-    Called once a resumed workspace clears the protected gate so a grant is
-    strictly single-use: a later DIFFERENT change to the same file must be
-    granted again. Returns the number of grants consumed."""
-    consumed = 0
-    now = datetime.now(UTC)
-    async with self._session_factory() as session:
-        ws = await WorkspaceRepository(session).get(workspace_id)
-        if ws is None:
-            return 0
-        rows = await session.execute(
-            select(OperatorGrantAuditRecord).where(
-                OperatorGrantAuditRecord.workspace_id == workspace_id,
-                OperatorGrantAuditRecord.consumed_at.is_(None),
-                OperatorGrantAuditRecord.revoked_at.is_(None),
-                OperatorGrantAuditRecord.block_epoch == ws.block_epoch,
-            )
-        )
-        for record in rows.scalars().all():
-            record.consumed_at = now
-            consumed += 1
-        await session.commit()
-    return consumed
+    Thin executor wrapper over the shared single source of truth (single-use,
+    consumed once the resumed workspace clears the protected gate)."""
+    return await consume_active_operator_grants(self._session_factory, workspace_id)
 
 
 async def _begin_execution(

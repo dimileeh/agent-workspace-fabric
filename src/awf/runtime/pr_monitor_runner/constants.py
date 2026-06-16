@@ -113,6 +113,18 @@ _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 
+# A protected-scope violation in a monitor repair commit PAUSED the workspace
+# into ``blocked`` for an operator decision (post-PR). Distinct from
+# ``PROTECTED_SCOPE_PUSH_BLOCKED`` (the legacy terminal/rollback reason): the
+# offending commit is PRESERVED, the workspace is non-terminal, and the monitor
+# cycle stops cleanly rather than failing.
+_PROTECTED_SCOPE_PAUSED_REASON = "PROTECTED_SCOPE_PAUSED_FOR_OPERATOR"
+
+# Monitor ``block_resume_phase`` value marking a post-PR (monitoring_pr) block,
+# so the worker routes its resume back INTO the PR monitor rather than the
+# executor. Distinct from the executor's pre-PR resume-phase strings.
+MONITOR_PR_PROTECTED_PUSH_RESUME_PHASE = "monitor_pr_protected_push"
+
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
 
 _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"

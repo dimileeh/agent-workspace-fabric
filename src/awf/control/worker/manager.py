@@ -35,6 +35,7 @@ from awf.control.worker.admission import _requested_admission_row_slots
 from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.control.worker.constants import (
     _BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE,
+    _MONITOR_BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE,
     ORDERED_BLOCKED_RESUME_REASON,
     ORDERED_MONITOR_RESUME_REASON,
     ORDERED_READY_EXECUTION_REASON,
@@ -309,8 +310,50 @@ class ControlWorker(WorkerDelegatesMixin):
                     expected=WorkspaceStatus.blocked,
                     action="resume_blocked_execution",
                 )
+                # Split by block_resume_phase: POST-PR protected-scope blocks
+                # resume back INTO the PR monitor (claim blocked -> monitoring_pr
+                # and dispatch via the monitor resume path); every other block
+                # resumes through the executor (blocked -> running). The pre-PR
+                # executor branch below is unchanged.
+                (
+                    pre_pr_blocked_ids,
+                    post_pr_blocked_ids,
+                ) = await self._partition_blocked_by_resume_phase(blocked_ids)
+                if post_pr_blocked_ids:
+                    claimed_monitor_blocked_ids = await self._claim_blocked_for_monitor_resume_ids(
+                        post_pr_blocked_ids,
+                        limit=execution_slots,
+                    )
+                    monitor_blocked_dispatched: set[str] = set()
+                    try:
+                        monitor_blocked_dispatch_ids = self._dispatchable_execution_ids(
+                            claimed_monitor_blocked_ids,
+                            limit=execution_slots,
+                        )
+                        await self._record_ordered_decisions(
+                            monitor_blocked_dispatch_ids,
+                            reason_code=ORDERED_BLOCKED_RESUME_REASON,
+                        )
+                        monitor_blocked_dispatched = self._dispatch_monitor_resumes(
+                            monitor_blocked_dispatch_ids,
+                            limit=execution_slots,
+                        )
+                    finally:
+                        for workspace_id in claimed_monitor_blocked_ids:
+                            if workspace_id in monitor_blocked_dispatched:
+                                continue
+                            await self._restore_monitor_blocked_resume_claim(
+                                workspace_id,
+                                reason_code=(_MONITOR_BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE),
+                            )
+                            await self._release_monitoring_pr_claim(workspace_id)
+                    dispatched_ids.update(monitor_blocked_dispatched)
+                    execution_dispatched_ids.update(monitor_blocked_dispatched)
+                    execution_slots = self._available_execution_slots()
+                    if execution_slots <= 0:
+                        pre_pr_blocked_ids = []
                 claimed_blocked_ids = await self._claim_blocked_resume_ids(
-                    blocked_ids,
+                    pre_pr_blocked_ids,
                     limit=execution_slots,
                 )
                 # The claim CAS above already committed ``blocked -> running`` and

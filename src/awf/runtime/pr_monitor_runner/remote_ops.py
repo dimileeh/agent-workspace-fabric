@@ -90,6 +90,7 @@ _GIT_PUSH_OUTPUT_CONTEXT_RE = re.compile(
 )
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
+_PROTECTED_SCOPE_PAUSED_REASON = "PROTECTED_SCOPE_PAUSED_FOR_OPERATOR"
 _PRE_EXISTING_DIRTY_WORKTREE_REASON = "PRE_EXISTING_DIRTY_WORKTREE"
 _REPAIR_START_HEAD_UNAVAILABLE_REASON = "REPAIR_START_HEAD_UNAVAILABLE"
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"
@@ -142,6 +143,16 @@ class _GitPushResult:
     def protected_scope_diff_unavailable(self) -> bool:
         """Return whether protected-scope diff evidence could not be gathered."""
         return self.failed and self.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
+
+    @property
+    def paused_into_blocked(self) -> bool:
+        """Return whether this push paused the workspace into ``blocked``.
+
+        Distinct from ``protected_scope_blocked``/``terminal_monitor_failure``:
+        the offending commit is PRESERVED for an operator decision and the
+        monitor cycle stops cleanly (the workspace is non-terminal ``blocked``),
+        so the loop must NOT mark it failed."""
+        return self.failed and self.reason_code == _PROTECTED_SCOPE_PAUSED_REASON
 
     @property
     def workflow_scope_required(self) -> bool:
@@ -218,6 +229,8 @@ def _git_push_failure_outcome(push_result: _GitPushResult) -> str:
         return "pre_push_validation_failed"
     if push_result.workflow_scope_required:
         return "github_workflow_scope_required"
+    if push_result.paused_into_blocked:
+        return "protected_scope_paused_for_operator"
     if push_result.protected_scope_diff_unavailable:
         return "protected_scope_diff_unavailable"
     if push_result.protected_scope_blocked:

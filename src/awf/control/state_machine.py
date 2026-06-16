@@ -79,6 +79,9 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
             WorkspaceStatus.running,
             WorkspaceStatus.validating,
             WorkspaceStatus.pushing,
+            # A post-PR block resumes back INTO the PR monitor after an operator
+            # decision (grant/directive): re-validate, then re-run decide() gates.
+            WorkspaceStatus.monitoring_pr,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
@@ -87,6 +90,10 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
         {
             WorkspaceStatus.ready,
             WorkspaceStatus.completed,
+            # A protected quality-gate violation in a monitor repair commit
+            # pauses the PR monitor for an operator decision instead of
+            # terminally failing (post-PR block). The commit is preserved.
+            WorkspaceStatus.blocked,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
