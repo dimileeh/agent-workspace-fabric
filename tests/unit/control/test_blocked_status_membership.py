@@ -35,6 +35,12 @@ from awf.service.metrics import EXECUTION_IN_USE_STATUSES, TERMINAL_WORKSPACE_ST
 from awf.service.metrics_capacity import (
     EXECUTION_IN_USE_STATUSES as CAPACITY_EXECUTION_IN_USE_STATUSES,
 )
+from awf.service.orphan_resources import (
+    ACTIVE_WORKSPACE_STATUSES as ORPHAN_ACTIVE_WORKSPACE_STATUSES,
+)
+from awf.service.orphan_resources import (
+    KNOWN_WORKSPACE_STATUSES as ORPHAN_KNOWN_WORKSPACE_STATUSES,
+)
 
 _BLOCKED = WorkspaceStatus.blocked
 
@@ -55,6 +61,14 @@ class TestBlockedKeepWarmMembership:
 
     def test_in_protected_gc_statuses(self) -> None:
         assert _BLOCKED.value in PROTECTED_WORKSPACE_GC_STATUSES
+
+    def test_in_orphan_resource_active_statuses(self) -> None:
+        # The orphan-resource scanner keeps its own active/known status sets; if
+        # ``blocked`` were omitted, the workspace row would be filtered out of the
+        # id view, its containers/networks/volumes/worktree would classify as
+        # ``missing``, and the reaper could delete the preserved warm stack.
+        assert _BLOCKED.value in ORPHAN_ACTIVE_WORKSPACE_STATUSES
+        assert _BLOCKED.value in ORPHAN_KNOWN_WORKSPACE_STATUSES
 
 
 @pytest.mark.unit
