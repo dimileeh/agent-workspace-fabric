@@ -704,6 +704,59 @@ def test_remove_empty_untracked_dirs_preserves_tracked_deinitialized_submodule(
 
 
 @pytest.mark.unit
+def test_is_tracked_gitlink_includes_safe_directory_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ls-tree probe must inject safe.directory so Git ownership overrides work.
+
+    Without the override, a worktree with mismatched ownership causes Git to
+    refuse ``ls-tree`` with ``fatal: detected dubious ownership``. That failure
+    makes the helper return False, letting cleanup remove a tracked deinitialized
+    submodule and dirty the worktree.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    submodule = worktree / "sub"
+    submodule.mkdir()
+    (submodule / ".git").mkdir()
+    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
+    _run_real_git(submodule, "init")
+    _run_real_git(submodule, "config", "user.email", "agent@example.com")
+    _run_real_git(submodule, "config", "user.name", "AWF Agent")
+    _run_real_git(submodule, "add", "file.txt")
+    _run_real_git(submodule, "commit", "-m", "init")
+    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
+    _run_real_git(worktree, "commit", "-m", "add sub")
+    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
+
+    captured: list[list[str]] = []
+    original_run = subprocess.run
+
+    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(list(cmd))
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    assert validation_worktree._is_tracked_gitlink(worktree, submodule) is True
+
+    ls_tree_calls = [call for call in captured if "ls-tree" in call]
+    assert len(ls_tree_calls) == 1
+    assert "-c" in ls_tree_calls[0]
+    assert f"safe.directory={worktree}" in ls_tree_calls[0]
+    assert submodule.exists()
+
+
+@pytest.mark.unit
 def test_snapshot_empty_untracked_dirs_preserves_tracked_deinitialized_submodule(
     tmp_path: Path,
 ) -> None:

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from awf.common.commands import CommandResult
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.runtime.git_porcelain import (
     changed_paths_from_porcelain as _changed_paths_from_porcelain,
 )
@@ -180,6 +181,7 @@ def _is_tracked_gitlink(worktree_path: Path, path: Path) -> bool:
     result = subprocess.run(
         [
             "git",
+            *git_safe_directory_config_args(worktree_path),
             "-C",
             str(worktree_path),
             "ls-tree",
