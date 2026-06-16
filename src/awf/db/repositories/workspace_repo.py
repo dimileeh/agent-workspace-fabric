@@ -31,6 +31,7 @@ from awf.db.enums import (
 )
 from awf.db.models import (
     MergeCandidate,
+    OperatorGrantAuditRecord,
     TaskAttempt,
     Workspace,
     WorkspaceEvent,
@@ -654,6 +655,45 @@ class WorkspaceRepository:
             )
         stmt = stmt.limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+    async def list_resumable_blocked_ids(
+        self,
+        *,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+    ) -> builtins.list[str]:
+        """Return ``blocked`` workspace IDs an operator has cleared for resume.
+
+        A pre-PR ``blocked`` workspace is resumable only once an operator has
+        acted on it: ``guide`` either arms a directive in
+        ``pending_operator_hint`` (revert/redo) or records at least one grant
+        active for the workspace's CURRENT ``block_epoch`` (approve-and-keep).
+        Blocked workspaces still awaiting an operator decision carry neither, so
+        they are excluded here — otherwise the worker would spin them through
+        ``blocked -> running -> blocked`` re-running the same gate every cycle.
+        Oldest ``updated_at`` first for FIFO fairness across cleared workspaces.
+        """
+        if limit <= 0:
+            return []
+        active_grant_exists = (
+            select(OperatorGrantAuditRecord.id)
+            .where(
+                OperatorGrantAuditRecord.workspace_id == Workspace.id,
+                OperatorGrantAuditRecord.consumed_at.is_(None),
+                OperatorGrantAuditRecord.revoked_at.is_(None),
+                OperatorGrantAuditRecord.block_epoch == Workspace.block_epoch,
+            )
+            .exists()
+        )
+        stmt = select(Workspace.id).where(
+            Workspace.status == WorkspaceStatus.blocked.value,
+            or_(Workspace.pending_operator_hint.isnot(None), active_grant_exists),
+        )
+        if exclude_ids:
+            stmt = stmt.where(Workspace.id.notin_(exclude_ids))
+        stmt = stmt.order_by(Workspace.updated_at.asc(), Workspace.id.asc()).limit(limit)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
 
     async def list_schedulable_ids(
         self,

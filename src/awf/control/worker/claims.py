@@ -595,6 +595,26 @@ async def _claim_blocked_for_resume(self: Any, workspace_id: str) -> bool:
         return True
 
 
+async def _claim_blocked_resume_ids(
+    self: Any, workspace_ids: list[str], *, limit: int
+) -> list[str]:
+    """Claim each operator-cleared ``blocked`` workspace for resume, in order.
+
+    Mirrors ``_claim_monitoring_pr_ids``: the per-workspace CAS in
+    ``_claim_blocked_for_resume`` performs the ``blocked -> running`` transition,
+    so only the rows it actually wins (and that are not already running locally)
+    are returned for dispatch."""
+    claimed: list[str] = []
+    for workspace_id in workspace_ids:
+        if len(claimed) >= limit:
+            break
+        if workspace_id in self._execution_tasks:
+            continue
+        if await self._claim_blocked_for_resume(workspace_id):
+            claimed.append(workspace_id)
+    return claimed
+
+
 async def _safely_resume_claimed_pr_monitor(
     self: Any,
     workspace_id: str,
