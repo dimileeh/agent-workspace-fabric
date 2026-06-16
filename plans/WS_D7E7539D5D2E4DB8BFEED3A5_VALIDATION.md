@@ -37,10 +37,12 @@ Result: All checks passed / no issues found.
 
 - `src/awf/control/executor/planning_ops.py`
 - `src/awf/control/executor/execution_validation.py`
+- `src/awf/control/executor/planning_artifacts.py` (reviewed; no changes required — deposit works from the worktree copy before removal)
 - `tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_001.py`
 - `tests/unit/control/test_planning_ops_branch_edges.py`
 - `plans/WS_D7E7539D5D2E4DB8BFEED3A5_PLAN.md`
 - `plans/WS_D7E7539D5D2E4DB8BFEED3A5_VALIDATION.md`
+- `docs/awf-plans/ws_d7e7539d5d2e4db8bfeed3a5.conformance.json`
 
 ## No remaining gaps
 
