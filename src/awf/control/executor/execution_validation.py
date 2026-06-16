@@ -161,8 +161,18 @@ async def run_validation_and_fix_cycle(
     rebase_recovery_result: _RebaseRecoveryResult | None,
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
     execution_owner_id: str | None = None,
+    resume_skip_agent: bool = False,
 ) -> ExecutionValidationResult:
-    """Run validate/fix attempts and emit the terminal validation state."""
+    """Run validate/fix attempts and emit the terminal validation state.
+
+    ``resume_skip_agent`` marks an approve-and-keep grant resume, which is
+    documented as "skip the agent — no tokens" and keeps the operator-approved
+    protected change verbatim. A validation fix pass re-invokes the coding
+    adapter, which would both spend tokens and potentially rewrite the approved
+    change, so grant resumes run validation with zero fix passes: a failure
+    marks the workspace FAILED for operator triage instead of firing a fix
+    pass. This mirrors the pre-commit repair gate (PRRT_kwDOSJAM6s6J5SDf).
+    """
     if run_model is None:
         run_model = default_model
 
@@ -183,7 +193,7 @@ async def run_validation_and_fix_cycle(
             successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
         )
 
-    max_fix_passes = self._config.max_validation_fix_passes
+    max_fix_passes = 0 if resume_skip_agent else self._config.max_validation_fix_passes
     profile = _profile_for_workspace(
         ws,
         worktree_path=worktree_path,

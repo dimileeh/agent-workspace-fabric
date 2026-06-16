@@ -31,7 +31,12 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
-from awf.runtime.validation import ValidationCoverageResult, ValidationRunner
+from awf.runtime.validation import (
+    ValidationCommandResult,
+    ValidationCoverageResult,
+    ValidationResult,
+    ValidationRunner,
+)
 from tests.postgres import postgres_test_engine
 from tests.unit.control.executor_paths import _test_worktrees_root
 from tests.unit.control.test_executor_post_agent_commit_parts.test_executor_post_agent_commit_part_001 import (
@@ -334,6 +339,85 @@ async def test_blocked_resume_grant_does_not_invoke_agent_on_precommit_repair(
     # no targeted-repair agent run and no retry commit.
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 1
+    agent_calls = [call for call in fake.calls if call.input_bytes is not None]
+    assert agent_calls == []
+
+
+@pytest.mark.unit
+async def test_blocked_resume_grant_does_not_invoke_fix_agent_on_validation_failure(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for PRRT_kwDOSJAM6s6J7EUX: an approve-and-keep grant resume
+    # skips the agent ("no tokens") and keeps the approved protected change
+    # verbatim, then re-runs setup + validation. If that validation FAILS, the
+    # fix cycle MUST NOT fire a fix pass — re-invoking the coding adapter would
+    # spend tokens and could rewrite the approved protected change. A grant
+    # resume runs validation with zero fix passes, so a failure marks the
+    # workspace FAILED for operator triage instead of calling the agent.
+    ws_id = await _seed_resumable_blocked_workspace(factory)
+
+    # The post-agent commit captures the approved change verbatim; queue it
+    # through to a real commit so execution reaches the validation step.
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff (non-empty)
+    fake.queue_result(returncode=0)  # git commit
+    fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+    fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+
+    stdout_path = tmp_path / "validate.stdout"
+    stderr_path = tmp_path / "validate.stderr"
+    stdout_path.write_text("FAILED tests/test_app.py::test_flow\n", encoding="utf-8")
+    stderr_path.write_text("AssertionError: expected ok\n", encoding="utf-8")
+
+    failing_validation = ValidationResult(
+        commands=[
+            ValidationCommandResult(
+                command="pytest -q",
+                returncode=1,
+                duration_seconds=0.1,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                reason_code="COMMAND_FAILED",
+            )
+        ]
+    )
+
+    validate_phase_calls = 0
+    real_run_profile_phases = executor._validation.run_profile_phases
+
+    async def _fail_validate_phase(
+        *, phase_names: tuple[str, ...] | list[str], **kwargs: Any
+    ) -> ValidationResult:
+        nonlocal validate_phase_calls
+        if tuple(phase_names) == ("post_agent", "validate"):
+            validate_phase_calls += 1
+            return failing_validation
+        return await real_run_profile_phases(phase_names=phase_names, **kwargs)
+
+    monkeypatch.setattr(executor._validation, "run_profile_phases", _fail_validate_phase)
+
+    async def _head_sha(*, workspace_id: str, worktree_path: Path) -> str:
+        return "deadbeef01"
+
+    monkeypatch.setattr(executor, "_capture_workspace_head_sha", _head_sha)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "validation_failure"
+
+    # Validation ran exactly once: zero fix passes means no fix-pass re-validate.
+    assert validate_phase_calls == 1
+    # The coding adapter was never invoked — no fix-pass agent run (which would
+    # carry a fix prompt as ``input_bytes``) spent tokens or touched the change.
     agent_calls = [call for call in fake.calls if call.input_bytes is not None]
     assert agent_calls == []
 
