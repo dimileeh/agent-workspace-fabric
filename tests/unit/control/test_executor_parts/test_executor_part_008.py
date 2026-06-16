@@ -114,6 +114,7 @@ async def _seed_resumable_blocked_workspace(
     reclaim_to_running: bool = True,
     execution_claimed_by: str | None = None,
     block_baseline_coverage: dict[str, Any] | None = None,
+    block_planning_conformance_handoff: dict[str, Any] | None = None,
 ) -> str:
     """Insert a workspace the worker has already re-claimed ``blocked → running``
     after an operator resolved the pause, ready for ``resume_blocked_execution``
@@ -152,6 +153,8 @@ async def _seed_resumable_blocked_workspace(
             ws.execution_claimed_by = execution_claimed_by
         if block_baseline_coverage is not None:
             ws.block_baseline_coverage = block_baseline_coverage
+        if block_planning_conformance_handoff is not None:
+            ws.block_planning_conformance_handoff = block_planning_conformance_handoff
         if directive is not None:
             ws.pending_operator_hint = {
                 "status": "pending",
@@ -420,6 +423,96 @@ async def test_blocked_resume_grant_does_not_invoke_fix_agent_on_validation_fail
     # carry a fix prompt as ``input_bytes``) spent tokens or touched the change.
     agent_calls = [call for call in fake.calls if call.input_bytes is not None]
     assert agent_calls == []
+
+
+_PENDING_CONFORMANCE_HANDOFF = {
+    "plan_path": "docs/awf-plans/ws.md",
+    "report_path": "docs/awf-plans/ws.conformance.json",
+    "iteration": 1,
+    "max_iterations": 3,
+    "report": {
+        "status": "needs_iteration",
+        "summary": "AWF validation evidence is required.",
+        "gaps": ["rerun pytest under AWF"],
+        "reason_code": "CONFORMANCE_REQUIRES_AWF_VALIDATION",
+    },
+}
+
+
+@pytest.mark.unit
+async def test_blocked_resume_grant_runs_conformance_check_from_persisted_handoff(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for PRRT_kwDOSJAM6s6KAbBL: an approve-and-keep grant resume skips
+    # the agent/planning block — the ONLY place the in-memory planning handoff is
+    # produced — so without the block-time persistence the post-validation plan
+    # conformance check (gated on a non-None handoff) would be skipped entirely,
+    # letting a planning-required workspace whose conformance was still pending
+    # AWF-validation evidence be revalidated and pushed without the required gate.
+    # The handoff persisted at block time is reconstructed on resume so the
+    # conformance check still runs.
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory,
+        block_planning_conformance_handoff=_PENDING_CONFORMANCE_HANDOFF,
+    )
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id)
+
+    seen_handoffs: list[Any] = []
+
+    async def _record_conformance(*, handoff: Any, **_kwargs: Any) -> None:
+        # Returning None (implicitly) reports conformance satisfied, so the
+        # success path proceeds to push.
+        seen_handoffs.append(handoff)
+
+    monkeypatch.setattr(executor, "_run_post_validation_conformance_check", _record_conformance)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+
+    assert len(seen_handoffs) == 1, "conformance check must run on the grant resume"
+    handoff = seen_handoffs[0]
+    assert handoff is not None
+    assert handoff.report_path == Path("docs/awf-plans/ws.conformance.json")
+    assert handoff.plan_path == Path("docs/awf-plans/ws.md")
+
+
+@pytest.mark.unit
+async def test_blocked_resume_grant_skips_conformance_check_without_persisted_handoff(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The complement of the regression above: when the original run satisfied
+    # conformance inline (no handoff persisted), an approve-and-keep resume must
+    # NOT invent a pending conformance requirement — the check stays skipped, just
+    # as it was on the run that blocked.
+    ws_id = await _seed_resumable_blocked_workspace(factory)
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id)
+
+    conformance_calls = 0
+
+    async def _record_conformance(**_kwargs: Any) -> None:
+        nonlocal conformance_calls
+        conformance_calls += 1
+
+    monkeypatch.setattr(executor, "_run_post_validation_conformance_check", _record_conformance)
+
+    await executor.resume_blocked_execution(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+
+    assert conformance_calls == 0
 
 
 @pytest.mark.unit
@@ -706,3 +799,77 @@ async def test_measure_and_persist_baseline_coverage_skip_reuses_without_measuri
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
         assert ws.block_baseline_coverage is None
+
+
+@pytest.mark.unit
+async def test_persist_block_planning_conformance_handoff_round_trips(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The pending handoff is serialized to a JSON column at the single point it is
+    # known so a later pause into ``blocked`` can reconstruct it on an
+    # approve-and-keep resume (PRRT_kwDOSJAM6s6KAbBL).
+    from awf.control.executor.recovery_payloads import (
+        _planning_validation_handoff_from_metadata,
+    )
+    from awf.control.executor.types import _PlanningValidationHandoff
+    from awf.runtime.planning import (
+        CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        PlanConformanceReport,
+        PlanConformanceStatus,
+    )
+
+    ws_id = await _seed_resumable_blocked_workspace(factory, grant_path=None)
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is required.",
+            gaps=("rerun pytest under AWF",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws.md"),
+        report_path=Path("docs/awf-plans/ws.conformance.json"),
+        iteration=1,
+        max_iterations=3,
+    )
+
+    await executor._persist_block_planning_conformance_handoff(ws_id, handoff=handoff)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert (
+            _planning_validation_handoff_from_metadata(ws.block_planning_conformance_handoff)
+            == handoff
+        )
+
+
+@pytest.mark.unit
+async def test_persist_block_planning_conformance_handoff_clears_when_none(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # No pending handoff (conformance satisfied inline) persists ``None`` so a
+    # resume faithfully reproduces the original run rather than inventing one.
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory,
+        grant_path=None,
+        block_planning_conformance_handoff=_PENDING_CONFORMANCE_HANDOFF,
+    )
+
+    await executor._persist_block_planning_conformance_handoff(ws_id, handoff=None)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.block_planning_conformance_handoff is None
+
+
+@pytest.mark.unit
+async def test_persist_block_planning_conformance_handoff_missing_workspace_is_a_noop(
+    executor: WorkspaceExecutor,
+) -> None:
+    # The row vanished (e.g. concurrent destroy) before the persist landed: the
+    # write is a best-effort no-op rather than raising, mirroring the baseline
+    # persist guard.
+    await executor._persist_block_planning_conformance_handoff("ws_does_not_exist", handoff=None)

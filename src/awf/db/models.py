@@ -292,6 +292,21 @@ class Workspace(Base):
     it, a repo carrying sub-threshold coverage debt could fail the coverage
     gate after an approved protected change despite no regression."""
 
+    block_planning_conformance_handoff: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    """Serialized pending plan-conformance handoff (``_PlanningValidationHandoff``)
+    threaded into validation on the run that blocked.
+
+    Persisted for the same reason as ``block_baseline_coverage``: an
+    approve-and-keep resume skips the agent block, which is the only place the
+    in-memory handoff is produced, so without this the post-validation plan
+    conformance check (gated on a non-None handoff) would be skipped entirely —
+    letting a planning-required workspace whose conformance was still pending
+    AWF-validation evidence be revalidated and pushed without the required
+    conformance gate. ``None`` when conformance was satisfied inline (no pending
+    handoff), so a resume faithfully reproduces the original run."""
+
     # Idempotency
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 

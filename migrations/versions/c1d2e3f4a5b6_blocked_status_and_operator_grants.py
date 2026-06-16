@@ -60,6 +60,10 @@ def upgrade() -> None:
         "workspaces",
         sa.Column("block_baseline_coverage", sa.JSON(), nullable=True),
     )
+    op.add_column(
+        "workspaces",
+        sa.Column("block_planning_conformance_handoff", sa.JSON(), nullable=True),
+    )
 
     op.create_table(
         "operator_grant_audit_records",
@@ -104,6 +108,7 @@ def downgrade() -> None:
     )
     op.drop_table("operator_grant_audit_records")
 
+    op.drop_column("workspaces", "block_planning_conformance_handoff")
     op.drop_column("workspaces", "block_baseline_coverage")
     op.drop_column("workspaces", "pending_operator_hint")
     op.drop_column("workspaces", "blocked_at")

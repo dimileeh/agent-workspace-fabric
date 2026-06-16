@@ -40,6 +40,7 @@ _NEW_WORKSPACE_COLUMNS = {
     "blocked_at",
     "pending_operator_hint",
     "block_baseline_coverage",
+    "block_planning_conformance_handoff",
 }
 _GRANT_TABLE = "operator_grant_audit_records"
 _GRANT_COLUMNS = {

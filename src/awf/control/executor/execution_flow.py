@@ -71,6 +71,7 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
+    _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
     _recovery_needs_existing_pr_push,
     _validate_only_recovery_target_head_sha,
@@ -488,6 +489,15 @@ async def execute(
             )
             if planning_should_return:
                 return
+            # Persist the (possibly None) handoff so a later pause into ``blocked``
+            # can reconstruct it on an approve-and-keep resume — that resume skips
+            # this whole block, the only place the handoff is produced, and would
+            # otherwise lose the pending post-validation conformance requirement
+            # (mirrors ``_measure_and_persist_baseline_coverage``).
+            await self._persist_block_planning_conformance_handoff(
+                workspace_id,
+                handoff=planning_validation_handoff,
+            )
         elif recovery is not None:
             # Recovery dispatch created the validate Operation in ``pending``;
             # flush it to ``running`` before validation so observability
@@ -508,6 +518,19 @@ async def execute(
                 workspace_id=workspace_id,
                 profile=profile,
                 recovery_payload=recovery,
+            )
+        elif resume_skip_agent:
+            # Approve-and-keep grant resume (recovery is None, agent block
+            # skipped): the in-memory handoff that the run which blocked threaded
+            # into validation is gone. Reconstruct it from the value persisted at
+            # block time so the post-validation plan conformance check (gated on a
+            # non-None handoff) still runs — otherwise a planning-required
+            # workspace whose conformance was still pending AWF-validation evidence
+            # could be revalidated and pushed without the required conformance
+            # gate. ``None`` (conformance satisfied inline) faithfully reproduces
+            # the original run, which skipped the check.
+            planning_validation_handoff = _planning_validation_handoff_from_metadata(
+                ws.block_planning_conformance_handoff
             )
     except ComposeExecCleanupError as exc:
         _log.error(

@@ -35,8 +35,12 @@ from awf.control.executor.metadata import (
 from awf.control.executor.quality_gates import (
     _log,
 )
-from awf.control.executor.recovery_payloads import _get_active_recovery_payload
+from awf.control.executor.recovery_payloads import (
+    _get_active_recovery_payload,
+    _planning_validation_handoff_metadata,
+)
 from awf.control.executor.status_helpers import _is_callback_terminal_status
+from awf.control.executor.types import _PlanningValidationHandoff
 from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
@@ -544,6 +548,32 @@ async def _persist_block_baseline_coverage(
         if ws is None:
             return
         ws.block_baseline_coverage = metadata
+        await session.commit()
+
+
+async def _persist_block_planning_conformance_handoff(
+    self: Any,
+    workspace_id: str,
+    *,
+    handoff: _PlanningValidationHandoff | None,
+) -> None:
+    """Record the pending plan-conformance handoff so a blocked-resume can reuse it.
+
+    The handoff is produced exactly once per run, in the agent/planning block.
+    A later pause into ``blocked`` preserves the row, so persisting it here lets
+    an approve-and-keep resume — which skips that block entirely — reconstruct the
+    handoff and still run the post-validation plan conformance check (gated on a
+    non-None handoff). Stores ``None`` when no handoff applies (conformance
+    satisfied inline), so a resume faithfully reproduces the original run rather
+    than inventing a pending conformance requirement (mirrors
+    ``_persist_block_baseline_coverage``).
+    """
+    metadata = _planning_validation_handoff_metadata(handoff) if handoff is not None else None
+    async with self._session_factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        if ws is None:
+            return
+        ws.block_planning_conformance_handoff = metadata
         await session.commit()
 
 

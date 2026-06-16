@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from pathlib import Path
 from typing import Any, cast
 
 from awf.control.executor.constants import (
@@ -133,6 +134,83 @@ def _planning_validation_handoff_from_recovery_payload(
         max_iterations=(
             max_iterations if max_iterations is not None else profile.planning.max_iterations
         ),
+    )
+
+
+def _planning_validation_handoff_metadata(
+    handoff: _PlanningValidationHandoff,
+) -> dict[str, Any]:
+    """Serialize a pending planning handoff for durable block-state storage.
+
+    Stored on ``Workspace.block_planning_conformance_handoff`` at block time so an
+    approve-and-keep resume (which skips the agent block where the handoff is
+    produced) can reconstruct it and still run the post-validation plan
+    conformance check. The rendered ``plan_path`` / ``report_path`` are persisted
+    verbatim — they are already workspace-substituted absolute paths.
+    """
+    return {
+        "plan_path": handoff.plan_path.as_posix(),
+        "report_path": handoff.report_path.as_posix(),
+        "iteration": handoff.iteration,
+        "max_iterations": handoff.max_iterations,
+        "report": {
+            "status": handoff.report.status.value,
+            "summary": handoff.report.summary,
+            "gaps": list(handoff.report.gaps),
+            "reason_code": handoff.report.reason_code,
+        },
+    }
+
+
+def _planning_validation_handoff_from_metadata(
+    metadata: object,
+) -> _PlanningValidationHandoff | None:
+    """Reconstruct a planning handoff from ``_planning_validation_handoff_metadata``.
+
+    Returns ``None`` for a missing/empty payload (the run satisfied conformance
+    inline, so a resume must NOT invent a pending handoff) or a malformed payload
+    (treated as absent — the resume falls back to skipping the conformance check
+    rather than crashing).
+    """
+    if not isinstance(metadata, Mapping):
+        return None
+    plan_path = _str_or_none(metadata.get("plan_path"))
+    report_path = _str_or_none(metadata.get("report_path"))
+    if plan_path is None or report_path is None:
+        return None
+    report_payload = metadata.get("report")
+    report_map = report_payload if isinstance(report_payload, Mapping) else {}
+    status_value = _str_or_none(report_map.get("status"))
+    try:
+        status = (
+            PlanConformanceStatus(status_value)
+            if status_value is not None
+            else PlanConformanceStatus.needs_iteration
+        )
+    except ValueError:
+        status = PlanConformanceStatus.needs_iteration
+    gaps_value = report_map.get("gaps")
+    gaps = tuple(str(item) for item in gaps_value) if isinstance(gaps_value, (list, tuple)) else ()
+    summary = _str_or_none(report_map.get("summary")) or ""
+    reason_code = _str_or_none(report_map.get("reason_code"))
+    report = (
+        PlanConformanceReport(
+            status=status,
+            summary=summary,
+            gaps=gaps,
+            reason_code=reason_code,
+        )
+        if reason_code is not None
+        else PlanConformanceReport(status=status, summary=summary, gaps=gaps)
+    )
+    iteration = _int_or_none(metadata.get("iteration"))
+    max_iterations = _int_or_none(metadata.get("max_iterations"))
+    return _PlanningValidationHandoff(
+        report=report,
+        plan_path=Path(plan_path),
+        report_path=Path(report_path),
+        iteration=iteration if iteration is not None else 0,
+        max_iterations=max_iterations if max_iterations is not None else 0,
     )
 
 

@@ -144,6 +144,9 @@ class ExecutorDelegatesMixin:
     _mark_failed = _state_ops._mark_failed
     enter_blocked_for_protected_violation = _state_ops.enter_blocked_for_protected_violation
     _persist_block_baseline_coverage = _state_ops._persist_block_baseline_coverage
+    _persist_block_planning_conformance_handoff = (
+        _state_ops._persist_block_planning_conformance_handoff
+    )
     _active_operator_grant_specs = _state_ops._active_operator_grant_specs
     _consume_active_operator_grants = _state_ops._consume_active_operator_grants
 
