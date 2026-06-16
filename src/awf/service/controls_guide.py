@@ -298,6 +298,12 @@ async def guide_workspace(
 
 _DEFAULT_GUIDE_OPERATOR = "operator"
 
+# Matches the ``OperatorGrantAuditRecord.normalized_path`` column width. A grant
+# path that exceeds it must be rejected as a 400 here rather than reaching the
+# DB insert, where Postgres would raise a length error (500 + transaction
+# rollback) for what is really an invalid operator request.
+_MAX_GRANT_PATH_LENGTH = 1024
+
 
 def _canonicalize_grant_path(path: str) -> str:
     """Normalize a grant glob to a repo-relative path, rejecting traversal.
@@ -315,6 +321,10 @@ def _canonicalize_grant_path(path: str) -> str:
         raise WorkspaceGuideInvalidGrantPathError(path, "must be repo-relative (no leading '/')")
     if any(segment == ".." for segment in normalized.split("/")):
         raise WorkspaceGuideInvalidGrantPathError(path, "'..' traversal is not allowed")
+    if len(normalized) > _MAX_GRANT_PATH_LENGTH:
+        raise WorkspaceGuideInvalidGrantPathError(
+            path, f"exceeds maximum length of {_MAX_GRANT_PATH_LENGTH} characters"
+        )
     return normalized
 
 

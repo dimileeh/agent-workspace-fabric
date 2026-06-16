@@ -274,7 +274,10 @@ async def test_guide_blocked_grant_requires_reason(session: AsyncSession) -> Non
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("bad_path", ["../etc/passwd", "/abs/path", "a/../../b"])
+@pytest.mark.parametrize(
+    "bad_path",
+    ["../etc/passwd", "/abs/path", "a/../../b", "a/" + "b" * 1024],
+)
 async def test_guide_blocked_rejects_unsafe_grant_path(
     session: AsyncSession, bad_path: str
 ) -> None:
