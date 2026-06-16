@@ -833,10 +833,35 @@ async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
     )
 
 
-async def _release_execution_claim(self: Any, workspace_id: str) -> None:
+async def _release_execution_claim(
+    self: Any, workspace_id: str, *, skip_if_blocked: bool = False
+) -> None:
     try:
         async with self._session_factory() as session:
-            released = await WorkspaceRepository(session).release_execution_claim(
+            repo = WorkspaceRepository(session)
+            if skip_if_blocked:
+                ws = await repo.get(workspace_id)
+                if ws is not None and ws.status == WorkspaceStatus.blocked.value:
+                    # A ``blocked`` workspace is paused awaiting an operator
+                    # decision and, per the blocked contract, keeps its worktree,
+                    # warm stack, and execution claim as the *durable lease* (see
+                    # ``enter_blocked_for_protected_violation`` and
+                    # ``tests/.../test_blocked_status_membership``). When a genuine
+                    # execution pauses into ``blocked`` on a protected-gate
+                    # violation, this ``finally`` reaches here right after the
+                    # pause; releasing the claim now would leave the row ``blocked``
+                    # with ``execution_claimed_by`` cleared, stranding it without
+                    # the fencing/ownership the membership contract and the resume
+                    # path expect until an operator-cleared resume re-stamps it.
+                    # Skip the release so the warm-stack lease stays held.
+                    #
+                    # Only the execution dispatch passes ``skip_if_blocked``: the
+                    # blocked-resume path deliberately releases when it reverts to
+                    # ``blocked`` after finding no executor, so a capable worker can
+                    # re-claim it (see
+                    # ``test_resume_blocked_claimed_releases_claim_when_executor_missing``).
+                    return
+            released = await repo.release_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
                 execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),

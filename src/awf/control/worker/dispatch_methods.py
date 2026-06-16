@@ -401,7 +401,12 @@ async def _safely_execute_claimed(self: Any, workspace_id: str) -> None:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat
-        await self._release_execution_claim(workspace_id)
+        # A protected-gate violation pauses the row into ``blocked`` while keeping
+        # its warm stack + execution claim as the durable lease; skip the release
+        # in that case so the paused workspace retains fencing/ownership until an
+        # operator-cleared resume re-stamps it. Every other (terminal) exit still
+        # releases the claim.
+        await self._release_execution_claim(workspace_id, skip_if_blocked=True)
         # Promptly release the terminal runtime when this execution ended terminal
         # (completed / failed, or a running ws cancelled while we executed it), so
         # the compose stack + per-ws auth overlay are reclaimed immediately instead

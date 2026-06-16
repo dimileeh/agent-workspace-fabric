@@ -170,3 +170,106 @@ async def test_stale_worker_is_fenced_and_cannot_clobber_or_steal(
 
     # Worker B still owns its claim and reads its own epoch back.
     assert await worker_b._read_execution_claim_epoch(workspace_id) == 2  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_blocked_workspace_release_preserves_durable_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    origin_repo: Path,
+) -> None:
+    """A ``blocked`` workspace keeps its execution claim as the durable lease.
+
+    The execution task's ``finally`` (``_safely_execute_claimed``) calls
+    ``_release_execution_claim(..., skip_if_blocked=True)`` right after the row
+    paused into ``blocked`` on a protected-gate violation. Releasing the claim
+    there would leave the paused workspace ``blocked`` with
+    ``execution_claimed_by`` cleared, stranding it without the fencing/ownership
+    the blocked contract and the resume path expect. The release is skipped while
+    the row is still blocked so the warm-stack lease stays held until an
+    operator-cleared resume re-stamps it.
+    """
+    workspace_id = await _create_requested(session_factory, origin_repo, "blocked-lease")
+    worker = _worker(session_factory, tmp_path)
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.status = WorkspaceStatus.blocked.value
+        ws.execution_claimed_by = worker._worker_id  # noqa: SLF001
+        ws.execution_claim_epoch = 1
+        await s.commit()
+    worker._execution_claim_epochs[workspace_id] = 1  # noqa: SLF001
+
+    await worker._release_execution_claim(workspace_id, skip_if_blocked=True)  # noqa: SLF001
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # The durable execution lease is preserved through the block.
+        assert ws.execution_claimed_by == worker._worker_id  # noqa: SLF001
+        assert ws.execution_claim_epoch == 1
+
+
+@pytest.mark.unit
+async def test_blocked_release_still_clears_claim_without_skip_flag(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    origin_repo: Path,
+) -> None:
+    """The skip is opt-in: the blocked-resume path still releases on its restore.
+
+    ``_safely_resume_blocked_claimed`` reverts to ``blocked`` and releases the
+    claim when it finds no executor, so a capable worker can re-claim it. Without
+    ``skip_if_blocked`` the release clears the claim even on a blocked row.
+    """
+    workspace_id = await _create_requested(session_factory, origin_repo, "blocked-released")
+    worker = _worker(session_factory, tmp_path)
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.status = WorkspaceStatus.blocked.value
+        ws.execution_claimed_by = worker._worker_id  # noqa: SLF001
+        ws.execution_claim_epoch = 1
+        await s.commit()
+    worker._execution_claim_epochs[workspace_id] = 1  # noqa: SLF001
+
+    await worker._release_execution_claim(workspace_id)  # noqa: SLF001
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.execution_claimed_by is None
+
+
+@pytest.mark.unit
+async def test_non_blocked_workspace_release_clears_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    origin_repo: Path,
+) -> None:
+    """A non-blocked (terminal) row still releases the claim even with the skip.
+
+    The blocked-only skip must not change the release for any other status: a
+    normal terminal exit clears ``execution_claimed_by`` so the lease is not
+    leaked.
+    """
+    workspace_id = await _create_requested(session_factory, origin_repo, "released-lease")
+    worker = _worker(session_factory, tmp_path)
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        ws.status = WorkspaceStatus.completed.value
+        ws.execution_claimed_by = worker._worker_id  # noqa: SLF001
+        ws.execution_claim_epoch = 1
+        await s.commit()
+    worker._execution_claim_epochs[workspace_id] = 1  # noqa: SLF001
+
+    await worker._release_execution_claim(workspace_id, skip_if_blocked=True)  # noqa: SLF001
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.execution_claimed_by is None
