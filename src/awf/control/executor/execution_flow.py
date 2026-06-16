@@ -94,6 +94,7 @@ from awf.db.enums import (
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
+from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -111,26 +112,60 @@ async def execute(
     *,
     execution_owner_id: str | None = None,
     execution_lease_expires_at: datetime | None = None,
+    resume_from_blocked: bool = False,
 ) -> None:
     """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
 
     The function is idempotent in the sense that it refuses to run on a
     workspace that is not currently in ``ready`` — useful when a poll
     loop races with a manual invocation.
+
+    ``resume_from_blocked`` re-enters a workspace the worker has already
+    transitioned ``blocked -> running`` (re-acquiring the epoch-fenced execution
+    claim) after an operator resolved a protected quality-gate violation. The
+    claim was taken by the worker's resume CAS, so ``_claim_ready`` is skipped.
+    An approve-and-keep grant skips the agent entirely (no tokens) and re-runs
+    setup + full validation; a revert/redo directive re-invokes the agent with
+    the directive appended. Active operator grants are honored by every gate and
+    consumed once the gate passes; if a protected violation still stands the gate
+    re-blocks (bumping ``block_epoch``, invalidating the now-stale grants).
     """
-    ws = await self._claim_ready(
-        workspace_id,
-        execution_owner_id=execution_owner_id,
-        execution_lease_expires_at=execution_lease_expires_at,
-    )
-    if ws is None:
-        return
-    if not await self._recheck_status(
-        workspace_id,
-        expected=WorkspaceStatus.running,
-        action="execute",
-    ):
-        return
+    resume_skip_agent = False
+    if resume_from_blocked:
+        ws = await self._load_workspace(workspace_id)
+        if ws is None:
+            return
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action="resume_blocked_execution",
+        ):
+            return
+        hint = pre_pr_operator_hint_from_payload(ws.pending_operator_hint)
+        grant_specs = await self._active_operator_grant_specs(workspace_id)
+        if hint is not None and hint.directive:
+            # Revert/redo: re-invoke the agent with the operator directive.
+            ws.task_prompt = (
+                f"{ws.task_prompt}\n\n[Operator directive — resolve the paused "
+                f"protected quality-gate violation]\n{hint.directive}"
+            )
+        elif grant_specs:
+            # Approve-and-keep: skip the agent (no tokens), re-run setup + validate.
+            resume_skip_agent = True
+    else:
+        ws = await self._claim_ready(
+            workspace_id,
+            execution_owner_id=execution_owner_id,
+            execution_lease_expires_at=execution_lease_expires_at,
+        )
+        if ws is None:
+            return
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action="execute",
+        ):
+            return
 
     compose_file = (
         Path(ws.compose_file_path)
@@ -413,7 +448,7 @@ async def execute(
                 )[:2000],
             )
             return
-        if recovery is None:
+        if recovery is None and not resume_skip_agent:
             if not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -478,7 +513,7 @@ async def execute(
             )
             if planning_should_return:
                 return
-        else:
+        elif recovery is not None:
             # Recovery dispatch created the validate Operation in ``pending``;
             # flush it to ``running`` before validation so observability
             # tooling sees a real ``started_at`` (otherwise the row jumps
@@ -777,6 +812,7 @@ async def execute(
                     changed_paths=staged_paths,
                     owned_paths=list(ws.owned_paths),
                     protected_file_diffs=protected_file_diffs,
+                    operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
                 )
                 if violations:
                     # A protected quality-gate edit outside owned_paths pauses
@@ -1323,6 +1359,12 @@ async def execute(
     # Bitbucket Cloud). The forge client is resolved from the persisted profile +
     # repo URL and passed in per-call, so a Bitbucket feature workspace opens its
     # PR via ``BitbucketClient`` instead of the GitHub-only ``gh pr create``.
+
+    if resume_from_blocked:
+        # The protected gate passed with the operator's grants applied, so the
+        # grants are now single-use spent: consume them before the push so a
+        # later DIFFERENT change to the same file must be granted again.
+        await self._consume_active_operator_grants(workspace_id)
 
     # ── Step 3: push + open PR ──────────────────────────────────────────
     if not await self._transition_if_current(

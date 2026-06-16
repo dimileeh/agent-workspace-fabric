@@ -26,6 +26,7 @@ from awf.control.worker.admission import (
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    _BLOCKED_RESUME_REASON_CODE,
     _MONITOR_RECOVERY_EVENT_TYPE,
     _MONITOR_RECOVERY_REASON_CODE,
     _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL,
@@ -569,6 +570,29 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
                 active_salvage_monitor_recovery_operation_id
             )
         return claimed
+
+
+async def _claim_blocked_for_resume(self: Any, workspace_id: str) -> bool:
+    """Atomically claim a ``blocked`` workspace for resume.
+
+    Epoch-fenced: the ``blocked -> running`` transition is the CAS — exactly one
+    worker wins (the loser sees ``running`` and updates 0 rows), so a double
+    resume cannot run the warm stack twice. The execution claim + fencing epoch
+    are (re-)stamped via the shared ``_apply_execution_claim`` so a stale prior
+    executor is fenced on its next write."""
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.blocked,
+            to=WorkspaceStatus.running,
+            reason_code=_BLOCKED_RESUME_REASON_CODE,
+        )
+        if ws is None:
+            return False
+        _apply_execution_claim(self, ws, owner_id=self._worker_id)
+        await session.commit()
+        return True
 
 
 async def _safely_resume_claimed_pr_monitor(

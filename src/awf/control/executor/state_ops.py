@@ -38,6 +38,7 @@ from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
     QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+    GrantSpec,
     QualityGateViolation,
     quality_gate_violation_details,
 )
@@ -45,7 +46,7 @@ from awf.db.enums import (
     FailureReason,
     WorkspaceStatus,
 )
-from awf.db.models import Workspace
+from awf.db.models import OperatorGrantAuditRecord, Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationCommandResult
@@ -483,3 +484,59 @@ async def enter_blocked_for_protected_violation(
         ws.blocked_at = datetime.now(UTC)
         await session.commit()
         return True
+
+
+async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[GrantSpec]:
+    """Return the operator grants active for the workspace's CURRENT block epoch.
+
+    A grant authorizes the protected gate only while it is unconsumed, unrevoked,
+    and scoped to ``workspace.block_epoch`` (a re-block bumps the epoch and
+    invalidates prior grants). Empty for a normal run — grant rows only exist
+    after an operator resolves a ``blocked`` workspace — so threading this into
+    every gate caller is a no-op outside the resume path."""
+    async with self._session_factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        if ws is None:
+            return []
+        rows = await session.execute(
+            select(OperatorGrantAuditRecord).where(
+                OperatorGrantAuditRecord.workspace_id == workspace_id,
+                OperatorGrantAuditRecord.consumed_at.is_(None),
+                OperatorGrantAuditRecord.revoked_at.is_(None),
+                OperatorGrantAuditRecord.block_epoch == ws.block_epoch,
+            )
+        )
+        return [
+            GrantSpec(
+                path=record.normalized_path,
+                approve_policy_downgrade=record.approve_policy_downgrade,
+            )
+            for record in rows.scalars().all()
+        ]
+
+
+async def _consume_active_operator_grants(self: Any, workspace_id: str) -> int:
+    """Mark the workspace's active (current-epoch) operator grants as consumed.
+
+    Called once a resumed workspace clears the protected gate so a grant is
+    strictly single-use: a later DIFFERENT change to the same file must be
+    granted again. Returns the number of grants consumed."""
+    consumed = 0
+    now = datetime.now(UTC)
+    async with self._session_factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        if ws is None:
+            return 0
+        rows = await session.execute(
+            select(OperatorGrantAuditRecord).where(
+                OperatorGrantAuditRecord.workspace_id == workspace_id,
+                OperatorGrantAuditRecord.consumed_at.is_(None),
+                OperatorGrantAuditRecord.revoked_at.is_(None),
+                OperatorGrantAuditRecord.block_epoch == ws.block_epoch,
+            )
+        )
+        for record in rows.scalars().all():
+            record.consumed_at = now
+            consumed += 1
+        await session.commit()
+    return consumed

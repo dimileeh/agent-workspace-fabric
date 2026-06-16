@@ -17,6 +17,8 @@ class _ExecutionTaskKind(StrEnum):
     MONITOR_RESUME = "monitor_resume"
     READY = "ready"
     PRESERVED_ACTIVE = "preserved_active"
+    # A resume of a pre-PR ``blocked`` workspace after an operator decision.
+    BLOCKED_RESUME = "blocked_resume"
     # A monitor resume that reconcile has cancelled but whose coroutine has not
     # yet stopped. Cancellation is cooperative, so the task can keep running
     # after ``cancel()`` returns. We keep it tracked under its workspace_id so a

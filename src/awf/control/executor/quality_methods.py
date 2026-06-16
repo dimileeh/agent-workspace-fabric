@@ -205,6 +205,7 @@ async def _verify_recovered_post_agent_commit(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
     if violations:
         # Pause for an operator decision instead of terminally failing — the
@@ -402,6 +403,7 @@ async def _fail_if_protected_quality_gate_committed_output(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
     if not violations:
         return False
@@ -1047,6 +1049,7 @@ async def _run_post_agent_semantic_precommit_repair(
             changed_paths=repair_staged_paths,
             owned_paths=list(ws.owned_paths),
         ),
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
     if violations:
         result = CommandResult(

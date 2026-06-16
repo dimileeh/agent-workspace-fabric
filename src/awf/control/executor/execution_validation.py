@@ -1167,6 +1167,7 @@ async def run_validation_and_fix_cycle(
                 changed_paths=fix_staged_paths,
                 owned_paths=list(ws.owned_paths),
                 protected_file_diffs=protected_file_diffs,
+                operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
             )
             if violations:
                 message = quality_gate_violation_message(violations)

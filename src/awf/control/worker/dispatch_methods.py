@@ -108,6 +108,51 @@ def _dispatch_monitor_resumes(self: Any, workspace_ids: list[str], *, limit: int
     return dispatched
 
 
+def _dispatch_blocked_resumes(self: Any, workspace_ids: list[str], *, limit: int) -> set[str]:
+    dispatched: set[str] = set()
+    for workspace_id in workspace_ids:
+        if len(dispatched) >= limit:
+            break
+        if workspace_id in self._execution_tasks:
+            continue
+        task = asyncio.create_task(
+            self._safely_resume_blocked_claimed(workspace_id),
+            name=f"awf-blocked-resume-{workspace_id}",
+        )
+        self._track_execution_task(workspace_id, task, kind=_ExecutionTaskKind.BLOCKED_RESUME)
+        dispatched.add(workspace_id)
+    return dispatched
+
+
+async def _safely_resume_blocked_claimed(self: Any, workspace_id: str) -> None:
+    """Run a blocked-resume execution under an execution-claim heartbeat.
+
+    Mirrors ``_safely_execute_claimed``: the worker's resume CAS already
+    re-acquired the epoch-fenced execution claim and transitioned the row
+    ``blocked -> running``, so the executor drives the normal flow in
+    ``resume_from_blocked`` mode while this loop keeps the lease warm."""
+    if self._executor is None:
+        return
+    heartbeat = asyncio.create_task(
+        self._refresh_execution_claim_loop(workspace_id),
+        name=f"awf-blocked-resume-claim-{workspace_id}",
+    )
+    try:
+        await self._executor.resume_blocked_execution(
+            workspace_id,
+            execution_owner_id=self._worker_id,
+            execution_lease_expires_at=self._execution_claim_expires_at(),
+        )
+    except Exception:
+        _log.exception("worker.resume_blocked_failed", workspace_id=workspace_id)
+    finally:
+        heartbeat.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat
+        await self._release_execution_claim(workspace_id)
+        await self._release_terminal_runtime_promptly(workspace_id)
+
+
 def _dispatch_preserved_active_validation(self: Any, workspace_id: str) -> bool:
     if self._executor is None:
         return False
