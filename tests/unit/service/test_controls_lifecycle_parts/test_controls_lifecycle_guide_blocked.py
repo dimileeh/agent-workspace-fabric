@@ -8,9 +8,10 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.ids import new_operator_grant_id
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord, Workspace
-from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
+from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload, utcnow
 from awf.service.controls import (
     WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideGrantNotAllowedError,
@@ -145,6 +146,75 @@ async def test_guide_blocked_grants_only_clears_stale_directive(session: AsyncSe
     grants = await _grants(session, workspace.id)
     assert len(grants) == 1
     assert grants[0].normalized_path == "pyproject.toml"
+
+
+@pytest.mark.unit
+async def test_guide_blocked_directive_only_revokes_stale_grant(session: AsyncSession) -> None:
+    # A prior approve-and-keep guide recorded an active current-epoch grant.
+    workspace = await _blocked_workspace(session, block_epoch=3)
+    session.add(
+        OperatorGrantAuditRecord(
+            id=new_operator_grant_id(),
+            workspace_id=workspace.id,
+            operator="alice@example.com",
+            reason="approved keeping it",
+            normalized_path="pyproject.toml",
+            block_epoch=3,
+            approve_policy_downgrade=True,
+            created_at=utcnow(),
+        )
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    # The operator changes their mind and issues a directive-only revert.
+    await service.guide_workspace(
+        workspace.id,
+        directive="revert the pyproject change after all",
+        reason="actually revert it",
+        operator="alice@example.com",
+        idempotency_key="guide-blocked-directive-revokes-grant",
+        expected_version=workspace.version,
+    )
+
+    # The directive is armed, and the stale grant must be revoked so the resume
+    # path's protected-file gates no longer honor it (mirror of the grants-only
+    # branch clearing a stale directive): the latest operator decision wins.
+    hint = pre_pr_operator_hint_from_payload(workspace.pending_operator_hint)
+    assert hint is not None
+    assert hint.directive == "revert the pyproject change after all"
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].revoked_at is not None
+
+
+@pytest.mark.unit
+async def test_guide_blocked_directive_with_new_grant_keeps_fresh_grant(
+    session: AsyncSession,
+) -> None:
+    # A combined guide (grant + directive) must NOT revoke the grant it just
+    # recorded in the same call — only a directive-ONLY decision supersedes
+    # prior grants.
+    workspace = await _blocked_workspace(
+        session,
+        block_epoch=2,
+        violations=[{"path": "pyproject.toml", "section": "x", "line": 1, "reason": "weakened"}],
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="also fix the unrelated module",
+        reason="keep this config and fix the other file",
+        grants=["docs/CONTRIBUTING.md"],
+        idempotency_key="guide-blocked-directive-plus-grant",
+        expected_version=workspace.version,
+    )
+
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].normalized_path == "docs/CONTRIBUTING.md"
+    assert grants[0].revoked_at is None
 
 
 @pytest.mark.unit

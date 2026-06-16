@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from sqlalchemy import select
+
 from awf.api.schemas import WorkspaceControlResponse
 from awf.common.ids import new_operator_grant_id
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
@@ -375,6 +377,7 @@ async def _guide_blocked_workspace(
     operator_id = (operator or "").strip() or _DEFAULT_GUIDE_OPERATOR
     now = utcnow()
     created_grants: list[dict[str, object]] = []
+    revoked_grants: list[str] = []
     for grant_path in canonical_grants:
         self._session.add(
             OperatorGrantAuditRecord(
@@ -404,6 +407,33 @@ async def _guide_blocked_workspace(
         )
         pending_hint_payload = build_pending_operator_hint_payload(hint)
         workspace.pending_operator_hint = pending_hint_payload
+        if not canonical_grants:
+            # Directive-only guide: revoke current-epoch grants armed by a prior
+            # approve-and-keep guide. The blocked-resume path loads
+            # ``_active_operator_grant_specs()`` for every protected-file gate
+            # regardless of the directive, so a stale grant would still suppress a
+            # violation on the same path even though the latest operator decision
+            # was to revert/redo. Mirror of the grants-only branch clearing a
+            # stale directive: the latest operator decision must win. A combined
+            # guide (``canonical_grants`` non-empty) is exempt — it must not
+            # revoke the grant it is recording in this same call.
+            stale_grants = (
+                (
+                    await self._session.execute(
+                        select(OperatorGrantAuditRecord).where(
+                            OperatorGrantAuditRecord.workspace_id == workspace.id,
+                            OperatorGrantAuditRecord.block_epoch == workspace.block_epoch,
+                            OperatorGrantAuditRecord.consumed_at.is_(None),
+                            OperatorGrantAuditRecord.revoked_at.is_(None),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for stale_grant in stale_grants:
+                stale_grant.revoked_at = now
+                revoked_grants.append(stale_grant.normalized_path)
     else:
         # Grants-only guide: clear any directive armed by a prior guide. The
         # blocked-resume path prioritizes a stored directive over active grants
@@ -420,6 +450,7 @@ async def _guide_blocked_workspace(
             "operation_id": operation.id,
             "operator": operator_id,
             "grants": created_grants,
+            "revoked_grants": revoked_grants or None,
             "approve_policy_downgrade": approve_policy_downgrade,
             "block_epoch": workspace.block_epoch,
             "pending_operator_hint": pending_hint_payload,
@@ -443,6 +474,7 @@ async def _guide_blocked_workspace(
             "expected_version": expected_version,
             "directive": directive_text,
             "grants": created_grants,
+            "revoked_grants": revoked_grants,
         },
     )
     result: dict[str, object | None] = {
@@ -452,6 +484,8 @@ async def _guide_blocked_workspace(
     }
     if pending_hint_payload is not None:
         result["pending_operator_hint"] = pending_hint_payload
+    if revoked_grants:
+        result["revoked_grants"] = revoked_grants
     await operations.finish(operation, status=OperationStatus.succeeded, result=result)
     return _control_response(
         workspace=workspace,
