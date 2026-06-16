@@ -28,7 +28,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
-from awf.runtime.validation import ValidationRunner
+from awf.runtime.validation import ValidationCoverageResult, ValidationRunner
 from tests.postgres import postgres_test_engine
 from tests.unit.control.executor_paths import _test_worktrees_root
 
@@ -101,6 +101,7 @@ async def _seed_resumable_blocked_workspace(
     directive: str | None = None,
     reclaim_to_running: bool = True,
     execution_claimed_by: str | None = None,
+    block_baseline_coverage: dict[str, Any] | None = None,
 ) -> str:
     """Insert a workspace the worker has already re-claimed ``blocked → running``
     after an operator resolved the pause, ready for ``resume_blocked_execution``
@@ -137,6 +138,8 @@ async def _seed_resumable_blocked_workspace(
             await repo.transition(ws, to=WorkspaceStatus.running, reason_code="X")
         if execution_claimed_by is not None:
             ws.execution_claimed_by = execution_claimed_by
+        if block_baseline_coverage is not None:
+            ws.block_baseline_coverage = block_baseline_coverage
         if directive is not None:
             ws.pending_operator_hint = {
                 "status": "pending",
@@ -361,3 +364,173 @@ async def test_blocked_resume_proceeds_when_claim_owner_matches(
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.completed.value
+
+
+_BELOW_THRESHOLD_BASELINE = {
+    "provider": "python",
+    "percent": 87.5,
+    "minimum_percent": 99.0,
+    "enforce": True,
+    "status": "below_threshold",
+    "reason_code": "COVERAGE_BELOW_THRESHOLD",
+}
+
+
+@pytest.mark.unit
+async def test_begin_execution_reuses_persisted_baseline_on_directive_resume(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regression for PRRT_kwDOSJAM6s6J4G5G: a revert/redo directive resume must
+    # reuse the pre-agent baseline captured at block time (so the coverage
+    # ratchet compares against the original base) instead of recomputing it
+    # against the already-mutated blocked worktree.
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory,
+        grant_path=None,
+        directive="revert the protected change",
+        block_baseline_coverage=_BELOW_THRESHOLD_BASELINE,
+    )
+
+    begin = await executor._begin_execution(
+        ws_id,
+        resume_from_blocked=True,
+        execution_owner_id=None,
+        execution_lease_expires_at=None,
+    )
+
+    assert begin is not None
+    _ws, resume_skip_agent, baseline = begin
+    assert resume_skip_agent is False  # directive re-invokes the agent
+    assert baseline is not None
+    assert baseline.percent == 87.5
+    assert baseline.reason_code == "COVERAGE_BELOW_THRESHOLD"
+
+
+@pytest.mark.unit
+async def test_begin_execution_reuses_persisted_baseline_on_approve_and_keep(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Approve-and-keep resume skips the agent block entirely, so the only path
+    # that surfaces the original baseline is this reuse — without it the coverage
+    # gate would drop to ``None`` and fail a no-regression sub-threshold repo.
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory,
+        grant_path="pyproject.toml",
+        block_baseline_coverage=_BELOW_THRESHOLD_BASELINE,
+    )
+
+    begin = await executor._begin_execution(
+        ws_id,
+        resume_from_blocked=True,
+        execution_owner_id=None,
+        execution_lease_expires_at=None,
+    )
+
+    assert begin is not None
+    _ws, resume_skip_agent, baseline = begin
+    assert resume_skip_agent is True  # grant present -> agent skipped
+    assert baseline is not None
+    assert baseline.percent == 87.5
+
+
+@pytest.mark.unit
+async def test_begin_execution_without_persisted_baseline_returns_none(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # No baseline captured on the original run (coverage skipped/absent): the
+    # resume faithfully reproduces the missing baseline rather than inventing one.
+    ws_id = await _seed_resumable_blocked_workspace(factory, grant_path="pyproject.toml")
+
+    begin = await executor._begin_execution(
+        ws_id,
+        resume_from_blocked=True,
+        execution_owner_id=None,
+        execution_lease_expires_at=None,
+    )
+
+    assert begin is not None
+    _ws, _resume_skip_agent, baseline = begin
+    assert baseline is None
+
+
+@pytest.mark.unit
+async def test_measure_and_persist_baseline_coverage_fresh_run(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fresh run measures the pre-agent baseline and durably persists it so a
+    # later pause into ``blocked`` can hand the original base to the resume path.
+    ws_id = await _seed_resumable_blocked_workspace(factory, grant_path=None)
+    measured = ValidationCoverageResult(
+        provider="python",
+        percent=90.0,
+        minimum_percent=99.0,
+        enforce=True,
+        status="below_threshold",
+        reason_code="COVERAGE_BELOW_THRESHOLD",
+    )
+
+    async def _preflight(**_kwargs: Any) -> ValidationCoverageResult:
+        return measured
+
+    monkeypatch.setattr(executor, "_run_baseline_coverage_preflight", _preflight)
+
+    result = await executor._measure_and_persist_baseline_coverage(
+        workspace_id=ws_id,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        profile=object(),  # type: ignore[arg-type]
+    )
+
+    assert result is measured
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.block_baseline_coverage is not None
+        assert ws.block_baseline_coverage["percent"] == 90.0
+
+
+@pytest.mark.unit
+async def test_measure_and_persist_baseline_coverage_skip_reuses_without_measuring(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A directive resume passes skip_measure=True: the reused base is returned
+    # verbatim, the preflight is never run, and nothing is re-persisted.
+    ws_id = await _seed_resumable_blocked_workspace(factory, grant_path=None)
+    reuse = ValidationCoverageResult(
+        provider="python",
+        percent=87.5,
+        minimum_percent=99.0,
+        enforce=True,
+        status="below_threshold",
+        reason_code="COVERAGE_BELOW_THRESHOLD",
+    )
+    preflight_calls: list[dict[str, Any]] = []
+
+    async def _preflight(**kwargs: Any) -> ValidationCoverageResult | None:
+        preflight_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(executor, "_run_baseline_coverage_preflight", _preflight)
+
+    result = await executor._measure_and_persist_baseline_coverage(
+        workspace_id=ws_id,
+        compose_project="proj",
+        compose_file=Path("compose.yml"),
+        profile=object(),  # type: ignore[arg-type]
+        reuse=reuse,
+        skip_measure=True,
+    )
+
+    assert result is reuse
+    assert preflight_calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.block_baseline_coverage is None

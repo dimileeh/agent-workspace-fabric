@@ -100,7 +100,6 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.validation import (
-    ValidationCoverageResult,
     ValidationResult,
 )
 
@@ -135,7 +134,8 @@ async def execute(
     )
     if begin is None:
         return
-    ws, resume_skip_agent = begin
+    # ``baseline_coverage`` is the pre-agent base reused on a blocked-resume.
+    ws, resume_skip_agent, baseline_coverage = begin
 
     compose_file = (
         Path(ws.compose_file_path)
@@ -224,7 +224,6 @@ async def execute(
             if salvage_result.prompt_override is not None:
                 ws.task_prompt = salvage_result.prompt_override
     rebase_recovery_result: _RebaseRecoveryResult | None = None
-    baseline_coverage: ValidationCoverageResult | None = None
     profile: WorkspaceProfile | None = None
     agent_exit_note: str | None = None
     agent_run_reason_code: str | None = None
@@ -448,11 +447,13 @@ async def execute(
                 action="baseline_coverage_preflight",
             ):
                 return
-            baseline_coverage = await self._run_baseline_coverage_preflight(
+            baseline_coverage = await self._measure_and_persist_baseline_coverage(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
+                reuse=baseline_coverage,
+                skip_measure=resume_from_blocked,
             )
             if not await self._recheck_status(
                 workspace_id,

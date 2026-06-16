@@ -93,6 +93,7 @@ class ExecutorDelegatesMixin:
     _digest_dirty_content = _planning_ops._digest_dirty_content
 
     _run_baseline_coverage_preflight = _quality_methods._run_baseline_coverage_preflight
+    _measure_and_persist_baseline_coverage = _quality_methods._measure_and_persist_baseline_coverage
     _run_final_coverage_gate = _quality_methods._run_final_coverage_gate
     _parallel_worker_cpu_limit_for_workspace = (
         _quality_methods._parallel_worker_cpu_limit_for_workspace
@@ -141,6 +142,7 @@ class ExecutorDelegatesMixin:
     _record_health_check_failed_event = _state_ops._record_health_check_failed_event
     _mark_failed = _state_ops._mark_failed
     enter_blocked_for_protected_violation = _state_ops.enter_blocked_for_protected_violation
+    _persist_block_baseline_coverage = _state_ops._persist_block_baseline_coverage
     _active_operator_grant_specs = _state_ops._active_operator_grant_specs
     _consume_active_operator_grants = _state_ops._consume_active_operator_grants
 

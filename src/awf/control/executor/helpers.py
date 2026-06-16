@@ -957,6 +957,19 @@ def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> Validation
     )
 
 
+def _reuse_persisted_block_baseline(
+    block_baseline_coverage: Mapping[str, object] | None,
+) -> ValidationCoverageResult | None:
+    """Rebuild the pre-agent baseline persisted at block time for a resume.
+
+    Returns ``None`` when no baseline was captured (coverage skipped/absent on
+    the original run), faithfully reproducing that run's missing baseline.
+    """
+    if not block_baseline_coverage:
+        return None
+    return _coverage_result_from_metadata(block_baseline_coverage)
+
+
 def _format_coverage_gaps(gaps: list[dict[str, object]]) -> str:
     if not gaps:
         return ""

@@ -23,7 +23,10 @@ from sqlalchemy import (
 
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
-from awf.control.executor.helpers import _realign_profile_from_resolved_profile_snapshot
+from awf.control.executor.helpers import (
+    _realign_profile_from_resolved_profile_snapshot,
+    _reuse_persisted_block_baseline,
+)
 from awf.control.executor.metadata import (
     _metadata_int,
     _metadata_number,
@@ -50,7 +53,7 @@ from awf.db.models import OperatorGrantAuditRecord, Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
-from awf.runtime.validation import ValidationCommandResult
+from awf.runtime.validation import ValidationCommandResult, ValidationCoverageResult
 
 
 def _resolved_profile_snapshot_from_db_value(value: object) -> dict[str, Any] | None:
@@ -518,6 +521,32 @@ async def enter_blocked_for_protected_violation(
         return True
 
 
+async def _persist_block_baseline_coverage(
+    self: Any,
+    workspace_id: str,
+    *,
+    baseline_coverage: ValidationCoverageResult | None,
+) -> None:
+    """Record the pre-agent baseline coverage so a blocked-resume can reuse it.
+
+    The baseline is measured exactly once per execution, before the agent
+    mutates the worktree. A later pause into ``blocked`` preserves the row, so
+    persisting the measurement here — at the single point it is known for the
+    whole run, ahead of every protected-gate block site — lets a resume ratchet
+    final coverage against the ORIGINAL base instead of recomputing against the
+    mutated worktree (directive resume) or dropping it (approve-and-keep resume).
+    Stores ``None`` when no baseline was measured (coverage skipped / absent), so
+    a resume faithfully reproduces the original run's missing baseline.
+    """
+    metadata = baseline_coverage.as_metadata() if baseline_coverage is not None else None
+    async with self._session_factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        if ws is None:
+            return
+        ws.block_baseline_coverage = metadata
+        await session.commit()
+
+
 async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[GrantSpec]:
     """Return the operator grants active for the workspace's CURRENT block epoch.
 
@@ -581,12 +610,15 @@ async def _begin_execution(
     resume_from_blocked: bool,
     execution_owner_id: str | None,
     execution_lease_expires_at: datetime | None,
-) -> tuple[Workspace, bool] | None:
+) -> tuple[Workspace, bool, ValidationCoverageResult | None] | None:
     """Acquire the workspace for ``execute`` and decide the resume mode.
 
-    Returns ``(ws, resume_skip_agent)`` once the workspace is owned and
-    confirmed ``running``, or ``None`` to signal ``execute`` should return
-    early (claim lost, status race, or missing row).
+    Returns ``(ws, resume_skip_agent, baseline_coverage)`` once the workspace is
+    owned and confirmed ``running``, or ``None`` to signal ``execute`` should
+    return early (claim lost, status race, or missing row). ``baseline_coverage``
+    is the pre-agent base measurement persisted at block time and reused on a
+    blocked-resume (so the coverage ratchet compares against the original base
+    rather than the mutated worktree); it is ``None`` on a fresh claim.
 
     ``resume_from_blocked`` re-enters a workspace the worker has already
     transitioned ``blocked -> running`` (re-acquiring the epoch-fenced execution
@@ -609,6 +641,7 @@ async def _begin_execution(
             owner_id=execution_owner_id,
         ):
             return None
+        baseline_coverage = _reuse_persisted_block_baseline(ws.block_baseline_coverage)
         hint = pre_pr_operator_hint_from_payload(ws.pending_operator_hint)
         grant_specs = await self._active_operator_grant_specs(workspace_id)
         if hint is not None and hint.directive:
@@ -617,9 +650,9 @@ async def _begin_execution(
                 f"{ws.task_prompt}\n\n[Operator directive — resolve the paused "
                 f"protected quality-gate violation]\n{hint.directive}"
             )
-            return ws, False
+            return ws, False, baseline_coverage
         # Approve-and-keep: skip the agent (no tokens), re-run setup + validate.
-        return ws, bool(grant_specs)
+        return ws, bool(grant_specs), baseline_coverage
 
     ws = await self._claim_ready(
         workspace_id,
@@ -634,4 +667,4 @@ async def _begin_execution(
         action="execute",
     ):
         return None
-    return ws, False
+    return ws, False, None

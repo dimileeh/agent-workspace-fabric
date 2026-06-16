@@ -281,6 +281,17 @@ class Workspace(Base):
     Stored in a dedicated column rather than reusing ``monitor_threads_addressed``
     (which carries monitor-state semantics and is reset by monitor logic)."""
 
+    block_baseline_coverage: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    """Serialized pre-agent baseline ``ValidationCoverageResult`` (its
+    ``as_metadata()`` form) measured before the agent mutated the worktree.
+
+    Persisted so a resume from ``blocked`` ratchets final coverage against the
+    ORIGINAL base measurement instead of recomputing it against the already-
+    mutated blocked worktree (a revert/redo directive resume) or dropping it
+    entirely (an approve-and-keep resume that skips the agent block). Without
+    it, a repo carrying sub-threshold coverage debt could fail the coverage
+    gate after an approved protected change despite no regression."""
+
     # Idempotency
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 

@@ -102,6 +102,41 @@ async def _run_baseline_coverage_preflight(
     )
 
 
+async def _measure_and_persist_baseline_coverage(
+    self: Any,
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    profile: WorkspaceProfile,
+    reuse: ValidationCoverageResult | None = None,
+    skip_measure: bool = False,
+) -> ValidationCoverageResult | None:
+    """Measure the pre-agent baseline coverage and persist it for blocked-resume.
+
+    On a fresh run the measurement reflects base coverage (the agent has not yet
+    mutated the worktree); persisting it lets a later pause into ``blocked`` hand
+    the original base back to the resume path. A directive resume passes
+    ``skip_measure=True`` to keep the already-reused base (``reuse``) instead of
+    recomputing against the mutated blocked worktree.
+    """
+    if skip_measure:
+        return reuse
+    baseline_coverage: (
+        ValidationCoverageResult | None
+    ) = await self._run_baseline_coverage_preflight(
+        workspace_id=workspace_id,
+        compose_project=compose_project,
+        compose_file=compose_file,
+        profile=profile,
+    )
+    await self._persist_block_baseline_coverage(
+        workspace_id,
+        baseline_coverage=baseline_coverage,
+    )
+    return baseline_coverage
+
+
 async def _run_final_coverage_gate(
     self: Any,
     *,

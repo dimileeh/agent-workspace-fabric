@@ -16,12 +16,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor.helpers import _reuse_persisted_block_baseline
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.validation import ValidationCoverageResult
 from tests.postgres import postgres_test_engine
+
+_BASELINE = ValidationCoverageResult(
+    provider="python",
+    percent=87.5,
+    minimum_percent=99.0,
+    enforce=True,
+    status="below_threshold",
+    reason_code="COVERAGE_BELOW_THRESHOLD",
+)
 
 _VIOLATIONS = [
     QualityGateViolation(
@@ -305,3 +316,49 @@ async def test_enter_blocked_owner_fence_rejects_stale_worker(
     )
     assert paused is True
     assert (await _get(factory, ws_id)).status == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
+async def test_persist_block_baseline_coverage_round_trips(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # The pre-agent baseline is serialized into the durable block column and
+    # rebuilds back into a coverage result for the blocked-resume ratchet.
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    await executor._persist_block_baseline_coverage(ws_id, baseline_coverage=_BASELINE)
+
+    ws = await _get(factory, ws_id)
+    assert ws.block_baseline_coverage is not None
+    assert ws.block_baseline_coverage["percent"] == 87.5
+    assert ws.block_baseline_coverage["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+    reused = _reuse_persisted_block_baseline(ws.block_baseline_coverage)
+    assert reused is not None
+    assert reused.percent == 87.5
+    assert reused.reason_code == "COVERAGE_BELOW_THRESHOLD"
+
+
+@pytest.mark.unit
+async def test_persist_block_baseline_coverage_none_is_stored_as_null(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A skipped/absent baseline persists as NULL so a resume reproduces the
+    # original run's missing baseline rather than inventing one.
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    await executor._persist_block_baseline_coverage(ws_id, baseline_coverage=None)
+
+    ws = await _get(factory, ws_id)
+    assert ws.block_baseline_coverage is None
+    assert _reuse_persisted_block_baseline(ws.block_baseline_coverage) is None
+
+
+@pytest.mark.unit
+async def test_persist_block_baseline_coverage_missing_workspace_is_noop(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # No row to update (e.g. concurrent destroy): silently no-op, never raise.
+    executor = _executor(factory, tmp_path)
+    await executor._persist_block_baseline_coverage("ws_missing", baseline_coverage=_BASELINE)
