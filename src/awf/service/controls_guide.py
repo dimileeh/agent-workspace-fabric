@@ -104,6 +104,15 @@ async def guide_workspace(
             "directive": directive_text,
             "grants": grant_inputs,
             "approve_policy_downgrade": approve_policy_downgrade,
+            # Grant-bearing guides persist the operator on each
+            # ``OperatorGrantAuditRecord`` (see ``_guide_blocked_workspace``), so a
+            # same-key retry that keeps the directive/grants/reason but swaps the
+            # operator is a *different* request: fold the normalized operator into
+            # the idempotency identity so it raises IDEMPOTENCY_CONFLICT instead of
+            # replaying the cached operation and silently keeping the first
+            # operator's attribution. The normalization mirrors the value persisted
+            # below so " alice "/"alice" replay and None/"" map to the default.
+            **({"operator": _normalize_guide_operator(operator)} if grant_inputs else {}),
         },
     )
     # Persist the PR/head context for provenance, but keep it OUT of the
@@ -298,6 +307,18 @@ async def guide_workspace(
 
 _DEFAULT_GUIDE_OPERATOR = "operator"
 
+
+def _normalize_guide_operator(operator: str | None) -> str:
+    """Normalize an operator identity to the value persisted on grant records.
+
+    Single source of truth shared by the idempotency identity (for grant-bearing
+    guides) and ``_guide_blocked_workspace`` so the identity always matches the
+    attribution actually stored on ``OperatorGrantAuditRecord``: surrounding
+    whitespace is stripped and a missing/blank operator collapses to
+    ``_DEFAULT_GUIDE_OPERATOR``."""
+    return (operator or "").strip() or _DEFAULT_GUIDE_OPERATOR
+
+
 # Matches the ``OperatorGrantAuditRecord.normalized_path`` column width. A grant
 # path that exceeds it must be rejected as a 400 here rather than reaching the
 # DB insert, where Postgres would raise a length error (500 + transaction
@@ -384,7 +405,7 @@ async def _guide_blocked_workspace(
         payload=operation_payload,
         idempotency_key=prepared.idempotency_key,
     )
-    operator_id = (operator or "").strip() or _DEFAULT_GUIDE_OPERATOR
+    operator_id = _normalize_guide_operator(operator)
     now = utcnow()
     created_grants: list[dict[str, object]] = []
     revoked_grants: list[str] = []

@@ -13,6 +13,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord, Workspace
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload, utcnow
 from awf.service.controls import (
+    IdempotencyConflictError,
     WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideGrantNotAllowedError,
     WorkspaceGuideGrantReasonRequiredError,
@@ -309,6 +310,91 @@ async def test_guide_blocked_requires_directive_or_grant(session: AsyncSession) 
             idempotency_key="guide-blocked-empty",
             expected_version=workspace.version,
         )
+
+
+@pytest.mark.unit
+async def test_guide_blocked_grant_same_key_different_operator_conflicts(
+    session: AsyncSession,
+) -> None:
+    """A grant-bearing same-key retry that swaps the operator must conflict.
+
+    The operator is persisted on ``OperatorGrantAuditRecord``; replaying the
+    cached operation would silently keep the first operator's attribution, so a
+    different operator on the same key must raise IDEMPOTENCY_CONFLICT instead.
+    """
+    workspace = await _blocked_workspace(session, block_epoch=3)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="approved benign config split",
+        grants=["pyproject.toml"],
+        approve_policy_downgrade=True,
+        operator="alice@example.com",
+        idempotency_key="guide-blocked-operator-swap",
+        expected_version=workspace.version,
+    )
+
+    # Retry under the original ``expected_version`` (the first call advanced it),
+    # so the operator is the *only* differing field — proving it gates the
+    # conflict rather than a version mismatch.
+    with pytest.raises(IdempotencyConflictError):
+        await service.guide_workspace(
+            workspace.id,
+            directive="",
+            reason="approved benign config split",
+            grants=["pyproject.toml"],
+            approve_policy_downgrade=True,
+            operator="mallory@example.com",
+            idempotency_key="guide-blocked-operator-swap",
+            expected_version=workspace.version - 1,
+        )
+
+    # The first operator's attribution is preserved (no duplicate, no overwrite).
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].operator == "alice@example.com"
+
+
+@pytest.mark.unit
+async def test_guide_blocked_grant_same_operator_whitespace_replays(
+    session: AsyncSession,
+) -> None:
+    """A retry whose only operator difference is surrounding whitespace replays.
+
+    The idempotency identity normalizes the operator the same way it is persisted
+    (strip + default), so " alice "/"alice" must be treated as the same request
+    rather than a spurious conflict.
+    """
+    workspace = await _blocked_workspace(session, block_epoch=3)
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="approved benign config split",
+        grants=["pyproject.toml"],
+        approve_policy_downgrade=True,
+        operator="alice@example.com",
+        idempotency_key="guide-blocked-operator-ws",
+        expected_version=workspace.version,
+    )
+
+    replay = await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="approved benign config split",
+        grants=["pyproject.toml"],
+        approve_policy_downgrade=True,
+        operator="  alice@example.com  ",
+        idempotency_key="guide-blocked-operator-ws",
+        expected_version=workspace.version - 1,
+    )
+
+    assert response.operation_id == replay.operation_id
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
 
 
 @pytest.mark.unit
