@@ -28,6 +28,7 @@ from awf.control.executor.types import (
     _PlanningValidationHandoff,
 )
 from awf.control.quality_gates import PLAN_ONLY_OUTPUT_REASON_CODE
+from awf.control.quality_gates_common import QualityGateViolation
 from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import (
@@ -978,6 +979,87 @@ async def test_fix_pass_plan_only_deposits_artifacts_before_marking_failed(
     executor._fail_if_plan_only_paths.assert_awaited_once()
     finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
     assert finish_kwargs["reason_code"] == PLAN_ONLY_OUTPUT_REASON_CODE
+
+
+def _real_staged_fix_pass_git(tmp_path: Path) -> AsyncMock:
+    """``git add -A`` succeeds; ``git diff --cached`` stages a real (non-plan) file."""
+    return AsyncMock(
+        side_effect=[
+            CommandResult(returncode=0, stdout="", stderr=""),  # git add -A
+            CommandResult(
+                returncode=0,
+                stdout="pyproject.toml\n",
+                stderr="",
+            ),  # git diff --cached --name-only
+        ]
+    )
+
+
+@pytest.mark.unit
+async def test_fix_pass_protected_block_fences_on_execution_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression PRRT_kwDOSJAM6s6J6rcG: the validation fix-cycle protected-gate
+    block must forward ``execution_owner_id`` so its epoch-guarded CAS fences on
+    the execution claim — mirroring every other pre-PR block site
+    (post-agent commit, recovery verify, committed output, pre-commit repair).
+
+    Without the owner id, ``enter_blocked_for_protected_violation`` skips the
+    ``execution_claimed_by`` condition, so a stale executor that already lost the
+    claim could still pause a workspace out of ``validating``.
+    """
+    profile = WorkspaceProfile.model_validate({"name": "prof-fix-protected-owner"})
+    workspace = _workspace("ws_fix_protected_owner")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    # The fix-pass stages a real protected file (``pyproject.toml``); the staged
+    # delta is not plan-only, so the cycle reaches the protected quality-gate
+    # classifier, which we force to report a violation.
+    violation = QualityGateViolation(
+        path="pyproject.toml",
+        protected_pattern="pyproject.toml",
+        section="tool.coverage",
+        line=1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "find_protected_quality_gate_changes",
+        lambda **_kwargs: [violation],
+    )
+
+    executor = _plan_only_guard_executor(tmp_path, committed_paths=set())
+    executor.enter_blocked_for_protected_violation = AsyncMock(return_value=True)
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+        compose_project=f"awf_{workspace.id}",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch=f"awf/{workspace.id}",
+        adapter=adapter,  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        git_in_worktree=_real_staged_fix_pass_git(tmp_path),
+        execution_owner_id="worker-x",
+    )
+
+    assert result.stop
+    executor.enter_blocked_for_protected_violation.assert_awaited_once()
+    block_kwargs = executor.enter_blocked_for_protected_violation.await_args.kwargs
+    assert block_kwargs["execution_owner_id"] == "worker-x"
+    assert block_kwargs["from_status"] == WorkspaceStatus.validating
+    assert block_kwargs["resume_phase"] == "validation_fix_cycle"
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
 
 
 # --- Direct unit tests for the guard helper itself ------------------------

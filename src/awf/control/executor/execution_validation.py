@@ -160,6 +160,7 @@ async def run_validation_and_fix_cycle(
     recovery: Mapping[str, Any] | None,
     rebase_recovery_result: _RebaseRecoveryResult | None,
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
+    execution_owner_id: str | None = None,
 ) -> ExecutionValidationResult:
     """Run validate/fix attempts and emit the terminal validation state."""
     if run_model is None:
@@ -1188,6 +1189,7 @@ async def run_validation_and_fix_cycle(
                     from_status=WorkspaceStatus.validating,
                     violations=violations,
                     resume_phase="validation_fix_cycle",
+                    execution_owner_id=execution_owner_id,
                 )
                 return ExecutionValidationResult(
                     stop=True,

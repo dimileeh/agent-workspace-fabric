@@ -1071,6 +1071,7 @@ async def execute(
         recovery=recovery,
         rebase_recovery_result=rebase_recovery_result,
         git_in_worktree=_git_in_worktree,
+        execution_owner_id=execution_owner_id,
     )
     # Deposit the worktree plan + conformance report into the served artifact
     # dir before teardown so the console can surface them (best-effort; see the
