@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import stat
+import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -165,6 +166,33 @@ def _is_directory(path: Path) -> bool:
         return False
 
 
+def _is_tracked_gitlink(worktree_path: Path, path: Path) -> bool:
+    """Return whether ``path`` is a tracked gitlink (submodule) entry.
+
+    Git represents submodules as ``160000`` tree entries. A deinitialized
+    submodule leaves an empty worktree directory with no ``.git`` marker, but
+    the path remains tracked in HEAD. Removing it would dirty the worktree.
+    """
+    try:
+        relative = path.relative_to(worktree_path).as_posix()
+    except ValueError:
+        return False
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree_path),
+            "ls-tree",
+            "HEAD",
+            "--",
+            relative,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.startswith("160000")
+
+
 def _remove_empty_untracked_dirs(
     *,
     worktree_path: Path,
@@ -202,11 +230,17 @@ def _remove_empty_untracked_dirs(
                 had_descendant = True
                 continue
             # A Git boundary is either the worktree's own `.git` control
-            # directory (the top-level entry we are scanning) or a nested
+            # directory (the top-level entry we are scanning), a nested
             # repository / submodule / linked worktree that contains a `.git`
-            # marker. Treat either form as a traversal boundary so we never
-            # recurse inside it and never remove any part of it.
-            if child.name == ".git" or (child / ".git").exists():
+            # marker, or a tracked submodule whose worktree was deinitialized
+            # (empty directory, no `.git` marker, but still a gitlink in HEAD).
+            # Treat any of these as a traversal boundary so we never recurse
+            # inside and never remove them.
+            if (
+                child.name == ".git"
+                or (child / ".git").exists()
+                or _is_tracked_gitlink(worktree_path, child)
+            ):
                 had_descendant = True
                 continue
             if maybe_remove_empty(child):
@@ -222,6 +256,9 @@ def _remove_empty_untracked_dirs(
             return False
         dir_path = f"{relative}/"
         if _is_under_ignored_path(dir_path, ignored_path_set):
+            return False
+        # Do not remove a tracked gitlink directory even when it is empty.
+        if _is_tracked_gitlink(worktree_path, directory):
             return False
 
         try:
@@ -267,10 +304,16 @@ def _snapshot_empty_untracked_dirs(
                 has_file = True
                 continue
             # A Git boundary is either the worktree's own `.git` control
-            # directory or a nested repository / submodule / linked worktree
-            # that contains a `.git` marker. Treat either form as a boundary so
-            # its empty descendants are not surfaced as dirty.
-            if child.name == ".git" or (child / ".git").exists():
+            # directory, a nested repository / submodule / linked worktree that
+            # contains a `.git` marker, or a tracked submodule whose worktree was
+            # deinitialized (empty directory, no `.git` marker). Treat any of
+            # these as a boundary so its empty descendants are not surfaced as
+            # dirty and the directory is not removed.
+            if (
+                child.name == ".git"
+                or (child / ".git").exists()
+                or _is_tracked_gitlink(worktree_path, child)
+            ):
                 has_file = True
                 continue
             if has_file_descendant(child):

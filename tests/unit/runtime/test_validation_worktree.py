@@ -647,6 +647,103 @@ def test_remove_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
 
 
 @pytest.mark.unit
+def test_remove_empty_untracked_dirs_preserves_tracked_deinitialized_submodule(
+    tmp_path: Path,
+) -> None:
+    """A tracked submodule directory left empty by ``git submodule deinit`` is kept.
+
+    Git leaves an empty directory at the gitlink path with no ``.git`` marker;
+    it remains tracked in HEAD as a ``160000`` entry. The cleanup helpers must
+    not traverse into or remove it, otherwise the worktree becomes dirty.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    submodule = worktree / "sub"
+    submodule.mkdir()
+    submodule_git = submodule / ".git"
+    submodule_git.mkdir()
+    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
+    _run_real_git(submodule, "init")
+    _run_real_git(submodule, "config", "user.email", "agent@example.com")
+    _run_real_git(submodule, "config", "user.name", "AWF Agent")
+    _run_real_git(submodule, "add", "file.txt")
+    _run_real_git(submodule, "commit", "-m", "init")
+    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
+    _run_real_git(worktree, "commit", "-m", "add sub")
+    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
+    # After deinit the directory is empty and has no .git marker.
+    assert not (submodule / ".git").exists()
+    assert not any(submodule.iterdir())
+    plain_empty_dir = worktree / "generated"
+    plain_empty_dir.mkdir()
+
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(removed) == ["generated/"]
+    assert submodule.exists()
+    assert not plain_empty_dir.exists()
+    status = _run_real_git(
+        worktree,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
+    assert status.stdout == ""
+
+
+@pytest.mark.unit
+def test_snapshot_empty_untracked_dirs_preserves_tracked_deinitialized_submodule(
+    tmp_path: Path,
+) -> None:
+    """A tracked deinitialized submodule must not be surfaced as dirty."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    submodule = worktree / "sub"
+    submodule.mkdir()
+    (submodule / ".git").mkdir()
+    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
+    _run_real_git(submodule, "init")
+    _run_real_git(submodule, "config", "user.email", "agent@example.com")
+    _run_real_git(submodule, "config", "user.name", "AWF Agent")
+    _run_real_git(submodule, "add", "file.txt")
+    _run_real_git(submodule, "commit", "-m", "init")
+    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
+    _run_real_git(worktree, "commit", "-m", "add sub")
+    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
+    plain_empty_dir = worktree / "generated"
+    plain_empty_dir.mkdir()
+
+    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(empty_dirs) == ["generated/"]
+    assert submodule.exists()
+    assert plain_empty_dir.exists()
+
+
+@pytest.mark.unit
 def test_snapshot_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
     tmp_path: Path,
 ) -> None:
