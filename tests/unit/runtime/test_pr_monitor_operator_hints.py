@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.control.quality_gates import QualityGateViolation
 from awf.db.enums import OperationType, WorkspaceStatus
 from awf.db.models import Operation
 from awf.db.repositories import WorkspaceRepository
@@ -1465,3 +1466,257 @@ async def test_refresh_operator_state_clears_processed_operator_hint_marker(
     assert stale_state.pending_operator_hint is None
     assert stale_state.threads_addressed_ids[processed_key] == "processed"
     assert isinstance(action, Merge)
+
+
+async def _seed_active_grant(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    path: str,
+    block_epoch: int = 0,
+) -> str:
+    from awf.common.ids import new_operator_grant_id
+    from awf.db.models import OperatorGrantAuditRecord
+
+    grant_id = new_operator_grant_id()
+    async with factory() as session:
+        session.add(
+            OperatorGrantAuditRecord(
+                id=grant_id,
+                workspace_id=workspace_id,
+                operator="op@example.com",
+                reason="approved the protected change",
+                normalized_path=path,
+                block_epoch=block_epoch,
+                approve_policy_downgrade=True,
+            )
+        )
+        await session.commit()
+    return grant_id
+
+
+@pytest.mark.unit
+async def test_operator_hint_grant_only_resume_skips_cli_and_consumes_grant(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant-only (approve-and-keep) resume — no directive but an active grant —
+    skips the CLI and pushes the preserved commit through the grant-aware gate,
+    then consumes the grant (single-use)."""
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    grant_id = await _seed_active_grant(factory, workspace_id, path="pyproject.toml")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="approved the protected change",
+        operation_id="op_grant_only",
+        requested_at="2026-06-16T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("a grant-only resume must NOT invoke the CLI")
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _pushed(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "pushed-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _pushed)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert state.pending_operator_hint is None  # hint processed
+    async with factory() as session:
+        grant = await session.get(OperatorGrantAuditRecord, grant_id)
+        assert grant is not None
+        assert grant.consumed_at is not None  # single-use
+
+
+@pytest.mark.unit
+async def test_operator_hint_resume_reblocks_when_violation_unresolved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directive resume that does NOT clear the protected violation RE-BLOCKS
+    (routes to the pause) instead of proceeding toward merge."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert the protected edit",
+        directive="revert it",
+        operation_id="op_reblock",
+        requested_at="2026-06-16T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    still_blocking = _ProtectedScopePushBlock(
+        message="still touches a protected file",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(path="pyproject.toml", protected_pattern="pyproject.toml"),
+        ),
+    )
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fixed_verdict(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _still_blocking(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return still_blocking
+
+    captured: dict[str, object] = {}
+
+    async def _pause(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PAUSED_BLOCKED",
+            paused_into_blocked=True,
+        )
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("a re-block must NOT push")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _still_blocking)
+    monkeypatch.setattr(runner, "_pause_monitor_for_protected_scope_block", _pause)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is True
+    assert captured["protected_scope_block"] is still_blocking
+
+
+@pytest.mark.unit
+async def test_operator_hint_resume_no_op_push_when_commit_already_on_remote(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Divergence recovery: a restart that finds the preserved commit already on
+    the remote treats the push as a no-op (no duplicate push)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_active_grant(factory, workspace_id, path="pyproject.toml")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="approved the protected change",
+        operation_id="op_idempotent",
+        requested_at="2026-06-16T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _already_on_remote(**_kwargs: object) -> bool:
+        return True
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("an already-pushed preserved commit must NOT be re-pushed")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "preserved-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _already_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert state.last_push_sha == "preserved-sha"
+    assert state.pending_operator_hint is None  # hint processed
