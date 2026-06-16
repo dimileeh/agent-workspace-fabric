@@ -454,10 +454,10 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
             self,
             *args: object,
             **kwargs: object,
-        ) -> tuple[Workspace, bool, None]:
+        ) -> tuple[Workspace, bool, bool, None]:
             # Fresh-claim entry: workspace acquired + confirmed ``running``,
-            # no blocked-resume skip, no persisted baseline.
-            return workspace, False, None
+            # no blocked-resume skip, no disabled fix passes, no persisted baseline.
+            return workspace, False, False, None
 
         async def _reject_unsupported_task_kind(
             self,

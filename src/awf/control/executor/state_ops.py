@@ -610,15 +610,16 @@ async def _begin_execution(
     resume_from_blocked: bool,
     execution_owner_id: str | None,
     execution_lease_expires_at: datetime | None,
-) -> tuple[Workspace, bool, ValidationCoverageResult | None] | None:
+) -> tuple[Workspace, bool, bool, ValidationCoverageResult | None] | None:
     """Acquire the workspace for ``execute`` and decide the resume mode.
 
-    Returns ``(ws, resume_skip_agent, baseline_coverage)`` once the workspace is
-    owned and confirmed ``running``, or ``None`` to signal ``execute`` should
-    return early (claim lost, status race, or missing row). ``baseline_coverage``
-    is the pre-agent base measurement persisted at block time and reused on a
-    blocked-resume (so the coverage ratchet compares against the original base
-    rather than the mutated worktree); it is ``None`` on a fresh claim.
+    Returns ``(ws, resume_skip_agent, resume_disable_fix_passes,
+    baseline_coverage)`` once the workspace is owned and confirmed ``running``,
+    or ``None`` to signal ``execute`` should return early (claim lost, status
+    race, or missing row). ``baseline_coverage`` is the pre-agent base
+    measurement persisted at block time and reused on a blocked-resume (so the
+    coverage ratchet compares against the original base rather than the mutated
+    worktree); it is ``None`` on a fresh claim.
 
     ``resume_from_blocked`` re-enters a workspace the worker has already
     transitioned ``blocked -> running`` (re-acquiring the epoch-fenced execution
@@ -629,6 +630,15 @@ async def _begin_execution(
     A revert/redo directive re-invokes the agent with the directive appended; an
     approve-and-keep grant skips the agent entirely (``resume_skip_agent``) and
     re-runs setup + full validation.
+
+    ``resume_disable_fix_passes`` is the separate signal that the *secondary*
+    agent passes (validation fix passes + pre-commit repair) must stay off. It is
+    true whenever operator grants are active — including a combined
+    ``--directive ... --grant ...`` guide where ``resume_skip_agent`` is ``False``
+    (the directive must run) but the active grants would otherwise let an
+    automatic fix pass rewrite a granted protected file and have the new
+    violation silently suppressed by the same single-use grant
+    (PRRT_kwDOSJAM6s6J7EUX / PRRT_kwDOSJAM6s6J5SDf).
     """
     if resume_from_blocked:
         ws = await self._load_workspace(workspace_id)
@@ -644,15 +654,24 @@ async def _begin_execution(
         baseline_coverage = _reuse_persisted_block_baseline(ws.block_baseline_coverage)
         hint = pre_pr_operator_hint_from_payload(ws.pending_operator_hint)
         grant_specs = await self._active_operator_grant_specs(workspace_id)
+        grants_active = bool(grant_specs)
         if hint is not None and hint.directive:
             # Revert/redo: re-invoke the agent with the operator directive.
             ws.task_prompt = (
                 f"{ws.task_prompt}\n\n[Operator directive — resolve the paused "
                 f"protected quality-gate violation]\n{hint.directive}"
             )
-            return ws, False, baseline_coverage
+            # A combined ``--directive ... --grant ...`` guide arms BOTH: the
+            # directive re-invokes the agent (``resume_skip_agent`` stays False)
+            # while the grants stay active for the protected-file gates. The
+            # directive run is intended, but ``resume_disable_fix_passes`` must
+            # still be set when grants are active so the secondary fix passes /
+            # pre-commit repair stay off — otherwise an automatic fix pass could
+            # rewrite the granted protected file and have the new violation
+            # suppressed by the same single-use grant.
+            return ws, False, grants_active, baseline_coverage
         # Approve-and-keep: skip the agent (no tokens), re-run setup + validate.
-        return ws, bool(grant_specs), baseline_coverage
+        return ws, grants_active, grants_active, baseline_coverage
 
     ws = await self._claim_ready(
         workspace_id,
@@ -667,4 +686,4 @@ async def _begin_execution(
         action="execute",
     ):
         return None
-    return ws, False, None
+    return ws, False, False, None

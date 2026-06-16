@@ -533,8 +533,10 @@ async def test_begin_execution_reuses_persisted_baseline_on_directive_resume(
     )
 
     assert begin is not None
-    _ws, resume_skip_agent, baseline = begin
+    _ws, resume_skip_agent, resume_disable_fix_passes, baseline = begin
     assert resume_skip_agent is False  # directive re-invokes the agent
+    # Directive-only resume (no grant): fix passes stay enabled.
+    assert resume_disable_fix_passes is False
     assert baseline is not None
     assert baseline.percent == 87.5
     assert baseline.reason_code == "COVERAGE_BELOW_THRESHOLD"
@@ -562,8 +564,45 @@ async def test_begin_execution_reuses_persisted_baseline_on_approve_and_keep(
     )
 
     assert begin is not None
-    _ws, resume_skip_agent, baseline = begin
+    _ws, resume_skip_agent, resume_disable_fix_passes, baseline = begin
     assert resume_skip_agent is True  # grant present -> agent skipped
+    # Grant-only resume also disables the secondary fix passes / pre-commit repair.
+    assert resume_disable_fix_passes is True
+    assert baseline is not None
+    assert baseline.percent == 87.5
+
+
+@pytest.mark.unit
+async def test_begin_execution_combined_directive_grant_disables_fix_passes(
+    executor: WorkspaceExecutor,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regression for PRRT_kwDOSJAM6s6J-nwp: a combined ``--directive ... --grant
+    # ...`` guide arms BOTH a directive (the agent must re-run) and active grants.
+    # The directive branch must keep ``resume_skip_agent`` False (so the directive
+    # runs) while still setting ``resume_disable_fix_passes`` True because grants
+    # are active — otherwise a secondary validation fix pass / pre-commit repair
+    # could rewrite the granted protected file and have the new violation
+    # suppressed by the same single-use grant (the danger PRRT_kwDOSJAM6s6J7EUX /
+    # PRRT_kwDOSJAM6s6J5SDf closed for grant-only resumes).
+    ws_id = await _seed_resumable_blocked_workspace(
+        factory,
+        grant_path="pyproject.toml",
+        directive="also tidy up the changelog",
+        block_baseline_coverage=_BELOW_THRESHOLD_BASELINE,
+    )
+
+    begin = await executor._begin_execution(
+        ws_id,
+        resume_from_blocked=True,
+        execution_owner_id=None,
+        execution_lease_expires_at=None,
+    )
+
+    assert begin is not None
+    _ws, resume_skip_agent, resume_disable_fix_passes, baseline = begin
+    assert resume_skip_agent is False  # the directive must re-invoke the agent
+    assert resume_disable_fix_passes is True  # grants active -> fix passes off
     assert baseline is not None
     assert baseline.percent == 87.5
 
@@ -585,7 +624,7 @@ async def test_begin_execution_without_persisted_baseline_returns_none(
     )
 
     assert begin is not None
-    _ws, _resume_skip_agent, baseline = begin
+    _ws, _resume_skip_agent, _resume_disable_fix_passes, baseline = begin
     assert baseline is None
 
 

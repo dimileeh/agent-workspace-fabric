@@ -135,7 +135,11 @@ async def execute(
     if begin is None:
         return
     # ``baseline_coverage`` is the pre-agent base reused on a blocked-resume.
-    ws, resume_skip_agent, baseline_coverage = begin
+    # ``resume_skip_agent`` gates the *main* agent run; ``resume_disable_fix_passes``
+    # separately gates the secondary fix passes + pre-commit repair so a combined
+    # directive+grant resume can run the directive agent while keeping the
+    # grant-suppressed fix passes off.
+    ws, resume_skip_agent, resume_disable_fix_passes, baseline_coverage = begin
 
     compose_file = (
         Path(ws.compose_file_path)
@@ -858,14 +862,16 @@ async def execute(
                                 compose_project=compose_project,
                                 compose_file=compose_file,
                                 model=run_model,
-                                # A grant resume (``resume_skip_agent``) deliberately
-                                # skips the agent — "no tokens" — and keeps the approved
-                                # protected change verbatim. Semantic pre-commit repair
-                                # would re-invoke the agent and could rewrite that
-                                # approved change, so gate it off on grant resumes too,
-                                # not just on upstream agent failures.
+                                # An active grant keeps the approved protected
+                                # change verbatim. Semantic pre-commit repair would
+                                # re-invoke the agent and could rewrite that approved
+                                # change, so gate it off whenever grants are active
+                                # (``resume_disable_fix_passes`` — covers both the
+                                # grant-only resume and a combined directive+grant
+                                # resume), not just on upstream agent failures.
                                 allow_agent_repair=(
-                                    agent_run_failure_reason is None and not resume_skip_agent
+                                    agent_run_failure_reason is None
+                                    and not resume_disable_fix_passes
                                 ),
                                 ws=ws,
                                 command_evidence=agent_command_evidence,
@@ -1072,7 +1078,7 @@ async def execute(
         rebase_recovery_result=rebase_recovery_result,
         git_in_worktree=_git_in_worktree,
         execution_owner_id=execution_owner_id,
-        resume_skip_agent=resume_skip_agent,
+        resume_disable_fix_passes=resume_disable_fix_passes,
     )
     # Deposit the worktree plan + conformance report into the served artifact
     # dir before teardown so the console can surface them (best-effort; see the
