@@ -258,7 +258,9 @@ async def run_validation_and_fix_cycle(
             0,
             planning_validation_handoff.max_iterations - planning_validation_handoff.iteration,
         )
-        if planning_validation_handoff is not None and recovery is None
+        if planning_validation_handoff is not None
+        and recovery is None
+        and not resume_disable_fix_passes
         else 0
     )
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
@@ -682,7 +684,17 @@ async def run_validation_and_fix_cycle(
                     )
                     # Recovery skips feature execution; retrying this
                     # conformance miss would only rerun validation.
-                    if recovery is not None or remaining_conformance_iterations <= 0:
+                    # ``resume_disable_fix_passes`` (a grant-bearing resume) must
+                    # likewise never fire a conformance fix pass: re-invoking the
+                    # agent while operator grants are active could rewrite a
+                    # granted protected file and have the new violation suppressed
+                    # by the same single-use grant. Mark FAILED for operator
+                    # triage instead (mirrors the zeroed validation-fix budget).
+                    if (
+                        recovery is not None
+                        or remaining_conformance_iterations <= 0
+                        or resume_disable_fix_passes
+                    ):
                         await self._finish_pending_validate_operations(
                             workspace_id=workspace_id,
                             status=OperationStatus.failed,

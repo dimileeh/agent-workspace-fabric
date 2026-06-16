@@ -165,6 +165,7 @@ async def _run_cycle(
     planning_validation_handoff: _PlanningValidationHandoff | None = None,
     recovery: dict[str, Any] | None = None,
     git_in_worktree: Any | None = None,
+    resume_disable_fix_passes: bool = False,
 ) -> Any:
     return await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
@@ -183,6 +184,7 @@ async def _run_cycle(
         rebase_recovery_result=None,
         git_in_worktree=git_in_worktree
         or AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+        resume_disable_fix_passes=resume_disable_fix_passes,
     )
 
 
@@ -705,6 +707,86 @@ async def test_post_validation_conformance_fix_pass_loop_falls_through_to_contin
     assert conformance_check.await_count == 2
     # The conformance fix pass re-invoked the agent exactly once between checks.
     assert adapter.run.await_count == 1
+
+
+@pytest.mark.unit
+async def test_grant_resume_conformance_failure_skips_fix_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A grant-bearing resume never fires a conformance fix pass (PRRT_kwDOSJAM6s6KADN4).
+
+    For a combined ``--directive ... --grant ...`` resume, ``resume_disable_fix_passes``
+    is true. Even though the planning handoff has a remaining conformance iteration
+    budget, a post-validation conformance miss must mark the workspace FAILED for
+    operator triage rather than re-invoking the coding agent — re-running while
+    operator grants are active could rewrite a granted protected file and have the
+    new violation suppressed by the same single-use grant.
+    """
+    profile = WorkspaceProfile.model_validate({"name": "prof-grant-conf"})
+    workspace = _workspace("ws_grant_conf")
+    _patch_profile(monkeypatch, profile)
+    _patch_clean_worktree(monkeypatch)
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_command(tmp_path)])
+
+    conformance_failure = _PlanningRunFailure(
+        message="conformance gap",
+        reason_code="PLAN_CONFORMANCE_UNSATISFIED",
+        details={"attempt": 1},
+    )
+    conformance_check = AsyncMock(return_value=conformance_failure)
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=2,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-1"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _run_post_validation_conformance_check=conformance_check,
+        _ensure_worktree_available=AsyncMock(return_value=True),
+        _repair_agent_git_ownership=AsyncMock(),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(
+            return_value=SimpleNamespace(policy_blocked=False),
+        ),
+        _fail_if_plan_only_paths=AsyncMock(return_value=False),
+        _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
+        _runner=SimpleNamespace(run=AsyncMock(return_value=CommandResult(0, "", ""))),
+    )
+    adapter = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(stdout="", stderr="")))
+
+    # Handoff has a remaining iteration budget (would normally allow a fix pass).
+    handoff = _handoff(tmp_path, iteration=1, max_iterations=3)
+
+    result = await _run_cycle(
+        executor,
+        workspace=workspace,
+        tmp_path=tmp_path,
+        adapter=adapter,
+        planning_validation_handoff=handoff,
+        resume_disable_fix_passes=True,
+    )
+
+    # Conformance checked once, then marked FAILED — no fix-pass agent re-invocation.
+    assert result.stop
+    assert conformance_check.await_count == 1
+    assert adapter.run.await_count == 0
+    executor._mark_failed.assert_awaited_once()
+    finish_kwargs = executor._finish_pending_validate_operations.await_args.kwargs
+    assert finish_kwargs["status"] == OperationStatus.failed
+    assert finish_kwargs["reason_code"] == "PLAN_CONFORMANCE_UNSATISFIED"
 
 
 # ---------------------------------------------------------------------------
