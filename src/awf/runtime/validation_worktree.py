@@ -165,6 +165,73 @@ def _is_directory(path: Path) -> bool:
         return False
 
 
+def _remove_empty_untracked_dirs(
+    *,
+    worktree_path: Path,
+    ignored_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Remove empty untracked directories from the worktree and return their paths.
+
+    Only directories that are truly empty, inside ``worktree_path``, and not
+    symlinks are removed. Empty directories under ``ignored_paths`` are left
+    alone so the cleanup/provenance contract continues to treat them as
+    setup-owned or ignored state.
+    """
+    removed: list[str] = []
+    ignored_path_set = {_normalize_porcelain_path(path) for path in ignored_paths}
+
+    def maybe_remove_empty(directory: Path) -> bool:
+        """Return True when the directory was removed because it was empty."""
+        try:
+            children = tuple(sorted(directory.iterdir(), key=lambda child: child.name))
+        except OSError:
+            return False
+
+        had_descendant = False
+        for child in children:
+            if child.name == ".git":
+                had_descendant = True
+                continue
+            if not _is_directory(child):
+                had_descendant = True
+                continue
+            try:
+                relative_child = child.relative_to(worktree_path).as_posix()
+            except ValueError:
+                had_descendant = True
+                continue
+            child_path = f"{relative_child}/"
+            if _is_under_ignored_path(child_path, ignored_path_set):
+                had_descendant = True
+                continue
+            if maybe_remove_empty(child):
+                continue
+            had_descendant = True
+
+        if had_descendant:
+            return False
+
+        try:
+            relative = directory.relative_to(worktree_path).as_posix()
+        except ValueError:
+            return False
+        dir_path = f"{relative}/"
+        if _is_under_ignored_path(dir_path, ignored_path_set):
+            return False
+
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+        removed.append(dir_path)
+        return True
+
+    maybe_remove_empty(worktree_path)
+    return tuple(dict.fromkeys(removed))
+
+
 def _snapshot_empty_untracked_dirs(
     *,
     worktree_path: Path,
@@ -350,11 +417,20 @@ async def check_validation_worktree_clean(
     run_git: GitRunner,
     worktree_path: Path,
     ignore_all_ignored: bool = False,
+    remove_empty_untracked_dirs: bool = False,
 ) -> ValidationWorktreeCheck:
     """Return dirty paths before or after an AWF validation command.
 
     When ``ignore_all_ignored`` is set, everything git currently reports as
     ignored is treated as clean (ignored paths never enter the commit/PR).
+
+    When ``remove_empty_untracked_dirs`` is set, empty untracked directories
+    are discovered and removed before the dirty guard runs. This is used by
+    the PR monitor pre-push validation worktree check so a Git-clean worktree
+    that still has an empty untracked directory left after deleting the last
+    tracked file in it is not failed as dirty. Default False preserves the
+    behavior for cleanup/provenance, where empty untracked directories are
+    side-effect signals.
 
     Unit tests often use plain directories instead of real git worktrees. Real
     AWF worktrees always contain a `.git` control file, so skip the guard only
@@ -392,14 +468,23 @@ async def check_validation_worktree_clean(
         status_stdout,
         include_ignored=True,
     )
-    empty_untracked_dirs = _snapshot_empty_untracked_dirs(
-        worktree_path=worktree_path,
-        # The snapshot appends its results unfiltered below, so it must skip the
-        # AWF-agent-runtime roots itself — an empty ``.claude/agent-memory/<agent>/``
-        # (created before any file is written) would otherwise surface the root
-        # and its parents as dirty, escaping the unconditional suppression above.
-        ignored_paths=(*ignored_paths, *AWF_AGENT_RUNTIME_IGNORED_ROOTS),
-    )
+
+    # The snapshot appends its results unfiltered below, so it must skip the
+    # AWF-agent-runtime roots itself — an empty ``.claude/agent-memory/<agent>/``
+    # (created before any file is written) would otherwise surface the root
+    # and its parents as dirty, escaping the unconditional suppression above.
+    snapshot_ignored_paths = (*ignored_paths, *AWF_AGENT_RUNTIME_IGNORED_ROOTS)
+    if remove_empty_untracked_dirs:
+        _remove_empty_untracked_dirs(
+            worktree_path=worktree_path,
+            ignored_paths=snapshot_ignored_paths,
+        )
+        empty_untracked_dirs: tuple[str, ...] = ()
+    else:
+        empty_untracked_dirs = _snapshot_empty_untracked_dirs(
+            worktree_path=worktree_path,
+            ignored_paths=snapshot_ignored_paths,
+        )
     # Ignored roots only suppress untracked or ignored artifacts; tracked files
     # below those roots must stay visible so cleanup can restore them.
     ignored_untracked_paths = {

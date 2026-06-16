@@ -457,6 +457,169 @@ async def test_check_validation_worktree_clean_can_ignore_all_ignored_paths(
 
 
 @pytest.mark.unit
+async def test_check_validation_worktree_clean_removes_empty_untracked_dirs_when_asked(
+    tmp_path: Path,
+) -> None:
+    """When the flag is set, a Git-clean worktree with an empty untracked directory passes."""
+    worktree = _init_fake_worktree(tmp_path)
+    empty_dir = worktree / "generated"
+    empty_dir.mkdir()
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command that cannot report empty untracked dirs."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert not empty_dir.exists()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_preserves_non_empty_untracked_dirs_even_when_asked(
+    tmp_path: Path,
+) -> None:
+    """A non-empty untracked directory must remain dirty even when cleanup is requested."""
+    worktree = _init_fake_worktree(tmp_path)
+    non_empty_dir = worktree / "generated"
+    non_empty_file = non_empty_dir / "out.txt"
+    non_empty_file.parent.mkdir(parents=True, exist_ok=True)
+    non_empty_file.write_text("generated\n", encoding="utf-8")
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command reporting the untracked file inside the dir."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "?? generated/out.txt\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert non_empty_dir.exists()
+    assert "generated/out.txt" in check.paths
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_preserves_untracked_files_when_asked(
+    tmp_path: Path,
+) -> None:
+    """A real untracked file must remain dirty even when empty-dir cleanup is requested."""
+    worktree = _init_fake_worktree(tmp_path)
+    (worktree / "untracked.py").write_text("x\n", encoding="utf-8")
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command reporting an untracked file."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "?? untracked.py\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert (worktree / "untracked.py").exists()
+    assert check.paths == ("untracked.py",)
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_removes_nested_empty_untracked_dirs_when_asked(
+    tmp_path: Path,
+) -> None:
+    """Nested empty untracked directories are removed and the worktree is treated as clean."""
+    worktree = _init_fake_worktree(tmp_path)
+    nested_empty_dir = worktree / "generated" / "empty" / "nested"
+    nested_empty_dir.mkdir(parents=True)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command that cannot report empty untracked dirs."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert not nested_empty_dir.exists()
+    assert not (worktree / "generated").exists()
+
+
+@pytest.mark.unit
+def test_remove_empty_untracked_dirs_skips_symlinks_and_non_empty_dirs(
+    tmp_path: Path,
+) -> None:
+    """Only real, empty, inside-the-worktree directories are removed."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    empty_dir = worktree / "empty"
+    empty_dir.mkdir()
+    non_empty_dir = worktree / "non_empty"
+    non_empty_file = non_empty_dir / "file.txt"
+    non_empty_file.parent.mkdir(parents=True, exist_ok=True)
+    non_empty_file.write_text("x\n", encoding="utf-8")
+    symlink_dir = worktree / "link"
+    symlink_dir.symlink_to(empty_dir)
+
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(removed) == ["empty/"]
+    assert not empty_dir.exists()
+    assert non_empty_dir.exists()
+    assert symlink_dir.is_symlink()
+
+
+@pytest.mark.unit
+def test_remove_empty_untracked_dirs_honors_ignored_roots(
+    tmp_path: Path,
+) -> None:
+    """Empty directories under ignored roots are left alone."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    ignored_empty_dir = worktree / ".venv" / "empty"
+    ignored_empty_dir.mkdir(parents=True)
+    plain_empty_dir = worktree / "generated"
+    plain_empty_dir.mkdir()
+
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(".venv/",),
+    )
+
+    assert sorted(removed) == ["generated/"]
+    assert not plain_empty_dir.exists()
+    assert ignored_empty_dir.exists()
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_reports_tracked_path_under_ignored_root(
     tmp_path: Path,
 ) -> None:

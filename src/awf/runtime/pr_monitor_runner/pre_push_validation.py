@@ -534,6 +534,7 @@ async def _pre_push_validation_worktree_check(
         run_git=_run_git,
         worktree_path=worktree_path,
         ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
     )
 
 
