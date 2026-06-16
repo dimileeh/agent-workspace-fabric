@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
@@ -114,6 +115,35 @@ async def test_guide_blocked_persists_epoch_scoped_grant(session: AsyncSession) 
     assert grant.operator == "alice@example.com"
     assert grant.reason == "approved benign config split"
     assert grant.consumed_at is None
+
+
+@pytest.mark.unit
+async def test_guide_blocked_grants_only_bumps_updated_at(session: AsyncSession) -> None:
+    # A grants-only approve-and-keep where no directive was ever armed clears no
+    # Workspace column (``pending_operator_hint`` is already ``None``), so without
+    # an explicit stamp neither the ORM ``onupdate`` hook nor
+    # ``advance_workspace_version`` (which preserves ``updated_at``) would record
+    # the decision. The ``updated_at``-ordered blocked-resume selector and pollers
+    # that key off ``updated_at`` must still observe the grant.
+    workspace = await _blocked_workspace(session, block_epoch=3)
+    assert workspace.pending_operator_hint is None
+    stale = utcnow() - timedelta(hours=1)
+    workspace.updated_at = stale
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="approved benign config split",
+        grants=["pyproject.toml"],
+        approve_policy_downgrade=True,
+        operator="alice@example.com",
+        idempotency_key="guide-blocked-grant-bumps-updated-at",
+        expected_version=workspace.version,
+    )
+
+    assert workspace.updated_at > stale
 
 
 @pytest.mark.unit

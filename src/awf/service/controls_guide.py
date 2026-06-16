@@ -481,6 +481,16 @@ async def _guide_blocked_workspace(
         # directive left in place would override this fresh approve-and-keep
         # decision on resume. The latest operator decision must win.
         workspace.pending_operator_hint = None
+        # When ``pending_operator_hint`` was already ``None`` this clears no
+        # Workspace column, so neither the ORM ``updated_at`` ``onupdate`` hook
+        # (no dirtied content field) nor ``advance_workspace_version`` (it
+        # explicitly preserves ``updated_at``) would record this grant-only
+        # decision. Stamp ``updated_at`` so the grant is visible to the
+        # ``updated_at``-ordered blocked-resume selector and to pollers that key
+        # off it — otherwise an older block approved later resumes ahead of a
+        # newer decision. The directive branch already bumps ``updated_at`` via
+        # the ``onupdate`` hook when it assigns ``pending_operator_hint``.
+        workspace.updated_at = now
 
     await repo.advance_workspace_version(workspace)
     event_payload = _event_payload(
