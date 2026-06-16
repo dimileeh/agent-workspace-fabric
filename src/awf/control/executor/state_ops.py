@@ -51,6 +51,7 @@ from awf.control.quality_gates import (
 )
 from awf.db.enums import (
     FailureReason,
+    OperationStatus,
     WorkspaceStatus,
 )
 from awf.db.models import OperatorGrantAuditRecord, Workspace
@@ -521,6 +522,26 @@ async def enter_blocked_for_protected_violation(
         # otherwise the resume path would re-apply a stale directive (and could
         # override a fresh approve-and-keep grant issued for this new epoch).
         ws.pending_operator_hint = None
+        # A workspace that blocks mid-recovery (a validate/rebase recovery fix
+        # pass produced the protected edit) must not leave the recovery
+        # Operation active: ``execute`` reloads it via
+        # ``_get_active_recovery_payload`` and, while it is non-None, takes the
+        # validate-only recovery branch and skips the agent entirely — so a
+        # later REVERT/REDO directive resume would silently never run and just
+        # revalidate the unchanged protected edit (re-blocking). Finalizing the
+        # active recovery operations here clears that branch so a directive
+        # resume re-invokes the agent (PRRT_kwDOSJAM6s6KBFxU). The fix-cycle
+        # ``_finish_pending_validate_operations`` call already finalizes the
+        # ``validate`` recovery row before this transition; this additionally
+        # covers the ``rebase_only`` recovery, recorded as an
+        # ``OperationType.rebase`` row that path does not touch.
+        await self._finish_active_recovery_operations_in_session(
+            session,
+            workspace_id=workspace_id,
+            status=OperationStatus.failed,
+            reason_code=QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+            error_message=("Protected quality-gate violation paused the workspace mid-recovery."),
+        )
         await session.commit()
         return True
 

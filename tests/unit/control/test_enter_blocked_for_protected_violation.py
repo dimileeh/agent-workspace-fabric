@@ -200,6 +200,117 @@ async def test_reblock_clears_pending_operator_hint(
     assert ws.pending_operator_hint is None
 
 
+async def _seed_recovery_op(
+    factory: async_sessionmaker[AsyncSession],
+    ws_id: str,
+    *,
+    operation_type: OperationType,
+    recovery_mode: str,
+) -> str:
+    async with factory() as session:
+        op = await OperationRepository(session).create(
+            workspace_id=ws_id,
+            operation_type=operation_type,
+            status=OperationStatus.running,
+            payload={"source": "pr_monitor", "recovery_mode": recovery_mode},
+        )
+        op_id = op.id
+        await session.commit()
+    return op_id
+
+
+@pytest.mark.unit
+async def test_enter_blocked_finishes_active_rebase_recovery_operation(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A rebase-only recovery fix pass produced the protected edit, so the
+    # workspace blocks while the ``OperationType.rebase`` recovery row is still
+    # running. The fix-cycle ``_finish_pending_validate_operations`` call only
+    # touches ``validate`` rows, so without this the recovery row stays active —
+    # ``execute`` would reload it via ``_get_active_recovery_payload`` and skip
+    # the agent on a directive resume, never running the REVERT/REDO guide.
+    ws_id = await _seed_running(factory)
+    op_id = await _seed_recovery_op(
+        factory,
+        ws_id,
+        operation_type=OperationType.rebase,
+        recovery_mode="rebase_only",
+    )
+    executor = _executor(factory, tmp_path)
+
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+
+    async with factory() as session:
+        finished = await OperationRepository(session).get(op_id)
+    assert finished is not None
+    assert finished.status == OperationStatus.failed.value
+    assert finished.result is not None
+    assert finished.result["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+
+
+@pytest.mark.unit
+async def test_enter_blocked_finishes_active_validate_recovery_operation(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # The same invariant for a ``validate_only`` recovery row: entering blocked
+    # leaves no active recovery operation, so the resume path observes
+    # ``recovery is None`` and honors an operator directive.
+    ws_id = await _seed_running(factory)
+    op_id = await _seed_recovery_op(
+        factory,
+        ws_id,
+        operation_type=OperationType.validate,
+        recovery_mode="validate_only",
+    )
+    executor = _executor(factory, tmp_path)
+
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+
+    async with factory() as session:
+        finished = await OperationRepository(session).get(op_id)
+    assert finished is not None
+    assert finished.status == OperationStatus.failed.value
+
+
+@pytest.mark.unit
+async def test_enter_blocked_failed_cas_leaves_recovery_operation_untouched(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A lost CAS (status mismatch) must NOT finish recovery operations — the row
+    # is owned by a newer claimant whose recovery run is still live.
+    ws_id = await _seed_running(factory)
+    op_id = await _seed_recovery_op(
+        factory,
+        ws_id,
+        operation_type=OperationType.rebase,
+        recovery_mode="rebase_only",
+    )
+    executor = _executor(factory, tmp_path)
+
+    paused = await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.validating,  # row is running -> CAS misses
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    assert paused is False
+
+    async with factory() as session:
+        op = await OperationRepository(session).get(op_id)
+    assert op is not None
+    assert op.status == OperationStatus.running.value
+
+
 @pytest.mark.unit
 async def test_late_mark_failed_does_not_clobber_blocked(
     factory: async_sessionmaker[AsyncSession], tmp_path: Path
