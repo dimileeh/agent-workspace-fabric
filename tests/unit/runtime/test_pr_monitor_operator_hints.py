@@ -1762,3 +1762,240 @@ def test_monitor_while_blocked_new_comment_not_dropped_on_resume() -> None:
 
     assert isinstance(action, AddressComments)
     assert new_thread in action.threads
+
+
+@pytest.mark.unit
+async def test_address_comments_paused_into_blocked_ends_monitor_without_failing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fix-cycle that pauses into ``blocked`` ends the monitor cycle cleanly:
+    the loop returns True (stop) and records a ``protected_scope_paused`` outcome
+    rather than terminally failing the workspace."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    thread = ReviewThread(
+        thread_id="T_paused",
+        path="src/awf/x.py",
+        line=1,
+        body_excerpt="tweak",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    async def _paused_fix_cycle(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PAUSED_BLOCKED",
+            paused_into_blocked=True,
+        )
+
+    async def _terminate_must_not_run(**_kwargs: object) -> None:
+        pytest.fail("a paused workspace must NOT be terminally failed")
+
+    monkeypatch.setattr(runner, "_run_fix_cycle", _paused_fix_cycle)
+    monkeypatch.setattr(runner, "_terminate_failed", _terminate_must_not_run)
+
+    handled = await runner._execute(
+        action=AddressComments(threads=(thread,), review_comments=()),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert handled is True
+    async with factory() as session:
+        operation = (
+            (
+                await session.execute(
+                    select(Operation).where(
+                        Operation.workspace_id == workspace_id,
+                        Operation.type == OperationType.comment_repair.value,
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert operation.result["outcome"] == "protected_scope_paused"
+
+
+@pytest.mark.unit
+async def test_operator_hint_paused_into_blocked_ends_monitor_without_failing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator-hint resume that re-pauses into ``blocked`` ends the monitor
+    cycle cleanly with a ``protected_scope_paused`` outcome (not a failure)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert",
+        directive="revert it",
+        operation_id="op_paused",
+        requested_at="2026-06-16T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _paused_hint_cycle(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PAUSED_BLOCKED",
+            paused_into_blocked=True,
+        )
+
+    async def _terminate_must_not_run(**_kwargs: object) -> None:
+        pytest.fail("a paused workspace must NOT be terminally failed")
+
+    monkeypatch.setattr(runner, "_run_operator_hint_cycle", _paused_hint_cycle)
+    monkeypatch.setattr(runner, "_terminate_failed", _terminate_must_not_run)
+
+    handled = await runner._execute(
+        action=AddressOperatorHint(hint=hint),
+        workspace_id=workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_ready_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert handled is True
+    async with factory() as session:
+        operation = (
+            (
+                await session.execute(
+                    select(Operation).where(
+                        Operation.workspace_id == workspace_id,
+                        Operation.type == OperationType.comment_repair.value,
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert operation.result["outcome"] == "protected_scope_paused"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("changed_paths", "expected"),
+    [((), True), (("src/awf/x.py",), False)],
+)
+async def test_preserved_commit_already_on_remote(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_paths: tuple[str, ...],
+    expected: bool,
+) -> None:
+    """An empty changed-path set vs the remote PR branch means the preserved
+    commit is already pushed (no-op); a non-empty set means there is work to push."""
+    worktree = tmp_path / "worktrees" / "ws_div"
+    worktree.mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _diff(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        return ("base-sha", changed_paths)
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _diff)
+
+    result = await runner._preserved_commit_already_on_remote(
+        workspace_id="ws_div",
+        worktree_path=worktree,
+        remote_branch="awf/ws_div",
+    )
+    assert result is expected
+
+
+@pytest.mark.unit
+async def test_preserved_commit_already_on_remote_missing_worktree_returns_false(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    assert (
+        await runner._preserved_commit_already_on_remote(
+            workspace_id="ws_missing",
+            worktree_path=tmp_path / "worktrees" / "ws_missing",
+            remote_branch="awf/ws_missing",
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_preserved_commit_already_on_remote_diff_error_returns_false(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "worktrees" / "ws_err"
+    worktree.mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _diff(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        raise ProtectedScopeDiffError("fetch failed")
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _diff)
+
+    assert (
+        await runner._preserved_commit_already_on_remote(
+            workspace_id="ws_err",
+            worktree_path=worktree,
+            remote_branch="awf/ws_err",
+        )
+        is False
+    )
