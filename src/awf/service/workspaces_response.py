@@ -147,11 +147,16 @@ def _workspace_block_state_response(
     if str(workspace.status) != WorkspaceStatus.blocked.value:
         return None
     raw_violations = getattr(workspace, "block_violations", None) or []
-    violations = [
-        WorkspaceBlockViolationResponse.model_validate(violation)
-        for violation in raw_violations
-        if isinstance(violation, Mapping)
-    ]
+    violations: list[WorkspaceBlockViolationResponse] = []
+    for violation in raw_violations:
+        if not isinstance(violation, Mapping):
+            continue
+        try:
+            violations.append(WorkspaceBlockViolationResponse.model_validate(violation))
+        except ValidationError:
+            # A single corrupt persisted entry (e.g. a non-int ``line``) must not
+            # 500 the whole workspace GET; skip it like the non-mapping filter above.
+            continue
     return WorkspaceBlockStateResponse(
         block_type=getattr(workspace, "block_type", None),
         block_reason_code=getattr(workspace, "block_reason_code", None),

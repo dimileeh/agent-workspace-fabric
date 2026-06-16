@@ -497,3 +497,33 @@ def test_workspace_response_omits_stale_block_state_after_resume() -> None:
     response = workspace_response(workspace)  # type: ignore[arg-type]
 
     assert response.block_state is None
+
+
+@pytest.mark.unit
+def test_workspace_response_skips_malformed_block_violation_mapping() -> None:
+    workspace = _blocked_workspace_fixture(status=WorkspaceStatus.blocked.value)
+    # A corrupt persisted entry whose ``line`` cannot coerce to int must be
+    # skipped rather than 500 the whole workspace GET.
+    workspace.block_violations = [
+        {
+            "path": "pyproject.toml",
+            "protected_pattern": "pyproject.toml",
+            "section": "tool.coverage",
+            "line": "not-an-int",
+            "reason": "Corrupt line type.",
+        },
+        {
+            "path": "Makefile",
+            "protected_pattern": "Makefile",
+            "section": None,
+            "line": 7,
+            "reason": "Protected file changed.",
+        },
+    ]
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.block_state is not None
+    assert len(response.block_state.violations) == 1
+    assert response.block_state.violations[0].path == "Makefile"
+    assert response.block_state.violations[0].line == 7
