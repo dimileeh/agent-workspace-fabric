@@ -369,6 +369,23 @@ async def _run_post_validation_conformance_check(
             report=report,
             validation_run_id=validation_run_id,
         )
+        # The satisfied conformance report is an AWF artifact/event, not source
+        # work. Remove the on-worktree copy so project-specific profiles that
+        # track the conformance report path do not see a dirty worktree at
+        # pre-push validation time. The outcome is already captured by the event
+        # above and by the validation-run artifact deposit. Best-effort: a
+        # removal failure must never discard a completed successful conformance.
+        try:
+            (worktree_path / handoff.report_path).unlink(missing_ok=True)
+        except OSError as exc:
+            _log.warning(
+                "executor.post_validation_conformance_report_unlink_failed",
+                workspace_id=workspace.id,
+                validation_run_id=validation_run_id,
+                report_path=handoff.report_path.as_posix(),
+                error_type=type(exc).__name__,
+                errno=exc.errno,
+            )
         return None
 
     gap_text = "; ".join(report.gaps) or report.summary

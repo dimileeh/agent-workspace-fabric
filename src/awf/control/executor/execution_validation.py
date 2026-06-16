@@ -700,6 +700,17 @@ async def run_validation_and_fix_cycle(
                         attempt=post_validation_conformance_fix_attempts,
                     )
             if conformance_failure is None:
+                # Deposit the conformance report (and plan) into the served
+                # artifact dir BEFORE the post-validation conformance check
+                # removes the on-worktree report copy. The deposit is best-effort
+                # and gated on planning being required; it must happen here so
+                # console artifact visibility is preserved.
+                _planning_artifacts._deposit_planning_artifacts_best_effort(
+                    self,
+                    profile=profile,
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                )
                 successful_validation_run_id = validation_run_id
                 successful_validation_workspace_head_sha = validation_workspace_head_sha
                 if recovery is not None and ws.pr_url and planning_validation_handoff is not None:

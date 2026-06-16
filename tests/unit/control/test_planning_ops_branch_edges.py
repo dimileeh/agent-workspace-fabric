@@ -577,6 +577,87 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     assert recorded == ["validation-run-1"]
     # The report is recorded as an event but never staged or committed.
     assert all("commit" not in call.args for call in runner.calls)
+    # #604: the fresh on-worktree report is also removed so it cannot dirty the
+    # tree during later validation/push cleanliness checks.
+    assert not report_abs.exists()
+
+
+class _PlanningAdapter:
+    def __init__(self, *stdout_values: str) -> None:
+        self.stdout_values = list(stdout_values)
+        self.prompts: list[str] = []
+
+    async def run(self, **kwargs: object) -> SimpleNamespace:
+        prompt = kwargs.get("prompt")
+        assert isinstance(prompt, str)
+        self.prompts.append(prompt)
+        stdout = self.stdout_values.pop(0) if self.stdout_values else ""
+        return SimpleNamespace(stdout=stdout, stderr="")
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_unlink_failure_is_non_fatal(
+    tmp_path: Path,
+) -> None:
+    """#604: if the satisfied report cannot be removed from the worktree, the
+    failure must be best-effort and non-fatal; the conformance outcome is still
+    recorded and success is returned."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    async def _record_event(**_kwargs: object) -> None:
+        return None
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    def _unlink_and_raise(**_kwargs: object) -> None:
+        # Simulate an unreadable/removable worktree state by removing the
+        # file and then raising, so the unlink guard must be best-effort.
+        report_abs.unlink(missing_ok=True)
+        raise OSError("read-only worktree")
+
+    executor._write_satisfied_post_validation_conformance_report = _unlink_and_raise  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is None
 
 
 # ---------------------------------------------------------------------------

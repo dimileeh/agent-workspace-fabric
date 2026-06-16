@@ -983,11 +983,11 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
     )
 
     assert failure is None
-    # Report stays written to the inspectable (gitignored) worktree path...
-    assert "validated evidence satisfies plan" in report_file.read_text(encoding="utf-8")
-    # ...and the conformance outcome is recorded as an event...
+    # #604: the satisfied report is removed from the worktree so it cannot
+    # dirty a tracked path, but the conformance outcome is recorded as an event.
+    assert not report_file.exists()
     assert event_markers == ["record"]
-    # ...but it is never staged or committed.
+    # It is never staged or committed.
     assert all("add" not in call.args for call in runner.calls)
     assert all("commit" not in call.args for call in runner.calls)
 
@@ -1048,7 +1048,9 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
     )
 
     assert failure is None
-    assert "validated evidence satisfies plan" in report_file.read_text(encoding="utf-8")
+    # #604: stdout-derived report is also removed from the worktree before the
+    # function returns; the conformance event is still recorded.
+    assert not report_file.exists()
     executor._record_post_validation_conformance_event.assert_awaited_once()  # type: ignore[attr-defined]
 
 
@@ -1335,3 +1337,73 @@ async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
     assert failure.details is not None
     assert failure.details["planning_scope"]["offending_paths"] == ["src/unvalidated.py"]
     executor._record_post_validation_conformance_event.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_satisfied_post_validation_conformance_report_unlinks_tracked_report(
+    tmp_path: Path,
+) -> None:
+    """#604 regression: an AWF-synthesised satisfied report must not remain as a
+    tracked dirty file. We simulate a tracked repo where the conformance report
+    path is already in the index; after the check returns success, the on-worktree
+    report file is removed so the PR monitor's dirty-worktree guard sees a clean
+    tree. The conformance event is still recorded and no git add/commit runs."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    # Pre-existing tracked-style report (e.g. from an earlier attempt).
+    report_file.write_text(
+        '{"status":"satisfied","summary":"stale success","gaps":[]}',
+        encoding="utf-8",
+    )
+    runner.queue_result(returncode=0, stdout=f" M {report_path.as_posix()}\n")  # before_compare
+    runner.queue_result(returncode=0, stdout="validated-head\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout=f" M {report_path.as_posix()}\n")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    event_markers: list[str] = []
+
+    async def record_event(**_kwargs: object) -> None:
+        event_markers.append("record")
+
+    executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is None
+    assert event_markers == ["record"]
+    # The on-worktree report is removed so it cannot dirty the tree later.
+    assert not report_file.exists()
+    # No staging or committing of the AWF artifact.
+    assert all("add" not in call.args for call in runner.calls)
+    assert all("commit" not in call.args for call in runner.calls)
