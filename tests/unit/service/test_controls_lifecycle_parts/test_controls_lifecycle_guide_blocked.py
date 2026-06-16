@@ -582,3 +582,106 @@ async def test_guide_grants_rejected_on_monitoring_pr(session: AsyncSession) -> 
             idempotency_key="guide-monitoring-grant",
             expected_version=workspace.version,
         )
+
+
+async def _monitor_origin_blocked_workspace(
+    session: AsyncSession,
+    *,
+    block_epoch: int = 1,
+) -> Workspace:
+    """A POST-PR (monitor-origin) protected-scope block: a PR exists and the
+    ``block_resume_phase`` carries the ``monitor_`` prefix that routes resume
+    back into the PR monitor rather than the executor."""
+    workspace = await _blocked_workspace(session, block_epoch=block_epoch)
+    workspace.block_resume_phase = "monitor_protected_scope_push"
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/7"
+    workspace.pr_number = 7
+    await session.flush()
+    return workspace
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_directive_resumes_into_monitor(
+    session: AsyncSession,
+) -> None:
+    from awf.runtime.operator_hints import operator_hint_from_threads
+
+    workspace = await _monitor_origin_blocked_workspace(session)
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="revert the protected workflow edit",
+        reason="operator asked for a revert",
+        idempotency_key="guide-monitor-directive",
+        expected_version=workspace.version,
+    )
+
+    # Monitor-origin block resumes back into the PR monitor, NOT the executor.
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # The hint is armed in the MONITOR state map (not the pre-PR column).
+    hint = operator_hint_from_threads(dict(workspace.monitor_threads_addressed or {}))
+    assert hint is not None
+    assert hint.directive == "revert the protected workflow edit"
+    assert hint.status == "pending"
+    # Claims are force-cleared so the monitor poll can re-claim the row.
+    assert workspace.monitor_claimed_by is None
+    assert workspace.execution_claimed_by is None
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_grant_only_arms_directiveless_hint(
+    session: AsyncSession,
+) -> None:
+    from awf.runtime.operator_hints import operator_hint_from_threads
+
+    workspace = await _monitor_origin_blocked_workspace(session, block_epoch=4)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="approved the protected change",
+        grants=["pyproject.toml"],
+        approve_policy_downgrade=True,
+        operator="alice@example.com",
+        idempotency_key="guide-monitor-grant",
+        expected_version=workspace.version,
+    )
+
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # A grant-only resume still arms a (directive-less) pending hint so decide()
+    # routes to AddressOperatorHint and pushes the preserved commit.
+    hint = operator_hint_from_threads(dict(workspace.monitor_threads_addressed or {}))
+    assert hint is not None
+    assert hint.directive is None
+    assert hint.status == "pending"
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].block_epoch == 4
+    assert grants[0].approve_policy_downgrade is True
+
+
+@pytest.mark.unit
+async def test_guide_pre_pr_blocked_stays_blocked_when_not_monitor_origin(
+    session: AsyncSession,
+) -> None:
+    """A pre-PR block (no ``monitor_`` resume phase) keeps WS-1 behavior: it stays
+    ``blocked`` and arms the directive in the pre-PR column, not the monitor map."""
+    workspace = await _blocked_workspace(session)
+    workspace.block_resume_phase = "validating"
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.guide_workspace(
+        workspace.id,
+        directive="revert it",
+        reason="operator asked for a revert",
+        idempotency_key="guide-pre-pr-directive",
+        expected_version=workspace.version,
+    )
+
+    assert response.status == WorkspaceStatus.blocked
+    assert workspace.status == WorkspaceStatus.blocked.value
+    assert pre_pr_operator_hint_from_payload(workspace.pending_operator_hint) is not None
