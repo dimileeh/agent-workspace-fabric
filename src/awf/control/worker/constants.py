@@ -37,8 +37,15 @@ _REQUESTED_ADMISSION_SLOT_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.validating,
     WorkspaceStatus.pushing,
     WorkspaceStatus.monitoring_pr,
+    # A blocked workspace keeps its warm stack, so it holds the host-port lock.
+    WorkspaceStatus.blocked,
 )
-"""Workspace statuses where the workspace holds an admission slot (e.g. a host-port lock)."""
+"""Workspace statuses where the workspace holds an admission slot (e.g. a host-port lock).
+
+Deliberately excludes ``blocked`` from ``_ACTIVE_EXECUTION_STATUSES`` and
+``_RUNTIME_HEALTH_SCAN_STATUSES`` (above): a paused ``blocked`` workspace must be
+preserve-not-reap, so it stays out of the stale-execution reaping / health-scan
+sets while still holding its admission slot here."""
 
 _STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
 
@@ -216,6 +223,41 @@ ORDERED_REQUESTED_PROVISIONING_REASON = "ORDERED_REQUESTED_PROVISIONING"
 ORDERED_READY_EXECUTION_REASON = "ORDERED_READY_EXECUTION"
 
 ORDERED_MONITOR_RESUME_REASON = "ORDERED_MONITOR_RESUME"
+
+ORDERED_BLOCKED_RESUME_REASON = "ORDERED_BLOCKED_RESUME"
+
+_BLOCKED_RESUME_REASON_CODE = "OPERATOR_GRANT_RESUME"
+"""Reason code for the worker's ``blocked -> running`` resume transition after
+an operator resolved a protected quality-gate violation via ``guide``."""
+
+_BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE = "BLOCKED_RESUME_NO_EXECUTOR"
+"""Reason code for reverting ``running -> blocked`` when a blocked-resume won the
+``blocked -> running`` claim but the worker had no executor to drive it — the
+paused state is restored instead of being left stranded in ``running``."""
+
+_BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE = "BLOCKED_RESUME_DISPATCH_ABORTED"
+"""Reason code for reverting ``running -> blocked`` when a blocked-resume won the
+``blocked -> running`` claim but the post-claim ordered-decision write (or another
+failure) aborted before a resume task was dispatched — the paused state is
+restored instead of being left stranded in ``running`` for stale-active recovery
+to FAIL."""
+
+_BLOCKED_RESUME_EXECUTION_FAILED_REASON_CODE = "BLOCKED_RESUME_EXECUTION_FAILED"
+"""Reason code for reverting ``running -> blocked`` when a blocked-resume won the
+``blocked -> running`` claim and dispatched, but ``resume_blocked_execution`` raised
+before moving the row out of ``running`` (e.g. a transient executor/setup failure).
+The owner-gated restore is a no-op once the resume has transitioned the row onward;
+when it is still ``running`` it restores the paused state instead of leaving it
+stranded for stale-active recovery to FAIL."""
+
+_BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE = "BLOCKED_RESUME_EXECUTION_CANCELLED"
+"""Reason code for reverting ``running -> blocked`` when a blocked-resume won the
+``blocked -> running`` claim and dispatched, but the resume task was *cancelled*
+(e.g. worker shutdown) while ``resume_blocked_execution`` was still in the post-claim
+``running`` state. ``CancelledError`` is a ``BaseException`` and skips the
+``except Exception`` restore path, so without mirroring the restore here the row would
+be left stranded in ``running`` for stale-active recovery to FAIL. The owner-gated
+restore is a no-op once the resume has transitioned the row onward."""
 
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 

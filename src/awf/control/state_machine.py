@@ -41,6 +41,9 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
             # Worker-restart salvage can attach an already-open PR monitor for
             # preserved active work that reached PR handoff before restart.
             WorkspaceStatus.monitoring_pr,
+            # A protected quality-gate violation pauses the run for an operator
+            # decision instead of terminally failing (pre-PR block).
+            WorkspaceStatus.blocked,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
@@ -52,6 +55,7 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
             WorkspaceStatus.running,
             WorkspaceStatus.pushing,
             WorkspaceStatus.monitoring_pr,
+            WorkspaceStatus.blocked,
             WorkspaceStatus.completed,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
@@ -61,7 +65,20 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
         {
             WorkspaceStatus.running,
             WorkspaceStatus.monitoring_pr,
+            WorkspaceStatus.blocked,
             WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+        }
+    ),
+    # A blocked workspace resumes through the worker after an operator decision:
+    # a grant re-enters the executor (running), or the operator cancels/fails it.
+    # It is non-terminal and keeps its warm stack + execution claim while paused.
+    WorkspaceStatus.blocked: frozenset(
+        {
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }

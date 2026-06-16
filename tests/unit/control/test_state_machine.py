@@ -39,19 +39,28 @@ class TestValidTransitions:
             (WorkspaceStatus.ready, WorkspaceStatus.destroying),
             (WorkspaceStatus.running, WorkspaceStatus.validating),
             (WorkspaceStatus.running, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.running, WorkspaceStatus.blocked),
             (WorkspaceStatus.running, WorkspaceStatus.failed),
             (WorkspaceStatus.running, WorkspaceStatus.cancelled),
             # Worker-restart salvage can rewind an abandoned active phase so
             # the executor can reclaim validation recovery.
             (WorkspaceStatus.validating, WorkspaceStatus.running),
             (WorkspaceStatus.validating, WorkspaceStatus.pushing),
+            (WorkspaceStatus.validating, WorkspaceStatus.blocked),
             (WorkspaceStatus.validating, WorkspaceStatus.failed),
             (WorkspaceStatus.validating, WorkspaceStatus.cancelled),
             (WorkspaceStatus.pushing, WorkspaceStatus.running),
             (WorkspaceStatus.pushing, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.pushing, WorkspaceStatus.blocked),
             (WorkspaceStatus.pushing, WorkspaceStatus.completed),
             (WorkspaceStatus.pushing, WorkspaceStatus.failed),
             (WorkspaceStatus.pushing, WorkspaceStatus.cancelled),
+            # A blocked workspace resumes (operator grant) or is terminated.
+            (WorkspaceStatus.blocked, WorkspaceStatus.running),
+            (WorkspaceStatus.blocked, WorkspaceStatus.validating),
+            (WorkspaceStatus.blocked, WorkspaceStatus.pushing),
+            (WorkspaceStatus.blocked, WorkspaceStatus.failed),
+            (WorkspaceStatus.blocked, WorkspaceStatus.cancelled),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.completed),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.failed),
             (WorkspaceStatus.monitoring_pr, WorkspaceStatus.cancelled),
@@ -90,6 +99,12 @@ class TestInvalidTransitions:
             # Cannot go backwards.
             (WorkspaceStatus.running, WorkspaceStatus.ready),
             (WorkspaceStatus.completed, WorkspaceStatus.running),
+            # blocked is non-terminal but cannot jump straight to completed /
+            # monitoring_pr / destroying — only resume or terminate.
+            (WorkspaceStatus.blocked, WorkspaceStatus.completed),
+            (WorkspaceStatus.blocked, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.blocked, WorkspaceStatus.destroying),
+            (WorkspaceStatus.blocked, WorkspaceStatus.blocked),
             # Cannot self-transition.
             (WorkspaceStatus.running, WorkspaceStatus.running),
             # monitoring_pr is a dead-end for its own inputs — only the
@@ -137,6 +152,7 @@ class TestTerminalDetection:
             WorkspaceStatus.running,
             WorkspaceStatus.validating,
             WorkspaceStatus.pushing,
+            WorkspaceStatus.blocked,
             WorkspaceStatus.completed,  # terminal *for the attempt*, but workspace can still destroy
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
@@ -171,6 +187,7 @@ class TestTerminalDetection:
             WorkspaceStatus.validating,
             WorkspaceStatus.pushing,
             WorkspaceStatus.monitoring_pr,
+            WorkspaceStatus.blocked,
         ],
     )
     def test_not_callback_terminal(self, state: WorkspaceStatus) -> None:

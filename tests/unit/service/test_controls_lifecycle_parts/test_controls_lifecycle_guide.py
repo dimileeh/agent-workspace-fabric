@@ -364,6 +364,7 @@ async def test_guide_rejects_wrong_state_and_missing_pr_before_creating_operatio
         "eligible_statuses": [
             WorkspaceStatus.monitoring_pr.value,
             WorkspaceStatus.failed.value,
+            WorkspaceStatus.blocked.value,
         ],
     }
     assert missing_pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}

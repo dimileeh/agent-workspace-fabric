@@ -160,8 +160,21 @@ async def run_validation_and_fix_cycle(
     recovery: Mapping[str, Any] | None,
     rebase_recovery_result: _RebaseRecoveryResult | None,
     git_in_worktree: Callable[[list[str]], Awaitable[CommandResult]],
+    execution_owner_id: str | None = None,
+    resume_disable_fix_passes: bool = False,
 ) -> ExecutionValidationResult:
-    """Run validate/fix attempts and emit the terminal validation state."""
+    """Run validate/fix attempts and emit the terminal validation state.
+
+    ``resume_disable_fix_passes`` marks a blocked-resume with active operator
+    grants — both an approve-and-keep grant resume (agent skipped, kept verbatim)
+    and a combined directive+grant resume (directive agent ran, grants still
+    active). A validation fix pass re-invokes the coding adapter, which would both
+    spend tokens and — while grants are active — potentially rewrite a granted
+    protected file and have the new violation suppressed by the same single-use
+    grant. So grant-bearing resumes run validation with zero fix passes: a failure
+    marks the workspace FAILED for operator triage instead of firing a fix pass.
+    This mirrors the pre-commit repair gate (PRRT_kwDOSJAM6s6J5SDf).
+    """
     if run_model is None:
         run_model = default_model
 
@@ -182,7 +195,7 @@ async def run_validation_and_fix_cycle(
             successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
         )
 
-    max_fix_passes = self._config.max_validation_fix_passes
+    max_fix_passes = 0 if resume_disable_fix_passes else self._config.max_validation_fix_passes
     profile = _profile_for_workspace(
         ws,
         worktree_path=worktree_path,
@@ -216,6 +229,19 @@ async def run_validation_and_fix_cycle(
         )
         await self._mark_failed(**mark_kwargs)
 
+    async def _enter_blocked_preserving_planning_artifacts(**block_kwargs: Any) -> None:
+        # Same artifact-ordering rationale as the FAILED path above: deposit the
+        # plan + conformance report BEFORE the block transition bumps
+        # ``updated_at`` (the console's artifact refetch key). A protected
+        # quality-gate violation pauses for an operator instead of failing.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+        await self.enter_blocked_for_protected_violation(**block_kwargs)
+
     validation_commands = [
         step.command.command
         for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
@@ -232,7 +258,9 @@ async def run_validation_and_fix_cycle(
             0,
             planning_validation_handoff.max_iterations - planning_validation_handoff.iteration,
         )
-        if planning_validation_handoff is not None and recovery is None
+        if planning_validation_handoff is not None
+        and recovery is None
+        and not resume_disable_fix_passes
         else 0
     )
     max_validation_attempts = max_fix_passes + post_validation_conformance_fix_pass_budget + 1
@@ -656,7 +684,17 @@ async def run_validation_and_fix_cycle(
                     )
                     # Recovery skips feature execution; retrying this
                     # conformance miss would only rerun validation.
-                    if recovery is not None or remaining_conformance_iterations <= 0:
+                    # ``resume_disable_fix_passes`` (a grant-bearing resume) must
+                    # likewise never fire a conformance fix pass: re-invoking the
+                    # agent while operator grants are active could rewrite a
+                    # granted protected file and have the new violation suppressed
+                    # by the same single-use grant. Mark FAILED for operator
+                    # triage instead (mirrors the zeroed validation-fix budget).
+                    if (
+                        recovery is not None
+                        or remaining_conformance_iterations <= 0
+                        or resume_disable_fix_passes
+                    ):
                         await self._finish_pending_validate_operations(
                             workspace_id=workspace_id,
                             status=OperationStatus.failed,
@@ -1154,6 +1192,7 @@ async def run_validation_and_fix_cycle(
                 changed_paths=fix_staged_paths,
                 owned_paths=list(ws.owned_paths),
                 protected_file_diffs=protected_file_diffs,
+                operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
             )
             if violations:
                 message = quality_gate_violation_message(violations)
@@ -1169,12 +1208,12 @@ async def run_validation_and_fix_cycle(
                     ),
                     error_message=message,
                 )
-                await _mark_failed_preserving_planning_artifacts(
+                await _enter_blocked_preserving_planning_artifacts(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.validating,
-                    failure_reason=FailureReason.policy_failure,
-                    reason_code="QUALITY_GATE_POLICY_CHANGED",
-                    message=message[:2000],
+                    violations=violations,
+                    resume_phase="validation_fix_cycle",
+                    execution_owner_id=execution_owner_id,
                 )
                 return ExecutionValidationResult(
                     stop=True,

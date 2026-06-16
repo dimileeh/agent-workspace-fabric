@@ -24,7 +24,12 @@ from awf.common.compose_exec import (
     build_tracked_compose_exec,
 )
 from awf.common.git_identity import (
+    git_identity_config_args,
     git_safe_directory_config_args,
+)
+from awf.common.task_tag import (
+    commit_message_with_task_tag,
+    strip_leading_task_tag,
 )
 from awf.control.executor.constants import (
     _AUDIT_GIT_PUSH_EVENT,
@@ -277,6 +282,113 @@ async def _recover_missing_git_head_or_mark_failed(
             reason_code=GIT_OBJECT_MISSING_REASON_CODE,
         )
         return False
+    return True
+
+
+async def _recover_orphan_history(
+    self: Any,
+    *,
+    workspace_id: str,
+    ws: Any,
+    base_commit: str,
+    worktree_path: Path,
+    git_in_worktree: Callable[[list[str]], Awaitable[Any]],
+    deposit_planning_artifacts: Callable[[], None],
+) -> bool:
+    """Reattach a severed feature branch to ``base_commit`` before push/PR.
+
+    Some agents sever git history (e.g. by accidentally running
+    ``git checkout --orphan`` or by re-initialising the repo). ``rev-list``
+    counts HIGH in that case (every HEAD commit is "new" w.r.t. base because
+    there's no shared ancestor), so the upstream no-work check wouldn't notice.
+    Without this guard the push succeeds but ``gh pr create`` dies with a
+    cryptic ``branch has no history in common with <base>`` error.
+
+    Recovery: ``git reset --soft <base>`` moves HEAD to the base commit while
+    leaving the index untouched — the index still reflects the orphan's tree. A
+    fresh ``git commit`` then produces a single commit on top of base containing
+    the cumulative diff, reattaching the branch to a valid ancestry so the PR
+    can be opened normally.
+
+    Returns ``True`` when HEAD descends from ``base_commit`` (caller continues),
+    or ``False`` when the branch is orphaned and automatic recovery also failed
+    — in which case the workspace is marked FAILED here (after depositing any
+    planning artifacts) and the caller must return. ``base_commit`` is always
+    populated by ``_claim_ready`` before this runs.
+    """
+    ancestor = await git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
+    if ancestor.ok:
+        return True
+    _log.warning(
+        "executor.orphan_history_detected",
+        workspace_id=workspace_id,
+        base_commit=base_commit,
+    )
+    reset = await git_in_worktree(["reset", "--soft", base_commit])
+    await self._repair_agent_git_ownership(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="orphan_history_reset",
+    )
+    if reset.ok:
+        recovery_msg = commit_message_with_task_tag(
+            f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)} (recovered from orphan)",
+            ws.task_tag,
+        )[:72]
+        recovery_body = (
+            f"AWF detected orphan history on workspace {workspace_id} "
+            f"(agent: {ws.agent}) and squashed the cumulative diff "
+            f"onto base commit {base_commit[:10]}.\n"
+        )
+        recover_commit = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                *git_identity_config_args(),
+                "commit",
+                "-m",
+                recovery_msg,
+                "-m",
+                recovery_body,
+            ],
+        )
+        await self._repair_agent_git_ownership(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="orphan_history_recovery_commit",
+        )
+        if recover_commit.ok:
+            ancestor = await git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
+    if not ancestor.ok:
+        # Planning ran before this commit step, so the preserved FAILED worktree
+        # can already hold the plan + conformance report. Deposit them BEFORE
+        # ``_mark_failed`` publishes the terminal status: the console keys its
+        # artifact refetch on the workspace ``updated_at`` (TaskArtifactsSection
+        # ``refreshKey``), and marking FAILED first would bump ``updated_at`` and
+        # let a poll observe it in the window before the deposit, record an empty
+        # artifact list, then never refetch — hiding the Plan/Validation
+        # controls. Best-effort and idempotent.
+        deposit_planning_artifacts()
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.agent_failure,
+            message=(
+                "agent severed git history — HEAD does not descend from "
+                f"base commit {base_commit[:10] if base_commit else 'unknown'}, "
+                "and automatic recovery (reset --soft + fresh commit) also failed. "
+                "The coding CLI likely ran `git checkout --orphan` or reinitialised "
+                "the repo; inspect the worktree manually."
+            ),
+        )
+        return False
+    _log.info(
+        "executor.orphan_history_recovered",
+        workspace_id=workspace_id,
+        base_commit=base_commit,
+    )
     return True
 
 

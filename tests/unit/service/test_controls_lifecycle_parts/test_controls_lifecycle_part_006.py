@@ -463,3 +463,77 @@ async def test_destroy_still_removes_worktree_unlike_cancel_stop(
 
     assert len(cleaner.calls) == 1
     assert cleaner.calls[0].remove_worktree is True
+
+
+@pytest.mark.unit
+async def test_stop_blocked_workspace_cancels_before_stack_teardown(
+    session: AsyncSession,
+) -> None:
+    """Regression: ``blocked`` is active, so stop routes it through ``cancelled``.
+
+    ``blocked`` is a non-terminal pause that still holds a warm stack and
+    execution claim. If it were not classified as active, stop would tear the
+    stack down but leave the row ``blocked`` pointing at removed resources.
+    """
+    workspace = await _workspace(session, status=WorkspaceStatus.blocked)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.stop_workspace(workspace.id, reason="halt")
+
+    assert response.status == WorkspaceStatus.cancelled
+    assert workspace.status == WorkspaceStatus.cancelled.value
+    assert stopper.calls == []
+    assert len(cleaner.calls) == 1
+    release_events = _release_events(await _events(session, workspace.id))
+    assert len(release_events) == 1
+    assert release_events[0].payload["workspace_status"] == WorkspaceStatus.cancelled.value
+
+
+@pytest.mark.unit
+async def test_destroy_blocked_workspace_requires_force(
+    session: AsyncSession,
+) -> None:
+    """Regression: ``blocked`` is active, so destroy honours the ``force`` guard."""
+    from awf.service.controls import ActiveWorkspaceDestroyError
+
+    workspace = await _workspace(session, status=WorkspaceStatus.blocked)
+    cleaner = RecordingCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    with pytest.raises(ActiveWorkspaceDestroyError):
+        await service.destroy_workspace(
+            workspace.id,
+            force=False,
+            remove_volumes=True,
+            remove_worktree=True,
+        )
+
+    assert cleaner.calls == []
+    assert await _operations(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_destroy_blocked_workspace_with_force_routes_through_cancelled(
+    session: AsyncSession,
+) -> None:
+    """Regression: forced destroy of ``blocked`` routes cancelled → destroying → destroyed.
+
+    ``blocked`` cannot transition directly to ``destroying``; classifying it as
+    active routes it through ``cancelled`` first so cleanup never runs while the
+    row stays ``blocked``.
+    """
+    workspace = await _workspace(session, status=WorkspaceStatus.blocked)
+    cleaner = RecordingCleaner(result=compose_down_succeeded_result())
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.destroy_workspace(
+        workspace.id,
+        force=True,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert workspace.status == WorkspaceStatus.destroyed.value
+    assert len(cleaner.calls) == 1

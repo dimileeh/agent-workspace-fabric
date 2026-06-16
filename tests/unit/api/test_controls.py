@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.controls as controls
@@ -190,27 +189,32 @@ async def test_control_route_functions_map_missing_workspace_errors(
 
 
 @pytest.mark.unit
-def test_guide_request_requires_non_empty_directive() -> None:
-    with pytest.raises(ValidationError):
-        WorkspaceGuideRequest()  # type: ignore[call-arg]
-    with pytest.raises(ValidationError):
-        WorkspaceGuideRequest(directive="")
-    with pytest.raises(ValidationError):
-        WorkspaceGuideRequest(directive="   ")
+def test_guide_request_directive_is_optional_with_grants() -> None:
+    # ``directive`` is now optional so a pre-PR blocked workspace can be resolved
+    # with grants alone. The per-status "non-empty directive" contract is enforced
+    # by the service layer, not the schema.
+    request = WorkspaceGuideRequest()  # type: ignore[call-arg]
+    assert request.directive == ""
+    assert request.grants == []
+    assert request.approve_policy_downgrade is False
 
-    request = WorkspaceGuideRequest(directive="implement, do not defer")
-    assert request.directive == "implement, do not defer"
-    assert request.reason is None
+    grant_request = WorkspaceGuideRequest(
+        grants=["pyproject.toml"], approve_policy_downgrade=True, reason="ok"
+    )
+    assert grant_request.directive == ""
+    assert grant_request.grants == ["pyproject.toml"]
+
+    directive_request = WorkspaceGuideRequest(directive="implement, do not defer")
+    assert directive_request.directive == "implement, do not defer"
+    assert directive_request.reason is None
 
 
 @pytest.mark.unit
-def test_guide_request_directive_schema_rejects_whitespace_only() -> None:
-    # The OpenAPI/JSON schema must mirror the runtime contract: a non-whitespace
-    # pattern so generated clients/docs do not advertise whitespace-only directives
-    # as valid (str_strip_whitespace only enforces this at validation time).
-    directive_schema = WorkspaceGuideRequest.model_json_schema()["properties"]["directive"]
-    assert directive_schema["minLength"] == 1
-    assert directive_schema["pattern"] == r"\S"
+def test_guide_request_schema_advertises_grant_fields() -> None:
+    properties = WorkspaceGuideRequest.model_json_schema()["properties"]
+    assert "grants" in properties
+    assert "approve_policy_downgrade" in properties
+    assert "operator" in properties
 
 
 @pytest.mark.unit

@@ -389,6 +389,9 @@ def _guide_workspace_impl(
     base_url: str | None,
     fmt: OutputFormat,
     action: str,
+    grants: list[str] | None = None,
+    approve_policy_downgrade: bool = False,
+    operator: str | None = None,
 ) -> None:
     headers = _control_headers(
         api_token=api_token,
@@ -396,11 +399,18 @@ def _guide_workspace_impl(
         if_match=if_match,
         action=action,
     )
+    body: dict[str, object] = {"directive": directive, "reason": reason}
+    if grants:
+        body["grants"] = grants
+    if approve_policy_downgrade:
+        body["approve_policy_downgrade"] = True
+    if operator is not None:
+        body["operator"] = operator
     response = _call(
         "POST",
         f"/v1/workspaces/{workspace_id}/guide",
         base_url=_base_url(base_url),
-        json={"directive": directive, "reason": reason},
+        json=body,
         headers=headers,
     )
     _handle_response(response, fmt)
@@ -410,12 +420,31 @@ def _guide_workspace_impl(
 def workspace_guide(
     workspace_id: str = typer.Argument(...),
     directive: str = typer.Option(
-        ...,
+        "",
         "--directive",
-        help="Operator instruction for the agent's next monitor cycle (acted on, not deferred).",
+        help=(
+            "Operator instruction for the agent's next monitor cycle (acted on, not "
+            "deferred). Optional for a blocked workspace resolved with grants alone."
+        ),
     ),
     reason: str | None = typer.Option(
-        None, "--reason", help="Optional operator audit reason (not the agent instruction)."
+        None, "--reason", help="Optional operator audit reason (required when granting paths)."
+    ),
+    grant: list[str] = typer.Option(
+        [],
+        "--grant",
+        help=(
+            "For a blocked workspace: a scoped, repo-relative path glob to "
+            "APPROVE-AND-KEEP (repeatable)."
+        ),
+    ),
+    approve_policy_downgrade: bool = typer.Option(
+        False,
+        "--approve-policy-downgrade",
+        help="Acknowledge that a granted edit may weaken validation.",
+    ),
+    operator: str | None = typer.Option(
+        None, "--operator", help="Operator identity recorded on grant audit records."
     ),
     idempotency_key: str | None = _control_idempotency_key_option(),
     if_match: str | None = typer.Option(
@@ -427,16 +456,22 @@ def workspace_guide(
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
-    """Inject an operator directive into a live monitoring workspace (issue #447).
+    """Inject an operator directive and/or scoped grants into a workspace (issue #447).
 
-    Closes the NotifyHuman/human-wait loop without cancel+re-adopt: the
-    directive reaches the agent on the monitor's next cycle. This is the
-    purpose-named affordance for operator guidance.
+    For a ``monitoring_pr`` workspace this closes the NotifyHuman/human-wait loop
+    without cancel+re-adopt. For a pre-PR ``blocked`` workspace (protected
+    quality-gate violation) it carries the operator decision: ``--grant`` globs to
+    APPROVE-AND-KEEP, ``--approve-policy-downgrade`` to acknowledge a weakening
+    edit, or a ``--directive`` to REVERT/REDO. At least one of directive/grant is
+    required.
     """
     _guide_workspace_impl(
         workspace_id=workspace_id,
         directive=directive,
         reason=reason,
+        grants=grant,
+        approve_policy_downgrade=approve_policy_downgrade,
+        operator=operator,
         idempotency_key=idempotency_key,
         if_match=if_match,
         api_token=api_token,

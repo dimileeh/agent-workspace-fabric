@@ -24,7 +24,11 @@ from awf.service.controls import (
     WorkspaceControlError,
     WorkspaceControlService,
     WorkspaceGuideEmptyDirectiveError,
+    WorkspaceGuideGrantNotAllowedError,
+    WorkspaceGuideGrantReasonRequiredError,
+    WorkspaceGuideInvalidGrantPathError,
     WorkspaceGuideMissingPrUrlError,
+    WorkspaceGuidePolicyDowngradeRequiredError,
     WorkspaceGuideStateError,
     WorkspaceNotFoundError,
     WorkspaceRebaseActiveConflictError,
@@ -128,16 +132,28 @@ async def guide_workspace(
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
-    """Inject an operator ``directive`` into a live monitoring workspace.
+    """Carry an operator decision to a workspace (directive or blocked grants).
 
-    ``directive`` is the agent instruction (acted on next monitor cycle);
-    ``reason`` is audit-only. This is the purpose-named affordance for operator
-    guidance — prefer it over overloading ``remonitor --reason``."""
+    For a live ``monitoring_pr`` workspace, ``directive`` is the agent
+    instruction (acted on next monitor cycle) and ``reason`` is audit-only.
+    This is the purpose-named affordance for operator guidance — prefer it over
+    overloading ``remonitor --reason``.
+
+    For a pre-PR ``blocked`` workspace (protected quality-gate violation), the
+    same control carries the approve-and-keep decision: ``grants`` is the list
+    of scoped path globs to approve, and ``approve_policy_downgrade``
+    acknowledges that a granted edit may weaken validation. At least one of
+    ``directive`` or ``grants`` must be provided; the service enforces the
+    per-status contract (a non-blocked workspace still requires a non-empty
+    directive)."""
     try:
         return await _controls(session).guide_workspace(
             workspace_id,
             directive=payload.directive,
             reason=payload.reason,
+            grants=payload.grants,
+            approve_policy_downgrade=payload.approve_policy_downgrade,
+            operator=payload.operator,
             idempotency_key=_require_idempotency_key(idempotency_key),
             expected_version=_parse_if_match(if_match),
         )
@@ -257,6 +273,10 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
         (
             WorkspaceGuideEmptyDirectiveError,
             WorkspaceGuideMissingPrUrlError,
+            WorkspaceGuideGrantNotAllowedError,
+            WorkspaceGuideGrantReasonRequiredError,
+            WorkspaceGuideInvalidGrantPathError,
+            WorkspaceGuidePolicyDowngradeRequiredError,
             WorkspaceRemonitorMissingPrUrlError,
             WorkspaceValidateMissingPrUrlError,
             WorkspaceRebaseMissingPrUrlError,

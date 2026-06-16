@@ -1,0 +1,475 @@
+"""Tests for the executor's ``enter_blocked_for_protected_violation`` helper.
+
+The helper is the single epoch-guarded clean exit used at every pre-PR
+protected-gate fail site. It must: pause into ``blocked`` while preserving the
+execution claim, record the violation durably, bump ``block_epoch`` on every
+entry, and refuse to clobber a row a newer claimant already holds (CAS 0-rows).
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.common.commands import FakeCommandRunner
+from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor.helpers import _reuse_persisted_block_baseline
+from awf.control.quality_gates import QualityGateViolation
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Workspace
+from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.session import make_session_factory
+from awf.runtime.validation import ValidationCoverageResult
+from tests.postgres import postgres_test_engine
+
+_BASELINE = ValidationCoverageResult(
+    provider="python",
+    percent=87.5,
+    minimum_percent=99.0,
+    enforce=True,
+    status="below_threshold",
+    reason_code="COVERAGE_BELOW_THRESHOLD",
+)
+
+_VIOLATIONS = [
+    QualityGateViolation(
+        path="pyproject.toml",
+        protected_pattern="pyproject.toml",
+        section="tool.coverage.report.fail_under",
+        line=5,
+        reason="coverage fail_under lowered from 99 to 80",
+    )
+]
+
+
+@pytest.fixture
+async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+def _executor(factory: async_sessionmaker[AsyncSession], tmp_path: Path) -> WorkspaceExecutor:
+    return WorkspaceExecutor(
+        session_factory=factory,
+        runner=FakeCommandRunner(),
+        compose=object(),  # type: ignore[arg-type]
+        validation=object(),  # type: ignore[arg-type]
+        pr_creator=object(),  # type: ignore[arg-type]
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "compose",
+        ),
+    )
+
+
+async def _seed_running(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    owner: str | None = "worker-a",
+) -> str:
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/blocked.git",
+            branch_base="main",
+            task_title="blocked helper test",
+            task_prompt="exercise the block helper",
+            agent="codex",
+            test_commands=[],
+        )
+        ws.status = WorkspaceStatus.running.value
+        ws.execution_claimed_by = owner
+        await session.commit()
+        return ws.id
+
+
+async def _get(factory: async_sessionmaker[AsyncSession], ws_id: str) -> Workspace:
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(ws_id)
+    assert ws is not None
+    return ws
+
+
+@pytest.mark.unit
+async def test_enter_blocked_pauses_and_records_violation(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    paused = await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    assert paused is True
+
+    ws = await _get(factory, ws_id)
+    assert ws.status == WorkspaceStatus.blocked.value
+    assert ws.block_reason_code == "QUALITY_GATE_POLICY_CHANGED"
+    assert ws.block_type == "protected_quality_gate"
+    assert ws.block_resume_phase == "validation_fix_cycle"
+    assert ws.block_epoch == 1
+    assert ws.blocked_at is not None
+    assert ws.block_violations[0]["path"] == "pyproject.toml"
+    # The warm-stack execution claim is preserved through the block.
+    assert ws.execution_claimed_by == "worker-a"
+
+
+@pytest.mark.unit
+async def test_reblock_bumps_block_epoch(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    # Resume the workspace (blocked -> running) the way the worker would.
+    async with factory() as session:
+        await WorkspaceRepository(session).transition_if_current(
+            ws_id,
+            from_status=WorkspaceStatus.blocked,
+            to=WorkspaceStatus.running,
+            reason_code="TEST_RESUME",
+        )
+        await session.commit()
+
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    ws = await _get(factory, ws_id)
+    # A re-block bumps block_epoch, invalidating any prior operator grants.
+    assert ws.block_epoch == 2
+
+
+@pytest.mark.unit
+async def test_reblock_clears_pending_operator_hint(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    # The worker resumes (blocked -> running) carrying an operator directive
+    # that was applied to the agent prompt for this run.
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        ws.pending_operator_hint = {
+            "reason": "revert it",
+            "directive": "revert the pyproject change",
+            "status": "pending",
+        }
+        await repo.transition_if_current(
+            ws_id,
+            from_status=WorkspaceStatus.blocked,
+            to=WorkspaceStatus.running,
+            reason_code="TEST_RESUME",
+        )
+        await session.commit()
+
+    # The applied directive did not resolve the violation, so the run re-blocks.
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    ws = await _get(factory, ws_id)
+    assert ws.block_epoch == 2
+    # The stale directive is cleared so the resume path cannot re-apply it (and
+    # cannot override a fresh approve-and-keep grant for the new epoch).
+    assert ws.pending_operator_hint is None
+
+
+async def _seed_recovery_op(
+    factory: async_sessionmaker[AsyncSession],
+    ws_id: str,
+    *,
+    operation_type: OperationType,
+    recovery_mode: str,
+) -> str:
+    async with factory() as session:
+        op = await OperationRepository(session).create(
+            workspace_id=ws_id,
+            operation_type=operation_type,
+            status=OperationStatus.running,
+            payload={"source": "pr_monitor", "recovery_mode": recovery_mode},
+        )
+        op_id = op.id
+        await session.commit()
+    return op_id
+
+
+@pytest.mark.unit
+async def test_enter_blocked_finishes_active_rebase_recovery_operation(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A rebase-only recovery fix pass produced the protected edit, so the
+    # workspace blocks while the ``OperationType.rebase`` recovery row is still
+    # running. The fix-cycle ``_finish_pending_validate_operations`` call only
+    # touches ``validate`` rows, so without this the recovery row stays active —
+    # ``execute`` would reload it via ``_get_active_recovery_payload`` and skip
+    # the agent on a directive resume, never running the REVERT/REDO guide.
+    ws_id = await _seed_running(factory)
+    op_id = await _seed_recovery_op(
+        factory,
+        ws_id,
+        operation_type=OperationType.rebase,
+        recovery_mode="rebase_only",
+    )
+    executor = _executor(factory, tmp_path)
+
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+
+    async with factory() as session:
+        finished = await OperationRepository(session).get(op_id)
+    assert finished is not None
+    assert finished.status == OperationStatus.failed.value
+    assert finished.result is not None
+    assert finished.result["reason_code"] == "QUALITY_GATE_POLICY_CHANGED"
+
+
+@pytest.mark.unit
+async def test_enter_blocked_finishes_active_validate_recovery_operation(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # The same invariant for a ``validate_only`` recovery row: entering blocked
+    # leaves no active recovery operation, so the resume path observes
+    # ``recovery is None`` and honors an operator directive.
+    ws_id = await _seed_running(factory)
+    op_id = await _seed_recovery_op(
+        factory,
+        ws_id,
+        operation_type=OperationType.validate,
+        recovery_mode="validate_only",
+    )
+    executor = _executor(factory, tmp_path)
+
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+
+    async with factory() as session:
+        finished = await OperationRepository(session).get(op_id)
+    assert finished is not None
+    assert finished.status == OperationStatus.failed.value
+
+
+@pytest.mark.unit
+async def test_enter_blocked_failed_cas_leaves_recovery_operation_untouched(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A lost CAS (status mismatch) must NOT finish recovery operations — the row
+    # is owned by a newer claimant whose recovery run is still live.
+    ws_id = await _seed_running(factory)
+    op_id = await _seed_recovery_op(
+        factory,
+        ws_id,
+        operation_type=OperationType.rebase,
+        recovery_mode="rebase_only",
+    )
+    executor = _executor(factory, tmp_path)
+
+    paused = await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.validating,  # row is running -> CAS misses
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    assert paused is False
+
+    async with factory() as session:
+        op = await OperationRepository(session).get(op_id)
+    assert op is not None
+    assert op.status == OperationStatus.running.value
+
+
+@pytest.mark.unit
+async def test_late_mark_failed_does_not_clobber_blocked(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="post_agent_commit",
+    )
+    # A stale executor's late error path tries to fail from the phase it last
+    # knew. The from_status CAS finds the row in ``blocked`` (not running), so it
+    # is a no-op: ``blocked -> failed`` is never clobbered behind the operator.
+    from awf.db.enums import FailureReason
+
+    await executor._mark_failed(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        failure_reason=FailureReason.infrastructure_failure,
+        message="late error after block",
+    )
+    ws = await _get(factory, ws_id)
+    assert ws.status == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
+async def test_enter_blocked_no_ops_on_status_mismatch(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+    # Row is ``running``; a stale executor believing it is ``validating`` loses
+    # the CAS and must not clobber the row.
+    paused = await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.validating,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    assert paused is False
+    ws = await _get(factory, ws_id)
+    assert ws.status == WorkspaceStatus.running.value
+    assert ws.block_epoch == 0
+
+
+@pytest.mark.unit
+async def test_enter_blocked_finalizes_stale_callback_on_terminal_status(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A row raced into a callback-terminal status (e.g. cancelled/completed) while
+    # a stale executor still believes it is ``running`` and tries to block. The CAS
+    # misses; like _transition_if_current / _mark_failed, this path must finalize
+    # any ignored stale callback operation so it does not hang forever.
+    ws_id = await _seed_running(factory)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        ws.status = WorkspaceStatus.completed.value
+        op = await OperationRepository(session).create(
+            workspace_id=ws_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            payload={"source": "pr_monitor", "recovery_mode": "validate_only"},
+        )
+        op_id = op.id
+        await session.commit()
+
+    executor = _executor(factory, tmp_path)
+    paused = await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    assert paused is False
+
+    async with factory() as session:
+        finished = await OperationRepository(session).get(op_id)
+    assert finished is not None
+    assert finished.status == OperationStatus.cancelled.value
+    assert finished.result is not None
+    assert finished.result["reason_code"] == "STALE_CALLBACK_IGNORED"
+    assert finished.result["callback_action"] == "enter_blocked_for_protected_violation"
+    assert finished.result["actual_status"] == WorkspaceStatus.completed.value
+
+
+@pytest.mark.unit
+async def test_enter_blocked_owner_fence_rejects_stale_worker(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws_id = await _seed_running(factory, owner="worker-a")
+    executor = _executor(factory, tmp_path)
+    # A stale worker (different owner) is fenced: 0 rows, no block.
+    paused = await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="post_agent_commit",
+        execution_owner_id="worker-b",
+    )
+    assert paused is False
+    assert (await _get(factory, ws_id)).status == WorkspaceStatus.running.value
+
+    # The live owner blocks successfully.
+    paused = await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="post_agent_commit",
+        execution_owner_id="worker-a",
+    )
+    assert paused is True
+    assert (await _get(factory, ws_id)).status == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
+async def test_persist_block_baseline_coverage_round_trips(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # The pre-agent baseline is serialized into the durable block column and
+    # rebuilds back into a coverage result for the blocked-resume ratchet.
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    await executor._persist_block_baseline_coverage(ws_id, baseline_coverage=_BASELINE)
+
+    ws = await _get(factory, ws_id)
+    assert ws.block_baseline_coverage is not None
+    assert ws.block_baseline_coverage["percent"] == 87.5
+    assert ws.block_baseline_coverage["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+    reused = _reuse_persisted_block_baseline(ws.block_baseline_coverage)
+    assert reused is not None
+    assert reused.percent == 87.5
+    assert reused.reason_code == "COVERAGE_BELOW_THRESHOLD"
+
+
+@pytest.mark.unit
+async def test_persist_block_baseline_coverage_none_is_stored_as_null(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A skipped/absent baseline persists as NULL so a resume reproduces the
+    # original run's missing baseline rather than inventing one.
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    await executor._persist_block_baseline_coverage(ws_id, baseline_coverage=None)
+
+    ws = await _get(factory, ws_id)
+    assert ws.block_baseline_coverage is None
+    assert _reuse_persisted_block_baseline(ws.block_baseline_coverage) is None
+
+
+@pytest.mark.unit
+async def test_persist_block_baseline_coverage_missing_workspace_is_noop(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # No row to update (e.g. concurrent destroy): silently no-op, never raise.
+    executor = _executor(factory, tmp_path)
+    await executor._persist_block_baseline_coverage("ws_missing", baseline_coverage=_BASELINE)

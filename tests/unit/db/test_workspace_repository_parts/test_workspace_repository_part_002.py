@@ -1419,6 +1419,13 @@ class TestOwnedPathOverlapLookup:
                 "src/awf/api/*.py",
             ),
             (
+                # A blocked workspace keeps its worktree while paused, so its
+                # owned paths still occupy and must report overlap.
+                WorkspaceStatus.blocked,
+                "src/awf/api/**",
+                "src/awf/api/routes/workspaces.py",
+            ),
+            (
                 WorkspaceStatus.running,
                 "src/awf/api/routes/workspaces.py",
                 "src/awf/api/../api/routes/workspaces.py",

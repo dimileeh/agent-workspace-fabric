@@ -77,6 +77,9 @@ from awf.db.repositories.workspace_repo_host_ports import (
     find_active_owned_path_overlaps,
     find_host_port_conflicts,
 )
+from awf.db.repositories.workspace_repo_resumable import (
+    list_resumable_blocked_ids,
+)
 
 
 def _transition_releases_provisioning_execution_claim(
@@ -654,6 +657,47 @@ class WorkspaceRepository:
             )
         stmt = stmt.limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+    async def list_resumable_blocked_ids(
+        self,
+        *,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
+    ) -> builtins.list[str]:
+        """Return ``blocked`` workspace IDs an operator has cleared for resume.
+
+        A pre-PR ``blocked`` workspace is resumable only once an operator has
+        acted on it: ``guide`` either arms a non-empty directive in
+        ``pending_operator_hint`` (revert/redo) or records at least one grant
+        active for the workspace's CURRENT ``block_epoch`` (approve-and-keep).
+        Blocked workspaces still awaiting an operator decision carry neither, so
+        they are excluded here — otherwise the worker would spin them through
+        ``blocked -> running -> blocked`` re-running the same gate every cycle.
+
+        When ``node_id`` is given the result is scoped to that owning node
+        (mirroring the scheduler/cleanup ``node_id == node_id OR node_id IS
+        NULL`` predicate): a blocked workspace's warm compose stack/worktree is
+        preserved on the node that ran it, so a worker on another node must not
+        claim it and resume against resources that only exist elsewhere. NULL
+        rows (legacy/unstamped) stay adoptable by any node.
+
+        The hint branch matches the resume path's acceptance test exactly: a
+        directive-less, whitespace-only, or non-string ``directive`` in
+        ``pending_operator_hint`` (which ``execution_flow`` treats as absent via
+        ``_optional_stripped_string`` — including non-``str`` JSON values such as
+        ``true``/``123``, running neither the revert/redo nor the approve-and-keep
+        branch) is NOT eligible on its own — selecting it would reproduce the very
+        spin loop the non-null guard was meant to avoid.
+        Oldest ``updated_at`` first for FIFO fairness across cleared workspaces.
+        """
+        return await list_resumable_blocked_ids(
+            self._session,
+            self._dialect_name,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            node_id=node_id,
+        )
 
     async def list_schedulable_ids(
         self,
