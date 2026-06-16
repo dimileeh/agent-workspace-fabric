@@ -248,6 +248,39 @@ class Workspace(Base):
     )
     """Lease expiry for ``monitor_claimed_by`` so crashed workers do not wedge recovery."""
 
+    # Block-state metadata (populated only while status == ``blocked``).
+    block_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """Reason code for the current pause (e.g. ``QUALITY_GATE_POLICY_CHANGED``)."""
+
+    block_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """Block category (e.g. ``protected_quality_gate``)."""
+
+    block_violations: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    """Normalized protected-violation records: ``[{path, section, line, reason}]``."""
+
+    block_resume_phase: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """Executor phase the workspace was in when it blocked (audit/resume context)."""
+
+    block_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0"), default=0
+    )
+    """Monotonic counter incremented on EACH entry into ``blocked``.
+
+    Operator grants are scoped to the ``block_epoch`` live at grant time; a
+    re-block bumps this value, which invalidates all prior grants. This is the
+    mechanism that makes "a later DIFFERENT change to the same file re-block":
+    the stale grant no longer matches the current epoch. Distinct from
+    ``execution_claim_epoch`` (claim fencing) — do not conflate the two."""
+
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """Wall-clock entry into the current block, for block-age surfacing."""
+
+    pending_operator_hint: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    """Serialized pre-PR ``OperatorHint`` awaiting the worker resume path.
+
+    Stored in a dedicated column rather than reusing ``monitor_threads_addressed``
+    (which carries monitor-state semantics and is reset by monitor logic)."""
+
     # Idempotency
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
@@ -297,6 +330,12 @@ class Workspace(Base):
         cascade="all, delete-orphan",
         lazy="select",
         order_by="EgressAuditRecord.enforced_at",
+    )
+    operator_granted_paths: Mapped[list[OperatorGrantAuditRecord]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="select",
+        order_by="OperatorGrantAuditRecord.created_at",
     )
     task_attempt: Mapped[TaskAttempt | None] = relationship(
         back_populates="workspace",
@@ -1243,6 +1282,69 @@ class EgressAuditRecord(Base):
     )
 
     workspace: Mapped[Workspace] = relationship(back_populates="egress_audit_records")
+
+
+class OperatorGrantAuditRecord(Base):
+    """Immutable audit record of an operator's scoped protected-path grant.
+
+    An operator resolves a pre-PR ``blocked`` workspace (protected quality-gate
+    violation) by APPROVE-AND-KEEP: a scoped, single-use, epoch-bound grant for a
+    specific repo-relative path glob. This is deliberately NOT a flat standing
+    path list on the workspace — each grant authorizes exactly one block instance
+    (``block_epoch``) and is consumed once applied, so a later DIFFERENT change to
+    the same file (a new block, a bumped epoch) must be granted again. The agent
+    can never write these rows; ``operator`` is always set by the control plane.
+    """
+
+    __tablename__ = "operator_grant_audit_records"
+    __table_args__ = (
+        Index("ix_operator_grant_audit_records_workspace", "workspace_id"),
+        Index("ix_operator_grant_audit_records_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+
+    operator: Mapped[str] = mapped_column(String(256), nullable=False)
+    """Identity of the operator who issued the grant (control-plane-set)."""
+
+    reason: Mapped[str] = mapped_column(String(2048), nullable=False)
+    """Required operator audit reason for the grant."""
+
+    normalized_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    """Canonicalized, repo-relative path glob the grant authorizes (no ``../``)."""
+
+    block_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    """The ``Workspace.block_epoch`` value this grant authorizes. A grant is only
+    active while it equals the workspace's current epoch."""
+
+    approve_policy_downgrade: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    """Operator acknowledgement that the granted edit may WEAKEN validation. A
+    weakening edit (or a classifier-less protected file) requires this flag."""
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """Set when the grant is applied past the gate (single-use)."""
+
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """Reserved for an explicit operator revoke (no CLI surface this slice)."""
+
+    workspace: Mapped[Workspace] = relationship(back_populates="operator_granted_paths")
+
+    @property
+    def is_active_for_epoch(self) -> bool:
+        """A grant authorizes the gate iff it is unconsumed, unrevoked, and
+        scoped to the workspace's CURRENT block epoch.
+
+        Epoch comparison is the caller's responsibility (it needs the live
+        workspace value); this property only covers the consumed/revoked legs."""
+        return self.consumed_at is None and self.revoked_at is None
 
 
 class WorkerHeartbeat(Base):
