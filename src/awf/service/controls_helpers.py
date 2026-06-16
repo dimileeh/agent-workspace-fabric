@@ -781,4 +781,11 @@ def _is_active(status_value: WorkspaceStatus) -> bool:
         WorkspaceStatus.validating,
         WorkspaceStatus.pushing,
         WorkspaceStatus.monitoring_pr,
+        # ``blocked`` is a non-terminal pause that still holds a warm stack,
+        # worktree, and execution claim. It must classify as active so stop/
+        # destroy route it through ``cancelled`` before stack teardown and so
+        # destroy honours the ``force`` guard — otherwise cleanup would run
+        # while the row stays ``blocked`` pointing at removed resources, and
+        # ``blocked`` cannot transition directly to ``destroying``.
+        WorkspaceStatus.blocked,
     }
