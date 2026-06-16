@@ -60,6 +60,10 @@ ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
 )
 HOST_PORT_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
     *ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
+    # A blocked workspace keeps its warm compose stack (and the host ports
+    # it bound) while paused for the operator, so a concurrent create/retry
+    # on the same node must still treat those ports as occupied.
+    WorkspaceStatus.blocked.value,
     WorkspaceStatus.destroying.value,
 )
 """Workspace statuses whose host ports should be checked for collision."""
