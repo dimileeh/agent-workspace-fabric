@@ -222,3 +222,49 @@ class TestDirectoryWideGrant:
             ),
         )
         assert violations != []
+
+
+@pytest.mark.unit
+class TestWildcardGrantMembership:
+    """A wildcard grant authorizes only the paths its glob actually matches.
+
+    The grant matcher uses precise glob membership, not the symmetric owned-path
+    overlap predicate (which reduced a wildcard to its literal directory prefix
+    and over-authorized the whole directory).
+    """
+
+    def _deploy_weakening(self, grants: tuple[GrantSpec, ...]) -> list:
+        return find_protected_quality_gate_changes(
+            changed_paths=[".github/workflows/deploy.yml"],
+            owned_paths=[],
+            protected_file_diffs={
+                ".github/workflows/deploy.yml": ProtectedFileDiff(
+                    path=".github/workflows/deploy.yml",
+                    old_text=_WORKFLOW_OLD,
+                    new_text=_WORKFLOW_WEAKENED,
+                )
+            },
+            operator_granted_paths=grants,
+        )
+
+    def test_wildcard_grant_does_not_authorize_non_matching_workflow(self) -> None:
+        grants = (GrantSpec(path=".github/workflows/*-lint.yml", approve_policy_downgrade=True),)
+        # deploy.yml does not match *-lint.yml, so the ack grant must not suppress.
+        assert self._deploy_weakening(grants) != []
+
+    def test_wildcard_grant_authorizes_matching_workflow(self) -> None:
+        violations = find_protected_quality_gate_changes(
+            changed_paths=[".github/workflows/ci-lint.yml"],
+            owned_paths=[],
+            protected_file_diffs={
+                ".github/workflows/ci-lint.yml": ProtectedFileDiff(
+                    path=".github/workflows/ci-lint.yml",
+                    old_text=_WORKFLOW_OLD,
+                    new_text=_WORKFLOW_WEAKENED,
+                )
+            },
+            operator_granted_paths=(
+                GrantSpec(path=".github/workflows/*-lint.yml", approve_policy_downgrade=True),
+            ),
+        )
+        assert violations == []

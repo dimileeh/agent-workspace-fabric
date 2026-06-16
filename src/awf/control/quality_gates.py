@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ PROTECTED_QUALITY_GATE_PATHS: Final[tuple[str, ...]] = (
     "setup.py",
     "tox.ini",
 )
+_GRANT_WILDCARD_CHARS: Final[tuple[str, ...]] = ("*", "?", "[")
+"""Glob metacharacters that make an operator grant a wildcard membership match."""
 INTERNAL_PLAN_ARTIFACT_PREFIX: Final[str] = "docs/awf-plans/"
 PLAN_ONLY_OUTPUT_REASON_CODE: Final[str] = "PLAN_ONLY_OUTPUT"
 QUALITY_GATE_POLICY_CHANGED_REASON_CODE: Final[str] = "QUALITY_GATE_POLICY_CHANGED"
@@ -383,13 +386,22 @@ def _protected_path_violations(
 
 
 def _grant_matches(path: str, grant_path: str) -> bool:
-    """Return whether a grant glob covers a changed path.
+    """Return whether an operator grant authorizes a changed path.
 
-    Reuses the owned-path overlap matcher so grant globs share the exact
-    directory/wildcard semantics as ``owned_paths`` (e.g. a directory-wide
-    ``.github/workflows/`` grant covers nested workflow files)."""
+    Grants use precise *membership* semantics rather than the symmetric
+    owned-path overlap predicate. A wildcard grant authorizes only the paths its
+    glob actually matches, so ``.github/workflows/*-lint.yml`` does NOT cover
+    ``.github/workflows/deploy.yml`` — the overlap matcher reduced the glob to
+    its literal ``.github/workflows/`` prefix and over-authorized the whole
+    directory. An explicit literal grant still covers an exact file and, for a
+    directory grant, every nested file beneath it."""
     normalized_grant = _normalize_path(grant_path)
-    return bool(normalized_grant) and owned_paths_overlap(path, normalized_grant)
+    if not normalized_grant:
+        return False
+    if any(char in normalized_grant for char in _GRANT_WILDCARD_CHARS):
+        return fnmatch.fnmatchcase(path, normalized_grant)
+    grant_dir = normalized_grant.rstrip("/")
+    return path == grant_dir or path.startswith(f"{grant_dir}/")
 
 
 def _grant_with_policy_downgrade_matches(
