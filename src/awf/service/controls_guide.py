@@ -29,7 +29,6 @@ from awf.runtime.operator_hints import (
 from awf.runtime.pr_monitor import OperatorHint
 from awf.service.controls_errors import (
     _GUIDE_ELIGIBLE_STATUSES,
-    WorkspaceGuideDirectiveOrGrantRequiredError,
     WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideGrantNotAllowedError,
     WorkspaceGuideGrantReasonRequiredError,
@@ -340,9 +339,11 @@ async def _guide_blocked_workspace(
     directive (if any) is armed in the dedicated ``pending_operator_hint`` column
     for the worker resume path. The workspace stays ``blocked`` — the worker's
     blocked-resume claim performs the ``blocked -> running`` transition.
+
+    ``guide_workspace`` already rejects an empty directive with no grants (with
+    ``WorkspaceGuideEmptyDirectiveError``) before dispatching here, so at least
+    one of ``directive_text``/``grant_inputs`` is always present.
     """
-    if not directive_text and not grant_inputs:
-        raise WorkspaceGuideDirectiveOrGrantRequiredError()
     canonical_grants = sorted({_canonicalize_grant_path(path) for path in grant_inputs})
     if canonical_grants and not reason_text:
         raise WorkspaceGuideGrantReasonRequiredError()

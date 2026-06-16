@@ -147,17 +147,6 @@ class WorkspaceGuideStateError(WorkspaceControlError):
         )
 
 
-class WorkspaceGuideDirectiveOrGrantRequiredError(WorkspaceControlError):
-    def __init__(self) -> None:
-        super().__init__(
-            error_code="WORKSPACE_GUIDE_DIRECTIVE_OR_GRANT_REQUIRED",
-            message=(
-                "Workspace guide on a blocked workspace requires at least one of "
-                "a directive or a path grant."
-            ),
-        )
-
-
 class WorkspaceGuideGrantNotAllowedError(WorkspaceControlError):
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
@@ -284,7 +273,6 @@ __all__ = [
     "IdempotencyConflictError",
     "VersionConflictError",
     "WorkspaceControlError",
-    "WorkspaceGuideDirectiveOrGrantRequiredError",
     "WorkspaceGuideEmptyDirectiveError",
     "WorkspaceGuideGrantNotAllowedError",
     "WorkspaceGuideGrantReasonRequiredError",

@@ -23,7 +23,6 @@ from awf.service.controls import (
     VersionConflictError,
     WorkspaceControlError,
     WorkspaceControlService,
-    WorkspaceGuideDirectiveOrGrantRequiredError,
     WorkspaceGuideEmptyDirectiveError,
     WorkspaceGuideGrantNotAllowedError,
     WorkspaceGuideGrantReasonRequiredError,
@@ -265,7 +264,6 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
         (
             WorkspaceGuideEmptyDirectiveError,
             WorkspaceGuideMissingPrUrlError,
-            WorkspaceGuideDirectiveOrGrantRequiredError,
             WorkspaceGuideGrantNotAllowedError,
             WorkspaceGuideGrantReasonRequiredError,
             WorkspaceGuideInvalidGrantPathError,
