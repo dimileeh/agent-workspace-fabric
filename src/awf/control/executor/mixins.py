@@ -19,6 +19,7 @@ class ExecutorDelegatesMixin:
     _repair_agent_git_ownership = _git_methods._repair_agent_git_ownership
     _run_agent_git_writability_preflight = _git_methods._run_agent_git_writability_preflight
     _recover_missing_git_head_or_mark_failed = _git_methods._recover_missing_git_head_or_mark_failed
+    _recover_orphan_history = _git_methods._recover_orphan_history
     _record_git_object_recovery_event = _git_methods._record_git_object_recovery_event
     _recover_feature_branch_remote_push_branch = (
         _git_methods._recover_feature_branch_remote_push_branch
