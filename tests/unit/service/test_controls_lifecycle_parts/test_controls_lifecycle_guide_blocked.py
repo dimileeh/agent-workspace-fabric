@@ -194,8 +194,8 @@ async def test_guide_blocked_directive_with_new_grant_keeps_fresh_grant(
     session: AsyncSession,
 ) -> None:
     # A combined guide (grant + directive) must NOT revoke the grant it just
-    # recorded in the same call — only a directive-ONLY decision supersedes
-    # prior grants.
+    # recorded in the same call — a directive supersedes PRE-EXISTING grants but
+    # preserves the paths granted by this same request.
     workspace = await _blocked_workspace(
         session,
         block_epoch=2,
@@ -216,6 +216,49 @@ async def test_guide_blocked_directive_with_new_grant_keeps_fresh_grant(
     assert len(grants) == 1
     assert grants[0].normalized_path == "docs/CONTRIBUTING.md"
     assert grants[0].revoked_at is None
+
+
+@pytest.mark.unit
+async def test_guide_blocked_directive_with_new_grant_revokes_prior_grant(
+    session: AsyncSession,
+) -> None:
+    # An earlier approve-and-keep guide recorded a current-epoch grant for one
+    # path. Before resume, the operator sends a COMBINED directive + grant that
+    # grants a DIFFERENT path. The directive is the latest decision: the prior
+    # grant must be revoked (otherwise the resume path's protected gates would
+    # still suppress a violation on the old path) while the freshly granted path
+    # is preserved.
+    workspace = await _blocked_workspace(session, block_epoch=4)
+    session.add(
+        OperatorGrantAuditRecord(
+            id=new_operator_grant_id(),
+            workspace_id=workspace.id,
+            operator="alice@example.com",
+            reason="approved keeping the old file",
+            normalized_path="pyproject.toml",
+            block_epoch=4,
+            approve_policy_downgrade=True,
+            created_at=utcnow(),
+        )
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="revert pyproject and fix the other module instead",
+        reason="changed my mind: revert that, grant only the new file",
+        grants=["docs/CONTRIBUTING.md"],
+        operator="alice@example.com",
+        idempotency_key="guide-blocked-directive-revokes-prior-keeps-fresh",
+        expected_version=workspace.version,
+    )
+
+    grants = await _grants(session, workspace.id)
+    by_path = {grant.normalized_path: grant for grant in grants}
+    # The pre-existing grant is revoked; the freshly granted path stays active.
+    assert by_path["pyproject.toml"].revoked_at is not None
+    assert by_path["docs/CONTRIBUTING.md"].revoked_at is None
 
 
 @pytest.mark.unit

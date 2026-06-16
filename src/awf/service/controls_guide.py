@@ -412,10 +412,12 @@ async def _guide_blocked_workspace(
     now = utcnow()
     created_grants: list[dict[str, object]] = []
     revoked_grants: list[str] = []
+    created_grant_ids: set[str] = set()
     for grant_path in canonical_grants:
+        grant_id = new_operator_grant_id()
         self._session.add(
             OperatorGrantAuditRecord(
-                id=new_operator_grant_id(),
+                id=grant_id,
                 workspace_id=workspace.id,
                 operator=operator_id,
                 reason=reason_text,
@@ -425,6 +427,7 @@ async def _guide_blocked_workspace(
                 created_at=now,
             )
         )
+        created_grant_ids.add(grant_id)
         created_grants.append(
             {"path": grant_path, "approve_policy_downgrade": approve_policy_downgrade}
         )
@@ -441,33 +444,36 @@ async def _guide_blocked_workspace(
         )
         pending_hint_payload = build_pending_operator_hint_payload(hint)
         workspace.pending_operator_hint = pending_hint_payload
-        if not canonical_grants:
-            # Directive-only guide: revoke current-epoch grants armed by a prior
-            # approve-and-keep guide. The blocked-resume path loads
-            # ``_active_operator_grant_specs()`` for every protected-file gate
-            # regardless of the directive, so a stale grant would still suppress a
-            # violation on the same path even though the latest operator decision
-            # was to revert/redo. Mirror of the grants-only branch clearing a
-            # stale directive: the latest operator decision must win. A combined
-            # guide (``canonical_grants`` non-empty) is exempt — it must not
-            # revoke the grant it is recording in this same call.
-            stale_grants = (
-                (
-                    await self._session.execute(
-                        select(OperatorGrantAuditRecord).where(
-                            OperatorGrantAuditRecord.workspace_id == workspace.id,
-                            OperatorGrantAuditRecord.block_epoch == workspace.block_epoch,
-                            OperatorGrantAuditRecord.consumed_at.is_(None),
-                            OperatorGrantAuditRecord.revoked_at.is_(None),
-                        )
+        # A directive is the latest operator decision and supersedes any grant
+        # armed by an EARLIER guide. The blocked-resume path loads
+        # ``_active_operator_grant_specs()`` for every protected-file gate
+        # regardless of the directive, so a pre-existing current-epoch grant
+        # would still suppress a violation on its path even though the latest
+        # operator decision was to revert/redo. Revoke pre-existing current-epoch
+        # grants (mirror of the grants-only branch clearing a stale directive:
+        # the latest operator decision must win) while PRESERVING the grants this
+        # same request is recording — a combined ``--directive ... --grant ...``
+        # guide keeps exactly the paths it just granted and no more.
+        stale_grants = (
+            (
+                await self._session.execute(
+                    select(OperatorGrantAuditRecord).where(
+                        OperatorGrantAuditRecord.workspace_id == workspace.id,
+                        OperatorGrantAuditRecord.block_epoch == workspace.block_epoch,
+                        OperatorGrantAuditRecord.consumed_at.is_(None),
+                        OperatorGrantAuditRecord.revoked_at.is_(None),
                     )
                 )
-                .scalars()
-                .all()
             )
-            for stale_grant in stale_grants:
-                stale_grant.revoked_at = now
-                revoked_grants.append(stale_grant.normalized_path)
+            .scalars()
+            .all()
+        )
+        for stale_grant in stale_grants:
+            if stale_grant.id in created_grant_ids:
+                # Preserve the grants recorded by this combined guide.
+                continue
+            stale_grant.revoked_at = now
+            revoked_grants.append(stale_grant.normalized_path)
     else:
         # Grants-only guide: clear any directive armed by a prior guide. The
         # blocked-resume path prioritizes a stored directive over active grants
