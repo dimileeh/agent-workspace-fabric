@@ -16,6 +16,8 @@ from awf.api.schemas import (
     ProviderRecoveryStateResponse,
     ValidationFreshnessSummaryResponse,
     WorkspaceAppEndpointResponse,
+    WorkspaceBlockStateResponse,
+    WorkspaceBlockViolationResponse,
     WorkspaceResponse,
     WorkspaceRetryResponse,
     WorkspaceRuntimeHealthResponse,
@@ -133,6 +135,33 @@ def _provider_recovery_state_response(
     )
 
 
+def _workspace_block_state_response(
+    workspace: Workspace,
+) -> WorkspaceBlockStateResponse | None:
+    """Project the persisted block-state columns while a workspace is ``blocked``.
+
+    The ``block_*`` columns are only populated on entry into ``blocked`` and are
+    not cleared on resume, so gate the projection on the live status to avoid
+    surfacing stale block details on a workspace that has since moved on.
+    """
+    if str(workspace.status) != WorkspaceStatus.blocked.value:
+        return None
+    raw_violations = getattr(workspace, "block_violations", None) or []
+    violations = [
+        WorkspaceBlockViolationResponse.model_validate(violation)
+        for violation in raw_violations
+        if isinstance(violation, Mapping)
+    ]
+    return WorkspaceBlockStateResponse(
+        block_type=getattr(workspace, "block_type", None),
+        block_reason_code=getattr(workspace, "block_reason_code", None),
+        block_resume_phase=getattr(workspace, "block_resume_phase", None),
+        block_epoch=getattr(workspace, "block_epoch", 0) or 0,
+        blocked_at=getattr(workspace, "blocked_at", None),
+        violations=violations,
+    )
+
+
 def workspace_response(
     workspace: Workspace,
     *,
@@ -148,6 +177,7 @@ def workspace_response(
         else validation_provenance_unavailable(workspace)
     )
     computed_fields["runtime_health"] = _workspace_runtime_health_from_events(workspace)
+    computed_fields["block_state"] = _workspace_block_state_response(workspace)
     computed_fields["failure_details"] = workspace_failure_details_payload(workspace)
     computed_fields["coordination_warnings"] = coordination_warnings_from_task_policy(
         workspace.task_policy

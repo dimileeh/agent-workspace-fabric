@@ -7318,6 +7318,132 @@
         "title": "WorkspaceArtifactResponse",
         "type": "object"
       },
+      "WorkspaceBlockStateResponse": {
+        "description": "Operator-facing block details surfaced while a workspace is ``blocked``.\n\nProjects the persisted ``block_*`` columns so ``GET /v1/workspaces/{id}``\nexposes the violating paths and block age, not just ``status=blocked``.",
+        "properties": {
+          "block_epoch": {
+            "default": 0,
+            "title": "Block Epoch",
+            "type": "integer"
+          },
+          "block_reason_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Reason Code"
+          },
+          "block_resume_phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Resume Phase"
+          },
+          "block_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block Type"
+          },
+          "blocked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked At"
+          },
+          "violations": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceBlockViolationResponse"
+            },
+            "title": "Violations",
+            "type": "array"
+          }
+        },
+        "title": "WorkspaceBlockStateResponse",
+        "type": "object"
+      },
+      "WorkspaceBlockViolationResponse": {
+        "description": "A single protected-file violation recorded when a workspace blocked.\n\nMirrors ``quality_gate_violation_details`` so operators can see which paths\ntriggered the pause and decide which ``guide --grant``/directive to issue.",
+        "properties": {
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "protected_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protected Pattern"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Section"
+          }
+        },
+        "title": "WorkspaceBlockViolationResponse",
+        "type": "object"
+      },
       "WorkspaceCompanionRequest": {
         "additionalProperties": false,
         "description": "Managed cross-repo companion service requested for one workspace.",
@@ -10327,6 +10453,16 @@
               }
             ],
             "title": "Base Commit"
+          },
+          "block_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkspaceBlockStateResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "branch_base": {
             "title": "Branch Base",
