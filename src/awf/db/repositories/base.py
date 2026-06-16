@@ -57,13 +57,15 @@ ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.validating.value,
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
+    # A blocked workspace keeps its worktree (and the owned paths it edits)
+    # while paused for the operator, so a concurrent create/retry with
+    # overlapping owned paths must still treat those paths as occupied. It
+    # also keeps its warm compose stack and bound host ports, so this status
+    # flows into HOST_PORT_CONFLICT_STATUSES below via the splat.
+    WorkspaceStatus.blocked.value,
 )
 HOST_PORT_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
     *ACTIVE_OWNED_PATH_OVERLAP_STATUSES,
-    # A blocked workspace keeps its warm compose stack (and the host ports
-    # it bound) while paused for the operator, so a concurrent create/retry
-    # on the same node must still treat those ports as occupied.
-    WorkspaceStatus.blocked.value,
     WorkspaceStatus.destroying.value,
 )
 """Workspace statuses whose host ports should be checked for collision."""
