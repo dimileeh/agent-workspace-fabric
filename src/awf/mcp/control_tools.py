@@ -288,8 +288,9 @@ def register_control_tools(
             max_length=1024,
             description="Optional operator audit reason (required when granting paths).",
         ),
-        grants: list[str] | None = Field(
-            default=None,
+        grants: list[str] = Field(
+            default_factory=list,
+            max_length=64,
             description=(
                 "For a blocked workspace: scoped, repo-relative path globs to "
                 "APPROVE-AND-KEEP. At least one of directive/grants is required."

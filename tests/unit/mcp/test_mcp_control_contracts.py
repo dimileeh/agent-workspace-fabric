@@ -502,6 +502,20 @@ class TestToolRegistrationAndSchema:
         props = tools["awf_retry_workspace"].inputSchema.get("properties", {})
         assert "expected_version" not in props
 
+    async def test_guide_grants_mirrors_rest_request_contract(self) -> None:
+        # The MCP guide tool must mirror the REST ``WorkspaceGuideRequest``
+        # contract 1:1: ``grants`` is a non-null list defaulting to empty with a
+        # 64-item bound, not a nullable field defaulting to ``None``.
+        mcp = build_mcp_server(service=_MockService())
+        tools = {t.name: t for t in await mcp.list_tools()}
+        schema = tools["awf_guide_workspace"].inputSchema
+        grants = schema["properties"]["grants"]
+        assert grants.get("type") == "array"
+        assert grants.get("items") == {"type": "string"}
+        assert grants.get("maxItems") == 64
+        # Non-null list defaulting via factory: never a required input.
+        assert "grants" not in schema.get("required", [])
+
 
 @pytest.mark.unit
 class TestSuccessPaths:
@@ -598,7 +612,7 @@ class TestSuccessPaths:
                         "workspace_id": "ws_guide",
                         "directive": "implement, do not defer",
                         "reason": "operator decision",
-                        "grants": None,
+                        "grants": [],
                         "approve_policy_downgrade": False,
                         "operator": None,
                         "idempotency_key": "ik-g",
