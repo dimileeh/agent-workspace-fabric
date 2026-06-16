@@ -81,6 +81,7 @@ from awf.runtime.planning import (
 from awf.runtime.workspace_prompt_context import (
     render_workspace_runtime_context,
 )
+from awf.service.artifacts import deposit_workspace_planning_artifacts
 from awf.service.coordination import (
     coordination_warnings_from_task_policy,
 )
@@ -373,8 +374,20 @@ async def _run_post_validation_conformance_check(
         # work. Remove the on-worktree copy so project-specific profiles that
         # track the conformance report path do not see a dirty worktree at
         # pre-push validation time. The outcome is already captured by the event
-        # above and by the validation-run artifact deposit. Best-effort: a
-        # removal failure must never discard a completed successful conformance.
+        # above and by the validation-run artifact deposit.
+        #
+        # For successful planned workspaces where the report was produced from
+        # stdout or a fresh on-disk file, deposit a snapshot into the served
+        # artifact dir BEFORE removing the on-worktree copy. The deposit is
+        # best-effort and gated on ``planning.required`` so the console still
+        # surfaces the conformance report after teardown.
+        deposit_workspace_planning_artifacts(
+            work_dir=self._config.compose_projects_root.parent,
+            workspace_id=workspace.id,
+            worktree_path=worktree_path,
+            plan_path=handoff.plan_path,
+            report_path=handoff.report_path,
+        )
         # The report may be tracked in the project profile. Deleting a tracked
         # file leaves a staged deletion (``D ...`` in ``git status``), which
         # still dirties the worktree. Restore the path from the index first to

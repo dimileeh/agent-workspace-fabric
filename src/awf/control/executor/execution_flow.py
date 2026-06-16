@@ -1145,11 +1145,6 @@ async def execute(
         rebase_recovery_result=rebase_recovery_result,
         git_in_worktree=_git_in_worktree,
     )
-    # Deposit the worktree plan + conformance report into the served artifact
-    # dir before teardown so the console can surface them (best-effort; see the
-    # helper). Runs on the success path and the validation/conformance stop
-    # paths (preserved FAILED workspaces) while the worktree still exists.
-    _deposit_planning_artifacts()
     if validation_result.stop:
         return
     assert profile is not None

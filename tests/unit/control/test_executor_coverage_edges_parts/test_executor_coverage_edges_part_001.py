@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
@@ -26,6 +26,7 @@ from awf.control.executor.recovery_payloads import (
     _recovery_needs_existing_pr_push,
 )
 from awf.control.executor.types import (
+    _PlanningRunFailure,
     _PlanningValidationHandoff,
     _RebaseRecoveryResult,
 )
@@ -40,7 +41,10 @@ from awf.runtime.planning import (
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
+    ValidationResult,
 )
+from awf.runtime.validation_worktree import ValidationWorktreeCheck, ValidationWorktreeCleanup
+from awf.service import artifacts as executor_service_artifacts
 
 
 def _command_result(tmp_path: Path, *, returncode: int = 1) -> ValidationCommandResult:
@@ -630,14 +634,453 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
     )
 
     # Write failure is non-fatal: success returned, event still recorded, and
-    # nothing is staged or committed.
+    # nothing is staged or committed. The report is still removed after the
+    # best-effort artifact deposit.
     assert failure is None
     assert recorded == ["validation-run-1"]
     assert all("commit" not in call.args for call in runner.calls)
+    report_abs = worktree_path / report_path
+    # The report is removed after deposit, even when the AWF re-synthesis write
+    # failed.
+    assert not report_abs.exists()
+
+
+@pytest.mark.unit
+async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_before_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#608: a satisfied report produced from stdout must be deposited into the
+    served artifact dir before the on-worktree copy is removed.
+
+    ``_run_post_validation_conformance_check`` records the satisfied event,
+    deposits the plan/report through ``deposit_workspace_planning_artifacts``,
+    then restores and unlinks the on-worktree report. Without the deposit step,
+    the served artifact directory would lose the conformance report because the
+    worktree copy is deleted before ``execution_validation.py`` can deposit it.
+    """
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    plan_path = Path("docs/awf-plans/ws_post.md")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    plan_abs = worktree_path / plan_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    # Git calls: before_compare, before_compare_head, after_compare, committed paths
+    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="validated-head\n")
+    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="")
+    # Git restore call for the report path
+    runner.queue_result(returncode=0, stdout="")
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+    recorded: list[str] = []
+
+    async def record_event(**kwargs: object) -> None:
+        recorded.append(str(kwargs.get("validation_run_id")))
+
+    executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
+
+    # Track deposit invocations so we can assert ordering relative to unlink.
+    deposited: list[tuple[bool, bool]] = []
+    real_deposit = executor_service_artifacts.deposit_workspace_planning_artifacts
+
+    def _spy_deposit(*args: object, **kwargs: object) -> None:
+        # Record whether both source files were present when the deposit ran.
+        source = kwargs.get("report_path") or args[3]
+        report_present = (worktree_path / source).exists()
+        plan_present = (worktree_path / (kwargs.get("plan_path") or args[2])).exists()
+        deposited.append((plan_present, report_present))
+        real_deposit(*args, **kwargs)
+
+    import awf.control.executor.planning_ops as _planning_ops_module
+
+    monkeypatch.setattr(
+        _planning_ops_module,
+        "deposit_workspace_planning_artifacts",
+        _spy_deposit,
+    )
+
+    # Create the on-worktree plan and a stale report. The conformance call only
+    # emits the report in stdout, so the file on disk stays stale and should be
+    # overwritten by the AWF-synthesized satisfied report before removal.
+    plan_abs.parent.mkdir(parents=True, exist_ok=True)
+    plan_abs.write_text("# plan\n", encoding="utf-8")
+    report_abs.parent.mkdir(parents=True, exist_ok=True)
+    report_abs.write_text('{"status":"stale"}', encoding="utf-8")
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=plan_path,
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+    )
+
+    assert failure is None
+    assert recorded == ["validation-run-1"]
+    # Deposit ran while the worktree report copy still existed.
+    assert deposited == [(True, True)]
+    # The on-worktree report copy is removed last.
+    assert not report_abs.exists()
+    # The final served artifact dir contains the satisfied conformance report
+    # (written with the AWF-synthesized JSON shape, which includes a reason_code).
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        tmp_path / "compose" / "..", "ws_post"
+    ).resolve()
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
+    assert deposited_report["summary"] == "validated evidence satisfies plan"
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan\n"
+
+
+@pytest.mark.unit
+async def test_validation_success_path_does_not_redeposit_after_conformance_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6KCdzX: after a passing validation, the conformance
+    report is already deposited (and the worktree copy unlinked) from inside
+    ``_run_post_validation_conformance_check``. The success path in
+    ``run_validation_and_fix_cycle`` must not attempt a second, no-op deposit
+    that would silently skip the report because the worktree file is gone.
+    """
+    profile = WorkspaceProfile.model_validate(
+        {"name": "prof-no-second-deposit", "planning": {"required": True}}
+    )
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "prof-no-second-deposit"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="A task",
+        agent="codex",
+        owned_paths=(),
+        id="ws_no_second_deposit",
+        pr_url=None,
+        task_tag=None,
+    )
+
+    from awf.control.executor import execution_validation as executor_execution_validation
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(executor_execution_validation, "_sync_resolved_profile", _sync_profile)
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=True,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_validation_command(tmp_path)])
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-no-second-deposit"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _run_post_validation_conformance_check=AsyncMock(return_value=None),
+    )
+
+    outer_deposits: list[object] = []
+    real_outer_deposit = (
+        executor_execution_validation._planning_artifacts._deposit_planning_artifacts_best_effort
+    )
+
+    def _spy_outer_deposit(*_args: object, **_kwargs: object) -> None:
+        outer_deposits.append(True)
+        real_outer_deposit(*_args, **_kwargs)
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_outer_deposit,
+    )
+
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.satisfied,
+            summary="ok",
+            gaps=(),
+        ),
+        plan_path=tmp_path / "worktree" / "plan.md",
+        report_path=tmp_path / "worktree" / "report.md",
+        iteration=0,
+        max_iterations=2,
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,
+        worktree_path=tmp_path / "worktree",
+        compose_project=f"awf_{workspace.id}",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch=f"awf/{workspace.id}",
+        adapter=SimpleNamespace(run=AsyncMock()),
+        run_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=handoff,
+        recovery=None,
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    # No second best-effort deposit from the success-path block: the real
+    # deposit already happened inside _run_post_validation_conformance_check.
+    assert outer_deposits == []
+    executor._run_post_validation_conformance_check.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_validation_conformance_failure_still_deposits_before_mark_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6KCdzX: a terminal conformance failure must still
+    deposit planning artifacts before marking the workspace FAILED. The
+    success-path deposit block was removed, but every terminal failure path
+    must keep its pre-mark deposit.
+    """
+    profile = WorkspaceProfile.model_validate(
+        {"name": "prof-failure-deposit", "planning": {"required": True}}
+    )
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "prof-failure-deposit"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="A task",
+        agent="codex",
+        owned_paths=(),
+        id="ws_failure_deposit",
+        pr_url=None,
+        task_tag=None,
+    )
+
+    from awf.control.executor import execution_validation as executor_execution_validation
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(executor_execution_validation, "_sync_resolved_profile", _sync_profile)
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=True,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_validation_command(tmp_path)])
+
+    order: list[str] = []
+    real_outer_deposit = (
+        executor_execution_validation._planning_artifacts._deposit_planning_artifacts_best_effort
+    )
+
+    def _spy_outer_deposit(*_args: object, **_kwargs: object) -> None:
+        order.append("deposit")
+        real_outer_deposit(*_args, **_kwargs)
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_outer_deposit,
+    )
+
+    async def _mark_failed(**_kwargs: object) -> None:
+        order.append("mark_failed")
+
+    async def _ensure_worktree_available(**_kwargs: object) -> bool:
+        return True
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-failure-deposit"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=_mark_failed,
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _run_post_validation_conformance_check=AsyncMock(
+            return_value=_PlanningRunFailure(
+                message="not satisfied",
+                reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+                details={"conformance": {}},
+            )
+        ),
+        _ensure_worktree_available=_ensure_worktree_available,
+        _git_add_all_in_worktree=AsyncMock(
+            return_value=CommandResult(returncode=0, stdout="", stderr="")
+        ),
+        _commit_in_worktree=AsyncMock(
+            return_value=CommandResult(returncode=0, stdout="", stderr="")
+        ),
+        _repair_agent_git_ownership=AsyncMock(),
+        _refresh_supply_chain_policy_for_workspace=AsyncMock(),
+    )
+
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.satisfied,
+            summary="ok",
+            gaps=(),
+        ),
+        plan_path=tmp_path / "worktree" / "plan.md",
+        report_path=tmp_path / "worktree" / "report.md",
+        iteration=0,
+        max_iterations=1,
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,
+        worktree_path=tmp_path / "worktree",
+        compose_project=f"awf_{workspace.id}",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch=f"awf/{workspace.id}",
+        adapter=SimpleNamespace(run=AsyncMock()),
+        run_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=handoff,
+        recovery=None,
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    # Terminal conformance failure path still deposits before marking FAILED.
+    assert order == ["deposit", "mark_failed"]
+
+
+def _passing_validation_command(tmp_path: Path) -> ValidationCommandResult:
+    stdout = tmp_path / "ok.stdout"
+    stderr = tmp_path / "ok.stderr"
+    stdout.write_text("ok", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    return ValidationCommandResult(
+        command="pytest -q",
+        returncode=0,
+        duration_seconds=0.1,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        phase="validate",
+        reason_code=None,
+        policy_failed=False,
+    )
 
 
 @pytest.mark.unit
 def test_validation_evidence_json_enforces_limit_on_minimal_fallback() -> None:
+
     oversized_percent = {f"pkg_{index}": "x" * 1000 for index in range(100)}
     payload = {
         "validation_run_id": "validation-run-1",
