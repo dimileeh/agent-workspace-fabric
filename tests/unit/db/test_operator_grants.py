@@ -209,6 +209,56 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
 
 
 @pytest.mark.unit
+async def test_list_resumable_blocked_ids_scopes_to_owning_node(
+    session: AsyncSession,
+) -> None:
+    """A blocked workspace's warm stack lives on the node that ran it.
+
+    When ``node_id`` is supplied the query must only surface rows owned by that
+    node (or NULL/legacy rows adoptable anywhere) — otherwise a worker on
+    another node would claim a blocked workspace and resume against a compose
+    stack/worktree that only exists elsewhere.
+    """
+    repo = WorkspaceRepository(session)
+    armed_hint = {
+        "status": "pending",
+        "reason": "revert the protected change",
+        "directive": "revert it",
+    }
+
+    on_node_a = await _blocked_workspace(session)
+    on_node_a.node_id = "node-a"
+    on_node_a.pending_operator_hint = dict(armed_hint)
+
+    on_node_b = await _blocked_workspace(session)
+    on_node_b.node_id = "node-b"
+    on_node_b.pending_operator_hint = dict(armed_hint)
+
+    # NULL/legacy node is adoptable by any node.
+    unstamped = await _blocked_workspace(session)
+    unstamped.pending_operator_hint = dict(armed_hint)
+
+    await session.flush()
+
+    # Scoped to node-a: only node-a's row plus the unstamped one.
+    assert set(await repo.list_resumable_blocked_ids(limit=10, node_id="node-a")) == {
+        on_node_a.id,
+        unstamped.id,
+    }
+    # Scoped to node-b: only node-b's row plus the unstamped one.
+    assert set(await repo.list_resumable_blocked_ids(limit=10, node_id="node-b")) == {
+        on_node_b.id,
+        unstamped.id,
+    }
+    # No node scope (default): every resumable row regardless of owning node.
+    assert set(await repo.list_resumable_blocked_ids(limit=10)) == {
+        on_node_a.id,
+        on_node_b.id,
+        unstamped.id,
+    }
+
+
+@pytest.mark.unit
 async def test_list_resumable_blocked_ids_sqlite_validates_directive_string_type() -> None:
     """The SQLite eligibility branch must type-check the directive via json_type.
 

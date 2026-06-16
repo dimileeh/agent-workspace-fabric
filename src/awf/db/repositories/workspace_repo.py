@@ -661,6 +661,7 @@ class WorkspaceRepository:
         *,
         limit: int,
         exclude_ids: set[str] | None = None,
+        node_id: str | None = None,
     ) -> builtins.list[str]:
         """Return ``blocked`` workspace IDs an operator has cleared for resume.
 
@@ -671,6 +672,13 @@ class WorkspaceRepository:
         Blocked workspaces still awaiting an operator decision carry neither, so
         they are excluded here — otherwise the worker would spin them through
         ``blocked -> running -> blocked`` re-running the same gate every cycle.
+
+        When ``node_id`` is given the result is scoped to that owning node
+        (mirroring the scheduler/cleanup ``node_id == node_id OR node_id IS
+        NULL`` predicate): a blocked workspace's warm compose stack/worktree is
+        preserved on the node that ran it, so a worker on another node must not
+        claim it and resume against resources that only exist elsewhere. NULL
+        rows (legacy/unstamped) stay adoptable by any node.
 
         The hint branch matches the resume path's acceptance test exactly: a
         directive-less, whitespace-only, or non-string ``directive`` in
@@ -733,6 +741,8 @@ class WorkspaceRepository:
             Workspace.status == WorkspaceStatus.blocked.value,
             or_(actionable_hint, active_grant_exists),
         )
+        if node_id is not None:
+            stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
         if exclude_ids:
             stmt = stmt.where(Workspace.id.notin_(exclude_ids))
         stmt = stmt.order_by(Workspace.updated_at.asc(), Workspace.id.asc()).limit(limit)

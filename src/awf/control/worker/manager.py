@@ -602,15 +602,23 @@ class ControlWorker(WorkerDelegatesMixin):
         first) is the fairness contract. The eligibility predicate (a directive
         or an active-epoch grant) lives in the repository query so workspaces
         still awaiting an operator decision are never re-dispatched.
+
+        Scoped to this worker's effective node (like the ready/monitor lists): a
+        blocked workspace's warm compose stack/worktree is preserved on the node
+        that ran it, so only that node — or any node, for NULL/legacy rows — may
+        resume it against resources that exist locally.
         """
         row_limit = self._config.max_concurrent_executions if limit is None else limit
         if row_limit <= 0:
             return []
 
+        node_id = effective_worker_config_node_id(self._config)
+
         async def _operation(session: AsyncSession) -> list[str]:
             return await WorkspaceRepository(session).list_resumable_blocked_ids(
                 limit=row_limit,
                 exclude_ids=exclude_ids,
+                node_id=node_id,
             )
 
         return await run_db_operation_with_retry(
