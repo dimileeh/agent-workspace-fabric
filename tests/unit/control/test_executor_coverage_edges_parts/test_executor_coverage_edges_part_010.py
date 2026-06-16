@@ -19,8 +19,88 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from awf.common.commands import CommandResult
 from awf.control.executor import quality_methods as executor_quality_methods
+from awf.control.executor.quality_gates import _PostAgentCommitStepError
+from awf.control.quality_gates import QUALITY_GATE_POLICY_CHANGED_REASON_CODE
 from awf.db.enums import WorkspaceStatus
+
+
+@pytest.mark.unit
+async def test_protected_quality_gate_committed_output_forwards_owner_id_on_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A committed-output protected violation owner-gates the block CAS.
+
+    Without ``execution_owner_id`` the ``blocked`` transition is not
+    owner-gated, so a stale executor that lost its claim to a newer claimant
+    could still drive the transition and clobber the newer claimant's state —
+    exactly the race the epoch-guarded CAS pattern prevents.
+    """
+    monkeypatch.setattr(
+        executor_quality_methods,
+        "committed_changed_paths_since",
+        AsyncMock(return_value=["pyproject.toml"]),
+    )
+    monkeypatch.setattr(
+        executor_quality_methods,
+        "protected_file_diffs_for_committed_paths",
+        AsyncMock(return_value={"pyproject.toml": "+fail_under = 70"}),
+    )
+    monkeypatch.setattr(
+        executor_quality_methods,
+        "find_protected_quality_gate_changes",
+        lambda **_kwargs: ["policy-change"],
+    )
+    executor = SimpleNamespace(
+        _runner=object(),
+        _active_operator_grant_specs=AsyncMock(return_value=[]),
+        enter_blocked_for_protected_violation=AsyncMock(return_value=True),
+    )
+
+    result = await executor_quality_methods._fail_if_protected_quality_gate_committed_output(
+        executor,
+        workspace_id="ws_block",
+        worktree_path=Path("/tmp/worktree"),
+        base_commit="0" * 40,
+        owned_paths=["src/"],
+        expected_status=WorkspaceStatus.validating,
+        execution_owner_id="owner-committed-output",
+    )
+
+    assert result is True
+    block_kwargs = executor.enter_blocked_for_protected_violation.await_args.kwargs
+    assert block_kwargs["execution_owner_id"] == "owner-committed-output"
+
+
+@pytest.mark.unit
+async def test_mark_post_agent_commit_failed_forwards_owner_id_on_block() -> None:
+    """A semantic-repair protected violation owner-gates the block CAS so a
+    stale executor cannot clobber a newer claimant's state."""
+    executor = SimpleNamespace(
+        enter_blocked_for_protected_violation=AsyncMock(return_value=True),
+    )
+    error = _PostAgentCommitStepError(
+        stage="post-agent pre-commit repair",
+        result=CommandResult(returncode=1, stdout="", stderr=""),
+        classification=None,
+        reason_code_override=QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+        protected_violations=("policy-change",),
+    )
+
+    await executor_quality_methods._mark_post_agent_commit_failed(
+        executor,
+        workspace_id="ws_block",
+        error=error,
+        agent_run_reason_code=None,
+        agent_run_details=None,
+        agent_exit_note=None,
+        upstream_failure_reason=None,
+        execution_owner_id="owner-semantic-repair",
+    )
+
+    block_kwargs = executor.enter_blocked_for_protected_violation.await_args.kwargs
+    assert block_kwargs["execution_owner_id"] == "owner-semantic-repair"
 
 
 @pytest.mark.unit

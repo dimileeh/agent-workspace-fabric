@@ -1006,6 +1006,7 @@ async def execute(
             agent_run_details=agent_run_details,
             agent_exit_note=agent_exit_note,
             upstream_failure_reason=agent_run_failure_reason,
+            execution_owner_id=execution_owner_id,
         )
         return
     except Exception as exc:  # unexpected — mark infrastructure
@@ -1039,6 +1040,7 @@ async def execute(
                     base_commit=base_commit,
                     owned_paths=list(ws.owned_paths),
                     expected_status=WorkspaceStatus.running,
+                    execution_owner_id=execution_owner_id,
                 ):
                     return
             else:
@@ -1236,6 +1238,7 @@ async def execute(
             base_commit=base_commit,
             owned_paths=list(ws.owned_paths),
             expected_status=WorkspaceStatus.validating,
+            execution_owner_id=execution_owner_id,
         ):
             return
     except Exception as exc:

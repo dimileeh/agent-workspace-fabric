@@ -718,6 +718,7 @@ async def test_verify_recovered_post_agent_commit_blocks_protected_policy_change
         base_commit="a" * 40,
         owned_paths=[],
         expected_status=WorkspaceStatus.running,
+        execution_owner_id="owner-recovery",
     )
     # A protected violation now pauses the workspace for an operator decision
     # instead of terminally failing.
@@ -726,6 +727,10 @@ async def test_verify_recovered_post_agent_commit_blocks_protected_policy_change
     block_kwargs = executor.enter_blocked_for_protected_violation.await_args.kwargs  # type: ignore[attr-defined]
     assert block_kwargs["from_status"] == WorkspaceStatus.running
     assert block_kwargs["resume_phase"] == "post_agent_commit_recovery_verify"
+    # The block transition is owner-gated so a stale executor that lost its
+    # claim cannot clobber a newer claimant (epoch-guarded CAS, mirrors the
+    # primary site in execution_flow.py).
+    assert block_kwargs["execution_owner_id"] == "owner-recovery"
 
 
 @pytest.mark.unit

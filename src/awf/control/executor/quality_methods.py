@@ -202,6 +202,7 @@ async def _verify_recovered_post_agent_commit(
     base_commit: str,
     owned_paths: list[str],
     expected_status: WorkspaceStatus,
+    execution_owner_id: str | None = None,
 ) -> bool:
     changed_paths = sorted(
         await committed_changed_paths_since(
@@ -250,6 +251,7 @@ async def _verify_recovered_post_agent_commit(
             from_status=expected_status,
             violations=violations,
             resume_phase="post_agent_commit_recovery_verify",
+            execution_owner_id=execution_owner_id,
         )
         return False
     ancestor = await self._runner.run(
@@ -286,6 +288,7 @@ async def _verify_recovered_post_agent_commit_or_mark_failed(
     base_commit: str,
     owned_paths: list[str],
     expected_status: WorkspaceStatus,
+    execution_owner_id: str | None = None,
 ) -> bool:
     try:
         return cast(
@@ -296,6 +299,7 @@ async def _verify_recovered_post_agent_commit_or_mark_failed(
                 base_commit=base_commit,
                 owned_paths=owned_paths,
                 expected_status=expected_status,
+                execution_owner_id=execution_owner_id,
             ),
         )
     except Exception as exc:
@@ -417,6 +421,7 @@ async def _fail_if_protected_quality_gate_committed_output(
     base_commit: str,
     owned_paths: list[str],
     expected_status: WorkspaceStatus,
+    execution_owner_id: str | None = None,
 ) -> bool:
     changed_paths = sorted(
         await committed_changed_paths_since(
@@ -448,6 +453,7 @@ async def _fail_if_protected_quality_gate_committed_output(
         from_status=expected_status,
         violations=violations,
         resume_phase="post_agent_commit_committed_output",
+        execution_owner_id=execution_owner_id,
     )
     return True
 
@@ -1198,6 +1204,7 @@ async def _mark_post_agent_commit_failed(
     agent_run_details: Mapping[str, Any] | None,
     agent_exit_note: str | None,
     upstream_failure_reason: FailureReason | None,
+    execution_owner_id: str | None = None,
 ) -> None:
     """Route a ``_PostAgentCommitStepError`` to ``_mark_failed`` with
     structured reason codes.
@@ -1232,6 +1239,7 @@ async def _mark_post_agent_commit_failed(
             from_status=WorkspaceStatus.running,
             violations=error.protected_violations,
             resume_phase="post_agent_precommit_repair",
+            execution_owner_id=execution_owner_id,
         )
         return
 
