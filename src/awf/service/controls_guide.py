@@ -12,8 +12,15 @@ from __future__ import annotations
 from typing import Any, cast
 
 from awf.api.schemas import WorkspaceControlResponse
+from awf.common.ids import new_operator_grant_id
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import MergeCandidateRepository, OperationRepository, WorkspaceRepository
+from awf.db.models import OperatorGrantAuditRecord
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    OperationRepository,
+    WorkspaceRepository,
+    owned_paths_overlap,
+)
 from awf.runtime.operator_hints import (
     build_pending_operator_hint_payload,
     persist_operator_hint,
@@ -22,8 +29,13 @@ from awf.runtime.operator_hints import (
 from awf.runtime.pr_monitor import OperatorHint
 from awf.service.controls_errors import (
     _GUIDE_ELIGIBLE_STATUSES,
+    WorkspaceGuideDirectiveOrGrantRequiredError,
     WorkspaceGuideEmptyDirectiveError,
+    WorkspaceGuideGrantNotAllowedError,
+    WorkspaceGuideGrantReasonRequiredError,
+    WorkspaceGuideInvalidGrantPathError,
     WorkspaceGuideMissingPrUrlError,
+    WorkspaceGuidePolicyDowngradeRequiredError,
     WorkspaceGuideStateError,
 )
 from awf.service.controls_helpers import (
@@ -49,6 +61,9 @@ async def guide_workspace(
     *,
     directive: str,
     reason: str | None = None,
+    grants: list[str] | None = None,
+    approve_policy_downgrade: bool = False,
+    operator: str | None = None,
     idempotency_key: str | None = None,
     expected_version: int | None = None,
 ) -> WorkspaceControlResponse:
@@ -66,10 +81,12 @@ async def guide_workspace(
     repo = WorkspaceRepository(self._session)
     operations = OperationRepository(self._session)
     directive_text = (directive or "").strip()
-    if not directive_text:
+    grant_inputs = sorted({grant.strip() for grant in (grants or []) if grant.strip()})
+    if not directive_text and not grant_inputs:
         # REST strips whitespace at the schema boundary, but the MCP tool only
         # advertises an advisory ``minLength``; guard here so a blank directive
-        # can never persist an empty operator hint that re-engages the agent.
+        # (with no grants) can never persist an empty operator hint that
+        # re-engages the agent.
         raise WorkspaceGuideEmptyDirectiveError()
     reason_text = (reason or "").strip()
     workspace_for_payload = await self._require_workspace(repo, workspace_id)
@@ -82,7 +99,11 @@ async def guide_workspace(
         reason=reason_text or None,
         reason_code=_OPERATOR_GUIDE_REASON_CODE,
         requested_action=OperationType.guide.value,
-        extra={"directive": directive_text},
+        extra={
+            "directive": directive_text,
+            "grants": grant_inputs,
+            "approve_policy_downgrade": approve_policy_downgrade,
+        },
     )
     # Persist the PR/head context for provenance, but keep it OUT of the
     # idempotency identity. The monitor may push/record a new head between the
@@ -120,6 +141,31 @@ async def guide_workspace(
     current = WorkspaceStatus(workspace.status)
     if current not in _GUIDE_ELIGIBLE_STATUSES:
         raise WorkspaceGuideStateError(workspace)
+
+    if current == WorkspaceStatus.blocked:
+        # Pre-PR operator decision: arm scoped grants and/or a directive on the
+        # paused workspace so the worker resume path can pick it up. No PR exists
+        # yet, so the ``pr_url`` requirement is relaxed for this branch.
+        return await _guide_blocked_workspace(
+            self,
+            repo=repo,
+            operations=operations,
+            workspace=workspace,
+            prepared=prepared,
+            directive_text=directive_text,
+            reason_text=reason_text,
+            grant_inputs=grant_inputs,
+            approve_policy_downgrade=approve_policy_downgrade,
+            operator=operator,
+            operation_payload=operation_payload,
+            expected_version=expected_version,
+        )
+
+    if grant_inputs:
+        # Path grants only make sense for a blocked workspace.
+        raise WorkspaceGuideGrantNotAllowedError(workspace)
+    if not directive_text:
+        raise WorkspaceGuideEmptyDirectiveError()
     if not workspace.pr_url:
         raise WorkspaceGuideMissingPrUrlError(workspace)
 
@@ -242,6 +288,163 @@ async def guide_workspace(
         status=OperationStatus.succeeded,
         result=result,
     )
+    return _control_response(
+        workspace=workspace,
+        operation=operation,
+        message="workspace operator guidance recorded",
+    )
+
+
+_DEFAULT_GUIDE_OPERATOR = "operator"
+
+
+def _canonicalize_grant_path(path: str) -> str:
+    """Normalize a grant glob to a repo-relative path, rejecting traversal.
+
+    Mirrors the quality-gate path normalization (backslash → ``/``, strip
+    leading ``./``) so grant globs match changed paths under the same matcher,
+    and fails closed on anything that could escape the repo: absolute paths and
+    any ``..`` segment are rejected."""
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized:
+        raise WorkspaceGuideInvalidGrantPathError(path, "path is empty")
+    if normalized.startswith("/"):
+        raise WorkspaceGuideInvalidGrantPathError(path, "must be repo-relative (no leading '/')")
+    if any(segment == ".." for segment in normalized.split("/")):
+        raise WorkspaceGuideInvalidGrantPathError(path, "'..' traversal is not allowed")
+    return normalized
+
+
+async def _guide_blocked_workspace(
+    self: Any,
+    *,
+    repo: WorkspaceRepository,
+    operations: OperationRepository,
+    workspace: Any,
+    prepared: Any,
+    directive_text: str,
+    reason_text: str,
+    grant_inputs: list[str],
+    approve_policy_downgrade: bool,
+    operator: str | None,
+    operation_payload: dict[str, Any],
+    expected_version: int | None,
+) -> WorkspaceControlResponse:
+    """Resolve a pre-PR ``blocked`` workspace via scoped grants and/or a directive.
+
+    Operator-only: ``operator`` is set by the control plane, never by workspace
+    input, and the agent has no control-plane egress to reach this surface. The
+    grants are recorded as immutable, single-use, epoch-bound audit rows; the
+    directive (if any) is armed in the dedicated ``pending_operator_hint`` column
+    for the worker resume path. The workspace stays ``blocked`` — the worker's
+    blocked-resume claim performs the ``blocked -> running`` transition.
+    """
+    if not directive_text and not grant_inputs:
+        raise WorkspaceGuideDirectiveOrGrantRequiredError()
+    canonical_grants = sorted({_canonicalize_grant_path(path) for path in grant_inputs})
+    if canonical_grants and not reason_text:
+        raise WorkspaceGuideGrantReasonRequiredError()
+    # Fail-fast: any grant that covers a recorded protected violation must carry
+    # the policy-downgrade acknowledgement. The gate only suppresses a real
+    # violation with an acked grant (a non-acked grant would re-block on resume),
+    # so reject upfront rather than letting the operator queue a useless grant.
+    if canonical_grants and not approve_policy_downgrade:
+        violation_paths = [
+            str(violation.get("path"))
+            for violation in (workspace.block_violations or [])
+            if isinstance(violation, dict) and violation.get("path")
+        ]
+        weakening = sorted(
+            grant
+            for grant in canonical_grants
+            if any(owned_paths_overlap(violation_path, grant) for violation_path in violation_paths)
+        )
+        if weakening:
+            raise WorkspaceGuidePolicyDowngradeRequiredError(weakening)
+
+    operation = await operations.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.guide,
+        status=OperationStatus.running,
+        payload=operation_payload,
+        idempotency_key=prepared.idempotency_key,
+    )
+    operator_id = (operator or "").strip() or _DEFAULT_GUIDE_OPERATOR
+    now = utcnow()
+    created_grants: list[dict[str, object]] = []
+    for grant_path in canonical_grants:
+        self._session.add(
+            OperatorGrantAuditRecord(
+                id=new_operator_grant_id(),
+                workspace_id=workspace.id,
+                operator=operator_id,
+                reason=reason_text,
+                normalized_path=grant_path,
+                block_epoch=workspace.block_epoch,
+                approve_policy_downgrade=approve_policy_downgrade,
+                created_at=now,
+            )
+        )
+        created_grants.append(
+            {"path": grant_path, "approve_policy_downgrade": approve_policy_downgrade}
+        )
+
+    pending_hint_payload: dict[str, object] | None = None
+    if directive_text:
+        hint = OperatorHint(
+            reason=reason_text or directive_text,
+            directive=directive_text,
+            operation_id=operation.id,
+            requested_at=now.isoformat(),
+            reason_code=_OPERATOR_GUIDE_REASON_CODE,
+            status="pending",
+        )
+        pending_hint_payload = build_pending_operator_hint_payload(hint)
+        workspace.pending_operator_hint = pending_hint_payload
+
+    await repo.advance_workspace_version(workspace)
+    event_payload = _event_payload(
+        {
+            "reason": reason_text or None,
+            "directive": directive_text or None,
+            "operation_id": operation.id,
+            "operator": operator_id,
+            "grants": created_grants,
+            "approve_policy_downgrade": approve_policy_downgrade,
+            "block_epoch": workspace.block_epoch,
+            "pending_operator_hint": pending_hint_payload,
+        },
+        expected_version=expected_version,
+    )
+    await repo.add_event(
+        workspace,
+        event_type="workspace.guide_requested",
+        reason_code=_OPERATOR_GUIDE_REASON_CODE,
+        payload=event_payload,
+    )
+    await _add_control_audit_event(
+        repo,
+        workspace,
+        operation=operation,
+        action=OperationType.guide.value,
+        outcome="succeeded",
+        reason_code=_OPERATOR_GUIDE_REASON_CODE,
+        extra={
+            "expected_version": expected_version,
+            "directive": directive_text,
+            "grants": created_grants,
+        },
+    )
+    result: dict[str, object | None] = {
+        "status": workspace.status,
+        "grants": created_grants,
+        "block_epoch": workspace.block_epoch,
+    }
+    if pending_hint_payload is not None:
+        result["pending_operator_hint"] = pending_hint_payload
+    await operations.finish(operation, status=OperationStatus.succeeded, result=result)
     return _control_response(
         workspace=workspace,
         operation=operation,

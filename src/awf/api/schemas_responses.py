@@ -143,17 +143,26 @@ class WorkspaceGuideRequest(BaseModel):
     ``directive`` is the first-class agent instruction injected into a live
     monitoring workspace; ``reason`` is an optional audit reason. Use the
     ``guide`` control rather than overloading ``remonitor --reason`` as the
-    directive channel."""
+    directive channel.
+
+    For a pre-PR ``blocked`` workspace (protected quality-gate violation), the
+    same control carries the operator decision: ``grants`` is a list of scoped
+    path globs to APPROVE-AND-KEEP, and ``approve_policy_downgrade`` acknowledges
+    that a granted edit may weaken validation. At least one of ``directive`` or
+    ``grants`` must be provided; the service enforces the per-status contract
+    (a non-blocked workspace still requires a non-empty directive)."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    # ``pattern`` requires at least one non-whitespace character so the OpenAPI
-    # schema mirrors the runtime contract: ``str_strip_whitespace`` + ``min_length``
-    # already reject whitespace-only directives, but without the pattern generated
-    # clients/docs would advertise ``"   "`` as valid. ``\S`` (not a lookahead) is
-    # used because pydantic-core's regex engine does not support lookarounds.
-    directive: Annotated[str, Field(min_length=1, max_length=1024, pattern=r"\S")]
+    # ``directive`` is optional so a blocked workspace can be resolved with grants
+    # alone. Whitespace is stripped at the boundary; the service rejects an empty
+    # directive for non-blocked workspaces and an empty directive + no grants for
+    # any workspace.
+    directive: Annotated[str, Field(default="", max_length=1024)]
     reason: Annotated[str | None, Field(default=None, max_length=1024)]
+    grants: Annotated[list[str], Field(default_factory=list, max_length=64)]
+    approve_policy_downgrade: bool = False
+    operator: Annotated[str | None, Field(default=None, max_length=256)]
 
 
 class WorkspaceOperationRequest(WorkspaceReasonRequest):

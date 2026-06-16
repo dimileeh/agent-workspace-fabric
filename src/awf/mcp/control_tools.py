@@ -275,18 +275,34 @@ def register_control_tools(
             ..., min_length=1, max_length=256, description="Workspace ID to guide."
         ),
         directive: str = Field(
-            ...,
+            default="",
             max_length=1024,
-            json_schema_extra={"minLength": 1},
             description=(
                 "Operator instruction for the agent's next monitor cycle "
-                "(acted on, not deferred); distinct from the audit reason."
+                "(acted on, not deferred); distinct from the audit reason. Optional "
+                "for a blocked workspace resolved with grants alone."
             ),
         ),
         reason: str | None = Field(
             default=None,
             max_length=1024,
-            description="Optional operator audit reason (not the agent instruction).",
+            description="Optional operator audit reason (required when granting paths).",
+        ),
+        grants: list[str] | None = Field(
+            default=None,
+            description=(
+                "For a blocked workspace: scoped, repo-relative path globs to "
+                "APPROVE-AND-KEEP. At least one of directive/grants is required."
+            ),
+        ),
+        approve_policy_downgrade: bool = Field(
+            default=False,
+            description="Acknowledge that a granted edit may weaken validation.",
+        ),
+        operator: str | None = Field(
+            default=None,
+            max_length=256,
+            description="Operator identity recorded on grant audit records.",
         ),
         idempotency_key: str | None = Field(
             ...,
@@ -299,7 +315,7 @@ def register_control_tools(
             description="Optional optimistic concurrency version (maps to If-Match).",
         ),
     ) -> StructuredToolResult:
-        """Operator control: inject a directive into a live monitoring workspace; not shell access."""
+        """Operator control: inject a directive and/or scoped grants into a workspace; not shell access."""
         idempotency_key_value = _required_idempotency_key(idempotency_key)
         if idempotency_key_value is None:
             return _idempotency_key_error()
@@ -308,6 +324,9 @@ def register_control_tools(
                 workspace_id,
                 directive=directive,
                 reason=reason,
+                grants=grants,
+                approve_policy_downgrade=approve_policy_downgrade,
+                operator=operator,
                 idempotency_key=idempotency_key_value,
                 expected_version=expected_version,
             )
