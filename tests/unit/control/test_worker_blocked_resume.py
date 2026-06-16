@@ -182,6 +182,47 @@ async def test_run_once_resumes_operator_cleared_blocked_workspace(
 
 
 @pytest.mark.unit
+async def test_resume_blocked_claimed_releases_claim_when_executor_missing(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # The resume CAS transitions ``blocked -> running`` and stamps the execution
+    # claim *before* dispatch. If the worker then has no executor, the resume
+    # task must still release the claim instead of stranding the claimed
+    # ``running`` row until lease expiry.
+    blocked_id = await _create_blocked(
+        session_factory,
+        origin_repo,
+        "no-executor",
+        directive="revert the change",
+    )
+    executor = _RecordingBlockedExecutor()
+    worker = _worker(session_factory, executor)
+
+    # Simulate the pre-dispatch claim CAS acquiring the execution claim.
+    assert await worker._claim_blocked_for_resume(blocked_id)  # noqa: SLF001
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(blocked_id)
+        assert ws is not None
+        assert ws.execution_claimed_by == worker._worker_id  # noqa: SLF001
+
+    # The executor went away after the claim was acquired.
+    worker._executor = None  # noqa: SLF001
+    await asyncio.wait_for(
+        worker._safely_resume_blocked_claimed(blocked_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    assert executor.resume_blocked_calls == []
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(blocked_id)
+        assert ws is not None
+        # Cleanup ran: the execution claim was released rather than stranded.
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+
+
+@pytest.mark.unit
 async def test_run_once_leaves_undecided_blocked_workspace_untouched(
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,

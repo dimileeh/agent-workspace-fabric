@@ -131,13 +131,17 @@ async def _safely_resume_blocked_claimed(self: Any, workspace_id: str) -> None:
     re-acquired the epoch-fenced execution claim and transitioned the row
     ``blocked -> running``, so the executor drives the normal flow in
     ``resume_from_blocked`` mode while this loop keeps the lease warm."""
-    if self._executor is None:
-        return
     heartbeat = asyncio.create_task(
         self._refresh_execution_claim_loop(workspace_id),
         name=f"awf-blocked-resume-claim-{workspace_id}",
     )
     try:
+        # The claim CAS already transitioned the row ``blocked -> running``
+        # before dispatch, so a missing executor must still fall through to the
+        # ``finally`` to release the claim — returning here would strand the
+        # claimed ``running`` row until lease expiry. Mirrors ``_safely_execute``.
+        if self._executor is None:
+            return
         await self._executor.resume_blocked_execution(
             workspace_id,
             execution_owner_id=self._worker_id,
