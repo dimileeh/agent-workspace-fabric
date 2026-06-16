@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Final
 
 from awf.control.quality_gates_common import (
@@ -13,6 +14,22 @@ from awf.control.quality_gates_common import (
     _violation,
 )
 from awf.db.repositories import owned_paths_overlap
+
+
+@dataclass(frozen=True)
+class GrantSpec:
+    """An operator's scoped protected-path grant, as seen by the gate.
+
+    Built from the active ``OperatorGrantAuditRecord`` rows for a workspace so
+    this module stays free of DB imports. ``path`` is a canonicalized,
+    repo-relative glob (``../`` traversal already rejected upstream at grant
+    time). ``approve_policy_downgrade`` is the operator's acknowledgement that
+    the granted edit may WEAKEN validation.
+    """
+
+    path: str
+    approve_policy_downgrade: bool = False
+
 
 PROTECTED_QUALITY_GATE_PATHS: Final[tuple[str, ...]] = (
     ".awf/workspace.yml",
@@ -267,6 +284,7 @@ def find_protected_quality_gate_changes(
     changed_paths: list[str] | tuple[str, ...],
     owned_paths: list[str] | tuple[str, ...],
     protected_file_diffs: Mapping[str, ProtectedFileDiff] | None = None,
+    operator_granted_paths: Sequence[GrantSpec] = (),
 ) -> list[QualityGateViolation]:
     """Return protected quality-gate changes the task did not explicitly own.
 
@@ -275,6 +293,15 @@ def find_protected_quality_gate_changes(
     old/new file content is available, pyproject and workflow changes are
     classified semantically so explicitly safe edits can proceed. Missing or
     unparseable classifier input still fails closed.
+
+    An operator can resolve a ``blocked`` workspace by granting specific paths
+    (``operator_granted_paths``). All grant honoring lives INSIDE this one
+    function so every caller is covered with no hand-union. A benign edit (the
+    classifier returns no violations) passes with or without a grant. A real
+    violation — a classifier-detected WEAKENING edit, a classifier-less protected
+    file, or an unclassifiable change with no diff — is suppressed only when a
+    matching grant carries ``approve_policy_downgrade`` (fail closed): a
+    non-acknowledged grant can never silently weaken validation.
     """
     diff_by_path = {
         _normalize_path(path): diff for path, diff in (protected_file_diffs or {}).items()
@@ -289,46 +316,83 @@ def find_protected_quality_gate_changes(
             continue
         if _is_owned(path, owned_paths):
             continue
-        if path == "pyproject.toml":
-            diff = diff_by_path.get(path)
-            if diff is None:
-                violations.append(
-                    _violation(
-                        path=path,
-                        protected_pattern=protected,
-                        section=path,
-                        line=None,
-                        reason="diff unavailable for protected pyproject.toml change",
-                    )
-                )
-                continue
-            violations.extend(_classify_pyproject_change(diff, protected))
+        path_violations = _protected_path_violations(path, protected, diff_by_path)
+        if not path_violations:
+            # Benign / explicitly-safe edit: nothing to suppress.
             continue
-        if _is_workflow_yaml_path(path):
-            diff = diff_by_path.get(path)
-            if diff is None:
-                violations.append(
-                    _violation(
-                        path=path,
-                        protected_pattern=protected,
-                        section=path,
-                        line=None,
-                        reason="diff unavailable for protected workflow change",
-                    )
-                )
-                continue
-            violations.extend(_classify_workflow_change(diff, protected))
+        if _grant_with_policy_downgrade_matches(path, operator_granted_paths):
+            # An operator acknowledged this validation-weakening edit.
             continue
-        violations.append(
-            _violation(
-                path=path,
-                protected_pattern=protected,
-                section=path,
-                line=None,
-                reason="protected quality-gate file changed outside declared owned_paths",
-            )
-        )
+        violations.extend(path_violations)
     return violations
+
+
+def _protected_path_violations(
+    path: str,
+    protected: str,
+    diff_by_path: Mapping[str, ProtectedFileDiff],
+) -> list[QualityGateViolation]:
+    """Classify a single unowned protected path into zero or more violations.
+
+    Returns an empty list for a benign classifier-backed edit; a non-empty list
+    for a weakening edit, a classifier-less protected file, or an unclassifiable
+    change whose diff is unavailable (fail closed).
+    """
+    if path == "pyproject.toml":
+        diff = diff_by_path.get(path)
+        if diff is None:
+            return [
+                _violation(
+                    path=path,
+                    protected_pattern=protected,
+                    section=path,
+                    line=None,
+                    reason="diff unavailable for protected pyproject.toml change",
+                )
+            ]
+        return _classify_pyproject_change(diff, protected)
+    if _is_workflow_yaml_path(path):
+        diff = diff_by_path.get(path)
+        if diff is None:
+            return [
+                _violation(
+                    path=path,
+                    protected_pattern=protected,
+                    section=path,
+                    line=None,
+                    reason="diff unavailable for protected workflow change",
+                )
+            ]
+        return _classify_workflow_change(diff, protected)
+    return [
+        _violation(
+            path=path,
+            protected_pattern=protected,
+            section=path,
+            line=None,
+            reason="protected quality-gate file changed outside declared owned_paths",
+        )
+    ]
+
+
+def _grant_matches(path: str, grant_path: str) -> bool:
+    """Return whether a grant glob covers a changed path.
+
+    Reuses the owned-path overlap matcher so grant globs share the exact
+    directory/wildcard semantics as ``owned_paths`` (e.g. a directory-wide
+    ``.github/workflows/`` grant covers nested workflow files)."""
+    normalized_grant = _normalize_path(grant_path)
+    return bool(normalized_grant) and owned_paths_overlap(path, normalized_grant)
+
+
+def _grant_with_policy_downgrade_matches(
+    path: str, operator_granted_paths: Sequence[GrantSpec]
+) -> bool:
+    """Return whether an acknowledged (``approve_policy_downgrade``) grant covers ``path``."""
+    return any(
+        grant.approve_policy_downgrade and _grant_matches(path, grant.path)
+        for grant in operator_granted_paths
+    )
 
 
 def quality_gate_violation_message(violations: list[QualityGateViolation]) -> str:
@@ -439,6 +503,7 @@ from awf.control.quality_gates_workflow import (  # noqa: E402
 )
 
 __all__ = [
+    "GrantSpec",
     "ProtectedFileDiff",
     "QualityGateViolation",
     "find_protected_quality_gate_changes",
