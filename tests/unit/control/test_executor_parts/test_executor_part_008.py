@@ -100,6 +100,7 @@ async def _seed_resumable_blocked_workspace(
     grant_path: str | None = "pyproject.toml",
     directive: str | None = None,
     reclaim_to_running: bool = True,
+    execution_claimed_by: str | None = None,
 ) -> str:
     """Insert a workspace the worker has already re-claimed ``blocked → running``
     after an operator resolved the pause, ready for ``resume_blocked_execution``
@@ -109,7 +110,8 @@ async def _seed_resumable_blocked_workspace(
     ``directive`` is armed in ``pending_operator_hint`` when provided. Set
     ``reclaim_to_running=False`` to leave the row ``blocked`` (the worker's resume
     CAS never landed), so ``resume_blocked_execution`` short-circuits on its
-    ``running`` recheck."""
+    ``running`` recheck. ``execution_claimed_by`` stamps the re-acquired execution
+    claim so resume entry can be gated on claim ownership."""
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
@@ -133,6 +135,8 @@ async def _seed_resumable_blocked_workspace(
         # before handing it to ``resume_blocked_execution``.
         if reclaim_to_running:
             await repo.transition(ws, to=WorkspaceStatus.running, reason_code="X")
+        if execution_claimed_by is not None:
+            ws.execution_claimed_by = execution_claimed_by
         if directive is not None:
             ws.pending_operator_hint = {
                 "status": "pending",
@@ -312,3 +316,48 @@ async def test_blocked_resume_short_circuits_when_not_running(
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
+async def test_blocked_resume_skips_when_claim_owned_by_other_worker(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regression for PRRT_kwDOSJAM6s6J4E8B: a stale worker whose execution claim
+    # was transferred to a newer claimant (e.g. worker-restart recovery after a
+    # lease lapse) must NOT resume — resume entry is gated on claim ownership,
+    # mirroring the CAS-guarded paths. Otherwise two workers could drive the same
+    # warm stack (duplicate resume execution). The row is left ``running`` with
+    # the rightful claimant's ownership intact.
+    ws_id = await _seed_resumable_blocked_workspace(factory, execution_claimed_by="worker-new")
+
+    await executor.resume_blocked_execution(ws_id, execution_owner_id="worker-stale")
+
+    assert fake.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.running.value
+        assert ws.execution_claimed_by == "worker-new"
+    grant = await _active_grant(factory, ws_id)
+    assert grant.consumed_at is None
+
+
+@pytest.mark.unit
+async def test_blocked_resume_proceeds_when_claim_owner_matches(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # The rightful claimant (execution_owner_id == execution_claimed_by) resumes
+    # normally: the ownership gate passes and the run drives to completion.
+    ws_id = await _seed_resumable_blocked_workspace(factory, execution_claimed_by="worker-A")
+    _queue_blocked_resume_to_push(fake, ws_id=ws_id)
+
+    await executor.resume_blocked_execution(ws_id, execution_owner_id="worker-A")
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value

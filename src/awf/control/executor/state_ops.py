@@ -203,7 +203,17 @@ async def _recheck_status(
     expected: WorkspaceStatus,
     action: str,
     reason_code: str = "EXECUTOR_STALE_STATUS",
+    owner_id: str | None = None,
+    owner_mismatch_reason_code: str = "EXECUTOR_STALE_CLAIM",
 ) -> bool:
+    """Confirm the row is still in ``expected`` (and, when ``owner_id`` is
+    provided, still claimed by it) before resuming work.
+
+    ``owner_id`` fences resume entry on claim ownership the same way the
+    CAS-guarded transitions do: a stale executor whose execution claim was
+    transferred to a newer claimant sees ``status == expected`` but a mismatched
+    ``execution_claimed_by`` and is skipped, so it cannot drive a duplicate run
+    behind the new claimant's back."""
     async with self._session_factory() as session:
         repo = WorkspaceRepository(session)
         ws = await repo.get(workspace_id)
@@ -214,14 +224,16 @@ async def _recheck_status(
                 action=action,
             )
             return False
-        if ws.status == expected.value:
+        status_ok = ws.status == expected.value
+        owner_ok = owner_id is None or ws.execution_claimed_by == owner_id
+        if status_ok and owner_ok:
             return True
         await self._record_stale_action_skip(
             repo,
             ws,
             action=action,
             expected=expected,
-            reason_code=reason_code,
+            reason_code=reason_code if not status_ok else owner_mismatch_reason_code,
         )
         if _is_callback_terminal_status(ws.status):
             await self._finish_ignored_stale_callback_operations_in_session(
@@ -579,7 +591,9 @@ async def _begin_execution(
     ``resume_from_blocked`` re-enters a workspace the worker has already
     transitioned ``blocked -> running`` (re-acquiring the epoch-fenced execution
     claim) after an operator resolved a protected quality-gate violation. The
-    claim was taken by the worker's resume CAS, so ``_claim_ready`` is skipped.
+    claim was taken by the worker's resume CAS, so ``_claim_ready`` is skipped;
+    instead the status recheck is fenced on ``execution_owner_id`` so a stale
+    worker whose claim was transferred to a newer claimant cannot resume.
     A revert/redo directive re-invokes the agent with the directive appended; an
     approve-and-keep grant skips the agent entirely (``resume_skip_agent``) and
     re-runs setup + full validation.
@@ -592,6 +606,7 @@ async def _begin_execution(
             workspace_id,
             expected=WorkspaceStatus.running,
             action="resume_blocked_execution",
+            owner_id=execution_owner_id,
         ):
             return None
         hint = pre_pr_operator_hint_from_payload(ws.pending_operator_hint)
