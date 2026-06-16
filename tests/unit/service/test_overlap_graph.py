@@ -262,6 +262,43 @@ async def test_overlap_graph_filters_to_running_and_queued_workspaces(
 
 
 @pytest.mark.unit
+async def test_overlap_graph_includes_blocked_keep_warm_workspaces(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A paused (keep-warm) blocked workspace still holds its worktree and owned
+    paths, so it must surface as a "running" node and form overlap edges."""
+    from awf.service.overlap_graph import build_workspace_overlap_graph
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    running_id = await _workspace(
+        session_factory,
+        title="Running",
+        owned_paths=["src/awf/api.py"],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    blocked_id = await _workspace(
+        session_factory,
+        title="Blocked keep-warm",
+        owned_paths=["src/**"],
+        status=WorkspaceStatus.blocked,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    graph = await build_workspace_overlap_graph(session_factory)
+
+    blocked_node = next(node for node in graph.nodes if node.workspace_id == blocked_id)
+    assert blocked_node.queue_state == "running"
+    assert len(graph.edges) == 1
+    assert graph.edges[0].affected_workspace_ids == tuple(sorted([running_id, blocked_id]))
+
+    running_graph = await build_workspace_overlap_graph(session_factory, queue_state="running")
+    assert blocked_id in {node.workspace_id for node in running_graph.nodes}
+    queued_graph = await build_workspace_overlap_graph(session_factory, queue_state="queued")
+    assert blocked_id not in {node.workspace_id for node in queued_graph.nodes}
+
+
+@pytest.mark.unit
 async def test_overlap_graph_path_match_explanations_cover_exact_ancestor_and_wildcard(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

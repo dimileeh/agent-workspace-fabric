@@ -35,6 +35,12 @@ RUNNING_WORKSPACE_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.validating.value,
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
+    # A blocked workspace stays paused with its worktree and owned paths held
+    # (keep-warm) awaiting an operator grant/resume decision, so it must surface
+    # in the advisory graph — otherwise operators miss overlap risk for exactly
+    # the workspaces they are about to grant/resume or start related work
+    # against. It maps to the "running" node queue state via the splat below.
+    WorkspaceStatus.blocked.value,
 )
 ACTIVE_OVERLAP_GRAPH_STATUSES: Final[tuple[str, ...]] = (
     *QUEUED_WORKSPACE_STATUSES,
