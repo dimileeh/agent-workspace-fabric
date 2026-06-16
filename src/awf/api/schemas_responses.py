@@ -137,6 +137,24 @@ class WorkspaceControlRequest(WorkspaceReasonRequest):
     stop_stack: bool = True
 
 
+def _guide_request_schema_extra(schema: dict[str, Any]) -> None:
+    """Encode the directive-or-grants invariant in the generated OpenAPI schema.
+
+    The Python model intentionally constructs from ``{}`` and defers the
+    non-empty enforcement to the service layer (so it can apply the per-status
+    contract). The HTTP contract, however, rejects an empty directive with no
+    grants for *every* status, so the published schema advertises the
+    ``anyOf`` invariant — a non-empty ``directive`` or a non-empty ``grants`` —
+    instead of letting generated clients treat ``{}``, ``{"directive": ""}``,
+    and ``{"grants": []}`` as valid requests.
+    """
+    schema["anyOf"] = [
+        {"properties": {"directive": {"minLength": 1}}, "required": ["directive"]},
+        {"properties": {"grants": {"minItems": 1}}, "required": ["grants"]},
+    ]
+    schema["properties"]["grants"]["items"]["minLength"] = 1
+
+
 class WorkspaceGuideRequest(BaseModel):
     """Operator-guidance request (issue #447).
 
@@ -152,7 +170,11 @@ class WorkspaceGuideRequest(BaseModel):
     ``grants`` must be provided; the service enforces the per-status contract
     (a non-blocked workspace still requires a non-empty directive)."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+        json_schema_extra=_guide_request_schema_extra,
+    )
 
     # ``directive`` is optional so a blocked workspace can be resolved with grants
     # alone. Whitespace is stripped at the boundary; the service rejects an empty

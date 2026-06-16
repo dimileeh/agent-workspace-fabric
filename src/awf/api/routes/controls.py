@@ -132,11 +132,20 @@ async def guide_workspace(
     if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
-    """Inject an operator ``directive`` into a live monitoring workspace.
+    """Carry an operator decision to a workspace (directive or blocked grants).
 
-    ``directive`` is the agent instruction (acted on next monitor cycle);
-    ``reason`` is audit-only. This is the purpose-named affordance for operator
-    guidance — prefer it over overloading ``remonitor --reason``."""
+    For a live ``monitoring_pr`` workspace, ``directive`` is the agent
+    instruction (acted on next monitor cycle) and ``reason`` is audit-only.
+    This is the purpose-named affordance for operator guidance — prefer it over
+    overloading ``remonitor --reason``.
+
+    For a pre-PR ``blocked`` workspace (protected quality-gate violation), the
+    same control carries the approve-and-keep decision: ``grants`` is the list
+    of scoped path globs to approve, and ``approve_policy_downgrade``
+    acknowledges that a granted edit may weaken validation. At least one of
+    ``directive`` or ``grants`` must be provided; the service enforces the
+    per-status contract (a non-blocked workspace still requires a non-empty
+    directive)."""
     try:
         return await _controls(session).guide_workspace(
             workspace_id,

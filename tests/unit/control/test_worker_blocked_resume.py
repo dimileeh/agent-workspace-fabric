@@ -222,6 +222,64 @@ async def test_resume_blocked_claimed_releases_claim_when_executor_missing(
         assert ws.execution_claim_expires_at is None
 
 
+async def _create_ready(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+) -> str:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.base_commit = "b" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
+@pytest.mark.unit
+async def test_run_once_prioritizes_blocked_resume_over_ready_when_slots_limited(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # With only one execution slot, an operator-cleared blocked workspace must
+    # take the slot ahead of fresh ready work: in-flight paused executions take
+    # priority over starting brand-new ones. Guards against silent regression of
+    # the dispatch ordering in ``run_once`` (blocked-resume before ready).
+    blocked_id = await _create_blocked(
+        session_factory,
+        origin_repo,
+        "blocked-first",
+        directive="revert the change",
+    )
+    ready_id = await _create_ready(session_factory, origin_repo, "ready-work")
+
+    executor = _RecordingBlockedExecutor()
+    worker = _worker(session_factory, executor)
+
+    dispatched = await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+    await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    assert dispatched == 1
+    assert executor.resume_blocked_calls == [blocked_id]
+    # The single slot went to the blocked resume; the ready workspace was left
+    # untouched for a later cycle.
+    async with session_factory() as s:
+        ready_ws = await WorkspaceRepository(s).get(ready_id)
+        assert ready_ws is not None
+        assert ready_ws.status == WorkspaceStatus.ready.value
+
+
 @pytest.mark.unit
 async def test_run_once_leaves_undecided_blocked_workspace_untouched(
     session_factory: async_sessionmaker[AsyncSession],
