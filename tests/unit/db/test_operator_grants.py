@@ -88,6 +88,21 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     with_directive = await _blocked_workspace(session)
     with_directive.pending_operator_hint = {"status": "pending", "directive": "revert it"}
 
+    # Hint present but carries no directive and no grant → the resume path would
+    # apply neither branch, so it must NOT be selected (else blocked -> running
+    # -> blocked spins re-running the same gate every cycle).
+    directiveless = await _blocked_workspace(session)
+    directiveless.pending_operator_hint = {"status": "pending", "reason": "paused on gate"}
+
+    # Hint with a whitespace-only directive is treated as directive-less by the
+    # resume path (``_optional_stripped_string``) → also not resumable.
+    blank_directive = await _blocked_workspace(session)
+    blank_directive.pending_operator_hint = {
+        "status": "pending",
+        "reason": "paused on gate",
+        "directive": "   ",
+    }
+
     # Active grant for the current epoch (approve-and-keep) → resumable.
     with_grant = await _blocked_workspace(session, block_epoch=2)
     session.add(
@@ -134,6 +149,8 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     ids = await repo.list_resumable_blocked_ids(limit=10)
     assert set(ids) == {with_directive.id, with_grant.id}
     assert awaiting.id not in ids
+    assert directiveless.id not in ids
+    assert blank_directive.id not in ids
     assert with_stale_grant.id not in ids
     assert running.id not in ids
 

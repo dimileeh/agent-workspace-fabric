@@ -665,12 +665,19 @@ class WorkspaceRepository:
         """Return ``blocked`` workspace IDs an operator has cleared for resume.
 
         A pre-PR ``blocked`` workspace is resumable only once an operator has
-        acted on it: ``guide`` either arms a directive in
+        acted on it: ``guide`` either arms a non-empty directive in
         ``pending_operator_hint`` (revert/redo) or records at least one grant
         active for the workspace's CURRENT ``block_epoch`` (approve-and-keep).
         Blocked workspaces still awaiting an operator decision carry neither, so
         they are excluded here — otherwise the worker would spin them through
         ``blocked -> running -> blocked`` re-running the same gate every cycle.
+
+        The hint branch matches the resume path's acceptance test exactly: a
+        directive-less or whitespace-only ``pending_operator_hint`` (which
+        ``execution_flow`` treats as absent via ``_optional_stripped_string``,
+        running neither the revert/redo nor the approve-and-keep branch) is NOT
+        eligible on its own — selecting it would reproduce the very spin loop the
+        non-null guard was meant to avoid.
         Oldest ``updated_at`` first for FIFO fairness across cleared workspaces.
         """
         if limit <= 0:
@@ -685,9 +692,16 @@ class WorkspaceRepository:
             )
             .exists()
         )
+        if self._dialect_name == "postgresql":
+            hint_directive: ColumnElement[Any] = Workspace.pending_operator_hint.op("->>")(
+                "directive"
+            )
+        else:
+            hint_directive = func.json_extract(Workspace.pending_operator_hint, "$.directive")
+        actionable_hint = func.trim(func.coalesce(hint_directive, "")) != ""
         stmt = select(Workspace.id).where(
             Workspace.status == WorkspaceStatus.blocked.value,
-            or_(Workspace.pending_operator_hint.isnot(None), active_grant_exists),
+            or_(actionable_hint, active_grant_exists),
         )
         if exclude_ids:
             stmt = stmt.where(Workspace.id.notin_(exclude_ids))
