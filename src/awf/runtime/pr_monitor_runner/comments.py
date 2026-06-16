@@ -305,11 +305,25 @@ async def _post_human_notification_once(
     status: PRStatus,
     state: MonitorState,
     blocker_reason: str | None = None,
+    notification_key: str | None = None,
 ) -> None:
+    """Post a single human-attention PR comment, deduped on a state key.
+
+    By default the dedupe key is head/reason scoped (``_notification_key``),
+    matching the once-per-(head, reason) behavior every existing caller relies
+    on. The protected-block pause passes an explicit ``notification_key`` keyed on
+    the block epoch + violation content so a SECOND, different protected violation
+    (or a changed directive that re-blocks with a bumped epoch) re-notifies on the
+    same head instead of being suppressed by the lifetime dedupe.
+    """
     from awf.runtime.pr_monitor_runner.helpers import _notification_key, _notify_human_reason
 
     reason = blocker_reason if blocker_reason is not None else _notify_human_reason(status, state)
-    key = _notification_key(head_sha=status.head_sha, blocker_reason=reason)
+    key = (
+        notification_key
+        if notification_key is not None
+        else _notification_key(head_sha=status.head_sha, blocker_reason=reason)
+    )
     if state.threads_addressed_ids.get(key) == "notified":
         _log.info(
             "monitor.notify_human_already_posted",

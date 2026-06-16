@@ -561,6 +561,113 @@ async def test_post_human_notification_dedup_skips_github_call(
     assert cmd.calls == []
 
 
+class _RecordingGh:
+    """Minimal gh double that records ``post_comment`` invocations."""
+
+    def __init__(self) -> None:
+        self.posts: list[dict[str, object]] = []
+
+    async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
+
+
+@pytest.mark.unit
+async def test_post_human_notification_dedupes_on_explicit_notification_key(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An explicit ``notification_key`` keys the dedupe on block epoch/content,
+    not head/reason: re-posting under the SAME key is suppressed, but a DIFFERENT
+    key (a new epoch / changed violation) re-notifies even on the same head."""
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    status = _status_for_helpers()
+    state = MonitorState()
+    repo = RepoRef(owner="example", name="repo")
+
+    # First post under epoch-1 key.
+    await runner._post_human_notification_once(
+        repo=repo,
+        pr_number=42,
+        status=status,
+        state=state,
+        blocker_reason="protected file pyproject.toml changed",
+        notification_key="__awf_protected_block__:1:digestA",
+    )
+    assert len(gh.posts) == 1
+
+    # Same key → suppressed (idempotent re-notify within one block epoch).
+    await runner._post_human_notification_once(
+        repo=repo,
+        pr_number=42,
+        status=status,
+        state=state,
+        blocker_reason="protected file pyproject.toml changed",
+        notification_key="__awf_protected_block__:1:digestA",
+    )
+    assert len(gh.posts) == 1
+
+    # Different key (new epoch / changed violation) on the SAME head → re-notifies.
+    await runner._post_human_notification_once(
+        repo=repo,
+        pr_number=42,
+        status=status,
+        state=state,
+        blocker_reason="protected file .coveragerc changed",
+        notification_key="__awf_protected_block__:2:digestB",
+    )
+    assert len(gh.posts) == 2
+
+
+@pytest.mark.unit
+def test_protected_block_notification_key_is_stable_per_epoch_and_content() -> None:
+    """The protected-block key changes with epoch or violation content so a second
+    different violation is not suppressed by the once-per-lifetime dedupe."""
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _protected_block_notification_key,
+        _protected_block_violations_digest,
+    )
+
+    v1 = (
+        QualityGateViolation(
+            path="pyproject.toml",
+            protected_pattern="pyproject.toml",
+            section="pyproject.toml",
+            line=None,
+            reason="weakened coverage",
+        ),
+    )
+    v2 = (
+        QualityGateViolation(
+            path=".coveragerc",
+            protected_pattern=".coveragerc",
+            section=".coveragerc",
+            line=None,
+            reason="weakened coverage",
+        ),
+    )
+    digest1 = _protected_block_violations_digest(v1)
+    # Order-independent: same violations in any order produce the same digest.
+    assert _protected_block_violations_digest(tuple(reversed(v1 + v1))) == (
+        _protected_block_violations_digest(v1 + v1)
+    )
+    key_epoch1 = _protected_block_notification_key(block_epoch=1, violations_digest=digest1)
+    key_epoch2 = _protected_block_notification_key(block_epoch=2, violations_digest=digest1)
+    key_v2 = _protected_block_notification_key(
+        block_epoch=1, violations_digest=_protected_block_violations_digest(v2)
+    )
+    assert key_epoch1 != key_epoch2  # new epoch → new key
+    assert key_epoch1 != key_v2  # different content → new key
+    assert key_epoch1.startswith("__awf_protected_block__:")
+
+
 @pytest.mark.unit
 async def test_defer_signal_write_failure_is_best_effort(
     factory: async_sessionmaker[AsyncSession],

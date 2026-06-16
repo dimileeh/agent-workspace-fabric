@@ -5,9 +5,10 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import (
     UTC,
@@ -26,6 +27,7 @@ from awf.common.bitbucket_client import (
     BitbucketClientError,
 )
 from awf.common.github_client import GitHubClientError
+from awf.control.quality_gates import QualityGateViolation
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import (
     OperationStatus,
@@ -825,6 +827,28 @@ def _base_fetch_retry_wait_seconds(
 def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
     reason = blocker_reason or "ready-to-merge"
     return f"__awf_notify__:{head_sha}:{reason}"
+
+
+def _protected_block_violations_digest(violations: Sequence[QualityGateViolation]) -> str:
+    """Return a stable, order-independent digest of protected-scope violations.
+
+    Keyed on the sorted ``(path, protected_pattern, reason)`` tuples so the same
+    set of violations always hashes the same regardless of discovery order, while
+    a different violation set (different path/pattern/reason) hashes differently —
+    the content half of the notification dedupe key."""
+    tuples = sorted((v.path, v.protected_pattern, v.reason or "") for v in violations)
+    payload = json.dumps(tuples, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _protected_block_notification_key(*, block_epoch: int, violations_digest: str) -> str:
+    """Build the protected-block human-notification dedupe key.
+
+    Keyed on the block epoch + violation content rather than head/lifetime so a
+    second/different violation (which bumps ``block_epoch``) or a changed
+    directive re-notifies, while a re-notify within one block epoch is
+    suppressed."""
+    return f"__awf_protected_block__:{block_epoch}:{violations_digest}"
 
 
 def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:
