@@ -22,6 +22,9 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
 )
+from awf.control.executor.constants import (
+    POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE,
+)
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import WorkspaceRepository
@@ -31,6 +34,10 @@ from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationCoverageResult, ValidationRunner
 from tests.postgres import postgres_test_engine
 from tests.unit.control.executor_paths import _test_worktrees_root
+from tests.unit.control.test_executor_post_agent_commit_parts.test_executor_post_agent_commit_part_001 import (
+    _failed_state_event,
+    _precommit_mypy_output,
+)
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -287,6 +294,48 @@ async def test_blocked_resume_with_directive_reinvokes_agent_with_directive(
     ]
     assert agent_calls, "expected the agent to be re-invoked with the directive"
     assert b"revert the protected change" in agent_calls[0].input_bytes
+
+
+@pytest.mark.unit
+async def test_blocked_resume_grant_does_not_invoke_agent_on_precommit_repair(
+    executor: WorkspaceExecutor,
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Regression for PRRT_kwDOSJAM6s6J5SDf: an approve-and-keep grant resume
+    # skips the agent task ("no tokens") and keeps the approved protected change
+    # verbatim. If the post-agent commit then trips a semantic pre-commit hook
+    # (here: mypy), the repair gate MUST stay closed — re-invoking the agent
+    # would spend tokens and could rewrite the approved change. The commit step
+    # records ``agent_skipped`` and fails instead of running semantic repair.
+    ws_id = await _seed_resumable_blocked_workspace(factory)
+    fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff (non-empty)
+    fake.queue_result(returncode=1, stdout=_precommit_mypy_output())  # git commit fails
+
+    await executor.resume_blocked_execution(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+
+    event = await _failed_state_event(factory, ws_id)
+    assert event.reason_code == POST_AGENT_COMMIT_PRECOMMIT_FAILED_REASON_CODE
+    assert event.payload is not None
+    details = event.payload["details"]
+    assert isinstance(details, dict)
+    commit_details = details["post_agent_commit"]
+    # The agent semantic repair was gated off, not run.
+    assert commit_details["repair_strategy"] == "agent_skipped"
+    assert commit_details["precommit_repair_attempted"] is False
+    # The agent CLI was never invoked: only the single failed commit ran, with
+    # no targeted-repair agent run and no retry commit.
+    commit_calls = [call for call in fake.calls if "commit" in call.args]
+    assert len(commit_calls) == 1
+    agent_calls = [call for call in fake.calls if call.input_bytes is not None]
+    assert agent_calls == []
 
 
 @pytest.mark.unit

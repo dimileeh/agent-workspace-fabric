@@ -858,7 +858,15 @@ async def execute(
                                 compose_project=compose_project,
                                 compose_file=compose_file,
                                 model=run_model,
-                                allow_agent_repair=agent_run_failure_reason is None,
+                                # A grant resume (``resume_skip_agent``) deliberately
+                                # skips the agent — "no tokens" — and keeps the approved
+                                # protected change verbatim. Semantic pre-commit repair
+                                # would re-invoke the agent and could rewrite that
+                                # approved change, so gate it off on grant resumes too,
+                                # not just on upstream agent failures.
+                                allow_agent_repair=(
+                                    agent_run_failure_reason is None and not resume_skip_agent
+                                ),
                                 ws=ws,
                                 command_evidence=agent_command_evidence,
                             )
