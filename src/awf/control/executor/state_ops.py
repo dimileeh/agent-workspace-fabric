@@ -474,6 +474,18 @@ async def enter_blocked_for_protected_violation(
                     expected=from_status,
                     reason_code="EXECUTOR_ENTER_BLOCKED_SKIPPED",
                 )
+                # Mirror the _transition_if_current / _mark_failed stale paths:
+                # a row raced into a callback-terminal status must also finalize
+                # any ignored stale callback operations, or they hang forever.
+                if _is_callback_terminal_status(current.status):
+                    await self._finish_ignored_stale_callback_operations_in_session(
+                        session,
+                        workspace_id=workspace_id,
+                        callback_source="executor",
+                        callback_action="enter_blocked_for_protected_violation",
+                        expected_status=from_status,
+                        actual_status=current.status,
+                    )
                 await session.commit()
             return False
         ws.block_reason_code = QUALITY_GATE_POLICY_CHANGED_REASON_CODE

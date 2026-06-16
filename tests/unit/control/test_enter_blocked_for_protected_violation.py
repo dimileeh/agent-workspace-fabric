@@ -17,9 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.quality_gates import QualityGateViolation
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from tests.postgres import postgres_test_engine
 
@@ -234,6 +234,48 @@ async def test_enter_blocked_no_ops_on_status_mismatch(
     ws = await _get(factory, ws_id)
     assert ws.status == WorkspaceStatus.running.value
     assert ws.block_epoch == 0
+
+
+@pytest.mark.unit
+async def test_enter_blocked_finalizes_stale_callback_on_terminal_status(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    # A row raced into a callback-terminal status (e.g. cancelled/completed) while
+    # a stale executor still believes it is ``running`` and tries to block. The CAS
+    # misses; like _transition_if_current / _mark_failed, this path must finalize
+    # any ignored stale callback operation so it does not hang forever.
+    ws_id = await _seed_running(factory)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        ws.status = WorkspaceStatus.completed.value
+        op = await OperationRepository(session).create(
+            workspace_id=ws_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            payload={"source": "pr_monitor", "recovery_mode": "validate_only"},
+        )
+        op_id = op.id
+        await session.commit()
+
+    executor = _executor(factory, tmp_path)
+    paused = await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    assert paused is False
+
+    async with factory() as session:
+        finished = await OperationRepository(session).get(op_id)
+    assert finished is not None
+    assert finished.status == OperationStatus.cancelled.value
+    assert finished.result is not None
+    assert finished.result["reason_code"] == "STALE_CALLBACK_IGNORED"
+    assert finished.result["callback_action"] == "enter_blocked_for_protected_violation"
+    assert finished.result["actual_status"] == WorkspaceStatus.completed.value
 
 
 @pytest.mark.unit
