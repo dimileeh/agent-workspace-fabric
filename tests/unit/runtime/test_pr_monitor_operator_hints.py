@@ -26,6 +26,7 @@ from awf.runtime.operator_hints import (
     persist_operator_hint,
 )
 from awf.runtime.pr_monitor import (
+    AddressComments,
     AddressOperatorHint,
     CheckState,
     CheckTiming,
@@ -37,6 +38,7 @@ from awf.runtime.pr_monitor import (
     NotifyHuman,
     OperatorHint,
     PRStatus,
+    ReviewThread,
     decide,
 )
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
@@ -1720,3 +1722,43 @@ async def test_operator_hint_resume_no_op_push_when_commit_already_on_remote(
     assert result.failed is False
     assert state.last_push_sha == "preserved-sha"
     assert state.pending_operator_hint is None  # hint processed
+
+
+@pytest.mark.unit
+def test_monitor_while_blocked_new_comment_not_dropped_on_resume() -> None:
+    """Scope #3: the reserved protected-block state keys (preserved-head marker,
+    epoch/content notification key) must NOT mark an untriaged comment addressed.
+    A review comment that arrived during the block yields ``AddressComments`` once
+    the operator hint has been processed on resume — it is not silently dropped."""
+    new_thread = ReviewThread(
+        thread_id="T_during_block",
+        path="src/awf/x.py",
+        line=1,
+        body_excerpt="please tweak this",
+        author="reviewer",
+    )
+    status = PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(new_thread,),
+        unresolved_review_comments=(),
+        base_behind_count=0,
+        merge_state_status=MergeStateStatus.CLEAN,
+        checks=(),
+    )
+    # State carrying the protected-block reserved keys, with the operator hint
+    # already processed (cleared) — the resume's next decide() cycle.
+    state = MonitorState(
+        threads_addressed_ids={
+            "__awf_protected_block_preserved_head__": "preserved-sha",
+            "__awf_protected_block__:1:digestA": "notified",
+        },
+        pending_operator_hint=None,
+    )
+
+    action = decide(status, state, MonitorConfig(auto_merge=True))
+
+    assert isinstance(action, AddressComments)
+    assert new_thread in action.threads
