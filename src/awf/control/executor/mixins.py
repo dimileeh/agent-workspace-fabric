@@ -133,6 +133,7 @@ class ExecutorDelegatesMixin:
         _state_ops._persist_resolved_profile_snapshot_if_missing
     )
     _claim_ready = _state_ops._claim_ready
+    _begin_execution = _state_ops._begin_execution
     _update_subphase = _state_ops._update_subphase
     _recheck_status = _state_ops._recheck_status
     _transition_if_current = _state_ops._transition_if_current

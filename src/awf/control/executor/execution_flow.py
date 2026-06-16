@@ -94,7 +94,6 @@ from awf.db.enums import (
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
-from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
 from awf.runtime.ownership import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     EXECUTOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -120,52 +119,23 @@ async def execute(
     workspace that is not currently in ``ready`` — useful when a poll
     loop races with a manual invocation.
 
-    ``resume_from_blocked`` re-enters a workspace the worker has already
-    transitioned ``blocked -> running`` (re-acquiring the epoch-fenced execution
-    claim) after an operator resolved a protected quality-gate violation. The
-    claim was taken by the worker's resume CAS, so ``_claim_ready`` is skipped.
-    An approve-and-keep grant skips the agent entirely (no tokens) and re-runs
-    setup + full validation; a revert/redo directive re-invokes the agent with
-    the directive appended. Active operator grants are honored by every gate and
-    consumed once the gate passes; if a protected violation still stands the gate
-    re-blocks (bumping ``block_epoch``, invalidating the now-stale grants).
+    ``resume_from_blocked`` re-enters a workspace the worker already moved
+    ``blocked -> running`` after an operator resolved a protected quality-gate
+    violation; ``_begin_execution`` decides whether to re-run the agent (a
+    revert/redo directive) or skip it (an approve-and-keep grant). Active
+    operator grants are honored by every gate and consumed once the gate passes;
+    if a protected violation still stands the gate re-blocks (bumping
+    ``block_epoch``, invalidating the now-stale grants).
     """
-    resume_skip_agent = False
-    if resume_from_blocked:
-        ws = await self._load_workspace(workspace_id)
-        if ws is None:
-            return
-        if not await self._recheck_status(
-            workspace_id,
-            expected=WorkspaceStatus.running,
-            action="resume_blocked_execution",
-        ):
-            return
-        hint = pre_pr_operator_hint_from_payload(ws.pending_operator_hint)
-        grant_specs = await self._active_operator_grant_specs(workspace_id)
-        if hint is not None and hint.directive:
-            # Revert/redo: re-invoke the agent with the operator directive.
-            ws.task_prompt = (
-                f"{ws.task_prompt}\n\n[Operator directive — resolve the paused "
-                f"protected quality-gate violation]\n{hint.directive}"
-            )
-        elif grant_specs:
-            # Approve-and-keep: skip the agent (no tokens), re-run setup + validate.
-            resume_skip_agent = True
-    else:
-        ws = await self._claim_ready(
-            workspace_id,
-            execution_owner_id=execution_owner_id,
-            execution_lease_expires_at=execution_lease_expires_at,
-        )
-        if ws is None:
-            return
-        if not await self._recheck_status(
-            workspace_id,
-            expected=WorkspaceStatus.running,
-            action="execute",
-        ):
-            return
+    begin = await self._begin_execution(
+        workspace_id,
+        resume_from_blocked=resume_from_blocked,
+        execution_owner_id=execution_owner_id,
+        execution_lease_expires_at=execution_lease_expires_at,
+    )
+    if begin is None:
+        return
+    ws, resume_skip_agent = begin
 
     compose_file = (
         Path(ws.compose_file_path)

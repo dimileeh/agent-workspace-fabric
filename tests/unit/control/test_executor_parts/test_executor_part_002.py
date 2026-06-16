@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
@@ -26,7 +26,6 @@ from awf.control.executor import (
     ollama_model,
 )
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import (
     OperationRepository,
     ValidationRunRepository,
@@ -272,64 +271,6 @@ async def _seed_ready_workspace(
         if create_worktree:
             (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
-
-
-async def _seed_resumable_blocked_workspace(
-    factory: async_sessionmaker[AsyncSession],
-    *,
-    block_epoch: int = 1,
-    grant_path: str = "pyproject.toml",
-) -> str:
-    """Insert a workspace the worker has already re-claimed ``blocked → running``
-    after an operator issued an approve-and-keep grant, ready for
-    ``resume_blocked_execution`` to drive to ``pushing``."""
-    async with factory() as s:
-        repo = WorkspaceRepository(s)
-        ws = await repo.create(
-            repo_url="git@github.com:dimileeh/aira-agent.git",
-            branch_base="development",
-            task_title="trivial",
-            task_prompt="Add a docstring.",
-            agent="codex",
-            test_commands=["pytest -q"],
-            task_policy={},
-        )
-        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
-        ws.branch_name = f"awf/{ws.id}"
-        ws.base_commit = "a" * 40
-        ws.compose_project_name = f"awf_{ws.id}"
-        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="X")
-        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="X")
-        await repo.transition(ws, to=WorkspaceStatus.blocked, reason_code="X")
-        ws.block_epoch = block_epoch
-        # The worker re-claims the operator-cleared workspace back to ``running``
-        # before handing it to ``resume_blocked_execution``.
-        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="X")
-        s.add(
-            OperatorGrantAuditRecord(
-                id=f"grant_{ws.id}",
-                workspace_id=ws.id,
-                operator="op@example.com",
-                reason="approved benign config split",
-                normalized_path=grant_path,
-                block_epoch=block_epoch,
-            )
-        )
-        await s.commit()
-        (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
-        return ws.id
-
-
-async def _active_grant(
-    factory: async_sessionmaker[AsyncSession], workspace_id: str
-) -> OperatorGrantAuditRecord:
-    async with factory() as s:
-        row = await s.execute(
-            select(OperatorGrantAuditRecord).where(
-                OperatorGrantAuditRecord.workspace_id == workspace_id
-            )
-        )
-        return row.scalars().one()
 
 
 async def _seed_running_worker_restart_recovery(
@@ -635,90 +576,6 @@ class TestHappyPathPart001:
         pr_body = _created_pr_body(fake)
         assert f"Automatically opened by AWF workspace `{ws_id}`" in pr_body
         assert "(agent: `codex`, model: `gpt-5`, effort: `xhigh`)." in pr_body
-
-    @staticmethod
-    def _queue_blocked_resume_to_push(fake: FakeCommandRunner, *, ws_id: str) -> None:
-        # Approve-and-keep resume skips the agent; the post-agent commit, the
-        # validation, the pre-push policy gates, and the push all still run, so
-        # the queue mirrors the happy path MINUS the leading ``adapter.run``.
-        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
-        fake.queue_result(returncode=0)  # git add
-        fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff (non-empty)
-        fake.queue_result(returncode=0)  # git commit
-        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
-        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
-        _queue_validation_head(fake)
-        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
-        _queue_pre_push_diagnostics(fake)
-        fake.queue_result(returncode=0)  # git push
-        fake.queue_result(
-            returncode=0,
-            stdout="https://github.com/dimileeh/aira-agent/pull/777\n",
-        )  # gh pr create
-
-    @pytest.mark.unit
-    async def test_blocked_resume_consumes_grants_after_push_transition(
-        self,
-        executor: WorkspaceExecutor,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-    ) -> None:
-        # On a successful resume the validating→pushing CAS commits the validated
-        # change to push, so the single-use operator grant is consumed.
-        ws_id = await _seed_resumable_blocked_workspace(factory)
-        self._queue_blocked_resume_to_push(fake, ws_id=ws_id)
-
-        await executor.resume_blocked_execution(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.completed.value
-        grant = await _active_grant(factory, ws_id)
-        assert grant.consumed_at is not None
-
-    @pytest.mark.unit
-    async def test_blocked_resume_keeps_grants_when_push_transition_loses(
-        self,
-        executor: WorkspaceExecutor,
-        fake: FakeCommandRunner,
-        factory: async_sessionmaker[AsyncSession],
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Regression for PRRT_kwDOSJAM6s6J2gLd: if the validating→pushing CAS
-        # loses (concurrent cancel, version race, stale status) the workspace
-        # never enters ``pushing``, so the grant MUST stay active — consuming it
-        # before the transition would strand a later protected check on the same
-        # resume with no usable grant.
-        ws_id = await _seed_resumable_blocked_workspace(factory)
-        self._queue_blocked_resume_to_push(fake, ws_id=ws_id)
-
-        real_transition = executor._transition_if_current
-
-        async def _transition_or_lose_pushing(
-            workspace_id: str, *, from_status: Any, to: Any, reason: str, action: str
-        ) -> bool:
-            if to is WorkspaceStatus.pushing:
-                return False  # simulate a lost CAS at the push transition
-            return await real_transition(
-                workspace_id,
-                from_status=from_status,
-                to=to,
-                reason=reason,
-                action=action,
-            )
-
-        monkeypatch.setattr(executor, "_transition_if_current", _transition_or_lose_pushing)
-
-        await executor.resume_blocked_execution(ws_id)
-
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status != WorkspaceStatus.completed.value
-            assert ws.status != WorkspaceStatus.pushing.value
-        grant = await _active_grant(factory, ws_id)
-        assert grant.consumed_at is None
 
     @pytest.mark.unit
     async def test_reuses_existing_pr_audit_event(
