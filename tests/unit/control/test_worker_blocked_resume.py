@@ -497,6 +497,93 @@ async def test_safely_resume_blocked_claimed_swallows_executor_error(
 
 
 @pytest.mark.unit
+async def test_safely_resume_blocked_claimed_restores_block_on_cancellation(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # A cancel (e.g. worker shutdown cancelling outstanding tasks) landing while
+    # ``resume_blocked_execution`` is still in the post-claim ``running`` state must
+    # restore the paused ``blocked`` state before the ``finally`` releases the claim,
+    # then re-raise so the task still ends cancelled. ``CancelledError`` is a
+    # ``BaseException`` and skips the ``except Exception`` restore path; without
+    # mirroring it the row would be stranded as an unclaimed ``running`` workspace
+    # that the next worker FAILs as a stale active execution instead of resuming the
+    # block (dropping the pending operator hint/grants).
+    blocked_id = await _create_blocked(
+        session_factory, origin_repo, "cancel-mid-resume", directive="go"
+    )
+
+    started = asyncio.Event()
+
+    class _HangingExecutor(_RecordingBlockedExecutor):
+        async def resume_blocked_execution(self, workspace_id: str, **_kwargs: object) -> None:
+            self.resume_blocked_calls.append(workspace_id)
+            started.set()
+            # Block in the post-claim ``running`` state until cancelled.
+            await asyncio.Event().wait()
+
+    worker = _worker(session_factory, _HangingExecutor())
+    assert await worker._claim_blocked_for_resume(blocked_id)  # noqa: SLF001
+
+    task = asyncio.ensure_future(
+        worker._safely_resume_blocked_claimed(blocked_id)  # noqa: SLF001
+    )
+    await asyncio.wait_for(started.wait(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(blocked_id)
+        assert ws is not None
+        # The paused state was restored instead of being stranded in running.
+        assert ws.status == WorkspaceStatus.blocked.value
+        # The operator directive is preserved so the next cycle can resume it.
+        assert ws.pending_operator_hint is not None
+        assert ws.pending_operator_hint["directive"] == "go"
+        # The claim was released by the ``finally``, not stranded.
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+
+
+@pytest.mark.unit
+async def test_restore_blocked_resume_claim_after_cancellation_completes_under_cancel(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # The shielded restore must run to completion even when its awaiter is cancelled
+    # mid-write (e.g. worker shutdown re-cancelling outstanding tasks): it absorbs the
+    # cancellation and finishes the ``running -> blocked`` write, so the paused state
+    # is never dropped. (The caller re-raises the original cancellation separately.)
+    blocked_id = await _create_blocked(
+        session_factory, origin_repo, "shielded-restore", directive="go"
+    )
+    worker = _worker(session_factory, _RecordingBlockedExecutor())
+    assert await worker._claim_blocked_for_resume(blocked_id)  # noqa: SLF001
+
+    task = asyncio.ensure_future(
+        worker._restore_blocked_resume_claim_after_cancellation(  # noqa: SLF001
+            blocked_id, reason_code="BLOCKED_RESUME_EXECUTION_CANCELLED"
+        )
+    )
+    # Let the helper reach its shielded ``await`` before cancelling (mirrors the real
+    # caller, which invokes it from an already-running except handler).
+    await asyncio.sleep(0)
+    task.cancel()
+    # The shield absorbs the cancellation and the restore still runs to completion.
+    await asyncio.wait_for(task, timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(blocked_id)
+        assert ws is not None
+        # The restore completed despite the cancellation. The helper only reverts the
+        # state; releasing the claim is the caller's ``finally`` responsibility, so the
+        # claim is still held here.
+        assert ws.status == WorkspaceStatus.blocked.value
+        assert ws.execution_claimed_by == worker._worker_id  # noqa: SLF001
+
+
+@pytest.mark.unit
 async def test_restore_blocked_resume_claim_noop_when_row_not_running(
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,

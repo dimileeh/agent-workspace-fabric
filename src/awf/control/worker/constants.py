@@ -250,6 +250,15 @@ The owner-gated restore is a no-op once the resume has transitioned the row onwa
 when it is still ``running`` it restores the paused state instead of leaving it
 stranded for stale-active recovery to FAIL."""
 
+_BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE = "BLOCKED_RESUME_EXECUTION_CANCELLED"
+"""Reason code for reverting ``running -> blocked`` when a blocked-resume won the
+``blocked -> running`` claim and dispatched, but the resume task was *cancelled*
+(e.g. worker shutdown) while ``resume_blocked_execution`` was still in the post-claim
+``running`` state. ``CancelledError`` is a ``BaseException`` and skips the
+``except Exception`` restore path, so without mirroring the restore here the row would
+be left stranded in ``running`` for stale-active recovery to FAIL. The owner-gated
+restore is a no-op once the resume has transitioned the row onward."""
+
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"

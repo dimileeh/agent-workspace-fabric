@@ -12,6 +12,7 @@ from functools import partial
 from typing import Any, cast
 
 from awf.control.worker.constants import (
+    _BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE,
     _BLOCKED_RESUME_EXECUTION_FAILED_REASON_CODE,
     _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL,
     EXECUTION_CLAIM_FENCED,
@@ -151,6 +152,23 @@ async def _safely_resume_blocked_claimed(self: Any, workspace_id: str) -> None:
             execution_owner_id=self._worker_id,
             execution_lease_expires_at=self._execution_claim_expires_at(),
         )
+    except asyncio.CancelledError:
+        # The resume CAS already committed ``blocked -> running`` before dispatch.
+        # ``CancelledError`` is a ``BaseException``, so a cancel that lands while
+        # ``resume_blocked_execution`` is still in the post-claim ``running`` state
+        # (e.g. worker shutdown cancelling outstanding tasks) skips the
+        # ``except Exception`` restore below; left as-is the ``finally`` releases the
+        # claim and the next worker treats the operator-paused row as a *stale active
+        # execution* (FAILing it) rather than a resumable block, dropping the pending
+        # hint/grants. Mirror the restore for cancellation — shielded so a second
+        # cancellation cannot skip the write — before re-raising so the task still
+        # ends cancelled and the slot drains. Owner-gated and a no-op once the resume
+        # has already transitioned the row past ``running``.
+        await self._restore_blocked_resume_claim_after_cancellation(
+            workspace_id,
+            reason_code=_BLOCKED_RESUME_EXECUTION_CANCELLED_REASON_CODE,
+        )
+        raise
     except Exception:
         _log.exception("worker.resume_blocked_failed", workspace_id=workspace_id)
         # The resume CAS already committed ``blocked -> running`` before dispatch.

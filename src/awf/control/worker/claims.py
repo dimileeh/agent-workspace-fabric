@@ -639,6 +639,30 @@ async def _restore_blocked_after_missing_executor(self: Any, workspace_id: str) 
     )
 
 
+async def _restore_blocked_resume_claim_after_cancellation(
+    self: Any, workspace_id: str, *, reason_code: str
+) -> None:
+    """Restore a cancelled blocked-resume back to ``blocked`` even if cancelled again.
+
+    ``_safely_resume_blocked_claimed``'s ``CancelledError`` handler must revert the
+    post-claim ``running`` row to ``blocked`` before re-raising, but the restore is
+    itself a cancellable DB write. A second cancellation (e.g. worker shutdown
+    cancelling outstanding tasks) landing mid-write would propagate out of the
+    un-shielded restore (which only catches ``Exception``), skipping the commit so
+    the caller's ``finally`` releases the claim and leaves the row stranded in
+    ``running`` for stale-active recovery to FAIL. Shield the restore and re-await
+    across repeated cancellations so it always runs to completion, mirroring
+    ``_release_execution_claim_after_cancellation``.
+    """
+    restore_task = asyncio.create_task(
+        self._restore_blocked_resume_claim(workspace_id, reason_code=reason_code),
+        name=f"awf-blocked-resume-restore-{workspace_id}",
+    )
+    while not restore_task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(restore_task)
+
+
 async def _claim_blocked_resume_ids(
     self: Any, workspace_ids: list[str], *, limit: int
 ) -> list[str]:

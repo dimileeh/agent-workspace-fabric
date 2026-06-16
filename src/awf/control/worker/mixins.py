@@ -26,6 +26,9 @@ class WorkerDelegatesMixin:
     _claim_blocked_resume_ids = _claims._claim_blocked_resume_ids
     _restore_blocked_after_missing_executor = _claims._restore_blocked_after_missing_executor
     _restore_blocked_resume_claim = _claims._restore_blocked_resume_claim
+    _restore_blocked_resume_claim_after_cancellation = (
+        _claims._restore_blocked_resume_claim_after_cancellation
+    )
     _safely_resume_claimed_pr_monitor = _claims._safely_resume_claimed_pr_monitor
     _finish_monitor_recovery_operation = _claims._finish_monitor_recovery_operation
     _finish_monitor_recovery_operation_after_cancellation = (
