@@ -370,12 +370,6 @@ async def _run_post_validation_conformance_check(
             report=report,
             validation_run_id=validation_run_id,
         )
-        # The satisfied conformance report is an AWF artifact/event, not source
-        # work. Remove the on-worktree copy so project-specific profiles that
-        # track the conformance report path do not see a dirty worktree at
-        # pre-push validation time. The outcome is already captured by the event
-        # above and by the validation-run artifact deposit.
-        #
         # For successful planned workspaces where the report was produced from
         # stdout or a fresh on-disk file, deposit a snapshot into the served
         # artifact dir BEFORE removing the on-worktree copy. The deposit is
@@ -388,6 +382,12 @@ async def _run_post_validation_conformance_check(
             plan_path=handoff.plan_path,
             report_path=handoff.report_path,
         )
+        # The satisfied conformance report is an AWF artifact/event, not source
+        # work. Remove the on-worktree copy so project-specific profiles that
+        # track the conformance report path do not see a dirty worktree at
+        # pre-push validation time. The outcome is already captured by the event
+        # above and by the validation-run artifact deposit.
+        #
         # The report may be tracked in the project profile. Deleting a tracked
         # file leaves a staged deletion (``D ...`` in ``git status``), which
         # still dirties the worktree. Restore the path from the index first to

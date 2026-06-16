@@ -700,11 +700,6 @@ async def run_validation_and_fix_cycle(
                         attempt=post_validation_conformance_fix_attempts,
                     )
             if conformance_failure is None:
-                # The conformance report was already deposited into the served
-                # artifact dir from inside _run_post_validation_conformance_check
-                # while the on-worktree copy still existed. The post-validation
-                # conformance check then removed the on-worktree copy, so no
-                # extra deposit is needed (or possible) here.
                 successful_validation_run_id = validation_run_id
                 successful_validation_workspace_head_sha = validation_workspace_head_sha
                 if recovery is not None and ws.pr_url and planning_validation_handoff is not None:

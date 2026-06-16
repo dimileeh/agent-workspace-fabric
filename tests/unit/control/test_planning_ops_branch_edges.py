@@ -646,6 +646,13 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
         max_iterations=2,
     )
 
+    # Ensure the report file exists before the conformance check so that a
+    # mocked ``Path.unlink`` raises on the actual unlink call rather than on
+    # the write failure path (which would make the file absent and leave
+    # ``missing_ok=True`` a no-op).
+    report_abs.parent.mkdir(parents=True, exist_ok=True)
+    report_abs.write_text(satisfied, encoding="utf-8")
+
     with patch.object(Path, "unlink", _raise_on_report_unlink):
         failure = await executor._run_post_validation_conformance_check(
             adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
