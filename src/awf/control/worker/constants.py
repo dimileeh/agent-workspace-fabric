@@ -230,6 +230,11 @@ _BLOCKED_RESUME_REASON_CODE = "OPERATOR_GRANT_RESUME"
 """Reason code for the worker's ``blocked -> running`` resume transition after
 an operator resolved a protected quality-gate violation via ``guide``."""
 
+_BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE = "BLOCKED_RESUME_NO_EXECUTOR"
+"""Reason code for reverting ``running -> blocked`` when a blocked-resume won the
+``blocked -> running`` claim but the worker had no executor to drive it — the
+paused state is restored instead of being left stranded in ``running``."""
+
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"

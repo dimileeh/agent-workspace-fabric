@@ -188,8 +188,9 @@ async def test_resume_blocked_claimed_releases_claim_when_executor_missing(
 ) -> None:
     # The resume CAS transitions ``blocked -> running`` and stamps the execution
     # claim *before* dispatch. If the worker then has no executor, the resume
-    # task must still release the claim instead of stranding the claimed
-    # ``running`` row until lease expiry.
+    # task must restore the paused ``blocked`` state and release the claim
+    # instead of stranding the claimed ``running`` row (which stale-active
+    # recovery would later FAIL, dropping the operator-visible paused state).
     blocked_id = await _create_blocked(
         session_factory,
         origin_repo,
@@ -205,6 +206,7 @@ async def test_resume_blocked_claimed_releases_claim_when_executor_missing(
         ws = await WorkspaceRepository(s).get(blocked_id)
         assert ws is not None
         assert ws.execution_claimed_by == worker._worker_id  # noqa: SLF001
+        assert ws.status == WorkspaceStatus.running.value
 
     # The executor went away after the claim was acquired.
     worker._executor = None  # noqa: SLF001
@@ -217,6 +219,11 @@ async def test_resume_blocked_claimed_releases_claim_when_executor_missing(
     async with session_factory() as s:
         ws = await WorkspaceRepository(s).get(blocked_id)
         assert ws is not None
+        # The paused state was restored instead of being stranded in running.
+        assert ws.status == WorkspaceStatus.blocked.value
+        # The operator directive is preserved so the next cycle can resume it.
+        assert ws.pending_operator_hint is not None
+        assert ws.pending_operator_hint["directive"] == "revert the change"
         # Cleanup ran: the execution claim was released rather than stranded.
         assert ws.execution_claimed_by is None
         assert ws.execution_claim_expires_at is None

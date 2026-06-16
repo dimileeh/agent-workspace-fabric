@@ -26,6 +26,7 @@ from awf.control.worker.admission import (
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    _BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
     _BLOCKED_RESUME_REASON_CODE,
     _MONITOR_RECOVERY_EVENT_TYPE,
     _MONITOR_RECOVERY_REASON_CODE,
@@ -593,6 +594,36 @@ async def _claim_blocked_for_resume(self: Any, workspace_id: str) -> bool:
         _apply_execution_claim(self, ws, owner_id=self._worker_id)
         await session.commit()
         return True
+
+
+async def _restore_blocked_after_missing_executor(self: Any, workspace_id: str) -> None:
+    """Revert a won blocked-resume back to ``blocked`` when no executor can drive it.
+
+    ``_claim_blocked_for_resume`` performs the ``blocked -> running`` CAS *before*
+    dispatch, so if the worker has no executor the resume task would otherwise
+    leave the row stranded in ``running`` (its claim released by the caller's
+    ``finally``) until stale-active recovery FAILS it — dropping the paused state
+    operators expect. Reverting to ``blocked`` restores that state: the claim CAS
+    never touched ``block_epoch``/``pending_operator_hint``/grants, so the next
+    cycle resumes it cleanly once an executor is present. Owner-gated so a newer
+    claimant that already fenced us is never clobbered."""
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.running,
+                to=WorkspaceStatus.blocked,
+                reason_code=_BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
+                extra_conditions=(Workspace.execution_claimed_by == self._worker_id,),
+            )
+            if ws is not None:
+                await session.commit()
+    except Exception:
+        _log.exception(
+            "worker.blocked_resume_restore_failed",
+            workspace_id=workspace_id,
+            worker_id=self._worker_id,
+        )
 
 
 async def _claim_blocked_resume_ids(

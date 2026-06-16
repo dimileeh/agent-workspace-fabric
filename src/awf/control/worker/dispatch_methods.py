@@ -137,10 +137,13 @@ async def _safely_resume_blocked_claimed(self: Any, workspace_id: str) -> None:
     )
     try:
         # The claim CAS already transitioned the row ``blocked -> running``
-        # before dispatch, so a missing executor must still fall through to the
-        # ``finally`` to release the claim — returning here would strand the
-        # claimed ``running`` row until lease expiry. Mirrors ``_safely_execute``.
+        # before dispatch, so a missing executor must not just release the claim
+        # and return: that would leave the row stranded in ``running`` (paused
+        # state dropped) until stale-active recovery FAILS it. Revert it to
+        # ``blocked`` first to restore the operator-visible paused state, then
+        # fall through to the ``finally`` to release the claim.
         if self._executor is None:
+            await self._restore_blocked_after_missing_executor(workspace_id)
             return
         await self._executor.resume_blocked_execution(
             workspace_id,
