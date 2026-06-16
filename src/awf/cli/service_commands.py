@@ -60,6 +60,7 @@ class GCStatusFilter(StrEnum):
     validating = "validating"
     pushing = "pushing"
     monitoring_pr = "monitoring_pr"
+    blocked = "blocked"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"

@@ -796,15 +796,21 @@ class WorkspaceService:
         *,
         directive: str,
         reason: str | None = None,
+        grants: builtins.list[str] | None = None,
+        approve_policy_downgrade: bool = False,
+        operator: str | None = None,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
-        """Inject an operator directive into a live monitoring workspace."""
+        """Inject an operator directive and/or scoped grants into a workspace."""
         async with self._factory() as s:
             result = await self._controls(s).guide_workspace(
                 workspace_id,
                 directive=directive,
                 reason=reason,
+                grants=grants,
+                approve_policy_downgrade=approve_policy_downgrade,
+                operator=operator,
                 idempotency_key=idempotency_key,
                 expected_version=expected_version,
             )

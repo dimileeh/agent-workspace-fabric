@@ -177,7 +177,7 @@ dependencies = [
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        """Unowned quality-gate edits should fail validation by initial agent."""
+        """Unowned quality-gate edits pause the workspace for an operator."""
         executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter.run (initial)
@@ -190,10 +190,11 @@ dependencies = [
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert "protected quality-gate" in (ws.failure_message or "")
-            assert ".awf/workspace.yml" in (ws.failure_message or "")
+            assert ws.status == WorkspaceStatus.blocked.value
+            assert ws.block_reason_code == "QUALITY_GATE_POLICY_CHANGED"
+            assert ws.block_type == "protected_quality_gate"
+            assert ws.block_violations
+            assert any(v["path"] == ".awf/workspace.yml" for v in ws.block_violations)
 
     @pytest.mark.unit
     async def test_initial_agent_self_committed_protected_change_before_staged_work_is_blocked(
@@ -232,10 +233,10 @@ dependencies = [
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert "protected quality-gate" in (ws.failure_message or "")
-            assert ".awf/workspace.yml" in (ws.failure_message or "")
+            assert ws.status == WorkspaceStatus.blocked.value
+            assert ws.block_reason_code == "QUALITY_GATE_POLICY_CHANGED"
+            assert ws.block_violations
+            assert any(v["path"] == ".awf/workspace.yml" for v in ws.block_violations)
         call_args = [call.args for call in fake.calls]
         assert any(
             args[:1] == ["git"]
@@ -278,9 +279,11 @@ dependencies = [
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            assert "pyproject.toml" in (ws.failure_message or "")
+            assert ws.status == WorkspaceStatus.blocked.value
+            assert ws.block_reason_code == "QUALITY_GATE_POLICY_CHANGED"
+            assert ws.block_resume_phase == "validation_fix_cycle"
+            assert ws.block_violations
+            assert any(v["path"] == "pyproject.toml" for v in ws.block_violations)
 
     class TestSupplyChainPolicy:
         """Validate helper behavior for supply-chain block messages and findings."""

@@ -19,6 +19,7 @@ class ExecutorDelegatesMixin:
     _repair_agent_git_ownership = _git_methods._repair_agent_git_ownership
     _run_agent_git_writability_preflight = _git_methods._run_agent_git_writability_preflight
     _recover_missing_git_head_or_mark_failed = _git_methods._recover_missing_git_head_or_mark_failed
+    _recover_orphan_history = _git_methods._recover_orphan_history
     _record_git_object_recovery_event = _git_methods._record_git_object_recovery_event
     _recover_feature_branch_remote_push_branch = (
         _git_methods._recover_feature_branch_remote_push_branch
@@ -93,6 +94,7 @@ class ExecutorDelegatesMixin:
     _digest_dirty_content = _planning_ops._digest_dirty_content
 
     _run_baseline_coverage_preflight = _quality_methods._run_baseline_coverage_preflight
+    _measure_and_persist_baseline_coverage = _quality_methods._measure_and_persist_baseline_coverage
     _run_final_coverage_gate = _quality_methods._run_final_coverage_gate
     _parallel_worker_cpu_limit_for_workspace = (
         _quality_methods._parallel_worker_cpu_limit_for_workspace
@@ -133,12 +135,20 @@ class ExecutorDelegatesMixin:
         _state_ops._persist_resolved_profile_snapshot_if_missing
     )
     _claim_ready = _state_ops._claim_ready
+    _begin_execution = _state_ops._begin_execution
     _update_subphase = _state_ops._update_subphase
     _recheck_status = _state_ops._recheck_status
     _transition_if_current = _state_ops._transition_if_current
     _record_stale_action_skip = _state_ops._record_stale_action_skip
     _record_health_check_failed_event = _state_ops._record_health_check_failed_event
     _mark_failed = _state_ops._mark_failed
+    enter_blocked_for_protected_violation = _state_ops.enter_blocked_for_protected_violation
+    _persist_block_baseline_coverage = _state_ops._persist_block_baseline_coverage
+    _persist_block_planning_conformance_handoff = (
+        _state_ops._persist_block_planning_conformance_handoff
+    )
+    _active_operator_grant_specs = _state_ops._active_operator_grant_specs
+    _consume_active_operator_grants = _state_ops._consume_active_operator_grants
 
     _start_validation_run = _validation_ops._start_validation_run
     _capture_workspace_head_sha = _validation_ops._capture_workspace_head_sha

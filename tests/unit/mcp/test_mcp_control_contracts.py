@@ -217,6 +217,9 @@ class _MockService:
         *,
         directive: str,
         reason: str | None = None,
+        grants: list[str] | None = None,
+        approve_policy_downgrade: bool = False,
+        operator: str | None = None,
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
@@ -227,6 +230,9 @@ class _MockService:
                     "workspace_id": workspace_id,
                     "directive": directive,
                     "reason": reason,
+                    "grants": grants,
+                    "approve_policy_downgrade": approve_policy_downgrade,
+                    "operator": operator,
                     "idempotency_key": idempotency_key,
                     "expected_version": expected_version,
                 },
@@ -496,6 +502,20 @@ class TestToolRegistrationAndSchema:
         props = tools["awf_retry_workspace"].inputSchema.get("properties", {})
         assert "expected_version" not in props
 
+    async def test_guide_grants_mirrors_rest_request_contract(self) -> None:
+        # The MCP guide tool must mirror the REST ``WorkspaceGuideRequest``
+        # contract 1:1: ``grants`` is a non-null list defaulting to empty with a
+        # 64-item bound, not a nullable field defaulting to ``None``.
+        mcp = build_mcp_server(service=_MockService())
+        tools = {t.name: t for t in await mcp.list_tools()}
+        schema = tools["awf_guide_workspace"].inputSchema
+        grants = schema["properties"]["grants"]
+        assert grants.get("type") == "array"
+        assert grants.get("items") == {"type": "string"}
+        assert grants.get("maxItems") == 64
+        # Non-null list defaulting via factory: never a required input.
+        assert "grants" not in schema.get("required", [])
+
 
 @pytest.mark.unit
 class TestSuccessPaths:
@@ -592,6 +612,9 @@ class TestSuccessPaths:
                         "workspace_id": "ws_guide",
                         "directive": "implement, do not defer",
                         "reason": "operator decision",
+                        "grants": [],
+                        "approve_policy_downgrade": False,
+                        "operator": None,
                         "idempotency_key": "ik-g",
                         "expected_version": 11,
                     },
@@ -686,16 +709,14 @@ class TestSuccessPaths:
         assert isinstance(payload, dict)
         assert service.calls[0][1]["idempotency_key"] == idempotency_key
 
-    async def test_guide_requires_idempotency_key_and_directive(self) -> None:
+    async def test_guide_requires_idempotency_key(self) -> None:
         service = _MockService()
         mcp = build_mcp_server(service=service)
 
-        # Directive required by schema.
-        with pytest.raises(ToolError, match="directive"):
-            await _call_result(
-                mcp, "awf_guide_workspace", {"workspace_id": "ws_x", "idempotency_key": "ik"}
-            )
-        # Blank idempotency key (directive present) → structured invalid-request.
+        # ``directive`` is now optional (a blocked workspace can be resolved with
+        # grants alone); the directive-or-grant contract is enforced by the
+        # service. Blank idempotency key → structured invalid-request before the
+        # service is called.
         result = await _call_result(
             mcp,
             "awf_guide_workspace",

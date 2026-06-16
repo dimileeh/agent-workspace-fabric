@@ -53,6 +53,10 @@ def new_operation_id() -> str:
     return f"op_{uuid4().hex[:24]}"
 
 
+def new_operator_grant_id() -> str:
+    return f"grant_{uuid4().hex[:24]}"
+
+
 def new_event_id() -> str:
     return f"evt_{uuid4().hex[:24]}"
 

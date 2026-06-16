@@ -33,8 +33,10 @@ _AUTH_OVERLAY_BACKFILL_FILENAME = (
 )
 _EXECUTION_CLAIM_EPOCH_REVISION = "b2d4f6a8c0e1"
 _WORKSPACE_TASK_TAG_REVISION = "c3e5f7b9d1a2"
-# Current head: on-demand worker GC delegation requests (#582).
+# On-demand worker GC delegation requests (#582).
 _SERVICE_GC_REQUESTS_REVISION = "b582d1c4e7a9"
+# Current head: blocked status columns + operator grant audit records.
+_BLOCKED_STATUS_REVISION = "c1d2e3f4a5b6"
 _AUTH_OVERLAY_PENDING_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_pending"
 _AUTH_OVERLAY_RESOLVED_EVENT_TYPE = "workspace.terminal_auth_overlay_unmount_resolved"
 _AUTH_OVERLAY_PENDING_REASON_CODE = "TERMINAL_AUTH_OVERLAY_UNMOUNT_PENDING"
@@ -102,7 +104,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [_SERVICE_GC_REQUESTS_REVISION]
+    assert script.get_heads() == [_BLOCKED_STATUS_REVISION]
 
 
 @pytest.mark.unit
@@ -345,13 +347,14 @@ async def test_auth_overlay_unmount_backfill_postgres_seeds_only_qualifying_rows
 
         monkeypatch.chdir(repo_root)
         with postgres_alembic_subprocess_lock(database_url):
-            # Upgrade to the latest revision so the workspaces table has every
-            # column the current ORM model writes (e.g. task_tag, added after
-            # this backfill migration). The backfill function is invoked
-            # manually below, so the schema version does not change what the
-            # test exercises; pinning to a pre-column revision broke the ORM
-            # seeding once a later migration added a column.
-            _run_alembic(repo_root, env, "upgrade", _WORKSPACE_TASK_TAG_REVISION)
+            # Upgrade to the current head so the workspaces table has every
+            # column the current ORM model writes (e.g. task_tag and the
+            # block-state columns, both added after this backfill migration).
+            # The backfill function is invoked manually below, so the schema
+            # version does not change what the test exercises; pinning to a
+            # pre-column revision broke the ORM seeding once a later migration
+            # added a column.
+            _run_alembic(repo_root, env, "upgrade", _BLOCKED_STATUS_REVISION)
 
         engine = make_engine(database_url)
         try:

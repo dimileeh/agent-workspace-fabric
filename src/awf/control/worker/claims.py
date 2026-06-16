@@ -26,6 +26,8 @@ from awf.control.worker.admission import (
 from awf.control.worker.config import effective_worker_config_node_id
 from awf.control.worker.constants import (
     _ACTIVE_EXECUTION_SALVAGE_MONITOR_ATTACHED_REASON_CODE,
+    _BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
+    _BLOCKED_RESUME_REASON_CODE,
     _MONITOR_RECOVERY_EVENT_TYPE,
     _MONITOR_RECOVERY_REASON_CODE,
     _SCHEDULER_PRIORITY_REFILL_PAGES_AFTER_FILL,
@@ -571,6 +573,116 @@ async def _claim_monitoring_pr(self: Any, workspace_id: str) -> bool:
         return claimed
 
 
+async def _claim_blocked_for_resume(self: Any, workspace_id: str) -> bool:
+    """Atomically claim a ``blocked`` workspace for resume.
+
+    Epoch-fenced: the ``blocked -> running`` transition is the CAS — exactly one
+    worker wins (the loser sees ``running`` and updates 0 rows), so a double
+    resume cannot run the warm stack twice. The execution claim + fencing epoch
+    are (re-)stamped via the shared ``_apply_execution_claim`` so a stale prior
+    executor is fenced on its next write."""
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.blocked,
+            to=WorkspaceStatus.running,
+            reason_code=_BLOCKED_RESUME_REASON_CODE,
+        )
+        if ws is None:
+            return False
+        _apply_execution_claim(self, ws, owner_id=self._worker_id)
+        await session.commit()
+        return True
+
+
+async def _restore_blocked_resume_claim(self: Any, workspace_id: str, *, reason_code: str) -> None:
+    """Revert a won blocked-resume back to ``blocked`` when it cannot be driven.
+
+    ``_claim_blocked_for_resume`` performs the ``blocked -> running`` CAS *before*
+    dispatch, so if the resume never starts the row would otherwise be left
+    stranded in ``running`` (its claim released elsewhere) until stale-active
+    recovery FAILS it — dropping the paused state operators expect. Reverting to
+    ``blocked`` restores that state: the claim CAS never touched
+    ``block_epoch``/``pending_operator_hint``/grants, so the next cycle resumes it
+    cleanly once it can run. Owner-gated so a newer claimant that already fenced
+    us is never clobbered. The ``reason_code`` records *why* the resume was
+    abandoned (no executor vs. an aborted post-claim dispatch)."""
+    try:
+        async with self._session_factory() as session:
+            ws = await WorkspaceRepository(session).transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.running,
+                to=WorkspaceStatus.blocked,
+                reason_code=reason_code,
+                extra_conditions=(Workspace.execution_claimed_by == self._worker_id,),
+            )
+            if ws is not None:
+                await session.commit()
+    except Exception:
+        _log.exception(
+            "worker.blocked_resume_restore_failed",
+            workspace_id=workspace_id,
+            worker_id=self._worker_id,
+        )
+
+
+async def _restore_blocked_after_missing_executor(self: Any, workspace_id: str) -> None:
+    """Revert a won blocked-resume back to ``blocked`` when no executor can drive it.
+
+    Thin wrapper over ``_restore_blocked_resume_claim`` for the missing-executor
+    case inside the dispatched resume task (the claim is released by the caller's
+    ``finally``)."""
+    await self._restore_blocked_resume_claim(
+        workspace_id,
+        reason_code=_BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
+    )
+
+
+async def _restore_blocked_resume_claim_after_cancellation(
+    self: Any, workspace_id: str, *, reason_code: str
+) -> None:
+    """Restore a cancelled blocked-resume back to ``blocked`` even if cancelled again.
+
+    ``_safely_resume_blocked_claimed``'s ``CancelledError`` handler must revert the
+    post-claim ``running`` row to ``blocked`` before re-raising, but the restore is
+    itself a cancellable DB write. A second cancellation (e.g. worker shutdown
+    cancelling outstanding tasks) landing mid-write would propagate out of the
+    un-shielded restore (which only catches ``Exception``), skipping the commit so
+    the caller's ``finally`` releases the claim and leaves the row stranded in
+    ``running`` for stale-active recovery to FAIL. Shield the restore and re-await
+    across repeated cancellations so it always runs to completion, mirroring
+    ``_release_execution_claim_after_cancellation``.
+    """
+    restore_task = asyncio.create_task(
+        self._restore_blocked_resume_claim(workspace_id, reason_code=reason_code),
+        name=f"awf-blocked-resume-restore-{workspace_id}",
+    )
+    while not restore_task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(restore_task)
+
+
+async def _claim_blocked_resume_ids(
+    self: Any, workspace_ids: list[str], *, limit: int
+) -> list[str]:
+    """Claim each operator-cleared ``blocked`` workspace for resume, in order.
+
+    Mirrors ``_claim_monitoring_pr_ids``: the per-workspace CAS in
+    ``_claim_blocked_for_resume`` performs the ``blocked -> running`` transition,
+    so only the rows it actually wins (and that are not already running locally)
+    are returned for dispatch."""
+    claimed: list[str] = []
+    for workspace_id in workspace_ids:
+        if len(claimed) >= limit:
+            break
+        if workspace_id in self._execution_tasks:
+            continue
+        if await self._claim_blocked_for_resume(workspace_id):
+            claimed.append(workspace_id)
+    return claimed
+
+
 async def _safely_resume_claimed_pr_monitor(
     self: Any,
     workspace_id: str,
@@ -758,10 +870,35 @@ async def _refresh_execution_claim(self: Any, workspace_id: str) -> bool:
     )
 
 
-async def _release_execution_claim(self: Any, workspace_id: str) -> None:
+async def _release_execution_claim(
+    self: Any, workspace_id: str, *, skip_if_blocked: bool = False
+) -> None:
     try:
         async with self._session_factory() as session:
-            released = await WorkspaceRepository(session).release_execution_claim(
+            repo = WorkspaceRepository(session)
+            if skip_if_blocked:
+                ws = await repo.get(workspace_id)
+                if ws is not None and ws.status == WorkspaceStatus.blocked.value:
+                    # A ``blocked`` workspace is paused awaiting an operator
+                    # decision and, per the blocked contract, keeps its worktree,
+                    # warm stack, and execution claim as the *durable lease* (see
+                    # ``enter_blocked_for_protected_violation`` and
+                    # ``tests/.../test_blocked_status_membership``). When a genuine
+                    # execution pauses into ``blocked`` on a protected-gate
+                    # violation, this ``finally`` reaches here right after the
+                    # pause; releasing the claim now would leave the row ``blocked``
+                    # with ``execution_claimed_by`` cleared, stranding it without
+                    # the fencing/ownership the membership contract and the resume
+                    # path expect until an operator-cleared resume re-stamps it.
+                    # Skip the release so the warm-stack lease stays held.
+                    #
+                    # Only the execution dispatch passes ``skip_if_blocked``: the
+                    # blocked-resume path deliberately releases when it reverts to
+                    # ``blocked`` after finding no executor, so a capable worker can
+                    # re-claim it (see
+                    # ``test_resume_blocked_claimed_releases_claim_when_executor_missing``).
+                    return
+            released = await repo.release_execution_claim(
                 workspace_id,
                 owner_id=self._worker_id,
                 execution_claim_epoch=self._execution_claim_epochs.get(workspace_id),
