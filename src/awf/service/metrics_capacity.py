@@ -109,6 +109,9 @@ EXECUTION_IN_USE_STATUSES = frozenset(
         WorkspaceStatus.validating.value,
         WorkspaceStatus.pushing.value,
         WorkspaceStatus.monitoring_pr.value,
+        # A blocked workspace keeps its warm stack + execution claim while it
+        # awaits an operator decision, so it still holds an execution slot.
+        WorkspaceStatus.blocked.value,
     }
 )
 EXECUTION_QUEUE_STATUSES = frozenset({WorkspaceStatus.ready.value})

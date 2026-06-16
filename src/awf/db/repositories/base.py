@@ -96,6 +96,8 @@ ALLOCATED_RESOURCE_RESERVATION_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.validating.value,
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
+    # A blocked workspace holds its reservation while paused (keep-warm).
+    WorkspaceStatus.blocked.value,
     WorkspaceStatus.destroying.value,
 )
 DEFAULT_IDEMPOTENCY_REPLAY_KEY_LIMIT: Final[int] = 4096
