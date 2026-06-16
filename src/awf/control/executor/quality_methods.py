@@ -56,6 +56,7 @@ from awf.control.protected_file_diffs import (
 )
 from awf.control.quality_gates import (
     PLAN_ONLY_OUTPUT_REASON_CODE,
+    QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
     changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
     plan_only_output_message,
@@ -206,12 +207,13 @@ async def _verify_recovered_post_agent_commit(
         protected_file_diffs=protected_file_diffs,
     )
     if violations:
-        await self._mark_failed(
+        # Pause for an operator decision instead of terminally failing — the
+        # recovered commit + worktree are preserved through the block.
+        await self.enter_blocked_for_protected_violation(
             workspace_id=workspace_id,
             from_status=expected_status,
-            failure_reason=FailureReason.policy_failure,
-            reason_code="QUALITY_GATE_POLICY_CHANGED",
-            message=quality_gate_violation_message(violations)[:2000],
+            violations=violations,
+            resume_phase="post_agent_commit_recovery_verify",
         )
         return False
     ancestor = await self._runner.run(
@@ -403,12 +405,12 @@ async def _fail_if_protected_quality_gate_committed_output(
     )
     if not violations:
         return False
-    await self._mark_failed(
+    # Pause for an operator decision instead of terminally failing.
+    await self.enter_blocked_for_protected_violation(
         workspace_id=workspace_id,
         from_status=expected_status,
-        failure_reason=FailureReason.policy_failure,
-        reason_code="QUALITY_GATE_POLICY_CHANGED",
-        message=quality_gate_violation_message(violations)[:2000],
+        violations=violations,
+        resume_phase="post_agent_commit_committed_output",
     )
     return True
 
@@ -1071,6 +1073,7 @@ async def _run_post_agent_semantic_precommit_repair(
             repair_strategy="agent",
             reason_code_override="QUALITY_GATE_POLICY_CHANGED",
             failure_reason_override=FailureReason.policy_failure,
+            protected_violations=violations,
         )
 
     retry_result = await run_commit()
@@ -1177,6 +1180,23 @@ async def _mark_post_agent_commit_failed(
     a downstream commit failure must NOT be re-classified as
     ``agent_failure`` and MUST NOT queue provider recovery.
     """
+    # A protected quality-gate violation surfaced by the semantic pre-commit
+    # repair gate pauses the workspace for an operator decision instead of
+    # terminally failing — but only when there is no genuine upstream agent
+    # failure (a real agent failure is not operator-resolvable here).
+    if (
+        error.reason_code_override == QUALITY_GATE_POLICY_CHANGED_REASON_CODE
+        and error.protected_violations
+        and upstream_failure_reason != FailureReason.agent_failure
+    ):
+        await self.enter_blocked_for_protected_violation(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            violations=error.protected_violations,
+            resume_phase="post_agent_precommit_repair",
+        )
+        return
+
     classification = error.classification
     if error.reason_code_override is not None:
         commit_reason_code = error.reason_code_override

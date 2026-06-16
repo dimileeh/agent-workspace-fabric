@@ -216,6 +216,19 @@ async def run_validation_and_fix_cycle(
         )
         await self._mark_failed(**mark_kwargs)
 
+    async def _enter_blocked_preserving_planning_artifacts(**block_kwargs: Any) -> None:
+        # Same artifact-ordering rationale as the FAILED path above: deposit the
+        # plan + conformance report BEFORE the block transition bumps
+        # ``updated_at`` (the console's artifact refetch key). A protected
+        # quality-gate violation pauses for an operator instead of failing.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+        await self.enter_blocked_for_protected_violation(**block_kwargs)
+
     validation_commands = [
         step.command.command
         for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
@@ -1169,12 +1182,11 @@ async def run_validation_and_fix_cycle(
                     ),
                     error_message=message,
                 )
-                await _mark_failed_preserving_planning_artifacts(
+                await _enter_blocked_preserving_planning_artifacts(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.validating,
-                    failure_reason=FailureReason.policy_failure,
-                    reason_code="QUALITY_GATE_POLICY_CHANGED",
-                    message=message[:2000],
+                    violations=violations,
+                    resume_phase="validation_fix_cycle",
                 )
                 return ExecutionValidationResult(
                     stop=True,

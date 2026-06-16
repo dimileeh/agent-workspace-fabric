@@ -6,7 +6,7 @@ Mechanically extracted from the original orchestrator; behavior is unchanged.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import (
     UTC,
     datetime,
@@ -34,6 +34,13 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.recovery_payloads import _get_active_recovery_payload
 from awf.control.executor.status_helpers import _is_callback_terminal_status
+from awf.control.quality_gates import (
+    PROTECTED_QUALITY_GATE_BLOCK_TYPE,
+    PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
+    QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+    QualityGateViolation,
+    quality_gate_violation_details,
+)
 from awf.db.enums import (
     FailureReason,
     WorkspaceStatus,
@@ -406,3 +413,73 @@ async def _mark_failed(
                 payload={"message": safe_message[:1000]},
             )
         await session.commit()
+
+
+async def enter_blocked_for_protected_violation(
+    self: Any,
+    *,
+    workspace_id: str,
+    from_status: WorkspaceStatus,
+    violations: Sequence[QualityGateViolation],
+    resume_phase: str,
+    execution_owner_id: str | None = None,
+) -> bool:
+    """Pause a workspace into ``blocked`` for an operator decision instead of
+    terminally failing on a protected quality-gate violation.
+
+    This is the single entry point used at every pre-PR protected-gate fail site:
+    it replaces ``_mark_failed(... QUALITY_GATE_POLICY_CHANGED ...)`` so the spent
+    work is preserved (worktree + warm stack + execution claim are all kept — the
+    block transition is not a provisioning release) while an operator resolves the
+    violation through the ``guide`` channel.
+
+    Epoch-guarded clean exit (mirrors the #421 terminal-transition CAS): the
+    transition is an atomic compare-and-set gated on the row still being in
+    ``from_status`` and — when the dispatching worker identity is known — still
+    claimed by ``execution_owner_id``. 0 rows means a stale/raced executor lost
+    the claim to a newer claimant; the caller returns ``False`` WITHOUT clobbering
+    the row, so a late error path cannot drive ``blocked -> failed`` behind the
+    new claimant's back. ``block_epoch`` is bumped on every entry so a re-block
+    invalidates all prior operator grants (a later DIFFERENT change re-blocks).
+
+    Returns ``True`` when the workspace was paused into ``blocked``.
+    """
+    normalized = quality_gate_violation_details(violations)
+    extra_conditions: tuple[Any, ...] = ()
+    if execution_owner_id is not None:
+        extra_conditions = (Workspace.execution_claimed_by == execution_owner_id,)
+    async with self._session_factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=from_status,
+            to=WorkspaceStatus.blocked,
+            reason_code=PROTECTED_VIOLATION_BLOCKED_REASON_CODE,
+            payload={
+                "block_type": PROTECTED_QUALITY_GATE_BLOCK_TYPE,
+                "block_reason_code": QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
+                "resume_phase": resume_phase,
+                "violations": normalized,
+            },
+            extra_conditions=extra_conditions,
+        )
+        if ws is None:
+            current = await repo.get(workspace_id)
+            if current is not None:
+                await self._record_stale_action_skip(
+                    repo,
+                    current,
+                    action="enter_blocked_for_protected_violation",
+                    expected=from_status,
+                    reason_code="EXECUTOR_ENTER_BLOCKED_SKIPPED",
+                )
+                await session.commit()
+            return False
+        ws.block_reason_code = QUALITY_GATE_POLICY_CHANGED_REASON_CODE
+        ws.block_type = PROTECTED_QUALITY_GATE_BLOCK_TYPE
+        ws.block_violations = normalized
+        ws.block_resume_phase = resume_phase
+        ws.block_epoch = (ws.block_epoch or 0) + 1
+        ws.blocked_at = datetime.now(UTC)
+        await session.commit()
+        return True

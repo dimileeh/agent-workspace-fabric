@@ -139,6 +139,7 @@ class ExecutorDelegatesMixin:
     _record_stale_action_skip = _state_ops._record_stale_action_skip
     _record_health_check_failed_event = _state_ops._record_health_check_failed_event
     _mark_failed = _state_ops._mark_failed
+    enter_blocked_for_protected_violation = _state_ops.enter_blocked_for_protected_violation
 
     _start_validation_run = _validation_ops._start_validation_run
     _capture_workspace_head_sha = _validation_ops._capture_workspace_head_sha

@@ -43,6 +43,13 @@ PROTECTED_QUALITY_GATE_PATHS: Final[tuple[str, ...]] = (
 )
 INTERNAL_PLAN_ARTIFACT_PREFIX: Final[str] = "docs/awf-plans/"
 PLAN_ONLY_OUTPUT_REASON_CODE: Final[str] = "PLAN_ONLY_OUTPUT"
+QUALITY_GATE_POLICY_CHANGED_REASON_CODE: Final[str] = "QUALITY_GATE_POLICY_CHANGED"
+"""Block reason code recorded when a protected quality-gate file was changed."""
+PROTECTED_QUALITY_GATE_BLOCK_TYPE: Final[str] = "protected_quality_gate"
+"""Block category for a pre-PR protected quality-gate pause."""
+PROTECTED_VIOLATION_BLOCKED_REASON_CODE: Final[str] = "PROTECTED_VIOLATION_BLOCKED"
+"""Transition-event reason code recorded when an executor pauses into ``blocked``
+instead of terminally failing on a protected quality-gate violation."""
 _WORKFLOW_PREFIX: Final[str] = ".github/workflows/"
 _COMMENT_STEP_MARKERS: Final[tuple[str, ...]] = (
     "comment",
@@ -503,6 +510,9 @@ from awf.control.quality_gates_workflow import (  # noqa: E402
 )
 
 __all__ = [
+    "PROTECTED_QUALITY_GATE_BLOCK_TYPE",
+    "PROTECTED_VIOLATION_BLOCKED_REASON_CODE",
+    "QUALITY_GATE_POLICY_CHANGED_REASON_CODE",
     "GrantSpec",
     "ProtectedFileDiff",
     "QualityGateViolation",

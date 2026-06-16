@@ -84,7 +84,6 @@ from awf.control.executor.types import (
 )
 from awf.control.quality_gates import (
     find_protected_quality_gate_changes,
-    quality_gate_violation_message,
 )
 from awf.db.enums import (
     AgentRuntime,
@@ -780,24 +779,20 @@ async def execute(
                     protected_file_diffs=protected_file_diffs,
                 )
                 if violations:
-                    # Planning ran before this gate, so the preserved FAILED
-                    # worktree can already hold the plan + conformance report.
-                    # Deposit them BEFORE ``_mark_failed`` publishes the
-                    # terminal status: the console keys its artifact refetch on
-                    # the workspace ``updated_at`` (TaskArtifactsSection
-                    # ``refreshKey``), and marking FAILED first would bump
-                    # ``updated_at`` and let a poll observe it in the window
-                    # before the deposit, record an empty artifact list, then
-                    # never refetch — hiding the Plan/Validation controls. This
-                    # branch returns before the post-validation deposit block.
+                    # A protected quality-gate edit outside owned_paths pauses
+                    # the workspace for an operator decision instead of throwing
+                    # away the spent work. Deposit the plan + conformance report
+                    # BEFORE the block transition for the same artifact-ordering
+                    # reason as the FAILED paths (the transition bumps
+                    # ``updated_at``, which the console keys its refetch on).
                     # Best-effort and idempotent.
                     _deposit_planning_artifacts()
-                    await self._mark_failed(
+                    await self.enter_blocked_for_protected_violation(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
-                        failure_reason=FailureReason.policy_failure,
-                        reason_code="QUALITY_GATE_POLICY_CHANGED",
-                        message=quality_gate_violation_message(violations)[:2000],
+                        violations=violations,
+                        resume_phase="post_agent_commit",
+                        execution_owner_id=execution_owner_id,
                     )
                     return
                 commit_msg = commit_message_with_task_tag(
