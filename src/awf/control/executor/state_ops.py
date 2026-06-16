@@ -44,7 +44,10 @@ from awf.control.executor.recovery_payloads import (
 )
 from awf.control.executor.status_helpers import _is_callback_terminal_status
 from awf.control.executor.types import _PlanningValidationHandoff
-from awf.control.operator_grants import active_operator_grant_specs_in_session
+from awf.control.operator_grants import (
+    active_operator_grant_specs_in_session,
+    consume_active_operator_grants_in_session,
+)
 from awf.control.quality_gates import (
     QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
     GrantSpec,
@@ -55,7 +58,7 @@ from awf.db.enums import (
     OperationStatus,
     WorkspaceStatus,
 )
-from awf.db.models import OperatorGrantAuditRecord, Workspace
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload
@@ -602,26 +605,13 @@ async def _consume_active_operator_grants(self: Any, workspace_id: str) -> int:
 
     Called once a resumed workspace clears the protected gate so a grant is
     strictly single-use: a later DIFFERENT change to the same file must be
-    granted again. Returns the number of grants consumed."""
-    consumed = 0
-    now = datetime.now(UTC)
+    granted again. Delegates to the shared session-bound consumer (same as the
+    monitor post-PR resume). Returns the number of grants consumed."""
     async with self._session_factory() as session:
-        ws = await WorkspaceRepository(session).get(workspace_id)
-        if ws is None:
-            return 0
-        rows = await session.execute(
-            select(OperatorGrantAuditRecord).where(
-                OperatorGrantAuditRecord.workspace_id == workspace_id,
-                OperatorGrantAuditRecord.consumed_at.is_(None),
-                OperatorGrantAuditRecord.revoked_at.is_(None),
-                OperatorGrantAuditRecord.block_epoch == ws.block_epoch,
-            )
-        )
-        for record in rows.scalars().all():
-            record.consumed_at = now
-            consumed += 1
-        await session.commit()
-    return consumed
+        consumed = await consume_active_operator_grants_in_session(session, workspace_id)
+        if consumed:
+            await session.commit()
+        return consumed
 
 
 async def _begin_execution(

@@ -17,6 +17,7 @@ gate caller is a no-op outside the resume path.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -48,3 +49,29 @@ async def active_operator_grant_specs_in_session(
         )
         for record in rows.scalars().all()
     ]
+
+
+async def consume_active_operator_grants_in_session(session: Any, workspace_id: str) -> int:
+    """Mark the workspace's active (current-epoch) operator grants consumed.
+
+    Single-use semantics: once a resumed workspace clears the protected gate, a
+    later DIFFERENT change to the same file must be granted again. Returns the
+    number of grants consumed. Shared by the executor (pre-PR resume) and the PR
+    monitor (post-PR resume) so both honor identical single-use behavior."""
+    now = datetime.now(UTC)
+    ws = await WorkspaceRepository(session).get(workspace_id)
+    if ws is None:
+        return 0
+    rows = await session.execute(
+        select(OperatorGrantAuditRecord).where(
+            OperatorGrantAuditRecord.workspace_id == workspace_id,
+            OperatorGrantAuditRecord.consumed_at.is_(None),
+            OperatorGrantAuditRecord.revoked_at.is_(None),
+            OperatorGrantAuditRecord.block_epoch == ws.block_epoch,
+        )
+    )
+    consumed = 0
+    for record in rows.scalars().all():
+        record.consumed_at = now
+        consumed += 1
+    return consumed

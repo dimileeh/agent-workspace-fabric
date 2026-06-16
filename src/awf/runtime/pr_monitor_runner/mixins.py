@@ -120,6 +120,8 @@ class RunnerDelegatesMixin:
     )
     _post_protected_block_notification = _remote_repair._post_protected_block_notification
     _active_operator_grant_specs = _remote_repair._active_operator_grant_specs
+    _consume_active_operator_grants = _remote_repair._consume_active_operator_grants
+    _preserved_commit_already_on_remote = _remote_repair._preserved_commit_already_on_remote
     _rollback_protected_scope_repair_delta_before_push = (
         _remote_repair._rollback_protected_scope_repair_delta_before_push
     )

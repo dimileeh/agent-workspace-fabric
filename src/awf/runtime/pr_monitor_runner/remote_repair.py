@@ -26,7 +26,10 @@ from awf.control.blocked_transition import (
     MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
     enter_blocked_for_protected_violation_in_session,
 )
-from awf.control.operator_grants import active_operator_grant_specs_in_session
+from awf.control.operator_grants import (
+    active_operator_grant_specs_in_session,
+    consume_active_operator_grants_in_session,
+)
 from awf.control.protected_file_diffs import (
     protected_file_diffs_for_committed_paths,
 )
@@ -1375,6 +1378,57 @@ async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[Gra
     no-op outside the resume path."""
     async with self._deps.session_factory() as session:
         return await active_operator_grant_specs_in_session(session, workspace_id)
+
+
+async def _preserved_commit_already_on_remote(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    remote_branch: str,
+    remote_push_url: str | None = None,
+) -> bool:
+    """Return whether the local HEAD is already on the remote PR branch.
+
+    Divergence recovery (WS-2 §5): a monitor/worker restart can re-run the
+    post-PR resume after the preserved commit's push already landed. Pushing
+    again would either no-op noisily or surface a spurious non-fast-forward, so
+    compare the worktree HEAD against the freshly-fetched remote branch: an empty
+    changed-path set means HEAD is an ancestor of (or equals) the remote head —
+    already pushed — so the caller treats the push as a no-op. A fetch/diff
+    failure returns ``False`` so the normal push path runs and surfaces the
+    error rather than silently skipping a real push."""
+    if not worktree_path.exists():
+        return False
+    try:
+        _local_base, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+    except ProtectedScopeDiffError:
+        return False
+    if changed_paths:
+        return False
+    _log.info(
+        "monitor.protected_scope_preserved_commit_already_on_remote",
+        workspace_id=workspace_id,
+        remote_branch=remote_branch,
+    )
+    return True
+
+
+async def _consume_active_operator_grants(self: Any, workspace_id: str) -> int:
+    """Mark the workspace's active operator grants consumed (single-use).
+
+    Called once a post-PR resume clears the protected gate and pushes, so a later
+    DIFFERENT protected change re-blocks and must be granted again. Delegates to
+    the shared session-bound consumer (same as the executor pre-PR resume)."""
+    async with self._deps.session_factory() as session:
+        consumed = await consume_active_operator_grants_in_session(session, workspace_id)
+        if consumed:
+            await session.commit()
+        return consumed
 
 
 async def _protected_scope_violations_for_status(
