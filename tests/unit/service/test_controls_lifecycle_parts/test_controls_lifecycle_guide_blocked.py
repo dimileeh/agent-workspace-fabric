@@ -115,6 +115,39 @@ async def test_guide_blocked_persists_epoch_scoped_grant(session: AsyncSession) 
 
 
 @pytest.mark.unit
+async def test_guide_blocked_grants_only_clears_stale_directive(session: AsyncSession) -> None:
+    # A prior directive guide armed a revert directive on the blocked workspace.
+    workspace = await _blocked_workspace(session, block_epoch=3)
+    workspace.pending_operator_hint = {
+        "reason": "revert it",
+        "directive": "revert the pyproject change",
+        "status": "pending",
+        "reason_code": "OPERATOR_GUIDE",
+    }
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    # The operator changes their mind and issues a grants-only approve-and-keep.
+    await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="actually keep it",
+        grants=["pyproject.toml"],
+        approve_policy_downgrade=True,
+        operator="alice@example.com",
+        idempotency_key="guide-blocked-grant-clears-hint",
+        expected_version=workspace.version,
+    )
+
+    # The stale directive must be cleared so the resume path honors the grant
+    # instead of re-applying the old revert directive (which it prioritizes).
+    assert pre_pr_operator_hint_from_payload(workspace.pending_operator_hint) is None
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].normalized_path == "pyproject.toml"
+
+
+@pytest.mark.unit
 async def test_guide_blocked_weakening_grant_requires_ack(session: AsyncSession) -> None:
     workspace = await _blocked_workspace(session)
     service, _stopper, _cleaner = _service(session)

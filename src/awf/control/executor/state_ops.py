@@ -482,6 +482,13 @@ async def enter_blocked_for_protected_violation(
         ws.block_resume_phase = resume_phase
         ws.block_epoch = (ws.block_epoch or 0) + 1
         ws.blocked_at = datetime.now(UTC)
+        # A re-block supersedes any operator directive from the prior block
+        # instance: the resume that produced this re-block already applied that
+        # directive. Grants are epoch-fenced and invalidated by the bumped
+        # block_epoch above, but the directive is not, so clear it explicitly —
+        # otherwise the resume path would re-apply a stale directive (and could
+        # override a fresh approve-and-keep grant issued for this new epoch).
+        ws.pending_operator_hint = None
         await session.commit()
         return True
 

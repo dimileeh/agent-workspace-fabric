@@ -403,6 +403,13 @@ async def _guide_blocked_workspace(
         )
         pending_hint_payload = build_pending_operator_hint_payload(hint)
         workspace.pending_operator_hint = pending_hint_payload
+    else:
+        # Grants-only guide: clear any directive armed by a prior guide. The
+        # blocked-resume path prioritizes a stored directive over active grants
+        # (``if hint.directive ... elif grant_specs``), so a stale revert/redo
+        # directive left in place would override this fresh approve-and-keep
+        # decision on resume. The latest operator decision must win.
+        workspace.pending_operator_hint = None
 
     await repo.advance_workspace_version(workspace)
     event_payload = _event_payload(

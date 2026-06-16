@@ -144,6 +144,52 @@ async def test_reblock_bumps_block_epoch(
 
 
 @pytest.mark.unit
+async def test_reblock_clears_pending_operator_hint(
+    factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    ws_id = await _seed_running(factory)
+    executor = _executor(factory, tmp_path)
+
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    # The worker resumes (blocked -> running) carrying an operator directive
+    # that was applied to the agent prompt for this run.
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(ws_id)
+        assert ws is not None
+        ws.pending_operator_hint = {
+            "reason": "revert it",
+            "directive": "revert the pyproject change",
+            "status": "pending",
+        }
+        await repo.transition_if_current(
+            ws_id,
+            from_status=WorkspaceStatus.blocked,
+            to=WorkspaceStatus.running,
+            reason_code="TEST_RESUME",
+        )
+        await session.commit()
+
+    # The applied directive did not resolve the violation, so the run re-blocks.
+    assert await executor.enter_blocked_for_protected_violation(
+        workspace_id=ws_id,
+        from_status=WorkspaceStatus.running,
+        violations=_VIOLATIONS,
+        resume_phase="validation_fix_cycle",
+    )
+    ws = await _get(factory, ws_id)
+    assert ws.block_epoch == 2
+    # The stale directive is cleared so the resume path cannot re-apply it (and
+    # cannot override a fresh approve-and-keep grant for the new epoch).
+    assert ws.pending_operator_hint is None
+
+
+@pytest.mark.unit
 async def test_late_mark_failed_does_not_clobber_blocked(
     factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
