@@ -331,6 +331,74 @@ async def test_guide_blocked_benign_grant_does_not_require_ack(session: AsyncSes
 
 
 @pytest.mark.unit
+async def test_guide_blocked_non_matching_wildcard_grant_does_not_require_ack(
+    session: AsyncSession,
+) -> None:
+    # The preflight must honor grants with the same precise membership semantics
+    # as the resume-time protected gate (``_grant_matches``), not the broader
+    # symmetric owned-path overlap predicate. A wildcard grant that does NOT
+    # actually match the violating path (``*-lint.yml`` vs ``deploy.yml``) would
+    # never suppress the violation on resume, so demanding the ack here is wrong:
+    # acking it would just record a useless grant and resume would re-block.
+    workspace = await _blocked_workspace(
+        session,
+        violations=[
+            {
+                "path": ".github/workflows/deploy.yml",
+                "section": ".github/workflows/deploy.yml",
+                "line": None,
+                "reason": "weakened",
+            }
+        ],
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="",
+        reason="grant only the lint workflows",
+        grants=[".github/workflows/*-lint.yml"],
+        idempotency_key="guide-blocked-wildcard-nomatch",
+        expected_version=workspace.version,
+    )
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].approve_policy_downgrade is False
+
+
+@pytest.mark.unit
+async def test_guide_blocked_matching_wildcard_grant_requires_ack(
+    session: AsyncSession,
+) -> None:
+    # A wildcard grant that DOES cover the violating path under precise membership
+    # (``*-lint.yml`` vs ``ci-lint.yml``) would suppress the violation on resume,
+    # so the policy-downgrade ack is still required up front.
+    workspace = await _blocked_workspace(
+        session,
+        violations=[
+            {
+                "path": ".github/workflows/ci-lint.yml",
+                "section": ".github/workflows/ci-lint.yml",
+                "line": None,
+                "reason": "weakened",
+            }
+        ],
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceGuidePolicyDowngradeRequiredError):
+        await service.guide_workspace(
+            workspace.id,
+            directive="",
+            reason="please keep it",
+            grants=[".github/workflows/*-lint.yml"],  # matches ci-lint.yml, no ack
+            idempotency_key="guide-blocked-wildcard-match-noack",
+            expected_version=workspace.version,
+        )
+    assert await _grants(session, workspace.id) == []
+
+
+@pytest.mark.unit
 async def test_guide_blocked_grant_requires_reason(session: AsyncSession) -> None:
     workspace = await _blocked_workspace(session)
     service, _stopper, _cleaner = _service(session)

@@ -15,13 +15,13 @@ from sqlalchemy import select
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.common.ids import new_operator_grant_id
+from awf.control.quality_gates import _grant_matches
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
     WorkspaceRepository,
-    owned_paths_overlap,
 )
 from awf.runtime.operator_hints import (
     build_pending_operator_hint_payload,
@@ -396,7 +396,7 @@ async def _guide_blocked_workspace(
         weakening = sorted(
             grant
             for grant in canonical_grants
-            if any(owned_paths_overlap(violation_path, grant) for violation_path in violation_paths)
+            if any(_grant_matches(violation_path, grant) for violation_path in violation_paths)
         )
         if weakening:
             raise WorkspaceGuidePolicyDowngradeRequiredError(weakening)
