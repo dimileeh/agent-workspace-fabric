@@ -697,25 +697,37 @@ class WorkspaceRepository:
             hint_directive: ColumnElement[Any] = Workspace.pending_operator_hint.op("->>")(
                 "directive"
             )
+            hint_reason: ColumnElement[Any] = Workspace.pending_operator_hint.op("->>")("reason")
             # ``pending_operator_hint`` is a generic ``JSON`` column (Postgres
             # ``json``, not ``jsonb``) so ``json_typeof`` — not ``jsonb_typeof`` —
             # is the matching introspection function for the ``->`` json value.
             directive_is_string: ColumnElement[Any] = (
                 func.json_typeof(Workspace.pending_operator_hint.op("->")("directive")) == "string"
             )
+            reason_is_string: ColumnElement[Any] = (
+                func.json_typeof(Workspace.pending_operator_hint.op("->")("reason")) == "string"
+            )
         else:
             hint_directive = func.json_extract(Workspace.pending_operator_hint, "$.directive")
+            hint_reason = func.json_extract(Workspace.pending_operator_hint, "$.reason")
             directive_is_string = (
                 func.json_type(Workspace.pending_operator_hint, "$.directive") == "text"
             )
-        # Mirror the resume path's ``_optional_stripped_string`` exactly: a
-        # non-string directive (e.g. ``true``/``123``) coerces to non-empty text
-        # but is discarded as absent on resume, so only a non-empty *string*
-        # directive is actionable — else the worker spins ``blocked -> running ->
-        # blocked`` re-running the same gate every cycle.
+            reason_is_string = func.json_type(Workspace.pending_operator_hint, "$.reason") == "text"
+        # Mirror the resume path's ``pre_pr_operator_hint_from_payload`` exactly: it
+        # rebuilds the hint only when BOTH ``reason`` and ``directive`` are non-blank
+        # *strings* (a non-string value such as ``true``/``123`` coerces to non-empty
+        # text but is discarded as absent), then injects the prompt only when
+        # ``hint.directive`` survives. A directive paired with a missing/blank
+        # ``reason`` makes that reconstruction return ``None``, so the worker would
+        # resume and re-run the agent *unguided* — reproducing the very ``blocked ->
+        # running -> blocked`` spin the non-null guard exists to avoid. Require both
+        # fields here so eligibility matches exactly what the resume path can apply.
         actionable_hint = and_(
             directive_is_string,
             func.trim(func.coalesce(hint_directive, "")) != "",
+            reason_is_string,
+            func.trim(func.coalesce(hint_reason, "")) != "",
         )
         stmt = select(Workspace.id).where(
             Workspace.status == WorkspaceStatus.blocked.value,

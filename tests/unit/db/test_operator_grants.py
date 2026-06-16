@@ -85,9 +85,40 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     # Awaiting an operator decision: no directive, no grant → not resumable.
     awaiting = await _blocked_workspace(session)
 
-    # Directive armed (revert/redo) → resumable.
+    # Directive armed (revert/redo) → resumable. ``guide`` always persists a
+    # ``reason`` alongside the directive (``reason=reason_text or directive_text``),
+    # so the realistic armed payload carries both fields.
     with_directive = await _blocked_workspace(session)
-    with_directive.pending_operator_hint = {"status": "pending", "directive": "revert it"}
+    with_directive.pending_operator_hint = {
+        "status": "pending",
+        "reason": "revert the protected change",
+        "directive": "revert it",
+    }
+
+    # Directive present but ``reason`` missing → the resume path's
+    # ``pre_pr_operator_hint_from_payload`` returns ``None`` (no reason), so it would
+    # never apply the directive and the worker would re-run the agent unguided. It
+    # must NOT be selected — else it spins ``blocked -> running -> blocked``.
+    reasonless_directive = await _blocked_workspace(session)
+    reasonless_directive.pending_operator_hint = {"status": "pending", "directive": "revert it"}
+
+    # Directive present but ``reason`` is whitespace-only → same as missing on the
+    # resume path (``reason.strip()`` is falsy) → not resumable.
+    blank_reason_directive = await _blocked_workspace(session)
+    blank_reason_directive.pending_operator_hint = {
+        "status": "pending",
+        "reason": "   ",
+        "directive": "revert it",
+    }
+
+    # Directive present but ``reason`` is a NON-STRING (e.g. JSON boolean) → the
+    # resume path discards a non-string reason as absent → not resumable.
+    non_string_reason_directive = await _blocked_workspace(session)
+    non_string_reason_directive.pending_operator_hint = {
+        "status": "pending",
+        "reason": True,
+        "directive": "revert it",
+    }
 
     # Hint present but carries no directive and no grant → the resume path would
     # apply neither branch, so it must NOT be selected (else blocked -> running
@@ -161,6 +192,9 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     ids = await repo.list_resumable_blocked_ids(limit=10)
     assert set(ids) == {with_directive.id, with_grant.id}
     assert awaiting.id not in ids
+    assert reasonless_directive.id not in ids
+    assert blank_reason_directive.id not in ids
+    assert non_string_reason_directive.id not in ids
     assert directiveless.id not in ids
     assert blank_directive.id not in ids
     assert non_string_directive.id not in ids
@@ -219,6 +253,10 @@ async def test_list_resumable_blocked_ids_sqlite_validates_directive_string_type
     )
     assert "json_type(workspaces.pending_operator_hint, '$.directive') = 'text'" in sql
     assert "json_extract(workspaces.pending_operator_hint, '$.directive')" in sql
+    # The resume path also requires a non-blank string ``reason``; eligibility
+    # must mirror that so a reason-less directive cannot be selected.
+    assert "json_type(workspaces.pending_operator_hint, '$.reason') = 'text'" in sql
+    assert "json_extract(workspaces.pending_operator_hint, '$.reason')" in sql
 
 
 @pytest.mark.unit
