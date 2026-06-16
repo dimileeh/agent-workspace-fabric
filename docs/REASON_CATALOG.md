@@ -809,6 +809,34 @@ This catalog documents common API/CLI/MCP failures, likely causes, and operator 
 **Related Command:** `awf workspace guide`
 **Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_directive_required](#workspace_guide_directive_required)
 
+### WORKSPACE_GUIDE_GRANT_NOT_ALLOWED
+**Problem:** Path grants are only accepted for a blocked workspace.
+**Likely Cause:** `awf workspace guide --grant ...` was issued against a workspace that is not paused in the `blocked` state; path grants exist solely to resolve a protected-file violation that paused the run.
+**Operator Fix:** Confirm the workspace is `blocked` with `awf workspace show <workspace_id>`. Only then re-issue the grant, or drop `--grant` and send a plain REVERT/REDO directive instead.
+**Related Command:** `awf workspace guide`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_grant_not_allowed](#workspace_guide_grant_not_allowed)
+
+### WORKSPACE_GUIDE_GRANT_REASON_REQUIRED
+**Problem:** An operator reason is required when granting protected paths.
+**Likely Cause:** `awf workspace guide --grant ...` was issued without an accompanying operator reason; APPROVE-AND-KEEP of a protected path must be auditable.
+**Operator Fix:** Re-run the guide control supplying a reason for the grant, e.g. `awf workspace guide <id> --grant "<path-glob>" --reason "<why this protected path is approved>"`.
+**Related Command:** `awf workspace guide`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_grant_reason_required](#workspace_guide_grant_reason_required)
+
+### WORKSPACE_GUIDE_INVALID_GRANT_PATH
+**Problem:** Invalid grant path.
+**Likely Cause:** A `--grant` glob was empty, absolute, or escaped the workspace root (e.g. contained `..`); grants must be repo-relative path globs.
+**Operator Fix:** Re-issue the grant with a repo-relative glob that stays inside the worktree, e.g. `awf workspace guide <id> --grant "src/awf/**" --reason "<reason>"`.
+**Related Command:** `awf workspace guide`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_invalid_grant_path](#workspace_guide_invalid_grant_path)
+
+### WORKSPACE_GUIDE_POLICY_DOWNGRADE_REQUIRED
+**Problem:** Granting a protected-violation path that weakens validation requires --approve-policy-downgrade and a reason.
+**Likely Cause:** The granted paths include a quality-gate/validation file whose change would weaken validation, but the grant did not acknowledge the downgrade.
+**Operator Fix:** If the weakening is intended, re-run with `--approve-policy-downgrade` and a reason, e.g. `awf workspace guide <id> --grant "<path>" --approve-policy-downgrade --reason "<justification>"`. Otherwise send a REVERT directive so the agent restores the protected file.
+**Related Command:** `awf workspace guide`
+**Docs Link:** [docs/REASON_CATALOG.md#workspace_guide_policy_downgrade_required](#workspace_guide_policy_downgrade_required)
+
 ### WORKSPACE_STATE_NOT_GUIDABLE
 **Problem:** Workspace is not in a state eligible for operator guidance.
 **Likely Cause:** The workspace is not in `monitoring_pr`; operator guidance can only steer the PR monitor while it owns an open pull request.
