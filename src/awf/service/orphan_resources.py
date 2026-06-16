@@ -69,6 +69,11 @@ ACTIVE_WORKSPACE_STATUSES = frozenset(
         WorkspaceStatus.validating.value,
         WorkspaceStatus.pushing.value,
         WorkspaceStatus.monitoring_pr.value,
+        # A blocked workspace is paused awaiting an operator decision with its
+        # worktree + warm stack preserved (mirrors PROTECTED_WORKSPACE_GC_STATUSES
+        # in gc_classify). It must classify as active here so the orphan reaper
+        # never tears down the warm stack this state exists to keep.
+        WorkspaceStatus.blocked.value,
         WorkspaceStatus.destroying.value,
     }
 )

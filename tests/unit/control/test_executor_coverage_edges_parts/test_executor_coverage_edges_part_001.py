@@ -22,7 +22,9 @@ from awf.control.executor.git_ops import (
     _read_ref_sha,
 )
 from awf.control.executor.recovery_payloads import (
+    _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
+    _planning_validation_handoff_metadata,
     _recovery_needs_existing_pr_push,
 )
 from awf.control.executor.types import (
@@ -566,6 +568,69 @@ def test_recovery_conformance_handoff_falls_back_when_payload_path_escapes_works
     assert handoff is not None
     assert handoff.plan_path == Path("docs/awf-plans/ws123.md")
     assert handoff.report_path == Path("docs/awf-plans/ws123.conformance.json")
+
+
+@pytest.mark.unit
+def test_planning_validation_handoff_metadata_round_trips() -> None:
+    # PRRT_kwDOSJAM6s6KAbBL: the block-time handoff persistence must faithfully
+    # reproduce the in-memory handoff so an approve-and-keep resume reconstructs
+    # the SAME pending post-validation conformance requirement.
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is required.",
+            gaps=("rerun pytest under AWF", "confirm migration applied"),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws123.md"),
+        report_path=Path("docs/awf-plans/ws123.conformance.json"),
+        iteration=2,
+        max_iterations=5,
+    )
+
+    metadata = _planning_validation_handoff_metadata(handoff)
+    assert _planning_validation_handoff_from_metadata(metadata) == handoff
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        {},
+        {"plan_path": "docs/plan.md"},  # missing report_path
+        {"report_path": "docs/report.json"},  # missing plan_path
+        "not-a-mapping",
+    ],
+)
+def test_planning_validation_handoff_from_metadata_treats_absent_or_malformed_as_none(
+    metadata: object,
+) -> None:
+    # A missing payload means conformance was satisfied inline on the original
+    # run; a malformed payload is treated as absent. Either way the resume must
+    # NOT invent a pending handoff (which would force an unwarranted conformance
+    # check) and must never crash.
+    assert _planning_validation_handoff_from_metadata(metadata) is None
+
+
+@pytest.mark.unit
+def test_planning_validation_handoff_from_metadata_defaults_iterations_and_status() -> None:
+    # Defensive reconstruction from a sparse payload: missing iteration counters
+    # default to 0 and an absent/invalid status falls back to needs_iteration so
+    # the conformance check still runs (and, on a grant resume, treats a miss as
+    # terminal regardless of the budget).
+    handoff = _planning_validation_handoff_from_metadata(
+        {
+            "plan_path": "docs/awf-plans/ws.md",
+            "report_path": "docs/awf-plans/ws.conformance.json",
+            "report": {"status": "bogus-status", "summary": "", "gaps": []},
+        }
+    )
+
+    assert handoff is not None
+    assert handoff.iteration == 0
+    assert handoff.max_iterations == 0
+    assert handoff.report.status == PlanConformanceStatus.needs_iteration
 
 
 @pytest.mark.unit

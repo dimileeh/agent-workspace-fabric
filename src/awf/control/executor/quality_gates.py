@@ -85,6 +85,7 @@ class _PostAgentCommitStepError(RuntimeError):
         repair_strategy: str | None = None,
         reason_code_override: str | None = None,
         failure_reason_override: FailureReason | None = None,
+        protected_violations: Sequence[Any] = (),
     ) -> None:
         """Initialise the error with stage, result, and optional overrides."""
         self.stage = stage
@@ -95,6 +96,10 @@ class _PostAgentCommitStepError(RuntimeError):
         self.repair_strategy = repair_strategy
         self.reason_code_override = reason_code_override
         self.failure_reason_override = failure_reason_override
+        self.protected_violations = tuple(protected_violations)
+        """Protected quality-gate violations carried from the semantic pre-commit
+        repair gate so the outer handler can pause into ``blocked`` (operator
+        decision) instead of terminally failing. Empty for non-policy errors."""
         output = (result.stderr or result.stdout or "").strip()
         super().__init__(f"post-agent {stage} failed (exit={result.returncode}): {output}")
 

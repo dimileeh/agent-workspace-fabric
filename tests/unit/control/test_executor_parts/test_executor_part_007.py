@@ -1281,11 +1281,12 @@ class TestPlanningArtifactDeposits:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Planning succeeds and writes the plan + conformance report, but the
-        # post-agent output changes a protected quality-gate file. That gate
-        # marks the workspace FAILED (policy failure) and returns BEFORE the
-        # post-validation deposit block, so the preserved worktree's plan +
-        # conformance report must still reach the served artifact dir.
+        # post-agent output changes a protected quality-gate file. That gate now
+        # pauses the workspace into ``blocked`` (operator decision) and returns
+        # BEFORE the post-validation deposit block, so the preserved worktree's
+        # plan + conformance report must still reach the served artifact dir.
         from awf.control.executor import execution_flow as _execution_flow
+        from awf.control.quality_gates import QualityGateViolation
 
         ws_id = await _seed_ready_workspace(
             factory,
@@ -1307,32 +1308,44 @@ class TestPlanningArtifactDeposits:
         monkeypatch.setattr(
             _execution_flow,
             "find_protected_quality_gate_changes",
-            lambda **_kwargs: ["policy-change"],
-        )
-        monkeypatch.setattr(
-            _execution_flow,
-            "quality_gate_violation_message",
-            lambda _violations: "protected quality-gate file changed",
+            lambda **_kwargs: [
+                QualityGateViolation(
+                    path="pyproject.toml",
+                    protected_pattern="pyproject.toml",
+                    reason="protected quality-gate file changed",
+                )
+            ],
         )
 
-        order = _record_deposit_vs_mark_order(executor, monkeypatch)
+        # The deposit must land BEFORE the block-status bump so the console's
+        # ``updated_at``-keyed refetch always observes the artifacts.
+        order: list[str] = []
+        real_deposit = _planning_artifacts._deposit_planning_artifacts_best_effort
+
+        def _spy_deposit(*args: Any, **kwargs: Any) -> None:
+            order.append("deposit")
+            real_deposit(*args, **kwargs)
+
+        monkeypatch.setattr(
+            _planning_artifacts, "_deposit_planning_artifacts_best_effort", _spy_deposit
+        )
+        real_block = executor.enter_blocked_for_protected_violation
+
+        async def _spy_block(**kwargs: Any) -> bool:
+            order.append("block")
+            return await real_block(**kwargs)
+
+        monkeypatch.setattr(executor, "enter_blocked_for_protected_violation", _spy_block)
 
         await executor.execute(ws_id)
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "policy_failure"
-            failed_event = next(
-                event
-                for event in reversed(ws.events)
-                if event.event_type == "workspace.state_changed"
-                and event.new_state == WorkspaceStatus.failed.value
-            )
-            assert failed_event.reason_code == "QUALITY_GATE_POLICY_CHANGED"
+            assert ws.status == WorkspaceStatus.blocked.value
+            assert ws.block_reason_code == "QUALITY_GATE_POLICY_CHANGED"
+            assert ws.block_resume_phase == "post_agent_commit"
+            assert ws.block_epoch == 1
 
         self._assert_served_plan_artifacts(tmp_path, ws_id)
-        # The deposit must land BEFORE the FAILED-status bump so the console's
-        # ``updated_at``-keyed refetch always observes the artifacts.
-        assert order.index("deposit") < order.index("mark_failed")
+        assert order.index("deposit") < order.index("block")

@@ -303,13 +303,19 @@ async def test_post_agent_commit_semantic_agent_repair_protected_gate_change_is_
     executor = _make_executor(fake, factory, tmp_path)
     await executor.execute(ws_id)
 
-    event = await _failed_state_event(factory, ws_id)
-    assert event.reason_code == "QUALITY_GATE_POLICY_CHANGED"
-    assert event.payload is not None
-    details = event.payload["details"]["post_agent_commit"]
-    assert details["stage"] == "post-agent pre-commit repair policy"
-    assert details["repair_strategy"] == "agent"
-    assert "protected quality-gate" in details["summary"]
+    # A protected quality-gate edit now pauses the workspace for an operator
+    # decision (non-terminal ``blocked``) instead of terminally failing.
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.blocked.value
+    assert ws.block_reason_code == "QUALITY_GATE_POLICY_CHANGED"
+    assert ws.block_type == "protected_quality_gate"
+    assert ws.block_resume_phase == "post_agent_precommit_repair"
+    assert ws.block_epoch == 1
+    assert ws.blocked_at is not None
+    assert ws.block_violations
+    assert any(violation["path"] == "pyproject.toml" for violation in ws.block_violations)
 
     commit_calls = [call for call in fake.calls if "commit" in call.args]
     assert len(commit_calls) == 1

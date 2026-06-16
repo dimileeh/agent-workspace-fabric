@@ -821,6 +821,7 @@ def _workspace_saturation_counts(status_counts: dict[str, int]) -> WorkspaceSatu
         validating=status_counts[WorkspaceStatus.validating.value],
         pushing=status_counts[WorkspaceStatus.pushing.value],
         monitoring_pr=status_counts[WorkspaceStatus.monitoring_pr.value],
+        blocked=status_counts[WorkspaceStatus.blocked.value],
         destroying=status_counts[WorkspaceStatus.destroying.value],
         completed=status_counts[WorkspaceStatus.completed.value],
         failed=status_counts[WorkspaceStatus.failed.value],

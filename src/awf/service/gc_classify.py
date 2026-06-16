@@ -53,6 +53,9 @@ PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
         WorkspaceStatus.validating.value,
         WorkspaceStatus.pushing.value,
         WorkspaceStatus.monitoring_pr.value,
+        # A blocked workspace is paused awaiting an operator decision with its
+        # worktree + warm stack preserved; never GC-reap it.
+        WorkspaceStatus.blocked.value,
         WorkspaceStatus.destroying.value,
     }
 )

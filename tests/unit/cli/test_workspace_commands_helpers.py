@@ -777,3 +777,52 @@ def test_adopt_pr_routes_lookalike_host_to_repo_slug(monkeypatch: pytest.MonkeyP
     body = _adopt_pr_body(monkeypatch, "github.com.evil.example/org/app")
     assert body["repo_url"] is None
     assert body["repo_slug"] == "github.com.evil.example/org/app"
+
+
+def _guide_body(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    def _call(method: str, path: str, **kwargs: object) -> httpx.Response:
+        captured.update(kwargs)
+        return httpx.Response(202, json={"id": "ws"})
+
+    monkeypatch.setattr(workspace_commands, "_call", _call)
+    monkeypatch.setattr(workspace_commands, "_handle_response", lambda *_args, **_kwargs: None)
+
+    kwargs: dict[str, object] = {
+        "workspace_id": "ws_1",
+        "directive": "revert the change",
+        "reason": "operator decision",
+        "idempotency_key": None,
+        "if_match": None,
+        "api_token": None,
+        "base_url": None,
+        "fmt": OutputFormat.json,
+        "action": "guide",
+    }
+    kwargs.update(overrides)
+    workspace_commands._guide_workspace_impl(**kwargs)  # type: ignore[arg-type]
+    return captured["json"]  # type: ignore[return-value]
+
+
+@pytest.mark.unit
+def test_guide_body_omits_blocked_resume_fields_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain guide (no grants/approval/operator) carries only directive + reason."""
+    body = _guide_body(monkeypatch)
+    assert body == {"directive": "revert the change", "reason": "operator decision"}
+
+
+@pytest.mark.unit
+def test_guide_body_includes_blocked_resume_fields_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grants, the policy-downgrade approval, and operator are forwarded when supplied."""
+    body = _guide_body(
+        monkeypatch,
+        grants=["pyproject.toml", "src/awf"],
+        approve_policy_downgrade=True,
+        operator="op@example.com",
+    )
+    assert body["grants"] == ["pyproject.toml", "src/awf"]
+    assert body["approve_policy_downgrade"] is True
+    assert body["operator"] == "op@example.com"

@@ -651,6 +651,32 @@ class TestCrossNodeAndEdgeCases:
         assert conflicts[0].workspace_id == existing_ws.id
 
     @pytest.mark.asyncio
+    async def test_blocked_workspace_is_blocking(self, session: AsyncSession) -> None:
+        """A blocked workspace keeps its warm stack, so its host ports still conflict."""
+        repo = WorkspaceRepository(session)
+        existing_ws = await _make_workspace(
+            session,
+            repo,
+            status=WorkspaceStatus.blocked,
+            task_policy={
+                "companions": [
+                    {
+                        "name": "web",
+                        "repo_url": "git@github.com:example/web.git",
+                        "ports": [[80, 8080]],
+                    }
+                ]
+            },
+        )
+        conflicts = await repo.find_host_port_conflicts(
+            host_ports=[8080],
+            excluding_workspace_id=None,
+        )
+        assert len(conflicts) == 1
+        assert conflicts[0].host_port == 8080
+        assert conflicts[0].workspace_id == existing_ws.id
+
+    @pytest.mark.asyncio
     async def test_multiple_ports_one_companion(self, session: AsyncSession) -> None:
         repo = WorkspaceRepository(session)
         existing = await _make_workspace(

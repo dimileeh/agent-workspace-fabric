@@ -71,6 +71,7 @@ from awf.control.executor.quality_gates import (
 )
 from awf.control.executor.recovery_payloads import (
     _get_active_recovery_payload,
+    _planning_validation_handoff_from_metadata,
     _planning_validation_handoff_from_recovery_payload,
     _recovery_needs_existing_pr_push,
     _validate_only_recovery_target_head_sha,
@@ -84,7 +85,6 @@ from awf.control.executor.types import (
 )
 from awf.control.quality_gates import (
     find_protected_quality_gate_changes,
-    quality_gate_violation_message,
 )
 from awf.db.enums import (
     AgentRuntime,
@@ -101,7 +101,6 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.validation import (
-    ValidationCoverageResult,
     ValidationResult,
 )
 
@@ -112,26 +111,36 @@ async def execute(
     *,
     execution_owner_id: str | None = None,
     execution_lease_expires_at: datetime | None = None,
+    resume_from_blocked: bool = False,
 ) -> None:
     """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
 
     The function is idempotent in the sense that it refuses to run on a
     workspace that is not currently in ``ready`` — useful when a poll
     loop races with a manual invocation.
+
+    ``resume_from_blocked`` re-enters a workspace the worker already moved
+    ``blocked -> running`` after an operator resolved a protected quality-gate
+    violation; ``_begin_execution`` decides whether to re-run the agent (a
+    revert/redo directive) or skip it (an approve-and-keep grant). Active
+    operator grants are honored by every gate and consumed once the gate passes;
+    if a protected violation still stands the gate re-blocks (bumping
+    ``block_epoch``, invalidating the now-stale grants).
     """
-    ws = await self._claim_ready(
+    begin = await self._begin_execution(
         workspace_id,
+        resume_from_blocked=resume_from_blocked,
         execution_owner_id=execution_owner_id,
         execution_lease_expires_at=execution_lease_expires_at,
     )
-    if ws is None:
+    if begin is None:
         return
-    if not await self._recheck_status(
-        workspace_id,
-        expected=WorkspaceStatus.running,
-        action="execute",
-    ):
-        return
+    # ``baseline_coverage`` is the pre-agent base reused on a blocked-resume.
+    # ``resume_skip_agent`` gates the *main* agent run; ``resume_disable_fix_passes``
+    # separately gates the secondary fix passes + pre-commit repair so a combined
+    # directive+grant resume can run the directive agent while keeping the
+    # grant-suppressed fix passes off.
+    ws, resume_skip_agent, resume_disable_fix_passes, baseline_coverage = begin
 
     compose_file = (
         Path(ws.compose_file_path)
@@ -220,7 +229,6 @@ async def execute(
             if salvage_result.prompt_override is not None:
                 ws.task_prompt = salvage_result.prompt_override
     rebase_recovery_result: _RebaseRecoveryResult | None = None
-    baseline_coverage: ValidationCoverageResult | None = None
     profile: WorkspaceProfile | None = None
     agent_exit_note: str | None = None
     agent_run_reason_code: str | None = None
@@ -414,7 +422,7 @@ async def execute(
                 )[:2000],
             )
             return
-        if recovery is None:
+        if recovery is None and not resume_skip_agent:
             if not await self._run_agent_git_writability_preflight(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -444,11 +452,13 @@ async def execute(
                 action="baseline_coverage_preflight",
             ):
                 return
-            baseline_coverage = await self._run_baseline_coverage_preflight(
+            baseline_coverage = await self._measure_and_persist_baseline_coverage(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
                 profile=profile,
+                reuse=baseline_coverage,
+                skip_measure=resume_from_blocked,
             )
             if not await self._recheck_status(
                 workspace_id,
@@ -479,7 +489,16 @@ async def execute(
             )
             if planning_should_return:
                 return
-        else:
+            # Persist the (possibly None) handoff so a later pause into ``blocked``
+            # can reconstruct it on an approve-and-keep resume — that resume skips
+            # this whole block, the only place the handoff is produced, and would
+            # otherwise lose the pending post-validation conformance requirement
+            # (mirrors ``_measure_and_persist_baseline_coverage``).
+            await self._persist_block_planning_conformance_handoff(
+                workspace_id,
+                handoff=planning_validation_handoff,
+            )
+        elif recovery is not None:
             # Recovery dispatch created the validate Operation in ``pending``;
             # flush it to ``running`` before validation so observability
             # tooling sees a real ``started_at`` (otherwise the row jumps
@@ -499,6 +518,19 @@ async def execute(
                 workspace_id=workspace_id,
                 profile=profile,
                 recovery_payload=recovery,
+            )
+        elif resume_skip_agent:
+            # Approve-and-keep grant resume (recovery is None, agent block
+            # skipped): the in-memory handoff that the run which blocked threaded
+            # into validation is gone. Reconstruct it from the value persisted at
+            # block time so the post-validation plan conformance check (gated on a
+            # non-None handoff) still runs — otherwise a planning-required
+            # workspace whose conformance was still pending AWF-validation evidence
+            # could be revalidated and pushed without the required conformance
+            # gate. ``None`` (conformance satisfied inline) faithfully reproduces
+            # the original run, which skipped the check.
+            planning_validation_handoff = _planning_validation_handoff_from_metadata(
+                ws.block_planning_conformance_handoff
             )
     except ComposeExecCleanupError as exc:
         _log.error(
@@ -778,26 +810,23 @@ async def execute(
                     changed_paths=staged_paths,
                     owned_paths=list(ws.owned_paths),
                     protected_file_diffs=protected_file_diffs,
+                    operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
                 )
                 if violations:
-                    # Planning ran before this gate, so the preserved FAILED
-                    # worktree can already hold the plan + conformance report.
-                    # Deposit them BEFORE ``_mark_failed`` publishes the
-                    # terminal status: the console keys its artifact refetch on
-                    # the workspace ``updated_at`` (TaskArtifactsSection
-                    # ``refreshKey``), and marking FAILED first would bump
-                    # ``updated_at`` and let a poll observe it in the window
-                    # before the deposit, record an empty artifact list, then
-                    # never refetch — hiding the Plan/Validation controls. This
-                    # branch returns before the post-validation deposit block.
+                    # A protected quality-gate edit outside owned_paths pauses
+                    # the workspace for an operator decision instead of throwing
+                    # away the spent work. Deposit the plan + conformance report
+                    # BEFORE the block transition for the same artifact-ordering
+                    # reason as the FAILED paths (the transition bumps
+                    # ``updated_at``, which the console keys its refetch on).
                     # Best-effort and idempotent.
                     _deposit_planning_artifacts()
-                    await self._mark_failed(
+                    await self.enter_blocked_for_protected_violation(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
-                        failure_reason=FailureReason.policy_failure,
-                        reason_code="QUALITY_GATE_POLICY_CHANGED",
-                        message=quality_gate_violation_message(violations)[:2000],
+                        violations=violations,
+                        resume_phase="post_agent_commit",
+                        execution_owner_id=execution_owner_id,
                     )
                     return
                 commit_msg = commit_message_with_task_tag(
@@ -856,7 +885,17 @@ async def execute(
                                 compose_project=compose_project,
                                 compose_file=compose_file,
                                 model=run_model,
-                                allow_agent_repair=agent_run_failure_reason is None,
+                                # An active grant keeps the approved protected
+                                # change verbatim. Semantic pre-commit repair would
+                                # re-invoke the agent and could rewrite that approved
+                                # change, so gate it off whenever grants are active
+                                # (``resume_disable_fix_passes`` — covers both the
+                                # grant-only resume and a combined directive+grant
+                                # resume), not just on upstream agent failures.
+                                allow_agent_repair=(
+                                    agent_run_failure_reason is None
+                                    and not resume_disable_fix_passes
+                                ),
                                 ws=ws,
                                 command_evidence=agent_command_evidence,
                             )
@@ -922,104 +961,19 @@ async def execute(
                     await self._prepare_provider_recovery(workspace_id)
                 return
 
-            # Some agents sever git history (e.g. by accidentally running
-            # ``git checkout --orphan`` or by re-initialising the repo).
-            # rev-list counts HIGH in that case (every HEAD commit is "new"
-            # w.r.t. base because there's no shared ancestor), so the
-            # previous check wouldn't notice. Without this guard, the push
-            # succeeds but ``gh pr create`` dies with a cryptic
-            # ``branch has no history in common with <base>`` error.
-            #
-            # Recovery: ``git reset --soft <base>`` moves HEAD to the base
-            # commit while leaving the index untouched — the index still
-            # reflects the orphan's tree. A fresh ``git commit`` then
-            # produces a single commit on top of base that contains the
-            # cumulative diff, and the branch is reattached to a valid
-            # ancestry so the PR can be opened normally.
-            #
-            # Invariant: ``base_commit`` is always populated by
-            # ``_claim_ready`` before this block runs. The ``assert`` both
-            # documents and satisfies mypy.
-            ancestor = await _git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
-            if not ancestor.ok:
-                _log.warning(
-                    "executor.orphan_history_detected",
-                    workspace_id=workspace_id,
-                    base_commit=base_commit,
-                )
-                reset = await _git_in_worktree(["reset", "--soft", base_commit])
-                await self._repair_agent_git_ownership(
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                    reason="orphan_history_reset",
-                )
-                if reset.ok:
-                    recovery_msg = commit_message_with_task_tag(
-                        f"awf: {strip_leading_task_tag(ws.task_title, ws.task_tag)} "
-                        "(recovered from orphan)",
-                        ws.task_tag,
-                    )[:72]
-                    recovery_body = (
-                        f"AWF detected orphan history on workspace {workspace_id} "
-                        f"(agent: {ws.agent}) and squashed the cumulative diff "
-                        f"onto base commit {base_commit[:10]}.\n"
-                    )
-                    recover_commit = await self._runner.run(
-                        [
-                            "git",
-                            *git_safe_directory_config_args(worktree_path),
-                            "-C",
-                            str(worktree_path),
-                            *git_identity_config_args(),
-                            "commit",
-                            "-m",
-                            recovery_msg,
-                            "-m",
-                            recovery_body,
-                        ],
-                    )
-                    await self._repair_agent_git_ownership(
-                        workspace_id=workspace_id,
-                        worktree_path=worktree_path,
-                        reason="orphan_history_recovery_commit",
-                    )
-                    if recover_commit.ok:
-                        ancestor = await _git_in_worktree(
-                            ["merge-base", "--is-ancestor", base_commit, "HEAD"]
-                        )
-                if not ancestor.ok:
-                    # Planning ran before this commit step, so the preserved
-                    # FAILED worktree can already hold the plan + conformance
-                    # report. Deposit them BEFORE ``_mark_failed`` publishes the
-                    # terminal status: the console keys its artifact refetch on
-                    # the workspace ``updated_at`` (TaskArtifactsSection
-                    # ``refreshKey``), and marking FAILED first would bump
-                    # ``updated_at`` and let a poll observe it in the window
-                    # before the deposit, record an empty artifact list, then
-                    # never refetch — hiding the Plan/Validation controls. This
-                    # branch returns from inside the ``try`` before the
-                    # post-validation deposit block, and a plain ``return``
-                    # bypasses the ``except`` deposit handlers below.
-                    # Best-effort and idempotent.
-                    _deposit_planning_artifacts()
-                    await self._mark_failed(
-                        workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.running,
-                        failure_reason=FailureReason.agent_failure,
-                        message=(
-                            "agent severed git history — HEAD does not descend from "
-                            f"base commit {base_commit[:10] if base_commit else 'unknown'}, "
-                            "and automatic recovery (reset --soft + fresh commit) also failed. "
-                            "The coding CLI likely ran `git checkout --orphan` or reinitialised "
-                            "the repo; inspect the worktree manually."
-                        ),
-                    )
-                    return
-                _log.info(
-                    "executor.orphan_history_recovered",
-                    workspace_id=workspace_id,
-                    base_commit=base_commit,
-                )
+            # Reattach a severed feature branch to base before push/PR. A plain
+            # ``return`` here (orphan recovery failed) bypasses the ``except``
+            # deposit handlers below, so the helper deposits planning artifacts
+            # before marking FAILED. See ``_recover_orphan_history``.
+            if not await self._recover_orphan_history(
+                workspace_id=workspace_id,
+                ws=ws,
+                base_commit=base_commit,
+                worktree_path=worktree_path,
+                git_in_worktree=_git_in_worktree,
+                deposit_planning_artifacts=_deposit_planning_artifacts,
+            ):
+                return
         elif recovery.get("recovery_mode") == "rebase_only":
             try:
                 rebase_recovery_result = await self._run_monitor_rebase_recovery(
@@ -1081,6 +1035,7 @@ async def execute(
             agent_run_details=agent_run_details,
             agent_exit_note=agent_exit_note,
             upstream_failure_reason=agent_run_failure_reason,
+            execution_owner_id=execution_owner_id,
         )
         return
     except Exception as exc:  # unexpected — mark infrastructure
@@ -1114,6 +1069,7 @@ async def execute(
                     base_commit=base_commit,
                     owned_paths=list(ws.owned_paths),
                     expected_status=WorkspaceStatus.running,
+                    execution_owner_id=execution_owner_id,
                 ):
                     return
             else:
@@ -1144,6 +1100,8 @@ async def execute(
         recovery=recovery,
         rebase_recovery_result=rebase_recovery_result,
         git_in_worktree=_git_in_worktree,
+        execution_owner_id=execution_owner_id,
+        resume_disable_fix_passes=resume_disable_fix_passes,
     )
     # Deposit the worktree plan + conformance report into the served artifact
     # dir before teardown so the console can surface them (best-effort; see the
@@ -1311,6 +1269,7 @@ async def execute(
             base_commit=base_commit,
             owned_paths=list(ws.owned_paths),
             expected_status=WorkspaceStatus.validating,
+            execution_owner_id=execution_owner_id,
         ):
             return
     except Exception as exc:
@@ -1338,6 +1297,17 @@ async def execute(
         action="start_push",
     ):
         return
+
+    if resume_from_blocked:
+        # The protected gate passed with the operator's grants applied, so the
+        # grants are now single-use spent: consume them so a later DIFFERENT
+        # change to the same file must be granted again. This MUST run only
+        # after the validating→pushing CAS above commits this validated change
+        # to push. Consuming before the transition would mark the grants spent
+        # even when the CAS loses (cancel, version race, stale status) and the
+        # workspace never enters ``pushing`` — a later protected check on the
+        # same resume would then re-block with no usable grant.
+        await self._consume_active_operator_grants(workspace_id)
     if not await self._ensure_worktree_available(
         workspace_id=workspace_id,
         worktree_path=worktree_path,

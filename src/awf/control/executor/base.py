@@ -99,6 +99,27 @@ class WorkspaceExecutor(ExecutorDelegatesMixin):
             execution_lease_expires_at=execution_lease_expires_at,
         )
 
+    async def resume_blocked_execution(
+        self: Any,
+        workspace_id: str,
+        *,
+        execution_owner_id: str | None = None,
+        execution_lease_expires_at: datetime | None = None,
+    ) -> None:
+        """Resume a ``blocked`` workspace the worker has re-claimed to ``running``.
+
+        Drives the normal execution flow in ``resume_from_blocked`` mode: an
+        approve-and-keep grant skips the agent and re-runs setup + validation; a
+        revert/redo directive re-invokes the agent. The execution claim was
+        already (re-)acquired by the worker's epoch-fenced resume CAS."""
+        return await _execution_flow.execute(
+            self,
+            workspace_id=workspace_id,
+            execution_owner_id=execution_owner_id,
+            execution_lease_expires_at=execution_lease_expires_at,
+            resume_from_blocked=True,
+        )
+
     async def resume_pr_monitor(self: Any, workspace_id: str) -> None:
         return await _monitor_handoff.resume_pr_monitor(
             self,

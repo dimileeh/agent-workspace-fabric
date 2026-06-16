@@ -14,7 +14,13 @@ _REMONITOR_ELIGIBLE_STATUSES = (
 # the same state-reset as remonitor so operators can use the directive/audit split
 # without falling back to ``remonitor --reason``. Defined here as the single source
 # of truth and imported by ``controls_guide.py``.
-_GUIDE_ELIGIBLE_STATUSES = (WorkspaceStatus.monitoring_pr, WorkspaceStatus.failed)
+_GUIDE_ELIGIBLE_STATUSES = (
+    WorkspaceStatus.monitoring_pr,
+    WorkspaceStatus.failed,
+    # A pre-PR ``blocked`` workspace is resolved through ``guide`` (directive
+    # and/or scoped grants) — see ``controls_guide``.
+    WorkspaceStatus.blocked,
+)
 _VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _REBASE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 
@@ -141,6 +147,44 @@ class WorkspaceGuideStateError(WorkspaceControlError):
         )
 
 
+class WorkspaceGuideGrantNotAllowedError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_GUIDE_GRANT_NOT_ALLOWED",
+            message="Path grants are only accepted for a blocked workspace.",
+            detail={"status": workspace.status},
+        )
+
+
+class WorkspaceGuideInvalidGrantPathError(WorkspaceControlError):
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(
+            error_code="WORKSPACE_GUIDE_INVALID_GRANT_PATH",
+            message=f"Invalid grant path {path!r}: {reason}",
+            detail={"path": path, "reason": reason},
+        )
+
+
+class WorkspaceGuidePolicyDowngradeRequiredError(WorkspaceControlError):
+    def __init__(self, paths: list[str]) -> None:
+        super().__init__(
+            error_code="WORKSPACE_GUIDE_POLICY_DOWNGRADE_REQUIRED",
+            message=(
+                "Granting a protected-violation path that weakens validation "
+                "requires --approve-policy-downgrade and a reason: " + ", ".join(paths)
+            ),
+            detail={"paths": paths},
+        )
+
+
+class WorkspaceGuideGrantReasonRequiredError(WorkspaceControlError):
+    def __init__(self) -> None:
+        super().__init__(
+            error_code="WORKSPACE_GUIDE_GRANT_REASON_REQUIRED",
+            message="An operator reason is required when granting protected paths.",
+        )
+
+
 class WorkspaceRefreshStateError(WorkspaceControlError):
     def __init__(self, workspace: Workspace) -> None:
         super().__init__(
@@ -230,7 +274,11 @@ __all__ = [
     "VersionConflictError",
     "WorkspaceControlError",
     "WorkspaceGuideEmptyDirectiveError",
+    "WorkspaceGuideGrantNotAllowedError",
+    "WorkspaceGuideGrantReasonRequiredError",
+    "WorkspaceGuideInvalidGrantPathError",
     "WorkspaceGuideMissingPrUrlError",
+    "WorkspaceGuidePolicyDowngradeRequiredError",
     "WorkspaceGuideStateError",
     "WorkspaceNotFoundError",
     "WorkspaceRebaseActiveConflictError",

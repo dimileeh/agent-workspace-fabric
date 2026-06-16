@@ -43,6 +43,16 @@ class WorkspaceStatus(StrEnum):
     (feature-PR variant) or until it's declared ready-for-human (release-PR
     variant). See ``src/awf/runtime/pr_monitor.py``."""
 
+    blocked = "blocked"
+    """Non-terminal pause awaiting an operator decision. Entered (pre-PR) when an
+    agent edits a PROTECTED quality-gate file outside the caller-declared
+    ``owned_paths``: instead of terminally failing and discarding the spent work,
+    the workspace pauses here with its worktree, warm stack, and execution claim
+    preserved. An operator resolves it through the ``guide`` channel — either an
+    APPROVE-AND-KEEP scoped grant or a REVERT/REDO directive. The agent can never
+    self-approve. See ``src/awf/control/quality_gates.py`` and the worker resume
+    path. This is NOT terminal and must not fold into the "Running" KPI."""
+
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
