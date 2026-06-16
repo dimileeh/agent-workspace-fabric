@@ -189,9 +189,6 @@ def _remove_empty_untracked_dirs(
 
         had_descendant = False
         for child in children:
-            if child.name == ".git":
-                had_descendant = True
-                continue
             if not _is_directory(child):
                 had_descendant = True
                 continue
@@ -202,6 +199,13 @@ def _remove_empty_untracked_dirs(
                 continue
             child_path = f"{relative_child}/"
             if _is_under_ignored_path(child_path, ignored_path_set):
+                had_descendant = True
+                continue
+            # A nested directory containing a `.git` marker is a nested
+            # repository, submodule, or linked worktree. Treat it as a traversal
+            # boundary so we never recurse inside it and never remove any part
+            # of it.
+            if (child / ".git").exists():
                 had_descendant = True
                 continue
             if maybe_remove_empty(child):
@@ -249,9 +253,6 @@ def _snapshot_empty_untracked_dirs(
 
         has_file = False
         for child in children:
-            if child.name == ".git":
-                has_file = True
-                continue
             if not _is_directory(child):
                 has_file = True
                 continue
@@ -262,6 +263,12 @@ def _snapshot_empty_untracked_dirs(
                 continue
             child_path = f"{relative_child}/"
             if _is_under_ignored_path(child_path, ignored_path_set):
+                has_file = True
+                continue
+            # A nested directory containing a `.git` marker is a nested
+            # repository, submodule, or linked worktree. Treat it as a boundary
+            # so its empty descendants are not surfaced as dirty.
+            if (child / ".git").exists():
                 has_file = True
                 continue
             if has_file_descendant(child):

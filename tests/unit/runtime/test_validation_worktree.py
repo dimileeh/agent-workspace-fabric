@@ -605,8 +605,8 @@ def test_remove_empty_untracked_dirs_honors_ignored_roots(
     worktree.mkdir(parents=True)
     (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
     ignored_empty_dir = worktree / ".venv" / "empty"
-    ignored_empty_dir.mkdir(parents=True)
     plain_empty_dir = worktree / "generated"
+    ignored_empty_dir.mkdir(parents=True)
     plain_empty_dir.mkdir()
 
     removed = validation_worktree._remove_empty_untracked_dirs(
@@ -617,6 +617,58 @@ def test_remove_empty_untracked_dirs_honors_ignored_roots(
     assert sorted(removed) == ["generated/"]
     assert not plain_empty_dir.exists()
     assert ignored_empty_dir.exists()
+
+
+@pytest.mark.unit
+def test_remove_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
+    tmp_path: Path,
+) -> None:
+    """Directories containing a `.git` marker must not be traversed or removed."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    nested_git_dir = worktree / "submodule"
+    nested_empty_dir = nested_git_dir / "empty"
+    plain_empty_dir = worktree / "generated"
+    nested_git_dir.mkdir(parents=True)
+    (nested_git_dir / ".git").write_text("gitdir: /tmp/sub.git\n", encoding="utf-8")
+    nested_empty_dir.mkdir(parents=True)
+    plain_empty_dir.mkdir()
+
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(removed) == ["generated/"]
+    assert not plain_empty_dir.exists()
+    assert nested_git_dir.exists()
+    assert nested_empty_dir.exists()
+
+
+@pytest.mark.unit
+def test_snapshot_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
+    tmp_path: Path,
+) -> None:
+    """Directories containing a `.git` marker must not expose empty descendants."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    nested_git_dir = worktree / "nested-worktree"
+    nested_empty_dir = nested_git_dir / "empty"
+    plain_empty_dir = worktree / "generated"
+    nested_git_dir.mkdir(parents=True)
+    (nested_git_dir / ".git").write_text("gitdir: /tmp/nested.git\n", encoding="utf-8")
+    nested_empty_dir.mkdir(parents=True)
+    plain_empty_dir.mkdir()
+
+    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(empty_dirs) == ["generated/"]
+    assert nested_empty_dir.exists()
 
 
 @pytest.mark.unit
