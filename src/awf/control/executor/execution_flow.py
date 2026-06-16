@@ -1360,12 +1360,6 @@ async def execute(
     # repo URL and passed in per-call, so a Bitbucket feature workspace opens its
     # PR via ``BitbucketClient`` instead of the GitHub-only ``gh pr create``.
 
-    if resume_from_blocked:
-        # The protected gate passed with the operator's grants applied, so the
-        # grants are now single-use spent: consume them before the push so a
-        # later DIFFERENT change to the same file must be granted again.
-        await self._consume_active_operator_grants(workspace_id)
-
     # ── Step 3: push + open PR ──────────────────────────────────────────
     if not await self._transition_if_current(
         workspace_id,
@@ -1375,6 +1369,17 @@ async def execute(
         action="start_push",
     ):
         return
+
+    if resume_from_blocked:
+        # The protected gate passed with the operator's grants applied, so the
+        # grants are now single-use spent: consume them so a later DIFFERENT
+        # change to the same file must be granted again. This MUST run only
+        # after the validating→pushing CAS above commits this validated change
+        # to push. Consuming before the transition would mark the grants spent
+        # even when the CAS loses (cancel, version race, stale status) and the
+        # workspace never enters ``pushing`` — a later protected check on the
+        # same resume would then re-block with no usable grant.
+        await self._consume_active_operator_grants(workspace_id)
     if not await self._ensure_worktree_available(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
