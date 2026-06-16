@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects import sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import WorkspaceStatus
@@ -103,6 +104,17 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
         "directive": "   ",
     }
 
+    # Hint with a NON-STRING directive (e.g. a JSON boolean): the resume path's
+    # ``_optional_stripped_string`` discards any non-string value as absent, so a
+    # directive that merely coerces to non-empty text must NOT clear eligibility
+    # here — otherwise it reproduces the blocked -> running -> blocked spin loop.
+    non_string_directive = await _blocked_workspace(session)
+    non_string_directive.pending_operator_hint = {
+        "status": "pending",
+        "reason": "paused on gate",
+        "directive": True,
+    }
+
     # Active grant for the current epoch (approve-and-keep) → resumable.
     with_grant = await _blocked_workspace(session, block_epoch=2)
     session.add(
@@ -151,6 +163,7 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     assert awaiting.id not in ids
     assert directiveless.id not in ids
     assert blank_directive.id not in ids
+    assert non_string_directive.id not in ids
     assert with_stale_grant.id not in ids
     assert running.id not in ids
 
@@ -159,6 +172,53 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
     assert set(excluded) == {with_grant.id}
     assert len(await repo.list_resumable_blocked_ids(limit=1)) == 1
     assert await repo.list_resumable_blocked_ids(limit=0) == []
+
+
+@pytest.mark.unit
+async def test_list_resumable_blocked_ids_sqlite_validates_directive_string_type() -> None:
+    """The SQLite eligibility branch must type-check the directive via json_type.
+
+    ``db/session.make_engine`` enforces Postgres, so the SQLite dialect branch is
+    exercised by compiling the statement rather than executing it. The directive
+    must be gated on ``json_type(...) = 'text'`` so a non-string directive cannot
+    clear eligibility, mirroring the resume path's ``_optional_stripped_string``.
+    """
+
+    class _EmptyResult:
+        def scalars(self) -> _EmptyResult:
+            return self
+
+        def all(self) -> list[str]:
+            return []
+
+    class _RecordingSession:
+        info: dict[str, str] = {}
+        bind = None
+
+        def __init__(self) -> None:
+            self.executed: list[object] = []
+
+        async def execute(self, statement: object) -> _EmptyResult:
+            self.executed.append(statement)
+            return _EmptyResult()
+
+    recording_session = _RecordingSession()
+    repo = WorkspaceRepository(recording_session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+    result = await repo.list_resumable_blocked_ids(limit=10)
+
+    assert result == []
+    assert len(recording_session.executed) == 1
+    sql = " ".join(
+        str(
+            recording_session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=sqlite.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        ).split()
+    )
+    assert "json_type(workspaces.pending_operator_hint, '$.directive') = 'text'" in sql
+    assert "json_extract(workspaces.pending_operator_hint, '$.directive')" in sql
 
 
 @pytest.mark.unit

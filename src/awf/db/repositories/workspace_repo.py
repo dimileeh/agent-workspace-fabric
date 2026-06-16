@@ -673,11 +673,12 @@ class WorkspaceRepository:
         ``blocked -> running -> blocked`` re-running the same gate every cycle.
 
         The hint branch matches the resume path's acceptance test exactly: a
-        directive-less or whitespace-only ``pending_operator_hint`` (which
-        ``execution_flow`` treats as absent via ``_optional_stripped_string``,
-        running neither the revert/redo nor the approve-and-keep branch) is NOT
-        eligible on its own — selecting it would reproduce the very spin loop the
-        non-null guard was meant to avoid.
+        directive-less, whitespace-only, or non-string ``directive`` in
+        ``pending_operator_hint`` (which ``execution_flow`` treats as absent via
+        ``_optional_stripped_string`` — including non-``str`` JSON values such as
+        ``true``/``123``, running neither the revert/redo nor the approve-and-keep
+        branch) is NOT eligible on its own — selecting it would reproduce the very
+        spin loop the non-null guard was meant to avoid.
         Oldest ``updated_at`` first for FIFO fairness across cleared workspaces.
         """
         if limit <= 0:
@@ -696,9 +697,26 @@ class WorkspaceRepository:
             hint_directive: ColumnElement[Any] = Workspace.pending_operator_hint.op("->>")(
                 "directive"
             )
+            # ``pending_operator_hint`` is a generic ``JSON`` column (Postgres
+            # ``json``, not ``jsonb``) so ``json_typeof`` — not ``jsonb_typeof`` —
+            # is the matching introspection function for the ``->`` json value.
+            directive_is_string: ColumnElement[Any] = (
+                func.json_typeof(Workspace.pending_operator_hint.op("->")("directive")) == "string"
+            )
         else:
             hint_directive = func.json_extract(Workspace.pending_operator_hint, "$.directive")
-        actionable_hint = func.trim(func.coalesce(hint_directive, "")) != ""
+            directive_is_string = (
+                func.json_type(Workspace.pending_operator_hint, "$.directive") == "text"
+            )
+        # Mirror the resume path's ``_optional_stripped_string`` exactly: a
+        # non-string directive (e.g. ``true``/``123``) coerces to non-empty text
+        # but is discarded as absent on resume, so only a non-empty *string*
+        # directive is actionable — else the worker spins ``blocked -> running ->
+        # blocked`` re-running the same gate every cycle.
+        actionable_hint = and_(
+            directive_is_string,
+            func.trim(func.coalesce(hint_directive, "")) != "",
+        )
         stmt = select(Workspace.id).where(
             Workspace.status == WorkspaceStatus.blocked.value,
             or_(actionable_hint, active_grant_exists),
