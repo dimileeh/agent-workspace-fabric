@@ -450,11 +450,14 @@ async def test_execute_skips_profile_sync_when_snapshot_already_frozen(
         _runner = object()
         _usage_sampler = None
 
-        async def _claim_ready(self, *args: object, **kwargs: object) -> Workspace:
-            return workspace
-
-        async def _recheck_status(self, *args: object, **kwargs: object) -> bool:
-            return True
+        async def _begin_execution(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> tuple[Workspace, bool, None]:
+            # Fresh-claim entry: workspace acquired + confirmed ``running``,
+            # no blocked-resume skip, no persisted baseline.
+            return workspace, False, None
 
         async def _reject_unsupported_task_kind(
             self,
