@@ -31,7 +31,6 @@ from awf.db.enums import (
 )
 from awf.db.models import (
     MergeCandidate,
-    OperatorGrantAuditRecord,
     TaskAttempt,
     Workspace,
     WorkspaceEvent,
@@ -77,6 +76,9 @@ from awf.db.repositories.workspace_repo_host_ports import (
     find_active_owned_path_conflicts,
     find_active_owned_path_overlaps,
     find_host_port_conflicts,
+)
+from awf.db.repositories.workspace_repo_resumable import (
+    list_resumable_blocked_ids,
 )
 
 
@@ -689,65 +691,13 @@ class WorkspaceRepository:
         spin loop the non-null guard was meant to avoid.
         Oldest ``updated_at`` first for FIFO fairness across cleared workspaces.
         """
-        if limit <= 0:
-            return []
-        active_grant_exists = (
-            select(OperatorGrantAuditRecord.id)
-            .where(
-                OperatorGrantAuditRecord.workspace_id == Workspace.id,
-                OperatorGrantAuditRecord.consumed_at.is_(None),
-                OperatorGrantAuditRecord.revoked_at.is_(None),
-                OperatorGrantAuditRecord.block_epoch == Workspace.block_epoch,
-            )
-            .exists()
+        return await list_resumable_blocked_ids(
+            self._session,
+            self._dialect_name,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            node_id=node_id,
         )
-        if self._dialect_name == "postgresql":
-            hint_directive: ColumnElement[Any] = Workspace.pending_operator_hint.op("->>")(
-                "directive"
-            )
-            hint_reason: ColumnElement[Any] = Workspace.pending_operator_hint.op("->>")("reason")
-            # ``pending_operator_hint`` is a generic ``JSON`` column (Postgres
-            # ``json``, not ``jsonb``) so ``json_typeof`` — not ``jsonb_typeof`` —
-            # is the matching introspection function for the ``->`` json value.
-            directive_is_string: ColumnElement[Any] = (
-                func.json_typeof(Workspace.pending_operator_hint.op("->")("directive")) == "string"
-            )
-            reason_is_string: ColumnElement[Any] = (
-                func.json_typeof(Workspace.pending_operator_hint.op("->")("reason")) == "string"
-            )
-        else:
-            hint_directive = func.json_extract(Workspace.pending_operator_hint, "$.directive")
-            hint_reason = func.json_extract(Workspace.pending_operator_hint, "$.reason")
-            directive_is_string = (
-                func.json_type(Workspace.pending_operator_hint, "$.directive") == "text"
-            )
-            reason_is_string = func.json_type(Workspace.pending_operator_hint, "$.reason") == "text"
-        # Mirror the resume path's ``pre_pr_operator_hint_from_payload`` exactly: it
-        # rebuilds the hint only when BOTH ``reason`` and ``directive`` are non-blank
-        # *strings* (a non-string value such as ``true``/``123`` coerces to non-empty
-        # text but is discarded as absent), then injects the prompt only when
-        # ``hint.directive`` survives. A directive paired with a missing/blank
-        # ``reason`` makes that reconstruction return ``None``, so the worker would
-        # resume and re-run the agent *unguided* — reproducing the very ``blocked ->
-        # running -> blocked`` spin the non-null guard exists to avoid. Require both
-        # fields here so eligibility matches exactly what the resume path can apply.
-        actionable_hint = and_(
-            directive_is_string,
-            func.trim(func.coalesce(hint_directive, "")) != "",
-            reason_is_string,
-            func.trim(func.coalesce(hint_reason, "")) != "",
-        )
-        stmt = select(Workspace.id).where(
-            Workspace.status == WorkspaceStatus.blocked.value,
-            or_(actionable_hint, active_grant_exists),
-        )
-        if node_id is not None:
-            stmt = stmt.where(or_(Workspace.node_id == node_id, Workspace.node_id.is_(None)))
-        if exclude_ids:
-            stmt = stmt.where(Workspace.id.notin_(exclude_ids))
-        stmt = stmt.order_by(Workspace.updated_at.asc(), Workspace.id.asc()).limit(limit)
-        result = await self._session.execute(stmt)
-        return list(result.scalars().all())
 
     async def list_schedulable_ids(
         self,
