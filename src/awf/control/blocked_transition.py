@@ -32,9 +32,28 @@ from awf.control.quality_gates import (
     QualityGateViolation,
     quality_gate_violation_details,
 )
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import MONITOR_BLOCK_RESUME_PHASE_PREFIX, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+
+__all__ = [
+    "MONITOR_BLOCK_RESUME_PHASE_PREFIX",
+    "MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE",
+    "MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE",
+    "enter_blocked_for_protected_violation_in_session",
+    "is_monitor_origin_block_resume_phase",
+]
+
+# Monitor-origin resume phases (POST-PR protected-scope pause sites).
+MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE = "monitor_protected_scope_push"
+MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE = "monitor_protected_scope_sync_base"
+
+
+def is_monitor_origin_block_resume_phase(block_resume_phase: str | None) -> bool:
+    """Return whether a ``block_resume_phase`` marks a POST-PR (monitor) block."""
+    if not block_resume_phase:
+        return False
+    return block_resume_phase.startswith(MONITOR_BLOCK_RESUME_PHASE_PREFIX)
 
 
 async def enter_blocked_for_protected_violation_in_session(
