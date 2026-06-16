@@ -235,6 +235,13 @@ _BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE = "BLOCKED_RESUME_NO_EXECUTOR"
 ``blocked -> running`` claim but the worker had no executor to drive it — the
 paused state is restored instead of being left stranded in ``running``."""
 
+_BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE = "BLOCKED_RESUME_DISPATCH_ABORTED"
+"""Reason code for reverting ``running -> blocked`` when a blocked-resume won the
+``blocked -> running`` claim but the post-claim ordered-decision write (or another
+failure) aborted before a resume task was dispatched — the paused state is
+restored instead of being left stranded in ``running`` for stale-active recovery
+to FAIL."""
+
 PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
 
 PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"

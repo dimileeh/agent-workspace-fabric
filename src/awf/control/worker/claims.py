@@ -596,24 +596,25 @@ async def _claim_blocked_for_resume(self: Any, workspace_id: str) -> bool:
         return True
 
 
-async def _restore_blocked_after_missing_executor(self: Any, workspace_id: str) -> None:
-    """Revert a won blocked-resume back to ``blocked`` when no executor can drive it.
+async def _restore_blocked_resume_claim(self: Any, workspace_id: str, *, reason_code: str) -> None:
+    """Revert a won blocked-resume back to ``blocked`` when it cannot be driven.
 
     ``_claim_blocked_for_resume`` performs the ``blocked -> running`` CAS *before*
-    dispatch, so if the worker has no executor the resume task would otherwise
-    leave the row stranded in ``running`` (its claim released by the caller's
-    ``finally``) until stale-active recovery FAILS it — dropping the paused state
-    operators expect. Reverting to ``blocked`` restores that state: the claim CAS
-    never touched ``block_epoch``/``pending_operator_hint``/grants, so the next
-    cycle resumes it cleanly once an executor is present. Owner-gated so a newer
-    claimant that already fenced us is never clobbered."""
+    dispatch, so if the resume never starts the row would otherwise be left
+    stranded in ``running`` (its claim released elsewhere) until stale-active
+    recovery FAILS it — dropping the paused state operators expect. Reverting to
+    ``blocked`` restores that state: the claim CAS never touched
+    ``block_epoch``/``pending_operator_hint``/grants, so the next cycle resumes it
+    cleanly once it can run. Owner-gated so a newer claimant that already fenced
+    us is never clobbered. The ``reason_code`` records *why* the resume was
+    abandoned (no executor vs. an aborted post-claim dispatch)."""
     try:
         async with self._session_factory() as session:
             ws = await WorkspaceRepository(session).transition_if_current(
                 workspace_id,
                 from_status=WorkspaceStatus.running,
                 to=WorkspaceStatus.blocked,
-                reason_code=_BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
+                reason_code=reason_code,
                 extra_conditions=(Workspace.execution_claimed_by == self._worker_id,),
             )
             if ws is not None:
@@ -624,6 +625,18 @@ async def _restore_blocked_after_missing_executor(self: Any, workspace_id: str) 
             workspace_id=workspace_id,
             worker_id=self._worker_id,
         )
+
+
+async def _restore_blocked_after_missing_executor(self: Any, workspace_id: str) -> None:
+    """Revert a won blocked-resume back to ``blocked`` when no executor can drive it.
+
+    Thin wrapper over ``_restore_blocked_resume_claim`` for the missing-executor
+    case inside the dispatched resume task (the claim is released by the caller's
+    ``finally``)."""
+    await self._restore_blocked_resume_claim(
+        workspace_id,
+        reason_code=_BLOCKED_RESUME_NO_EXECUTOR_REASON_CODE,
+    )
 
 
 async def _claim_blocked_resume_ids(

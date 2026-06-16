@@ -34,6 +34,7 @@ from awf.common.audit import redact_audit_text
 from awf.control.worker.admission import _requested_admission_row_slots
 from awf.control.worker.config import WorkerConfig, effective_worker_config_node_id
 from awf.control.worker.constants import (
+    _BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE,
     ORDERED_BLOCKED_RESUME_REASON,
     ORDERED_MONITOR_RESUME_REASON,
     ORDERED_READY_EXECUTION_REASON,
@@ -312,18 +313,37 @@ class ControlWorker(WorkerDelegatesMixin):
                     blocked_ids,
                     limit=execution_slots,
                 )
-                blocked_dispatch_ids = self._dispatchable_execution_ids(
-                    claimed_blocked_ids,
-                    limit=execution_slots,
-                )
-                await self._record_ordered_decisions(
-                    blocked_dispatch_ids,
-                    reason_code=ORDERED_BLOCKED_RESUME_REASON,
-                )
-                blocked_dispatched = self._dispatch_blocked_resumes(
-                    blocked_dispatch_ids,
-                    limit=execution_slots,
-                )
+                # The claim CAS above already committed ``blocked -> running`` and
+                # stamped the execution claim. If the fallible ordered-decision
+                # write (or anything else) aborts before a resume task is
+                # dispatched, the claimed-but-undispatched rows would be stranded
+                # in ``running`` with the operator hint/grants still pending, where
+                # stale-active recovery FAILS them as abandoned executions instead
+                # of preserving the paused operator block. Restore any such row to
+                # ``blocked`` and release its claim so the next cycle resumes it.
+                blocked_dispatched: set[str] = set()
+                try:
+                    blocked_dispatch_ids = self._dispatchable_execution_ids(
+                        claimed_blocked_ids,
+                        limit=execution_slots,
+                    )
+                    await self._record_ordered_decisions(
+                        blocked_dispatch_ids,
+                        reason_code=ORDERED_BLOCKED_RESUME_REASON,
+                    )
+                    blocked_dispatched = self._dispatch_blocked_resumes(
+                        blocked_dispatch_ids,
+                        limit=execution_slots,
+                    )
+                finally:
+                    for workspace_id in claimed_blocked_ids:
+                        if workspace_id in blocked_dispatched:
+                            continue
+                        await self._restore_blocked_resume_claim(
+                            workspace_id,
+                            reason_code=_BLOCKED_RESUME_DISPATCH_ABORTED_REASON_CODE,
+                        )
+                        await self._release_execution_claim(workspace_id)
                 dispatched_ids.update(blocked_dispatched)
                 execution_dispatched_ids.update(blocked_dispatched)
 

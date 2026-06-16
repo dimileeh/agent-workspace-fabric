@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker.constants import ORDERED_BLOCKED_RESUME_REASON
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import WorkspaceRepository
@@ -225,6 +226,57 @@ async def test_resume_blocked_claimed_releases_claim_when_executor_missing(
         assert ws.pending_operator_hint is not None
         assert ws.pending_operator_hint["directive"] == "revert the change"
         # Cleanup ran: the execution claim was released rather than stranded.
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+
+
+@pytest.mark.unit
+async def test_run_once_restores_blocked_when_ordered_decision_write_fails(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # ``run_once`` commits the ``blocked -> running`` claim in
+    # ``_claim_blocked_resume_ids`` *before* the fallible
+    # ``_record_ordered_decisions`` queue-decision write and before dispatch
+    # starts a resume task. If that write fails after retries, no resume task
+    # runs and the row would be stranded in ``running`` with the operator hint
+    # still pending — stale-active recovery would then FAIL it as an abandoned
+    # active execution, dropping the operator-visible paused state. ``run_once``
+    # must restore the claimed-but-undispatched workspace to ``blocked``.
+    blocked_id = await _create_blocked(
+        session_factory,
+        origin_repo,
+        "ordered-decision-fails",
+        directive="revert the change",
+    )
+    executor = _RecordingBlockedExecutor()
+    worker = _worker(session_factory, executor)
+
+    # Fail only the blocked-resume ordered-decision write — the empty monitor
+    # and ready writes must still succeed so the blocked claim is reached first.
+    original_record = worker._record_ordered_decisions  # noqa: SLF001
+
+    async def _record_with_blocked_failure(workspace_ids: list[str], *, reason_code: str) -> None:
+        if reason_code == ORDERED_BLOCKED_RESUME_REASON:
+            raise RuntimeError("ordered decision write failed")
+        await original_record(workspace_ids, reason_code=reason_code)
+
+    worker._record_ordered_decisions = _record_with_blocked_failure  # type: ignore[method-assign]  # noqa: SLF001
+
+    with pytest.raises(RuntimeError, match="ordered decision write failed"):
+        await asyncio.wait_for(worker.run_once(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+    # No resume task ran because dispatch was never reached.
+    assert executor.resume_blocked_calls == []
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(blocked_id)
+        assert ws is not None
+        # The paused state was restored instead of being stranded in running.
+        assert ws.status == WorkspaceStatus.blocked.value
+        # The operator directive is preserved so the next cycle can resume it.
+        assert ws.pending_operator_hint is not None
+        assert ws.pending_operator_hint["directive"] == "revert the change"
+        # The execution claim won by the resume CAS was released, not stranded.
         assert ws.execution_claimed_by is None
         assert ws.execution_claim_expires_at is None
 
