@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -613,6 +613,7 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
     runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
     runner.queue_result(returncode=0, stdout="")  # after_compare
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
 
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
@@ -624,14 +625,12 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
 
     executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
 
-    def _write_and_raise(**_kwargs: object) -> None:
-        # Simulate an unreadable worktree state by writing the file and then
-        # raising, so the unlink guard must be best-effort.
-        report_abs.parent.mkdir(parents=True, exist_ok=True)
-        report_abs.write_text(satisfied, encoding="utf-8")
-        raise OSError("read-only worktree")
+    real_unlink = Path.unlink
 
-    executor._write_satisfied_post_validation_conformance_report = _write_and_raise  # type: ignore[method-assign]
+    def _raise_on_report_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == report_abs and missing_ok:
+            raise OSError("permission denied")
+        return real_unlink(self, missing_ok=missing_ok)
 
     profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
     handoff = _PlanningValidationHandoff(
@@ -647,17 +646,18 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
         max_iterations=2,
     )
 
-    failure = await executor._run_post_validation_conformance_check(
-        adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
-        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
-        profile=profile,
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        worktree_path=worktree_path,
-        model=None,
-        handoff=handoff,
-        validation_run_id="validation-run-1",
-    )
+    with patch.object(Path, "unlink", _raise_on_report_unlink):
+        failure = await executor._run_post_validation_conformance_check(
+            adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
+            workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+            profile=profile,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            worktree_path=worktree_path,
+            model=None,
+            handoff=handoff,
+            validation_run_id="validation-run-1",
+        )
 
     assert failure is None
 
