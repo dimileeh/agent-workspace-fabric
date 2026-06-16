@@ -759,6 +759,7 @@ def test_is_tracked_gitlink_includes_safe_directory_config(
 @pytest.mark.unit
 def test_snapshot_empty_untracked_dirs_preserves_tracked_deinitialized_submodule(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tracked deinitialized submodule must not be surfaced as dirty."""
     worktree = tmp_path / "worktree"
@@ -786,14 +787,69 @@ def test_snapshot_empty_untracked_dirs_preserves_tracked_deinitialized_submodule
     plain_empty_dir = worktree / "generated"
     plain_empty_dir.mkdir()
 
+    captured: list[list[str]] = []
+    original_run = subprocess.run
+
+    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(list(cmd))
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
     empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
         worktree_path=worktree,
         ignored_paths=(),
     )
 
+    ls_tree_calls = [call for call in captured if "ls-tree" in call]
+    assert len(ls_tree_calls) == 1
+    assert "-r" in ls_tree_calls[0]
+    assert "-d" in ls_tree_calls[0]
     assert sorted(empty_dirs) == ["generated/"]
     assert submodule.exists()
     assert plain_empty_dir.exists()
+
+
+@pytest.mark.unit
+def test_remove_empty_untracked_dirs_batch_gitlink_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only one ``git ls-tree`` call should be issued for many directories."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+
+    # Create a handful of empty directories; none are submodules.
+    for name in ("a", "b", "c", "a/nested", "b/nested"):
+        (worktree / name).mkdir(parents=True)
+
+    captured: list[list[str]] = []
+    original_run = subprocess.run
+
+    def capture_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(list(cmd))
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    ls_tree_calls = [call for call in captured if "ls-tree" in call]
+    assert len(ls_tree_calls) == 1
+    assert "-r" in ls_tree_calls[0]
+    assert "-d" in ls_tree_calls[0]
+    assert len(removed) == 5
 
 
 @pytest.mark.unit

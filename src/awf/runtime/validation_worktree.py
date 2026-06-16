@@ -195,6 +195,39 @@ def _is_tracked_gitlink(worktree_path: Path, path: Path) -> bool:
     return result.returncode == 0 and result.stdout.startswith("160000")
 
 
+def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
+    """Return all tracked gitlink (submodule) paths under HEAD.
+
+    Loading the full set once avoids a separate ``git ls-tree`` subprocess for
+    every directory visited by the empty-directory helpers, which is
+    significant in repositories with many directories and no submodules.
+    """
+    result = subprocess.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "ls-tree",
+            "-r",
+            "-d",
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return frozenset()
+    paths: set[str] = set()
+    for line in result.stdout.splitlines():
+        if line.startswith("160000"):
+            # ls-tree output format: "<mode> <type> <sha>\t<path>"
+            tab_index = line.find("\t")
+            if tab_index != -1:
+                paths.add(line[tab_index + 1 :])
+    return frozenset(paths)
+
+
 def _remove_empty_untracked_dirs(
     *,
     worktree_path: Path,
@@ -209,6 +242,7 @@ def _remove_empty_untracked_dirs(
     """
     removed: list[str] = []
     ignored_path_set = {_normalize_porcelain_path(path) for path in ignored_paths}
+    gitlink_paths = _gitlink_paths(worktree_path)
 
     def maybe_remove_empty(directory: Path) -> bool:
         """Return True when the directory was removed because it was empty."""
@@ -238,11 +272,7 @@ def _remove_empty_untracked_dirs(
             # (empty directory, no `.git` marker, but still a gitlink in HEAD).
             # Treat any of these as a traversal boundary so we never recurse
             # inside and never remove them.
-            if (
-                child.name == ".git"
-                or (child / ".git").exists()
-                or _is_tracked_gitlink(worktree_path, child)
-            ):
+            if child.name == ".git" or (child / ".git").exists() or relative_child in gitlink_paths:
                 had_descendant = True
                 continue
             if maybe_remove_empty(child):
@@ -260,7 +290,7 @@ def _remove_empty_untracked_dirs(
         if _is_under_ignored_path(dir_path, ignored_path_set):
             return False
         # Do not remove a tracked gitlink directory even when it is empty.
-        if _is_tracked_gitlink(worktree_path, directory):
+        if relative in gitlink_paths:
             return False
 
         try:
@@ -284,6 +314,7 @@ def _snapshot_empty_untracked_dirs(
     """Snapshot fileless non-ignored directory trees that git status omits."""
     empty_dirs: list[str] = []
     ignored_path_set = {_normalize_porcelain_path(path) for path in ignored_paths}
+    gitlink_paths = _gitlink_paths(worktree_path)
 
     def has_file_descendant(directory: Path) -> bool:
         try:
@@ -311,11 +342,7 @@ def _snapshot_empty_untracked_dirs(
             # deinitialized (empty directory, no `.git` marker). Treat any of
             # these as a boundary so its empty descendants are not surfaced as
             # dirty and the directory is not removed.
-            if (
-                child.name == ".git"
-                or (child / ".git").exists()
-                or _is_tracked_gitlink(worktree_path, child)
-            ):
+            if child.name == ".git" or (child / ".git").exists() or relative_child in gitlink_paths:
                 has_file = True
                 continue
             if has_file_descendant(child):
