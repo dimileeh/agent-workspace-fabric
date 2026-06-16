@@ -475,6 +475,10 @@ async def check_validation_worktree_clean(
     # and its parents as dirty, escaping the unconditional suppression above.
     snapshot_ignored_paths = (*ignored_paths, *AWF_AGENT_RUNTIME_IGNORED_ROOTS)
     if remove_empty_untracked_dirs:
+        # Return value intentionally discarded: the removal is a pure side
+        # effect. The dirty check below relies only on git-status output, which
+        # never reports truly empty directories, so no removed-path list is
+        # needed here.
         _remove_empty_untracked_dirs(
             worktree_path=worktree_path,
             ignored_paths=snapshot_ignored_paths,
