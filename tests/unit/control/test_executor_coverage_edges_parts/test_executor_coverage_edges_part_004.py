@@ -694,6 +694,7 @@ async def test_verify_recovered_post_agent_commit_blocks_protected_policy_change
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
     executor.enter_blocked_for_protected_violation = AsyncMock(return_value=True)  # type: ignore[method-assign]
     executor._fail_if_plan_only_paths = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    executor._active_operator_grant_specs = AsyncMock(return_value=[])  # type: ignore[method-assign]
 
     async def _changed_paths(*_args: object, **_kwargs: object) -> list[str]:
         return ["pyproject.toml"]
@@ -737,6 +738,7 @@ async def test_verify_recovered_post_agent_commit_fails_when_head_not_descendant
     executor = _executor_with_runner(runner, tmp_path)
     executor._mark_failed = AsyncMock()  # type: ignore[method-assign]
     executor._fail_if_plan_only_paths = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    executor._active_operator_grant_specs = AsyncMock(return_value=[])  # type: ignore[method-assign]
 
     async def _changed_paths(*_args: object, **_kwargs: object) -> list[str]:
         return ["src/app.py"]
@@ -773,6 +775,7 @@ async def test_verify_recovered_post_agent_commit_accepts_non_policy_descendant(
     runner = FakeCommandRunner()
     executor = _executor_with_runner(runner, tmp_path)
     executor._fail_if_plan_only_paths = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    executor._active_operator_grant_specs = AsyncMock(return_value=[])  # type: ignore[method-assign]
 
     async def _changed_paths(*_args: object, **_kwargs: object) -> list[str]:
         return ["src/app.py"]

@@ -756,6 +756,7 @@ def _plan_only_guard_executor(
         ),
         _committed_paths_since=AsyncMock(return_value=committed_paths),
         _fail_if_plan_only_paths=AsyncMock(return_value=fail_if_plan_only),
+        _active_operator_grant_specs=AsyncMock(return_value=[]),
         _protected_file_diffs_for_staged_paths=AsyncMock(return_value=()),
         _runner=SimpleNamespace(run=AsyncMock(return_value=CommandResult(0, "", ""))),
     )
