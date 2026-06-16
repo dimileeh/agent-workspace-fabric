@@ -12,6 +12,7 @@ from functools import partial
 from typing import Any, cast
 
 from awf.control.worker.constants import (
+    _BLOCKED_RESUME_EXECUTION_FAILED_REASON_CODE,
     _EXECUTION_SLOTS_SATURATED_LOG_INTERVAL,
     EXECUTION_CLAIM_FENCED,
 )
@@ -152,6 +153,18 @@ async def _safely_resume_blocked_claimed(self: Any, workspace_id: str) -> None:
         )
     except Exception:
         _log.exception("worker.resume_blocked_failed", workspace_id=workspace_id)
+        # The resume CAS already committed ``blocked -> running`` before dispatch.
+        # If ``resume_blocked_execution`` raised before moving the row onward (e.g.
+        # a transient executor/setup failure), the row is still ``running`` with its
+        # operator hint/grants pending; left as-is the ``finally`` releases the claim
+        # and the next worker treats it as a *stale active execution* (FAILing it)
+        # rather than a resumable block. Restore the paused state first (owner-gated,
+        # and a no-op once the resume has already transitioned the row past
+        # ``running``) so the next cycle resumes it cleanly.
+        await self._restore_blocked_resume_claim(
+            workspace_id,
+            reason_code=_BLOCKED_RESUME_EXECUTION_FAILED_REASON_CODE,
+        )
     finally:
         heartbeat.cancel()
         with contextlib.suppress(asyncio.CancelledError):

@@ -457,9 +457,13 @@ async def test_safely_resume_blocked_claimed_swallows_executor_error(
     session_factory: async_sessionmaker[AsyncSession],
     origin_repo: Path,
 ) -> None:
-    # A resume that raises inside the executor must not escape: the error is
-    # logged and the ``finally`` still releases the execution claim so the row
-    # is not left wedged with a stranded claim.
+    # A resume that raises inside the executor *before* moving the row out of
+    # ``running`` must not escape, and must not leave the row stranded in
+    # ``running``: the resume CAS already committed ``blocked -> running``, so a
+    # transient executor/setup failure would otherwise be picked up by the next
+    # worker as a stale active execution (FAILing it) instead of a resumable
+    # block. The error is logged, the paused ``blocked`` state is restored, and
+    # the ``finally`` still releases the execution claim.
     blocked_id = await _create_blocked(
         session_factory, origin_repo, "executor-raises", directive="go"
     )
@@ -480,6 +484,13 @@ async def test_safely_resume_blocked_claimed_swallows_executor_error(
     async with session_factory() as s:
         ws = await WorkspaceRepository(s).get(blocked_id)
         assert ws is not None
+        # The paused state was restored instead of being stranded in running, so
+        # the next cycle resumes it cleanly rather than stale-active recovery
+        # FAILing it.
+        assert ws.status == WorkspaceStatus.blocked.value
+        # The operator directive is preserved so the next cycle can resume it.
+        assert ws.pending_operator_hint is not None
+        assert ws.pending_operator_hint["directive"] == "go"
         # The claim was released by the ``finally``, not stranded.
         assert ws.execution_claimed_by is None
         assert ws.execution_claim_expires_at is None
