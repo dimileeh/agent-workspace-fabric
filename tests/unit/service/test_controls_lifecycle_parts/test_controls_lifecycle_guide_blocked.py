@@ -276,6 +276,33 @@ async def test_guide_blocked_grant_requires_reason(session: AsyncSession) -> Non
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("./pyproject.toml", "pyproject.toml"),
+        ("././src/awf/x.py", "src/awf/x.py"),
+        ("  ./docs/file.md  ", "docs/file.md"),
+        ("plain/path.py", "plain/path.py"),
+    ],
+)
+def test_canonicalize_grant_path_strips_leading_dot_slash(raw: str, expected: str) -> None:
+    """A grant glob's leading ``./`` segments are stripped to a repo-relative path."""
+    from awf.service.controls_guide import _canonicalize_grant_path
+
+    assert _canonicalize_grant_path(raw) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("raw", ["./", "././", "   "])
+def test_canonicalize_grant_path_rejects_empty_after_normalization(raw: str) -> None:
+    """A glob that normalizes to nothing is rejected as an empty path."""
+    from awf.service.controls_guide import _canonicalize_grant_path
+
+    with pytest.raises(WorkspaceGuideInvalidGrantPathError, match="path is empty"):
+        _canonicalize_grant_path(raw)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "bad_path",
     ["../etc/passwd", "/abs/path", "a/../../b", "a/" + "b" * 1024],
 )

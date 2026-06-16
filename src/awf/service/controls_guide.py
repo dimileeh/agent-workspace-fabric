@@ -174,7 +174,10 @@ async def guide_workspace(
     if grant_inputs:
         # Path grants only make sense for a blocked workspace.
         raise WorkspaceGuideGrantNotAllowedError(workspace)
-    if not directive_text:
+    if not directive_text:  # pragma: no cover - unreachable: the line-86 guard
+        # already rejects an empty directive when there are no grants, and the
+        # ``grant_inputs`` branch above consumes the only other way to reach here
+        # with an empty directive. Kept as belt-and-suspenders defense in depth.
         raise WorkspaceGuideEmptyDirectiveError()
     if not workspace.pr_url:
         raise WorkspaceGuideMissingPrUrlError(workspace)

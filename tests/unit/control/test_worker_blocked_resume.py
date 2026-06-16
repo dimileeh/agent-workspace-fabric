@@ -359,3 +359,169 @@ async def test_run_once_leaves_undecided_blocked_workspace_untouched(
         ws = await WorkspaceRepository(s).get(blocked_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
+async def test_claim_blocked_for_resume_returns_false_when_not_blocked(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # The resume CAS only wins a row still in ``blocked``. A workspace that
+    # already left ``blocked`` (e.g. a competing worker resumed it) yields no
+    # row, so the claim must report failure without touching the state.
+    ready_id = await _create_ready(session_factory, origin_repo, "not-blocked")
+    worker = _worker(session_factory, _RecordingBlockedExecutor())
+
+    assert await worker._claim_blocked_for_resume(ready_id) is False  # noqa: SLF001
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(ready_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_list_resumable_blocked_returns_empty_when_limit_non_positive(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # A non-positive row limit short-circuits before any DB query.
+    await _create_blocked(session_factory, origin_repo, "blocked", directive="go")
+    worker = _worker(session_factory, _RecordingBlockedExecutor())
+
+    assert await worker._list_resumable_blocked(limit=0) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
+async def test_claim_blocked_resume_ids_skips_in_flight_and_honors_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # An already-tracked workspace is skipped (it is being resumed), and the
+    # per-cycle limit caps how many fresh rows are claimed.
+    in_flight = await _create_blocked(session_factory, origin_repo, "in-flight", directive="go")
+    claimable = await _create_blocked(session_factory, origin_repo, "claimable", directive="go")
+    overflow = await _create_blocked(session_factory, origin_repo, "overflow", directive="go")
+    worker = _worker(session_factory, _RecordingBlockedExecutor())
+
+    async def _noop() -> None:
+        return None
+
+    worker._execution_tasks[in_flight] = asyncio.create_task(_noop())  # noqa: SLF001
+
+    claimed = await worker._claim_blocked_resume_ids(  # noqa: SLF001
+        [in_flight, claimable, overflow], limit=1
+    )
+
+    assert claimed == [claimable]
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        # The in-flight row was skipped, not re-claimed.
+        in_flight_ws = await repo.get(in_flight)
+        assert in_flight_ws is not None and in_flight_ws.status == WorkspaceStatus.blocked.value
+        # The overflow row was left for a later cycle (limit reached).
+        overflow_ws = await repo.get(overflow)
+        assert overflow_ws is not None and overflow_ws.status == WorkspaceStatus.blocked.value
+    await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+
+
+@pytest.mark.unit
+async def test_dispatch_blocked_resumes_skips_in_flight_and_honors_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # Pure dispatch-loop wiring: an already-tracked workspace is skipped and the
+    # limit caps how many resume tasks are spawned this cycle.
+    worker = _worker(session_factory, _RecordingBlockedExecutor())
+    resumed: list[str] = []
+
+    async def _fake_resume(workspace_id: str) -> None:
+        resumed.append(workspace_id)
+
+    worker._safely_resume_blocked_claimed = _fake_resume  # type: ignore[method-assign]  # noqa: SLF001
+
+    async def _noop() -> None:
+        return None
+
+    worker._execution_tasks["in-flight"] = asyncio.create_task(_noop())  # noqa: SLF001
+
+    dispatched = worker._dispatch_blocked_resumes(  # noqa: SLF001
+        ["in-flight", "fresh", "overflow"], limit=1
+    )
+
+    assert dispatched == {"fresh"}
+    await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=WORKER_TEST_TIMEOUT_SECONDS)
+    assert resumed == ["fresh"]
+
+
+@pytest.mark.unit
+async def test_safely_resume_blocked_claimed_swallows_executor_error(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # A resume that raises inside the executor must not escape: the error is
+    # logged and the ``finally`` still releases the execution claim so the row
+    # is not left wedged with a stranded claim.
+    blocked_id = await _create_blocked(
+        session_factory, origin_repo, "executor-raises", directive="go"
+    )
+
+    class _RaisingExecutor(_RecordingBlockedExecutor):
+        async def resume_blocked_execution(self, workspace_id: str, **_kwargs: object) -> None:
+            raise RuntimeError("resume boom")
+
+    worker = _worker(session_factory, _RaisingExecutor())
+    assert await worker._claim_blocked_for_resume(blocked_id)  # noqa: SLF001
+
+    # Must not raise despite the executor blowing up.
+    await asyncio.wait_for(
+        worker._safely_resume_blocked_claimed(blocked_id),  # noqa: SLF001
+        timeout=WORKER_TEST_TIMEOUT_SECONDS,
+    )
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(blocked_id)
+        assert ws is not None
+        # The claim was released by the ``finally``, not stranded.
+        assert ws.execution_claimed_by is None
+        assert ws.execution_claim_expires_at is None
+
+
+@pytest.mark.unit
+async def test_restore_blocked_resume_claim_noop_when_row_not_running(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin_repo: Path,
+) -> None:
+    # The restore CAS is gated on ``running`` + owner. A row no longer in
+    # ``running`` (or owned by another claimant) yields no row, so the restore
+    # is a silent no-op rather than clobbering the current state.
+    blocked_id = await _create_blocked(
+        session_factory, origin_repo, "already-blocked", directive="go"
+    )
+    worker = _worker(session_factory, _RecordingBlockedExecutor())
+
+    await worker._restore_blocked_resume_claim(  # noqa: SLF001
+        blocked_id, reason_code="EXECUTOR_BLOCKED_RESUME_ABORTED"
+    )
+
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).get(blocked_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
+async def test_restore_blocked_resume_claim_swallows_session_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    # A DB failure during restore is logged and swallowed — the surrounding
+    # cleanup path must not propagate it.
+    worker = _worker(session_factory, _RecordingBlockedExecutor())
+
+    def _boom() -> AsyncSession:
+        raise RuntimeError("session unavailable")
+
+    worker._session_factory = _boom  # type: ignore[method-assign]  # noqa: SLF001
+
+    # Must return without raising.
+    await worker._restore_blocked_resume_claim(  # noqa: SLF001
+        "ws_missing", reason_code="EXECUTOR_BLOCKED_RESUME_ABORTED"
+    )

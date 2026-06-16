@@ -21,6 +21,7 @@ import pytest
 
 from awf.common.commands import CommandResult
 from awf.control.executor import quality_methods as executor_quality_methods
+from awf.control.executor import state_ops as executor_state_ops
 from awf.control.executor.quality_gates import _PostAgentCommitStepError
 from awf.control.quality_gates import QUALITY_GATE_POLICY_CHANGED_REASON_CODE
 from awf.db.enums import WorkspaceStatus
@@ -220,3 +221,47 @@ async def test_prepare_provider_recovery_tolerates_invalid_agent_runtime(
     # Invalid runtime → defaults is None → no effective default model is passed.
     assert captured["effective_default_model"] is None
     assert session.commits == 1
+
+
+class _NullGetSession:
+    """A session whose ``WorkspaceRepository.get`` resolves to a missing row."""
+
+    async def __aenter__(self) -> _NullGetSession:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+
+class _MissingWorkspaceRepo:
+    def __init__(self, _session: object) -> None:
+        return None
+
+    async def get(self, _workspace_id: str) -> object | None:
+        return None
+
+
+@pytest.mark.unit
+async def test_active_operator_grant_specs_returns_empty_when_workspace_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vanished workspace yields no active grants rather than querying rows."""
+    monkeypatch.setattr(executor_state_ops, "WorkspaceRepository", _MissingWorkspaceRepo)
+    executor = SimpleNamespace(_session_factory=lambda: _NullGetSession())
+
+    specs = await executor_state_ops._active_operator_grant_specs(executor, "ws_gone")
+
+    assert specs == []
+
+
+@pytest.mark.unit
+async def test_consume_active_operator_grants_returns_zero_when_workspace_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Consuming grants on a vanished workspace is a no-op that consumes nothing."""
+    monkeypatch.setattr(executor_state_ops, "WorkspaceRepository", _MissingWorkspaceRepo)
+    executor = SimpleNamespace(_session_factory=lambda: _NullGetSession())
+
+    consumed = await executor_state_ops._consume_active_operator_grants(executor, "ws_gone")
+
+    assert consumed == 0
