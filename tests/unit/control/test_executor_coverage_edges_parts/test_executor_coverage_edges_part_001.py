@@ -583,6 +583,9 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
     runner.queue_result(returncode=0, stdout="validated-head\n")
     runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(
+        returncode=1, stderr="fatal: path not in index\n"
+    )  # restore fails best-effort
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -1016,6 +1019,7 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
     runner.queue_result(returncode=0, stdout="validated-head\n")
     runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
     runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -1071,6 +1075,7 @@ async def test_post_validation_conformance_ignores_stale_report_without_stdout(
     runner.queue_result(returncode=0, stdout="validated-head\n")
     runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
     runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -1116,8 +1121,9 @@ async def test_post_validation_conformance_failure_counts_handoff_iterations(
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
     runner.queue_result(returncode=0, stdout="")  # changed paths before conformance
     runner.queue_result(returncode=0, stdout="validated-head\n")
-    runner.queue_result(returncode=0, stdout="")  # changed paths after conformance
+    runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -1362,6 +1368,7 @@ async def test_satisfied_post_validation_conformance_report_unlinks_tracked_repo
     runner.queue_result(returncode=0, stdout="validated-head\n")  # before_compare_head
     runner.queue_result(returncode=0, stdout=f" M {report_path.as_posix()}\n")  # after_compare
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"

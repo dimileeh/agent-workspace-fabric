@@ -526,6 +526,7 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
     runner.queue_result(returncode=0, stdout="")  # after_compare (changed paths)
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
 
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
@@ -623,13 +624,14 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
 
     executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
 
-    def _unlink_and_raise(**_kwargs: object) -> None:
-        # Simulate an unreadable/removable worktree state by removing the
-        # file and then raising, so the unlink guard must be best-effort.
-        report_abs.unlink(missing_ok=True)
+    def _write_and_raise(**_kwargs: object) -> None:
+        # Simulate an unreadable worktree state by writing the file and then
+        # raising, so the unlink guard must be best-effort.
+        report_abs.parent.mkdir(parents=True, exist_ok=True)
+        report_abs.write_text(satisfied, encoding="utf-8")
         raise OSError("read-only worktree")
 
-    executor._write_satisfied_post_validation_conformance_report = _unlink_and_raise  # type: ignore[method-assign]
+    executor._write_satisfied_post_validation_conformance_report = _write_and_raise  # type: ignore[method-assign]
 
     profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
     handoff = _PlanningValidationHandoff(

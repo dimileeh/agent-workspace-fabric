@@ -948,6 +948,7 @@ class TestHappyPathPart001:
         report_path = f"docs/awf-plans/{ws_id}.conformance.json"
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
+        fake.queue_result(returncode=0, stdout="")  # git restore report path
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
