@@ -15,12 +15,15 @@ from sqlalchemy import select
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.common.ids import new_operator_grant_id
+from awf.control.blocked_transition import is_monitor_origin_block_resume_phase
 from awf.control.quality_gates import _grant_matches
+from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    TaskAttemptRepository,
     WorkspaceRepository,
 )
 from awf.runtime.operator_hints import (
@@ -432,6 +435,28 @@ async def _guide_blocked_workspace(
             {"path": grant_path, "approve_policy_downgrade": approve_policy_downgrade}
         )
 
+    if is_monitor_origin_block_resume_phase(workspace.block_resume_phase):
+        # POST-PR (monitor-origin) block: arm the MONITOR hint in
+        # ``monitor_threads_addressed`` (NOT the pre-PR ``pending_operator_hint``
+        # column) and transition ``blocked -> monitoring_pr`` so the existing
+        # monitor poll/claim/decide() path re-engages and returns
+        # ``AddressOperatorHint``. A grant-only (approve-and-keep) resume still
+        # arms a directive-less hint so ``decide()`` routes to the hint cycle.
+        return await _guide_monitor_origin_blocked_workspace(
+            self,
+            repo=repo,
+            operations=operations,
+            workspace=workspace,
+            operation=operation,
+            directive_text=directive_text,
+            reason_text=reason_text,
+            created_grants=created_grants,
+            approve_policy_downgrade=approve_policy_downgrade,
+            operator_id=operator_id,
+            now=now,
+            expected_version=expected_version,
+        )
+
     pending_hint_payload: dict[str, object] | None = None
     if directive_text:
         hint = OperatorHint(
@@ -536,6 +561,138 @@ async def _guide_blocked_workspace(
         result["pending_operator_hint"] = pending_hint_payload
     if revoked_grants:
         result["revoked_grants"] = revoked_grants
+    await operations.finish(operation, status=OperationStatus.succeeded, result=result)
+    return _control_response(
+        workspace=workspace,
+        operation=operation,
+        message="workspace operator guidance recorded",
+    )
+
+
+async def _guide_monitor_origin_blocked_workspace(
+    self: Any,
+    *,
+    repo: WorkspaceRepository,
+    operations: OperationRepository,
+    workspace: Any,
+    operation: Any,
+    directive_text: str,
+    reason_text: str,
+    created_grants: list[dict[str, object]],
+    approve_policy_downgrade: bool,
+    operator_id: str,
+    now: Any,
+    expected_version: int | None,
+) -> WorkspaceControlResponse:
+    """Resolve a POST-PR (monitor-origin) ``blocked`` workspace into the monitor.
+
+    Arms a pending monitor :class:`OperatorHint` in ``monitor_threads_addressed``
+    (directive for a revert/redo, directive-less for an approve-and-keep grant)
+    and transitions ``blocked -> monitoring_pr`` — reopening the merge candidate at
+    the workspace's current head and force-clearing claims so the monitor poll
+    re-claims the row. The grants were already recorded (epoch-scoped audit rows)
+    by the caller. ``decide()`` then returns ``AddressOperatorHint`` and re-runs
+    all merge gates against a fresh PR fetch (time passed during the human delay).
+    """
+    monitor_state = dict(workspace.monitor_threads_addressed or {})
+    hint = OperatorHint(
+        reason=reason_text or directive_text or "operator resolved the protected-scope block",
+        directive=directive_text or None,
+        operation_id=operation.id,
+        requested_at=now.isoformat(),
+        reason_code=_OPERATOR_GUIDE_REASON_CODE,
+        status="pending",
+    )
+    persist_operator_hint(monitor_state, hint)
+    workspace.monitor_threads_addressed = monitor_state
+    pending_hint_payload = build_pending_operator_hint_payload(hint)
+
+    candidate_repo = MergeCandidateRepository(self._session)
+    open_candidate = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace.id)
+    candidate_head_sha = _remonitor_current_head_sha(workspace, open_candidate, monitor_state)
+    if candidate_head_sha is None:
+        latest = await candidate_repo.get_latest_for_workspace_with_merge_inputs(workspace.id)
+        candidate_head_sha = latest.head_sha if latest is not None and latest.head_sha else None
+
+    old_status = workspace.status
+    WorkspaceStateMachine.assert_transition(WorkspaceStatus.blocked, WorkspaceStatus.monitoring_pr)
+    workspace.status = WorkspaceStatus.monitoring_pr.value
+    workspace.monitor_iter_count = 0
+    attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
+    candidate_reopened = False
+    if attempt is not None:
+        attempt.status = workspace.status
+        candidate = await candidate_repo.get_by_attempt_id(attempt.id)
+        if candidate is not None:
+            reopen_head_sha = (
+                candidate_head_sha or candidate.head_sha or workspace.monitor_last_commit_sha
+            )
+            await candidate_repo.create_or_update_open_for_attempt(
+                task=candidate.task,
+                attempt=candidate.attempt,
+                workspace=workspace,
+                head_sha=reopen_head_sha,
+                base_sha=workspace.base_commit,
+            )
+            candidate_reopened = True
+    # A monitor-origin block has no live worker — force-clear every claim so
+    # ``claim_monitoring_pr`` can acquire the row immediately (mirrors remonitor).
+    claims_reset = _claim_reset_snapshot(workspace)
+    workspace.monitor_claimed_by = None
+    workspace.monitor_claim_expires_at = None
+    workspace.execution_claimed_by = None
+    workspace.execution_claim_expires_at = None
+    await repo.advance_workspace_version(workspace)
+
+    state_reset = {
+        "from": old_status,
+        "to": WorkspaceStatus.monitoring_pr.value,
+        "candidate_reopened": candidate_reopened,
+    }
+    event_payload = _event_payload(
+        {
+            "reason": reason_text or None,
+            "directive": directive_text or None,
+            "operation_id": operation.id,
+            "operator": operator_id,
+            "grants": created_grants,
+            "approve_policy_downgrade": approve_policy_downgrade,
+            "block_epoch": workspace.block_epoch,
+            "pending_operator_hint": pending_hint_payload,
+            "claims_reset": claims_reset,
+            "state_reset": state_reset,
+        },
+        expected_version=expected_version,
+    )
+    await repo.add_event_with_states(
+        workspace,
+        event_type="workspace.guide_requested",
+        old_state=old_status,
+        new_state=WorkspaceStatus.monitoring_pr.value,
+        reason_code=_OPERATOR_GUIDE_REASON_CODE,
+        payload=event_payload,
+    )
+    await _add_control_audit_event(
+        repo,
+        workspace,
+        operation=operation,
+        action=OperationType.guide.value,
+        outcome="succeeded",
+        reason_code=_OPERATOR_GUIDE_REASON_CODE,
+        extra={
+            "expected_version": expected_version,
+            "directive": directive_text,
+            "grants": created_grants,
+        },
+    )
+    result: dict[str, object | None] = {
+        "status": workspace.status,
+        "grants": created_grants,
+        "block_epoch": workspace.block_epoch,
+        "state_reset": state_reset,
+        "claims_reset": claims_reset,
+        "pending_operator_hint": pending_hint_payload,
+    }
     await operations.finish(operation, status=OperationStatus.succeeded, result=result)
     return _control_response(
         workspace=workspace,

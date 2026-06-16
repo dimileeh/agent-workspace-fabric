@@ -115,6 +115,11 @@ class RunnerDelegatesMixin:
     _repair_protected_scope_commits_before_push = (
         _remote_repair._repair_protected_scope_commits_before_push
     )
+    _pause_monitor_for_protected_scope_block = (
+        _remote_repair._pause_monitor_for_protected_scope_block
+    )
+    _post_protected_block_notification = _remote_repair._post_protected_block_notification
+    _active_operator_grant_specs = _remote_repair._active_operator_grant_specs
     _rollback_protected_scope_repair_delta_before_push = (
         _remote_repair._rollback_protected_scope_repair_delta_before_push
     )

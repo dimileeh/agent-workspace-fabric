@@ -975,6 +975,26 @@ async def _execute(
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
             )
             return True
+        if push_result.paused_into_blocked:
+            # A protected-scope violation paused the workspace into ``blocked``
+            # for an operator decision (WS-2). The row already left
+            # ``monitoring_pr`` (preserving the offending commit); end the monitor
+            # cycle cleanly — do NOT terminally fail. Persist state so the
+            # notification dedupe + preserved-commit marker survive a restart.
+            await self._persist_state(workspace_id, state)
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "status": "succeeded",
+                    "outcome": "protected_scope_paused",
+                    "reason_code": push_result.reason_code,
+                    "thread_count": len(action.threads),
+                    "review_comment_count": len(action.review_comments),
+                    "pushed": False,
+                },
+            )
+            return True
         if push_result.failed:
             reason_code = push_result.reason_code
             outcome = _git_push_failure_outcome(push_result)
@@ -1108,6 +1128,22 @@ async def _execute(
                 workspace_id,
                 message=cleanup_failure_message(exc),
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+            )
+            return True
+        if push_result.paused_into_blocked:
+            # A directive-revert / grant resume that still trips the protected
+            # gate re-paused the workspace into ``blocked`` (WS-2 §2 re-block).
+            # End the cycle cleanly without terminally failing.
+            await self._persist_state(workspace_id, state)
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "status": "succeeded",
+                    "outcome": "protected_scope_paused",
+                    "reason_code": push_result.reason_code,
+                    "pushed": False,
+                },
             )
             return True
         if push_result.failed:

@@ -111,6 +111,11 @@ _PROTECTED_SCOPE_REPAIR_FAILED_REASON = "PROTECTED_SCOPE_REPAIR_FAILED"
 
 _PROTECTED_SCOPE_PUSH_BLOCKED_REASON = "PROTECTED_SCOPE_PUSH_BLOCKED"
 
+# A protected-scope violation in an unpushed monitor commit pauses the workspace
+# into ``blocked`` for an operator decision (WS-2) instead of silently rolling
+# the commit back. The offending commit is PRESERVED until the operator resolves.
+_PROTECTED_SCOPE_PAUSED_REASON = "PROTECTED_SCOPE_PAUSED_BLOCKED"
+
 _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON = "PROTECTED_SCOPE_DIFF_UNAVAILABLE"
 
 _REPAIR_WORKTREE_STATUS_FAILED_REASON = "REPAIR_WORKTREE_STATUS_FAILED"

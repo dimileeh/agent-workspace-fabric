@@ -22,15 +22,23 @@ from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag
+from awf.control.blocked_transition import (
+    MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+    enter_blocked_for_protected_violation_in_session,
+)
+from awf.control.operator_grants import active_operator_grant_specs_in_session
 from awf.control.protected_file_diffs import (
     protected_file_diffs_for_committed_paths,
 )
 from awf.control.quality_gates import (
+    PROTECTED_QUALITY_GATE_BLOCK_TYPE,
+    GrantSpec,
     QualityGateViolation,
     find_protected_quality_gate_changes,
     quality_gate_violation_details,
     quality_gate_violation_message,
 )
+from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
     WorkspaceEventCreate,
@@ -52,6 +60,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+    _PROTECTED_SCOPE_PAUSED_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
     _PROTECTED_SCOPE_REPAIR_FAILED_REASON,
     _REPAIR_START_HEAD_UNAVAILABLE_REASON,
@@ -599,6 +608,205 @@ async def _repair_protected_scope_commits_before_push(
             source_head_sha=source_head_sha or operation_start_head,
         ),
     )
+
+
+_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY = "__awf_protected_block_preserved_head__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key carrying the preserved
+(unpushed) commit SHA of a POST-PR protected-scope pause, so a monitor/worker
+restart reconstructs it and the idempotent-push ancestry check avoids a
+duplicate push (WS-2 §5)."""
+
+
+async def _pause_monitor_for_protected_scope_block(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    pr_head_sha: str,
+    protected_scope_block: _ProtectedScopePushBlock,
+    worktree_path: Path,
+    resume_phase: str = MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+    state: MonitorState | None = None,
+    remote_branch: str = "",
+    base_branch: str = "",
+    operation_id: str | None = None,
+    operation_type: str | None = None,
+    monitor_log: WorkspaceLogSink | None = None,
+    source_head_sha: str | None = None,
+) -> _GitPushResult:
+    """Pause the workspace into ``blocked`` for an operator decision.
+
+    Replaces the silent ``git reset --hard`` rollback at the post-PR push sites:
+    the offending commit is PRESERVED (no reset, no clean) and the workspace is
+    transitioned ``monitoring_pr -> blocked`` via the shared WS-1 block-transition
+    core, recording the preserved HEAD SHA for divergence recovery. An operator
+    notification is posted as a PR comment, deduped on the block epoch + violation
+    content so a second/different violation re-notifies.
+
+    A stale CAS (the row already left ``monitoring_pr`` — cancelled/failed/merged
+    upstream) returns a plain failed result WITHOUT pausing, so a raced monitor
+    cannot clobber the new state.
+    """
+    del monitor_log
+    violations = tuple(protected_scope_block.violations)
+    preserved_head_sha = await self._rev_parse_head(worktree_path)
+    block_epoch: int | None = None
+    repo_url: str | None = None
+    async with self._deps.session_factory() as session:
+        repo = WorkspaceRepository(session)
+        extra_payload = {"preserved_head_sha": preserved_head_sha} if preserved_head_sha else None
+        ws = await enter_blocked_for_protected_violation_in_session(
+            session,
+            repo,
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.monitoring_pr,
+            violations=violations,
+            resume_phase=resume_phase,
+            block_type=PROTECTED_QUALITY_GATE_BLOCK_TYPE,
+            extra_payload=extra_payload,
+        )
+        if ws is None:
+            # The row already left monitoring_pr; do not clobber it. Return a
+            # plain failed result (NOT paused) so the caller's normal failed
+            # handling runs against whatever terminal state already won.
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=protected_scope_block.message,
+                reason_code=protected_scope_block.reason_code,
+            )
+        block_epoch = ws.block_epoch
+        repo_url = ws.repo_url
+        await session.commit()
+
+    _log.warning(
+        "monitor.protected_scope_paused_into_blocked",
+        workspace_id=workspace_id,
+        paths=_quality_gate_violation_paths(list(violations)),
+        preserved_head_sha=preserved_head_sha,
+        block_epoch=block_epoch,
+    )
+    await self._append_workspace_events(
+        workspace_id=workspace_id,
+        events=[
+            WorkspaceEventCreate(
+                event_type="workspace.monitor_protected_scope_paused",
+                reason_code=_PROTECTED_SCOPE_PAUSED_REASON,
+                payload={
+                    "paths": _quality_gate_violation_paths(list(violations)),
+                    "protected_patterns": [v.protected_pattern for v in violations],
+                    "violations": quality_gate_violation_details(list(violations)),
+                    "message": protected_scope_block.message,
+                    "preserved_head_sha": preserved_head_sha,
+                    "block_epoch": block_epoch,
+                    "resume_phase": resume_phase,
+                    "operation_id": operation_id,
+                    "operation_type": operation_type,
+                    "remote_branch": remote_branch,
+                    "base_branch": base_branch,
+                    "source_head_sha": source_head_sha,
+                    "pushed": False,
+                },
+            )
+        ],
+    )
+    if state is not None and preserved_head_sha:
+        state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, preserved_head_sha)
+    await self._post_protected_block_notification(
+        workspace_id=workspace_id,
+        pr_number=pr_number,
+        repo_url=repo_url,
+        pr_head_sha=pr_head_sha,
+        state=state,
+        violations=violations,
+        block_epoch=block_epoch or 0,
+    )
+    details: dict[str, object] = {
+        "phase": "pre_push_committed_diff",
+        "paths": _quality_gate_violation_paths(list(violations)),
+        "protected_patterns": [v.protected_pattern for v in violations],
+        "violations": quality_gate_violation_details(list(violations)),
+        "message": protected_scope_block.message,
+        "preserved_head_sha": preserved_head_sha,
+        "block_epoch": block_epoch,
+        "paused_into_blocked": True,
+        "pushed": False,
+    }
+    return _GitPushResult(
+        pushed=False,
+        failed=True,
+        returncode=1,
+        stderr=(
+            f"{protected_scope_block.message}\n"
+            "AWF paused the workspace for an operator decision and PRESERVED the "
+            "offending commit; no push was attempted."
+        ),
+        reason_code=_PROTECTED_SCOPE_PAUSED_REASON,
+        details=details,
+        paused_into_blocked=True,
+    )
+
+
+async def _post_protected_block_notification(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    repo_url: str | None,
+    pr_head_sha: str | None,
+    state: MonitorState | None,
+    violations: Sequence[QualityGateViolation],
+    block_epoch: int,
+) -> None:
+    """Post the protected-scope pause notification as a PR comment (best-effort).
+
+    Deduped on the block epoch + violation content (the same key builder
+    ``_post_human_notification_once`` accepts) so a second/different violation
+    (new epoch) re-notifies rather than being suppressed by the once-per-(head,
+    reason) lifetime dedupe. A missing ``repo_url``/``pr_head_sha``/``state`` (an
+    out-of-band pause with no live monitor context) skips the comment — the block
+    event is the durable record either way.
+    """
+    from awf.common.github_client import RepoRef
+    from awf.runtime.monitor_prompts import ready_to_merge_comment
+    from awf.runtime.pr_monitor_runner.helpers import (
+        _protected_block_notification_key,
+        _protected_block_violations_digest,
+    )
+
+    if repo_url is None or not pr_head_sha or state is None:
+        return
+    try:
+        repo = RepoRef.from_url(repo_url)
+    except ValueError:  # pragma: no cover - repo_url is validated at provision time
+        return
+    notification_key = _protected_block_notification_key(
+        block_epoch=block_epoch,
+        violations_digest=_protected_block_violations_digest(violations),
+    )
+    if state.threads_addressed_ids.get(notification_key) == "notified":
+        _log.info(
+            "monitor.protected_scope_paused_notification_already_posted",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            block_epoch=block_epoch,
+        )
+        return
+    blocker_reason = (
+        "a protected quality-gate file was changed and AWF paused the workspace "
+        f"for an operator decision: {quality_gate_violation_message(list(violations))}"
+    )
+    await self._deps.gh.post_comment(
+        repo=repo,
+        pr_number=pr_number,
+        body=ready_to_merge_comment(
+            pr_number=pr_number,
+            head_sha=pr_head_sha,
+            blocker_reason=blocker_reason,
+        ),
+    )
+    state.mark_addressed(notification_key, "notified")
 
 
 async def _rollback_protected_scope_repair_delta_before_push(
@@ -1157,6 +1365,18 @@ async def _protected_scope_violations_not_restored_to_remote_branch(
     return remaining
 
 
+async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[GrantSpec]:
+    """Return the operator grants active for the workspace's CURRENT block epoch.
+
+    Delegates to the shared session-bound loader so the monitor's grant-aware
+    protected-scope push checks use exactly the same query as the executor's
+    pre-PR resume path (no second grant model). Empty for a workspace that is not
+    a resumed approve-and-keep block, so threading it into every gate caller is a
+    no-op outside the resume path."""
+    async with self._deps.session_factory() as session:
+        return await active_operator_grant_specs_in_session(session, workspace_id)
+
+
 async def _protected_scope_violations_for_status(
     self: Any,
     *,
@@ -1187,6 +1407,7 @@ async def _protected_scope_violations_for_status(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
 
 
@@ -1232,6 +1453,7 @@ async def _protected_scope_violations_for_unpushed_commits(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
 
 
@@ -1312,6 +1534,7 @@ async def _protected_scope_violations_for_sync_base_push(
         changed_paths=sync_base_authored_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
 
 

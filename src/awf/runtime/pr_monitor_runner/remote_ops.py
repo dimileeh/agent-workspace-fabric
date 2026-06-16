@@ -122,6 +122,11 @@ class _GitPushResult:
     recovered_by_resync: bool = False
     reason_code: str = _GIT_PUSH_FAILED_REASON
     details: Mapping[str, object] | None = None
+    paused_into_blocked: bool = False
+    """The push site paused the workspace into ``blocked`` for an operator
+    decision (a protected-scope violation in an unpushed commit, WS-2). The row
+    already left ``monitoring_pr``; the monitor loop ends this cycle WITHOUT
+    terminally failing the workspace and the offending commit is preserved."""
 
     @property
     def error_message(self: Any) -> str | None:
@@ -151,6 +156,11 @@ class _GitPushResult:
     @property
     def terminal_monitor_failure(self: Any) -> bool:
         """Return whether the push failure should end monitor recovery."""
+        # A pause into ``blocked`` is NOT a terminal failure: the workspace is
+        # preserved for an operator decision, not failed. The loop ends the
+        # cycle via the dedicated paused-into-blocked handling instead.
+        if self.paused_into_blocked:
+            return False
         return self.failed and (
             self.protected_scope_blocked
             or self.reason_code
