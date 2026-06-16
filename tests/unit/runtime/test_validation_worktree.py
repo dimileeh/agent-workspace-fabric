@@ -672,6 +672,63 @@ def test_snapshot_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
 
 
 @pytest.mark.unit
+def test_remove_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
+    tmp_path: Path,
+) -> None:
+    """The worktree's own `.git` directory must never be removed or reported.
+
+    A real git repository creates an empty `.git/branches/`, `.git/objects/pack/`,
+    `.git/objects/info/`, and `.git/refs/tags/` immediately after ``git init``.
+    These are part of git's internal machinery, not untracked side effects, and
+    must not be surfaced as dirty by empty-directory cleanup or snapshot logic.
+    """
+    worktree = tmp_path / "real-worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    plain_empty_dir = worktree / "generated"
+    plain_empty_dir.mkdir()
+
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(removed) == ["generated/"]
+    assert not plain_empty_dir.exists()
+    assert (worktree / ".git").exists()
+
+
+@pytest.mark.unit
+def test_snapshot_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
+    tmp_path: Path,
+) -> None:
+    """The worktree's own `.git` directory must not expose empty internal dirs."""
+    worktree = tmp_path / "real-worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    plain_empty_dir = worktree / "generated"
+    plain_empty_dir.mkdir()
+
+    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(empty_dirs) == ["generated/"]
+    assert (worktree / ".git").exists()
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_reports_tracked_path_under_ignored_root(
     tmp_path: Path,
 ) -> None:
