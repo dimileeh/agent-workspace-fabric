@@ -1812,6 +1812,90 @@ async def test_operator_hint_resume_no_op_push_when_commit_already_on_remote(
 
 
 @pytest.mark.unit
+async def test_operator_hint_resume_no_op_push_with_missing_preserved_commit_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant-only resume from a worktree reset/recreated at the remote head pushes
+    a no-op (everything up-to-date) — but the recorded preserved commit never landed.
+    Consuming the grant and marking the hint processed here would silently drop the
+    approved protected change (PRRT_kwDOSJAM6s6KEtU2). The recorded preserved SHA not
+    being on the remote must keep the grant active and surface needs_human."""
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    grant_id = await _seed_active_grant(factory, workspace_id, path="pyproject.toml")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="approved the protected change",
+        operation_id="op_dropped_preserved",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("a grant-only resume must NOT invoke the CLI")
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _no_op_push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "reset-to-remote-head-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _no_op_push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    # The hint is NOT processed — it is surfaced for human attention instead.
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    # The grant is NOT consumed: the approved protected change never landed.
+    async with factory() as session:
+        grant = await session.get(OperatorGrantAuditRecord, grant_id)
+        assert grant is not None
+        assert grant.consumed_at is None
+
+
+@pytest.mark.unit
 async def test_operator_hint_resume_threads_recorded_preserved_sha_into_no_op_check(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

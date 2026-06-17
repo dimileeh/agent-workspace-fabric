@@ -252,6 +252,32 @@ async def _run_operator_hint_cycle(
         # A fixed verdict can reflect non-code PR work (for example posting an
         # allowed reply) where there is no commit to publish. A successful no-op
         # push still means the operator hint was handled.
+        #
+        # BUT a protected-block grant resume MUST land its approved preserved
+        # commit. If the worktree was reset/recreated at the remote head during
+        # the blocked interval, that commit is gone and the push no-ops as
+        # "everything up-to-date". The SHA-containment check guards the early skip
+        # and the idempotent no-op return above, but NOT this fall-through; without
+        # this guard the no-op would consume the grant and mark the hint processed
+        # even though the approved protected change never landed — silently dropping
+        # it. When a preserved HEAD SHA was recorded and is NOT on the remote head,
+        # keep the grant active and surface needs_human instead of finishing the
+        # bookkeeping (PRRT_kwDOSJAM6s6KEtU2).
+        if preserved_head_sha and not await self._preserved_commit_already_on_remote(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            preserved_head_sha=preserved_head_sha,
+        ):
+            reason = (
+                "operator-approved preserved commit "
+                f"{preserved_head_sha} is not on the remote PR branch after a no-op "
+                "push; the worktree was reset and the approved protected change was "
+                "dropped"
+            )
+            mark_operator_hint_needs_human(state, reason)
+            return cast(_GitPushResult, push_result)
         await self._consume_active_operator_grants(workspace_id)
         mark_operator_hint_processed(state)
         return cast(_GitPushResult, push_result)
