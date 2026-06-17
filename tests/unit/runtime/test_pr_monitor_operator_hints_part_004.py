@@ -16,13 +16,16 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.github_client import RepoRef
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     MonitorState,
+    OperatorHint,
 )
+from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from tests.postgres import postgres_test_engine
@@ -274,3 +277,90 @@ async def test_protected_block_persists_preserved_head_marker_atomically(
         assert (workspace.monitor_threads_addressed or {}).get(
             _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
         ) == "blocked-head-sha"
+
+
+@pytest.mark.unit
+async def test_terminal_directive_drop_clears_stale_preserved_marker(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directive-only resume that DROPS the preserved commit then returns a TERMINAL
+    verdict must clear the stale preserved-head marker (PRRT_kwDOSJAM6s6KVCYE).
+
+    The directive reset the worktree back to the remote PR head (dropping the preserved
+    offending commit) and then reported ``needs_human`` BEFORE any push, so the resume
+    never finalized and the block-time marker survives. Because the local HEAD is now
+    contained in the remote, leaving the marker in place lets a LATER operator guide
+    with a FRESH directive (and no grants) satisfy the directive-drop restart shortcut
+    in ``_run_operator_hint_cycle`` — which only checks HEAD containment, not operation
+    identity — so it would finalize the new guide as a no-op and SKIP the CLI, silently
+    ignoring the follow-up instruction. Clearing the marker on the terminal drop forces
+    the next directive to run the CLI behind the normal guards."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="drop the protected edit and keep the rest",
+        directive="revert the protected-file change, keep the remaining work",
+        operation_id="op_terminal_directive_drop",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("recorded-preserved-sha", None)
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        # Neither the marker nor the post-drop local HEAD is reported on the remote, so
+        # both restart shortcuts at the top of the cycle are skipped and the CLI runs.
+        return False
+
+    async def _needs_human(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="needs_human", reason="cannot finish the revert")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        # The directive reset HEAD to the corrected head (no preserved commit below it).
+        return "corrected-head-sha"
+
+    async def _preserved_dropped(**_kwargs: object) -> bool:
+        # The preserved commit is no longer reachable from HEAD — it was dropped.
+        return False
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _needs_human)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_preserved_commit_reachable_from_head", _preserved_dropped)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The terminal verdict parks the hint at ``monitoring_pr`` (NON-failed) ...
+    assert result.failed is False
+    assert result.pushed is False
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    # ... and the stale preserved-head marker is CLEARED so a later directive guide is
+    # not silently short-circuited by the directive-drop restart shortcut.
+    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids

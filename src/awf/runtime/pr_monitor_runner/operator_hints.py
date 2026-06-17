@@ -228,6 +228,14 @@ async def _run_operator_hint_cycle(
             )
             if reblock_result is not None:
                 return reblock_result
+            await _clear_dropped_preserved_marker_after_terminal_directive(
+                self,
+                worktree_path=worktree_path,
+                state=state,
+                hint=hint,
+                active_grant_specs=active_grant_specs,
+                preserved_head_sha=preserved_head_sha,
+            )
             mark_operator_hint_agent_failed(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
         if verdict.verdict in {"needs_human", "defer", "false_positive"}:
@@ -250,6 +258,14 @@ async def _run_operator_hint_cycle(
             )
             if reblock_result is not None:
                 return reblock_result
+            await _clear_dropped_preserved_marker_after_terminal_directive(
+                self,
+                worktree_path=worktree_path,
+                state=state,
+                hint=hint,
+                active_grant_specs=active_grant_specs,
+                preserved_head_sha=preserved_head_sha,
+            )
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
 
@@ -711,6 +727,55 @@ async def _terminal_directive_grant_reblock(
         # resume re-arm a fresh one.
         state.pending_operator_hint = None
     return reblock_result
+
+
+async def _clear_dropped_preserved_marker_after_terminal_directive(
+    self: Any,
+    *,
+    worktree_path: Path,
+    state: MonitorState,
+    hint: OperatorHint,
+    active_grant_specs: Any,
+    preserved_head_sha: str | None,
+) -> None:
+    """Drop the preserved-head marker when a directive-only resume RESET the preserved
+    commit away before returning a TERMINAL verdict.
+
+    A directive-only protected-block resume can resolve the block by dropping the
+    preserved offending commit (resetting the worktree back to the remote PR head) and
+    then return a TERMINAL verdict (``agent_failed`` / ``needs_human`` / ``defer`` /
+    ``false_positive``) BEFORE any push. A terminal verdict never finalizes, so the
+    preserved-head marker — recorded at block time — survives in monitor state even
+    though the commit it pointed at is gone. Because the drop leaves the local HEAD
+    already contained in the remote, a LATER operator guide carrying a FRESH directive
+    and no grants would satisfy the directive-drop restart shortcut at the top of
+    ``_run_operator_hint_cycle``: that shortcut only checks the local HEAD is contained
+    in the remote, NOT that the pending operation is the one that ran the drop, so it
+    would finalize the new guide as a no-op and SKIP the CLI — silently ignoring the
+    follow-up instruction (PRRT_kwDOSJAM6s6KVCYE). Once the preserved commit is dropped
+    there is nothing left to protect, so clear the marker; a genuinely new protected
+    change re-records a fresh marker via ``_protected_scope_push_block``.
+
+    Scoped to directive-only resumes (``hint.directive`` AND no active grants): a
+    grant-bearing terminal resume is handled by ``_terminal_directive_grant_reblock``
+    (it re-blocks while the preserved commit is reachable and parks otherwise), and the
+    two restart shortcuts both require ``not active_grant_specs`` so a surviving grant
+    already excludes them. Clears ONLY when a resolvable local HEAD proves the preserved
+    commit is gone from local history: an unresolvable HEAD is ambiguous (the drop may
+    not have landed), so the marker is RETAINED to keep the leak guard armed for the
+    corrected resume — mirroring the shortcut's own HEAD-missing skip
+    (PRRT_kwDOSJAM6s6KUx2T)."""
+    if not (hint.directive and preserved_head_sha) or active_grant_specs:
+        return
+    local_head_sha = await self._rev_parse_head(worktree_path)
+    if not local_head_sha:
+        return
+    if await self._preserved_commit_reachable_from_head(
+        worktree_path=worktree_path,
+        preserved_head_sha=preserved_head_sha,
+    ):
+        return
+    state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
 
 
 async def _finalize_operator_hint_resume(
