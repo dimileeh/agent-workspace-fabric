@@ -6,7 +6,7 @@ Plan reference: `plans/WS_D7E7539D5D2E4DB8BFEED3A5_PLAN.md`
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Satisfied report written by AWF must not remain as a tracked dirty file at pre-push validation time | Complete | `_run_post_validation_conformance_check` in `src/awf/control/executor/planning_ops.py` now unlinks `worktree_path / handoff.report_path` after recording the `workspace.post_validation_conformance_satisfied` event. The removal is best-effort and non-fatal. |
+| Satisfied report written by AWF must not remain as a tracked dirty file at pre-push validation time | Complete | `_run_post_validation_conformance_check` in `src/awf/control/executor/planning_ops.py` first runs `git restore --source=<base_commit> --worktree --staged -- <handoff.report_path>` to put back any tracked base-commit content, then falls back to unlinking `worktree_path / handoff.report_path` if the restore fails. The cleanup is best-effort and non-fatal. |
 | Keep the PR monitor dirty-worktree guard strong | Complete | No changes to `check_validation_worktree_clean`, `INTERNAL_PLAN_ARTIFACT_PREFIX`, `changed_paths_are_only_internal_plan_artifacts`, or the PR monitor. Real source/config/test dirty paths still fail validation. |
 | Preserve fresh report from agent (stdout or disk) | Complete | Both stdout-derived and fresh-on-disk reports still record the conformance event and then remove the on-worktree copy before returning success. Tests updated to assert the file no longer exists on the worktree. |
 | Preserve real conformance failure path | Complete | The unlink only happens on the `report.satisfied` success branch. Unsatisfied reports are intentionally left on disk for diagnosis, and the failure return path is unchanged. |
