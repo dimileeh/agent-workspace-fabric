@@ -414,6 +414,7 @@ async def _run_pre_push_validation_with_fix_passes(
             compose_project=compose_project,
             compose_file=compose_file,
             remote_branch=remote_branch,
+            state=state,
         )
 
         if validation_result.passed:
@@ -535,6 +536,65 @@ async def _pre_push_validation_worktree_check(
         worktree_path=worktree_path,
         ignore_all_ignored=True,
     )
+
+
+async def _try_finalize_pre_push_dirty_repair_state(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    compose_project: str,
+    compose_file: Path,
+    state: object | None,
+    check: ValidationWorktreeCheck,
+) -> ValidationWorktreeCheck | None:
+    """Commit monitor-owned residual repair dirt before pre-push validation."""
+
+    if state is None or check.clean or check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return None
+    try:
+        committed = bool(
+            await self._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=f"awf: finalize PR monitor repair for {workspace_id}",
+                compose_project=compose_project,
+                compose_file=compose_file,
+                state=state,
+            )
+        )
+    except Exception as exc:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_failed",
+            workspace_id=workspace_id,
+            error=repr(exc),
+            paths=list(check.paths),
+        )
+        return None
+    if not committed:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_no_commit",
+            workspace_id=workspace_id,
+            paths=list(check.paths),
+        )
+        return None
+
+    verify = await _pre_push_validation_worktree_check(
+        self,
+        worktree_path=worktree_path,
+    )
+    if verify.clean:
+        _log.info(
+            "monitor.pre_push_dirty_finalized",
+            workspace_id=workspace_id,
+            paths=list(check.paths),
+        )
+    else:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_still_dirty",
+            workspace_id=workspace_id,
+            paths=list(verify.paths),
+        )
+    return verify
 
 
 async def _head_descends_from(
@@ -1153,6 +1213,7 @@ async def _run_pre_push_validation(
     compose_project: str,
     compose_file: Path,
     remote_branch: str,
+    state: object | None = None,
 ) -> _PrePushValidationResult:
     """Run a single pre-push validation cycle and persist run metadata."""
     async with self._deps.session_factory() as session:
@@ -1174,6 +1235,19 @@ async def _run_pre_push_validation(
         self,
         worktree_path=worktree_path,
     )
+    if not pre_validation_check.clean:
+        finalized_check = await _try_finalize_pre_push_dirty_repair_state(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            state=state,
+            check=pre_validation_check,
+        )
+        if finalized_check is not None:
+            pre_validation_check = finalized_check
+            workspace_head_sha = await self._rev_parse_head(worktree_path)
     if not pre_validation_check.clean:
         return _pre_push_dirty_result(
             workspace_head_sha=workspace_head_sha,

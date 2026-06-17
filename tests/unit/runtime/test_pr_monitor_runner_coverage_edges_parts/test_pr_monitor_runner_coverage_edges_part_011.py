@@ -8,11 +8,16 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.adapters.base import AgentRunError
+from awf.adapters.provider_failures import AGENT_PROVIDER_CAPACITY_EXHAUSTED
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.enums import AgentRuntime
 from awf.db.repositories import PolicyFindingRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import CheckFailure
+from awf.runtime.pr_monitor_runner import remote_repair as pr_remote_repair
+from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -138,4 +143,84 @@ async def test_ci_fix_refuses_pre_existing_dirty_worktree_before_agent(
     assert adapter.calls == []
     assert [call.args for call in cmd.calls] == [
         _git_worktree_command(worktree, "status", "--porcelain", "--untracked-files=all")
+    ]
+
+
+@pytest.mark.unit
+async def test_ci_fix_provider_retry_commits_dirty_output_before_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider retry must not strand operation-owned CI-repair dirt."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr="MODEL_CAPACITY_EXHAUSTED",
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
+    cmd.queue_result(returncode=0)  # git add
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=0)  # git commit
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    ownership_reasons: list[str] = []
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        ownership_reasons.append(reason)
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    assert any(
+        call.args[-3:] == ["commit", "-m", "fix: address PR #42 CI failure"] for call in cmd.calls
+    )
+    assert ownership_reasons == [
+        "dirty_worktree_pre_commit",
+        "dirty_worktree_post_commit_succeeded",
     ]
