@@ -440,6 +440,27 @@ async def _commit_dirty_worktree(
                     recovered_head=recovered[:10],
                     reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
                 )
+                if recovered != recovery_head:
+                    diff = await self._deps.runner.run(
+                        git_worktree_command(
+                            worktree_path,
+                            "diff",
+                            "--name-only",
+                            "-z",
+                            f"{recovery_head}..{recovered}",
+                        )
+                    )
+                    if diff.ok:
+                        recovered_paths = [p for p in diff.stdout.split("\0") if p]
+                        if recovered_paths:
+                            policy_message = await self._refresh_supply_chain_policy_before_push(
+                                workspace_id=workspace_id,
+                                command_evidence=command_evidence,
+                                changed_paths=recovered_paths,
+                            )
+                            if policy_message is not None:
+                                raise _MonitorPolicyBlockedError(policy_message)
+                    return True
             else:
                 raise _MonitorHeadObjectMissingError(
                     _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
