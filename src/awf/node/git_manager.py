@@ -696,6 +696,75 @@ def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> Non
             os.chown(target.path, uid, gid)
 
 
+async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
+    """Clear a poisoned ``core.hooksPath`` from the shared bare mirror config.
+
+    Returns ``True`` if repair was needed and succeeded, ``False`` if no repair
+    was needed. Raises ``GitOperationError`` if the unset fails.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "--git-dir",
+        str(mirror_path),
+        "config",
+        "--local",
+        "core.hooksPath",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_bytes, stderr_bytes = await proc.communicate()
+    assert proc.returncode is not None
+
+    if proc.returncode != 0:
+        return False
+
+    unset = await asyncio.create_subprocess_exec(
+        "git",
+        "--git-dir",
+        str(mirror_path),
+        "config",
+        "--unset",
+        "core.hooksPath",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    unset_stdout_bytes, unset_stderr_bytes = await unset.communicate()
+    unset_stdout = unset_stdout_bytes.decode("utf-8", errors="replace")
+    unset_stderr = unset_stderr_bytes.decode("utf-8", errors="replace")
+    assert unset.returncode is not None
+
+    if unset.returncode != 0:
+        raise GitOperationError(
+            operation="mirror.hooks_path_repair",
+            returncode=unset.returncode,
+            stdout=unset_stdout,
+            stderr=unset_stderr,
+            reason_code="MIRROR_HOOKS_PATH_REPAIR_FAILED",
+        )
+    return True
+
+
+async def verify_head_object_exists(worktree_path: Path) -> bool:
+    """Return ``True`` when HEAD's commit object is reachable in the object database.
+
+    Uses ``git cat-file -e HEAD^{commit}`` which exits 0 when the object exists
+    and non-zero when the ref exists but the commit object is missing.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "-C",
+        str(worktree_path),
+        "cat-file",
+        "-e",
+        "HEAD^{commit}",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    assert proc.returncode is not None
+    return proc.returncode == 0
+
+
 def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
     if path.is_symlink():
         os.lchown(path, uid, gid)

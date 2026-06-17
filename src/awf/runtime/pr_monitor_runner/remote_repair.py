@@ -19,6 +19,7 @@ from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.commands import CommandResult
 from awf.common.git_identity import (
+    git_identity_config_args,
     git_safe_directory_config_args,
 )
 from awf.common.task_tag import commit_message_with_task_tag
@@ -36,6 +37,12 @@ from awf.db.repositories import (
     WorkspaceEventCreate,
     WorkspaceRepository,
 )
+from awf.node.git_manager import (
+    mirror_path_for_worktree,
+    repair_agent_writable_worktree,
+    repair_mirror_hooks_path,
+    verify_head_object_exists,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.ownership import (
     MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
@@ -50,6 +57,9 @@ from awf.runtime.pr_monitor_runner.commit_autofix import (
 )
 from awf.runtime.pr_monitor_runner.constants import (
     _AUDIT_GIT_PUSH_EVENT,
+    _HEAD_OBJECT_MISSING_RECOVERED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
     _PRE_EXISTING_DIRTY_WORKTREE_REASON,
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
     _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
@@ -82,6 +92,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
@@ -240,6 +251,120 @@ async def _resolve_task_tag(self: Any, workspace_id: str) -> str | None:
         return workspace.task_tag if workspace is not None else None
 
 
+async def _recover_missing_head_object_from_filesystem(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    operation_start_head: str,
+    task_tag: str | None = None,
+) -> str | None:
+    """Rebuild a valid branch commit from filesystem state when HEAD's commit object is missing.
+
+    Mirrors the executor's ``_recover_missing_head_from_filesystem`` in
+    ``src/awf/control/executor/git_ops.py`` but uses the monitor's
+    ``operation_start_head`` as the re-anchor point instead of ``base_commit``.
+    """
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is None:
+        return None
+
+    async def mirror_git(args: list[str]) -> CommandResult:
+        return cast(
+            CommandResult,
+            await self._deps.runner.run(["git", "--git-dir", str(mirror_path), *args]),
+        )
+
+    async def worktree_git(args: list[str]) -> CommandResult:
+        return cast(
+            CommandResult,
+            await self._deps.runner.run(
+                [
+                    "git",
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                    *args,
+                ]
+            ),
+        )
+
+    start_ok = await mirror_git(["cat-file", "-e", f"{operation_start_head}^{{commit}}"])
+    if not start_ok.ok:
+        return None
+
+    branch_ref = await _resolve_worktree_branch_ref(worktree_path)
+    if branch_ref is None:
+        return None
+
+    reset_ref = await mirror_git(["update-ref", branch_ref, operation_start_head])
+    if not reset_ref.ok:
+        return None
+
+    reset_index = await worktree_git(["reset", "--mixed", "HEAD"])
+    if not reset_index.ok:
+        return None
+
+    add = await worktree_git(["add", "-A"])
+    if not add.ok:
+        return None
+
+    diff = await worktree_git(["diff", "--cached", "--quiet"])
+    if diff.returncode not in {0, 1}:
+        return None
+
+    if diff.returncode == 1:
+        commit = await self._deps.runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                *git_identity_config_args(),
+                "commit",
+                "-m",
+                commit_message_with_task_tag(
+                    f"awf: recover {workspace_id} from missing git object", task_tag
+                )[:72],
+                "-m",
+                (
+                    f"AWF recovered workspace {workspace_id} after HEAD pointed at "
+                    "a commit object missing from the canonical mirror. The commit "
+                    f"squashes the workspace filesystem state onto operation start "
+                    f"head {operation_start_head[:10]}."
+                ),
+            ]
+        )
+        if not commit.ok:
+            return None
+
+    await asyncio.to_thread(repair_agent_writable_worktree, mirror_path, worktree_path)
+
+    head = await worktree_git(["rev-parse", "HEAD"])
+    recovered_head_sha = head.stdout.strip()
+    if not head.ok or not recovered_head_sha:
+        return None
+    return recovered_head_sha
+
+
+async def _resolve_worktree_branch_ref(worktree_path: Path) -> str | None:
+    """Resolve the full branch ref (e.g. ``refs/heads/awf/ws_...``) for a worktree."""
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "-C",
+        str(worktree_path),
+        "symbolic-ref",
+        "HEAD",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_bytes, _ = await proc.communicate()
+    assert proc.returncode is not None
+    if proc.returncode != 0:
+        return None
+    return stdout_bytes.decode("utf-8", errors="replace").strip()
+
+
 async def _commit_dirty_worktree(
     self: Any,
     *,
@@ -264,6 +389,56 @@ async def _commit_dirty_worktree(
     worktree_path = self._worktrees_root / workspace_id
     if not worktree_path.exists():
         return False
+
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except Exception:
+            _log.warning(
+                "monitor.mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            )
+
+    head_object_exists = await verify_head_object_exists(worktree_path)
+    if not head_object_exists:
+        _log.warning(
+            "monitor.head_object_missing",
+            workspace_id=workspace_id,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        operation_start_head = await _open_merge_candidate_head_sha(self, workspace_id)
+        if operation_start_head is not None:
+            recovered = await _recover_missing_head_object_from_filesystem(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                operation_start_head=operation_start_head,
+                task_tag=(
+                    await _resolve_task_tag(self, workspace_id)
+                    if isinstance(task_tag, _TaskTagUnset)
+                    else task_tag
+                ),
+            )
+            if recovered is not None:
+                _log.info(
+                    "monitor.head_object_missing_recovered",
+                    workspace_id=workspace_id,
+                    recovered_head=recovered[:10],
+                    reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
+                )
+            else:
+                raise _MonitorHeadObjectMissingError(
+                    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                    f"HEAD object missing for workspace {workspace_id} and recovery failed",
+                )
+        else:
+            raise _MonitorHeadObjectMissingError(
+                _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                f"HEAD object missing for workspace {workspace_id} and no operation start head available",
+            )
+
     # Decide dirtiness with the SAME untracked AWF-agent-runtime exclusion the
     # pre-existing-dirty guard and the staging filter below apply. A worktree
     # dirtied only by reviewer subagent memory (untracked ``.claude/agent-memory/...``)
@@ -958,6 +1133,15 @@ async def _repair_protected_scope_changes_before_commit(
     )
     if await self._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
+    worktree_path = self._worktrees_root / workspace_id
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        return None
     agent_run_err = None
     try:
         await self._deps.adapter.run(
@@ -971,7 +1155,6 @@ async def _repair_protected_scope_changes_before_commit(
         agent_run_err = exc
         await self._handle_provider_agent_run_error(workspace_id, exc, state=state)
 
-    worktree_path = self._worktrees_root / workspace_id
     repaired_status = await self._deps.runner.run(
         git_worktree_command(worktree_path, "status", "--porcelain")
     )

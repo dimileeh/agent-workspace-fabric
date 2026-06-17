@@ -1218,3 +1218,119 @@ class TestAgentWritableWorktreeHelpers:
         )
 
         assert chowned == [(file_path, 1000, 1001)]
+
+
+class TestRepairMirrorHooksPath:
+    @pytest.mark.unit
+    async def test_clears_poisoned_hooks_path(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "core.hooksPath", "/dev/null"],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is True
+        check = subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "--local", "core.hooksPath"],
+            capture_output=True,
+            text=True,
+        )
+        assert check.returncode != 0
+
+    @pytest.mark.unit
+    async def test_noop_when_hooks_path_not_set(self, tmp_path: Path) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+
+        result = await git_module.repair_mirror_hooks_path(mirror)
+
+        assert result is False
+
+    @pytest.mark.unit
+    async def test_raises_on_unset_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mirror = tmp_path / "mirror.git"
+        mirror.mkdir()
+        subprocess.run(
+            ["git", "init", "--bare", str(mirror)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "--git-dir", str(mirror), "config", "core.hooksPath", "/dev/null"],
+            check=True,
+            capture_output=True,
+        )
+
+        original_exec = asyncio.create_subprocess_exec
+        call_count = 0
+
+        async def _fake_exec(*args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                return await original_exec(
+                    "sh",
+                    "-c",
+                    "exit 5",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            return await original_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+        with pytest.raises(GitOperationError) as exc:
+            await git_module.repair_mirror_hooks_path(mirror)
+
+        assert exc.value.reason_code == "MIRROR_HOOKS_PATH_REPAIR_FAILED"
+
+
+class TestVerifyHeadObjectExists:
+    @pytest.mark.unit
+    async def test_succeeds_for_valid_head(self, origin_repo: Path, work_dir: Path) -> None:
+        manager = GitManager(work_dir)
+        layout = await manager.add_worktree(
+            workspace_id="ws_verify_head",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_verify_head",
+        )
+
+        result = await git_module.verify_head_object_exists(layout.worktree_path)
+
+        assert result is True
+
+    @pytest.mark.unit
+    async def test_fails_for_missing_object(self, origin_repo: Path, work_dir: Path) -> None:
+        manager = GitManager(work_dir)
+        layout = await manager.add_worktree(
+            workspace_id="ws_missing_obj",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_missing_obj",
+        )
+
+        fake_sha = "deadbeef" * 5
+        ref_path = layout.mirror_path / "refs" / "heads" / layout.branch_name
+        ref_path.parent.mkdir(parents=True, exist_ok=True)
+        ref_path.write_text(fake_sha + "\n")
+
+        result = await git_module.verify_head_object_exists(layout.worktree_path)
+
+        assert result is False

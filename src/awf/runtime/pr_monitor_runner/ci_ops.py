@@ -23,6 +23,10 @@ from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import (
     fix_ci_prompt,
 )
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor import (
     CheckFailure,
     MonitorState,
@@ -32,6 +36,7 @@ from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
+    AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
     _GitPushResult,
 )
 from awf.runtime.pr_monitor_runner.types import (
@@ -91,6 +96,20 @@ async def _run_ci_fix(
     )
     agent_run_err = None
     command_evidence: list[str] = []
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="agent runtime ownership repair failed before CI fix agent launch",
+            reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        )
     try:
         result = await self._deps.adapter.run(
             compose_project=compose_project,

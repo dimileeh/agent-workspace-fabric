@@ -17,8 +17,15 @@ from awf.runtime.monitor_prompts import (
     address_thread_prompt,
     ready_to_merge_comment,
 )
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor_runner.constants import _TASK_TAG_UNSET, _TaskTagUnset
-from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+from awf.runtime.pr_monitor_runner.types import (
+    ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+)
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
@@ -247,6 +254,17 @@ async def _invoke_cli_for_verdict_result(
     command_evidence: list[str] = []
     if await runner._provider_recovery_suppresses_cli(workspace_id):
         raise ProviderRecoveryRetryError()
+    worktree_path = runner._worktrees_root / workspace_id
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
+        )
     agent_run_err = None
     try:
         result = await runner._deps.adapter.run(

@@ -80,3 +80,11 @@ class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):
     def reason_code(self: Any) -> str:
         """Return the fixed reason code for ownership repair failures."""
         return AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+class _MonitorHeadObjectMissingError(Exception):
+    """HEAD ref exists but commit object is missing from canonical mirror."""
+
+    def __init__(self, reason_code: str, message: str = "") -> None:
+        super().__init__(message)
+        self.reason_code = reason_code

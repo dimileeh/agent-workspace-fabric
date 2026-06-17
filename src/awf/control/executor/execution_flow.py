@@ -93,6 +93,10 @@ from awf.db.enums import (
     WorkspaceStatus,
 )
 from awf.db.repositories import WorkspaceRepository
+from awf.node.git_manager import (
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+)
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
 from awf.runtime.ownership import (
@@ -334,6 +338,15 @@ async def execute(
                 reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
             )
             return
+        mirror_path = mirror_path_for_worktree(worktree_path)
+        if mirror_path is not None:
+            try:
+                await repair_mirror_hooks_path(mirror_path)
+            except Exception:
+                _log.warning(
+                    "executor.mirror_hooks_path_repair_failed",
+                    workspace_id=workspace_id,
+                )
         setup_result = await self._validation.run_profile_phases(
             workspace_id=workspace_id,
             compose_project=compose_project,

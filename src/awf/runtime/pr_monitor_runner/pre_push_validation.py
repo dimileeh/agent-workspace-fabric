@@ -34,7 +34,21 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.node.git_manager import (
+    mirror_path_for_worktree,
+    repair_mirror_hooks_path,
+    verify_head_object_exists,
+)
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
+from awf.runtime.pr_monitor_runner.constants import (
+    _HEAD_OBJECT_MISSING_RECOVERED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MIRROR_HOOKS_PATH_POISONED_REASON,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
@@ -45,6 +59,9 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.remote_repair import (
+    _recover_missing_head_object_from_filesystem,
+)
 from awf.runtime.validation import profile_phase_command_plan
 from awf.runtime.validation_identity import (
     environment_identity_digest,
@@ -819,6 +836,14 @@ async def _run_pre_push_validation_fix_pass(
         task_tag=task_tag,
     )
     command_evidence: list[str] = []
+    if not await repair_agent_runtime_ownership(
+        logger=_log,
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        reason="monitor_agent_pre_launch",
+        event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    ):
+        return False, "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED"
     try:
         fix_result = await self._deps.adapter.run(
             compose_project=compose_project,
@@ -880,6 +905,44 @@ async def _run_pre_push_validation_fix_pass(
         if rollback_failure_reason is not None:
             return False, rollback_failure_reason
         return False, None
+
+    mirror_path = mirror_path_for_worktree(worktree_path)
+    if mirror_path is not None:
+        try:
+            await repair_mirror_hooks_path(mirror_path)
+        except Exception:
+            _log.warning(
+                "monitor.mirror_hooks_path_repair_failed",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
+            )
+
+    head_object_exists = await verify_head_object_exists(worktree_path)
+    if not head_object_exists:
+        _log.warning(
+            "monitor.pre_push_validation_fix_head_object_missing",
+            workspace_id=workspace_id,
+            pass_number=pass_number,
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+        recovered = await _recover_missing_head_object_from_filesystem(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            operation_start_head=fix_start_head,
+            task_tag=task_tag,
+        )
+        if recovered is not None:
+            _log.info(
+                "monitor.pre_push_validation_fix_head_object_missing_recovered",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                recovered_head=recovered[:10],
+                reason_code=_HEAD_OBJECT_MISSING_RECOVERED_REASON,
+            )
+        else:
+            return False, _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON
 
     try:
         committed = bool(

@@ -17,6 +17,10 @@ from awf.common.logging import get_logger
 from awf.common.task_tag import commit_message_with_task_tag
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
+from awf.runtime.ownership import (
+    MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+    repair_agent_runtime_ownership,
+)
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
@@ -734,6 +738,20 @@ async def _run_sync_base(
         command_evidence: list[str] = []
         if await runner._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
+        if not await repair_agent_runtime_ownership(
+            logger=_log,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            reason="monitor_agent_pre_launch",
+            event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
+        ):
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr="agent runtime ownership repair failed before sync-base agent launch",
+                reason_code=AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+            )
         try:
             result = await runner._deps.adapter.run(
                 compose_project=compose_project,
