@@ -482,6 +482,7 @@ async def _guide_blocked_workspace(
             directive_text=directive_text,
             reason_text=reason_text,
             created_grants=created_grants,
+            created_grant_ids=created_grant_ids,
             approve_policy_downgrade=approve_policy_downgrade,
             operator_id=operator_id,
             now=now,
@@ -610,6 +611,7 @@ async def _guide_monitor_origin_blocked_workspace(
     directive_text: str,
     reason_text: str,
     created_grants: list[dict[str, object]],
+    created_grant_ids: set[str],
     approve_policy_downgrade: bool,
     operator_id: str,
     now: Any,
@@ -637,6 +639,38 @@ async def _guide_monitor_origin_blocked_workspace(
     persist_operator_hint(monitor_state, hint)
     workspace.monitor_threads_addressed = monitor_state
     pending_hint_payload = build_pending_operator_hint_payload(hint)
+
+    revoked_grants: list[str] = []
+    if directive_text:
+        # A directive is the latest operator decision and supersedes any grant
+        # armed by an EARLIER guide. The monitor hint resume loads
+        # ``_active_operator_grant_specs()`` for every protected-scope push gate
+        # regardless of the directive (mirror of the pre-PR resume path), so a
+        # pre-existing current-epoch grant would still suppress a violation on its
+        # path even though the latest operator decision was to revert/redo. Revoke
+        # pre-existing current-epoch grants while PRESERVING the grants this same
+        # request is recording — a combined ``--directive ... --grant ...`` guide
+        # keeps exactly the paths it just granted and no more.
+        stale_grants = (
+            (
+                await self._session.execute(
+                    select(OperatorGrantAuditRecord).where(
+                        OperatorGrantAuditRecord.workspace_id == workspace.id,
+                        OperatorGrantAuditRecord.block_epoch == workspace.block_epoch,
+                        OperatorGrantAuditRecord.consumed_at.is_(None),
+                        OperatorGrantAuditRecord.revoked_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for stale_grant in stale_grants:
+            if stale_grant.id in created_grant_ids:
+                # Preserve the grants recorded by this combined guide.
+                continue
+            stale_grant.revoked_at = now
+            revoked_grants.append(stale_grant.normalized_path)
 
     candidate_repo = MergeCandidateRepository(self._session)
     open_candidate = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace.id)
@@ -687,6 +721,7 @@ async def _guide_monitor_origin_blocked_workspace(
             "operation_id": operation.id,
             "operator": operator_id,
             "grants": created_grants,
+            "revoked_grants": revoked_grants or None,
             "approve_policy_downgrade": approve_policy_downgrade,
             "block_epoch": workspace.block_epoch,
             "pending_operator_hint": pending_hint_payload,
@@ -719,6 +754,7 @@ async def _guide_monitor_origin_blocked_workspace(
     result: dict[str, object | None] = {
         "status": workspace.status,
         "grants": created_grants,
+        "revoked_grants": revoked_grants or None,
         "block_epoch": workspace.block_epoch,
         "state_reset": state_reset,
         "claims_reset": claims_reset,

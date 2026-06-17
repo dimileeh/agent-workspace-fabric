@@ -664,6 +664,84 @@ async def test_guide_monitor_origin_blocked_grant_only_arms_directiveless_hint(
 
 
 @pytest.mark.unit
+async def test_guide_monitor_origin_blocked_directive_only_revokes_stale_grant(
+    session: AsyncSession,
+) -> None:
+    # A prior approve-and-keep guide recorded an active current-epoch grant on a
+    # POST-PR (monitor-origin) block. The operator then changes their mind and
+    # issues a directive-only revert: the stale grant must be revoked so the
+    # monitor hint resume's protected-scope gates (which load
+    # ``_active_operator_grant_specs``) no longer suppress a violation on its path.
+    workspace = await _monitor_origin_blocked_workspace(session, block_epoch=3)
+    session.add(
+        OperatorGrantAuditRecord(
+            id=new_operator_grant_id(),
+            workspace_id=workspace.id,
+            operator="alice@example.com",
+            reason="approved keeping it",
+            normalized_path="pyproject.toml",
+            block_epoch=3,
+            approve_policy_downgrade=True,
+            created_at=utcnow(),
+        )
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="revert the pyproject change after all",
+        reason="actually revert it",
+        operator="alice@example.com",
+        idempotency_key="guide-monitor-directive-revokes-grant",
+        expected_version=workspace.version,
+    )
+
+    grants = await _grants(session, workspace.id)
+    assert len(grants) == 1
+    assert grants[0].revoked_at is not None
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_directive_with_new_grant_revokes_prior(
+    session: AsyncSession,
+) -> None:
+    # A combined directive + grant on a monitor-origin block revokes a PRE-EXISTING
+    # grant (the directive is the latest decision) while preserving the path granted
+    # by this same request.
+    workspace = await _monitor_origin_blocked_workspace(session, block_epoch=4)
+    session.add(
+        OperatorGrantAuditRecord(
+            id=new_operator_grant_id(),
+            workspace_id=workspace.id,
+            operator="alice@example.com",
+            reason="approved keeping the old file",
+            normalized_path="pyproject.toml",
+            block_epoch=4,
+            approve_policy_downgrade=True,
+            created_at=utcnow(),
+        )
+    )
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="revert pyproject and fix the other module instead",
+        reason="changed my mind: revert that, grant only the new file",
+        grants=["docs/CONTRIBUTING.md"],
+        operator="alice@example.com",
+        idempotency_key="guide-monitor-directive-revokes-prior-keeps-fresh",
+        expected_version=workspace.version,
+    )
+
+    grants = await _grants(session, workspace.id)
+    by_path = {grant.normalized_path: grant for grant in grants}
+    assert by_path["pyproject.toml"].revoked_at is not None
+    assert by_path["docs/CONTRIBUTING.md"].revoked_at is None
+
+
+@pytest.mark.unit
 async def test_guide_pre_pr_blocked_stays_blocked_when_not_monitor_origin(
     session: AsyncSession,
 ) -> None:
