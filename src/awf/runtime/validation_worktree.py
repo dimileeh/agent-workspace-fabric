@@ -185,6 +185,7 @@ def _is_tracked_gitlink(worktree_path: Path, path: Path) -> bool:
             "-C",
             str(worktree_path),
             "ls-tree",
+            "-z",
             "HEAD",
             "--",
             relative,
@@ -201,6 +202,10 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
     Loading the full set once avoids a separate ``git ls-tree`` subprocess for
     every directory visited by the empty-directory helpers, which is
     significant in repositories with many directories and no submodules.
+
+    ``-z`` emits NUL-terminated entries and disables C-quoting, so gitlinks
+    whose paths contain non-ASCII characters or whitespace are returned as
+    their real on-disk names rather than quoted text.
     """
     result = subprocess.run(
         [
@@ -209,6 +214,7 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
             "-C",
             str(worktree_path),
             "ls-tree",
+            "-z",
             "-r",
             "-d",
             "HEAD",
@@ -219,12 +225,12 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
     if result.returncode != 0:
         return frozenset()
     paths: set[str] = set()
-    for line in result.stdout.splitlines():
-        if line.startswith("160000"):
+    for entry in result.stdout.split("\0"):
+        if entry.startswith("160000"):
             # ls-tree output format: "<mode> <type> <sha>\t<path>"
-            tab_index = line.find("\t")
+            tab_index = entry.find("\t")
             if tab_index != -1:
-                paths.add(line[tab_index + 1 :])
+                paths.add(entry[tab_index + 1 :])
     return frozenset(paths)
 
 

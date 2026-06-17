@@ -753,6 +753,7 @@ def test_is_tracked_gitlink_includes_safe_directory_config(
     assert len(ls_tree_calls) == 1
     assert "-c" in ls_tree_calls[0]
     assert f"safe.directory={worktree}" in ls_tree_calls[0]
+    assert "-z" in ls_tree_calls[0]
     assert submodule.exists()
 
 
@@ -805,6 +806,7 @@ def test_snapshot_empty_untracked_dirs_preserves_tracked_deinitialized_submodule
     assert len(ls_tree_calls) == 1
     assert "-r" in ls_tree_calls[0]
     assert "-d" in ls_tree_calls[0]
+    assert "-z" in ls_tree_calls[0]
     assert sorted(empty_dirs) == ["generated/"]
     assert submodule.exists()
     assert plain_empty_dir.exists()
@@ -849,6 +851,7 @@ def test_remove_empty_untracked_dirs_batch_gitlink_checks(
     assert len(ls_tree_calls) == 1
     assert "-r" in ls_tree_calls[0]
     assert "-d" in ls_tree_calls[0]
+    assert "-z" in ls_tree_calls[0]
     assert len(removed) == 5
 
 
