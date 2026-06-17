@@ -377,13 +377,28 @@ async def _run_post_validation_conformance_check(
     # artifact dir BEFORE removing the on-worktree copy. The deposit is
     # best-effort and gated on ``planning.required`` so the console still
     # surfaces the conformance report after teardown.
-    deposit_workspace_planning_artifacts(
-        work_dir=self._config.compose_projects_root.parent,
-        workspace_id=workspace.id,
-        worktree_path=worktree_path,
-        plan_path=handoff.plan_path,
-        report_path=handoff.report_path,
-    )
+    #
+    # When the report came from stdout and the on-disk copy was stale, the
+    # AWF-synthesized satisfied report was written above. If that write failed,
+    # the worktree file would still carry the stale report, so deposit the
+    # in-memory satisfied report directly to keep the served artifact consistent
+    # with the recorded event.
+    stdout_report_path = worktree_path / handoff.report_path
+    write_succeeded = stdout_report_path.exists()
+    if not report_from_fresh_file and report_text is not None and not write_succeeded:
+        _deposit_satisfied_conformance_report(
+            work_dir=self._config.compose_projects_root.parent,
+            workspace_id=workspace.id,
+            report=report,
+        )
+    else:
+        deposit_workspace_planning_artifacts(
+            work_dir=self._config.compose_projects_root.parent,
+            workspace_id=workspace.id,
+            worktree_path=worktree_path,
+            plan_path=handoff.plan_path,
+            report_path=handoff.report_path,
+        )
     # The satisfied conformance report is an AWF artifact/event, not source
     # work. Remove the on-worktree copy so project-specific profiles that
     # track the conformance report path do not see a dirty worktree at
@@ -537,6 +552,41 @@ def _write_satisfied_post_validation_conformance_report(
         + "\n",
         encoding="utf-8",
     )
+
+
+def _deposit_satisfied_conformance_report(
+    *,
+    work_dir: str | Path,
+    workspace_id: str,
+    report: PlanConformanceReport,
+) -> None:
+    """Deposit the satisfied conformance report into the served artifact dir
+    directly from the parsed report, bypassing the worktree file.
+
+    Used when the on-worktree report is stale and the AWF-synthesized write
+    failed: the event and validation run already record success, so the served
+    artifact must match that outcome rather than the stale disk copy.
+    """
+    from awf.service.artifacts import DEPOSITED_CONFORMANCE_NAME, workspace_artifact_dir
+
+    artifact_dir = workspace_artifact_dir(work_dir, workspace_id)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    dest = artifact_dir / DEPOSITED_CONFORMANCE_NAME
+    tmp_dest = artifact_dir / f".{DEPOSITED_CONFORMANCE_NAME}.tmp"
+    content = (
+        json.dumps(
+            {
+                "status": report.status.value,
+                "summary": report.summary,
+                "reason_code": report.reason_code,
+                "gaps": list(report.gaps),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    tmp_dest.write_text(content, encoding="utf-8")
+    tmp_dest.replace(dest)
 
 
 async def _record_post_validation_conformance_event(

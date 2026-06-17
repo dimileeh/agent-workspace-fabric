@@ -741,7 +741,9 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
 
     # Write failure is non-fatal: success returned, event still recorded, and
     # nothing is staged or committed. The report is still removed after the
-    # best-effort artifact deposit.
+    # best-effort artifact deposit. When the report came from stdout and the
+    # on-disk file was stale, the served artifact is written directly from the
+    # in-memory satisfied report so it matches the recorded event.
     assert failure is None
     assert recorded == ["validation-run-1"]
     report_abs = worktree_path / report_path
@@ -756,6 +758,12 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
     # No staging or committing of the AWF artifact.
     assert all("add" not in call.args for call in runner.calls)
     assert all("commit" not in call.args for call in runner.calls)
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        tmp_path / "compose" / "..", "ws_post"
+    ).resolve()
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
+    assert deposited_report["summary"] == "validated evidence satisfies plan"
 
 
 @pytest.mark.unit
