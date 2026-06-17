@@ -6,7 +6,7 @@ Plan reference: `plans/PRRT_kwDOSJAM6s6KG6cH_PLAN.md`
 
 | Requirement | Status | Evidence |
 |-------------|--------|----------|
-| For a tracked conformance report, the worktree ends clean (no staged or unstaged deletion) after cleanup. | Complete | `src/awf/control/executor/planning_ops.py` now issues `git restore --source=HEAD --worktree --staged -- <report>` followed by `Path.unlink`. This restores the tracked path to its committed index/worktree state before removing the on-worktree copy, leaving no porcelain entry. |
+| For a tracked conformance report, the worktree ends clean (no staged or unstaged deletion) after cleanup. | Complete | `src/awf/control/executor/planning_ops.py` now issues `git restore --source=base_commit --worktree --staged -- <report>`. This restores the tracked path to its pre-workspace baseline state in both the index and worktree, leaving the worktree clean. |
 | For an untracked/gitignored conformance report, the on-worktree file is still removed. | Complete | The new flow attempts restore first, logs on failure, then always unlinks. `test_satisfied_post_validation_conformance_report_untracked_fallback_to_unlink` passes. |
 | Existing regression tests for tracked/untracked cases updated to assert new clean behavior. | Complete | `test_executor_coverage_edges_part_001.py`: `_GitRmFakeRunner` renamed to `_GitRestoreFakeRunner` and now intercepts `git restore`; all six affected tests now assert a `git restore` call and assert no plain `git rm` call. |
 | No `git add` or `git commit` runs for the AWF artifact. | Complete | All updated tests retain `assert all("add" not in call.args ...)` and `assert all("commit" not in call.args ...)`. |
@@ -31,7 +31,7 @@ uv run --python 3.12 --extra dev mypy src/awf/control/executor/planning_ops.py
 
 ## Files changed
 
-- `src/awf/control/executor/planning_ops.py` — changed post-validation conformance cleanup from `git rm` (with unlink fallback) to `git restore --source=HEAD --worktree --staged` followed by `unlink`.
+- `src/awf/control/executor/planning_ops.py` — changed post-validation conformance cleanup from `git rm` (with unlink fallback) to `git restore --source=base_commit --worktree --staged`. For tracked reports the restore leaves the pre-workspace copy in place; for untracked/gitignored reports the restore fails and the code falls back to `unlink`.
 - `tests/unit/control/test_executor_coverage_edges_parts/test_executor_coverage_edges_part_001.py` — renamed fake runner, updated comments, and switched assertions from `git rm` to `git restore`.
 
 ## Gaps / next iterations

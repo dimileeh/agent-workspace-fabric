@@ -26,9 +26,9 @@ The desired behavior is to restore the report path to its state in the index (i.
 ## Implementation steps
 
 1. In `src/awf/control/executor/planning_ops.py`, replace the `git rm` logic with:
-   - First attempt `git restore --source=HEAD --worktree --staged -- <report_path>` to put the index/worktree back to the committed state.
-   - Then remove the on-worktree copy with `unlink`.
-   - If `git restore` fails (e.g. path is not tracked), fall back to plain `unlink` and log.
+   - First attempt `git restore --source=base_commit --worktree --staged -- <report_path>` to put the index/worktree back to the pre-workspace baseline state. Restoring from HEAD would resurrect any stale AWF-authored report committed by an earlier fix pass; base_commit is the safe pre-workspace baseline.
+   - For tracked reports, the restore leaves the committed copy in place and the worktree is clean.
+   - If `git restore` fails (e.g. path is not tracked at base_commit), fall back to plain `unlink` and log.
 2. Update the docstring / inline comment to explain why we restore instead of stage-delete.
 3. Update test doubles that simulate git behavior:
    - `_GitRmFakeRunner` in `test_executor_coverage_edges_part_001.py` to simulate `git restore` and unlink instead of `git rm`.
