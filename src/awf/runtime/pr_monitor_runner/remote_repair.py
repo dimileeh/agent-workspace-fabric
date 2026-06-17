@@ -1263,10 +1263,16 @@ async def _protected_scope_violations_for_status(
             "for validation before commit: "
             f"{exc}"
         ) from exc
+    # Grant-aware like the push-gate callsites: a directive+grant resume that
+    # touches an operator-granted path must NOT generate a repair prompt asking
+    # the agent to undo work the push gate would have allowed. Outside a blocked
+    # resume there are no active grants, so this is a no-op for the common path.
+    operator_granted_paths = await self._active_operator_grant_specs(workspace_id)
     return find_protected_quality_gate_changes(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
+        operator_granted_paths=operator_granted_paths,
     )
 
 

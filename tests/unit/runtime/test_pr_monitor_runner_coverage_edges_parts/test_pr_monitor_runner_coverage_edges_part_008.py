@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.control.quality_gates_common import QualityGateViolation
+from awf.db.models import OperatorGrantAuditRecord
 from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
@@ -366,6 +367,71 @@ async def test_protected_scope_violations_skip_empty_status(
         )
         == []
     )
+
+
+@pytest.mark.unit
+async def test_protected_scope_status_check_honors_active_operator_grant(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-commit repair check must honor an operator grant like the push gate.
+
+    Without grant-awareness a directive+grant resume that touches a granted
+    path would still generate a repair prompt asking the agent to undo work the
+    push gate would have allowed.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        workspace.block_epoch = 3
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _no_diff(**_kwargs: object) -> dict[str, object]:
+        # Classifier-less protected workflow file: a violation unless granted.
+        return {}
+
+    monkeypatch.setattr(runner, "_protected_file_diffs_for_status_paths", _no_diff)
+
+    status_stdout = " M .github/workflows/ci.yml\n"
+
+    # No active grant -> the unowned protected workflow change is a violation.
+    violations = await runner._protected_scope_violations_for_status(
+        workspace_id=workspace_id,
+        status_stdout=status_stdout,
+    )
+    assert [v.path for v in violations] == [".github/workflows/ci.yml"]
+
+    # An operator grant for the active epoch suppresses the same violation.
+    async with factory() as session:
+        session.add(
+            OperatorGrantAuditRecord(
+                id="grant_status_active_epoch3",
+                workspace_id=workspace_id,
+                operator="op@example.com",
+                reason="approved-and-keep",
+                normalized_path=".github/workflows/ci.yml",
+                block_epoch=3,
+                approve_policy_downgrade=True,
+            )
+        )
+        await session.commit()
+
+    granted = await runner._protected_scope_violations_for_status(
+        workspace_id=workspace_id,
+        status_stdout=status_stdout,
+    )
+    assert granted == []
 
 
 @pytest.mark.unit
