@@ -245,6 +245,126 @@ async def test_fix_cycle_pauses_into_blocked_and_preserves_protected_commit(
 
 
 @pytest.mark.unit
+async def test_protected_pause_fences_on_stale_monitor_claim_owner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KHtX5: a monitor whose expired lease was reclaimed by a
+    newer worker must NOT win the ``monitoring_pr -> blocked`` CAS. The pause
+    fences on ``monitor_claimed_by``; a superseded owner returns a plain failed
+    result (NOT paused) and leaves the row in ``monitoring_pr`` for the live
+    claimant, so its stale preserved worktree commit cannot clobber the takeover."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="stale-preserved-head\n")  # rev-parse HEAD
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    runner._monitor_owner_id = "stale-worker"  # superseded — lease lost to worker-current
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.failed is True
+    # The stale CAS path is taken: a plain failed result, NOT a pause.
+    assert result.paused_into_blocked is not True
+    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    # No clobber: no PR notification, row stays in monitoring_pr for the live owner.
+    assert gh.posts == []
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "monitoring_pr"
+
+
+@pytest.mark.unit
+async def test_protected_pause_with_matching_monitor_owner_pauses_into_blocked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The owner fence only rejects a superseded runner: the live monitor claim
+    owner still pauses into ``blocked`` and preserves the offending commit."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="preserved-head\n")  # rev-parse HEAD
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    runner._monitor_owner_id = "worker-current"  # the live claimant
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.paused_into_blocked is True
+    assert result.reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "blocked"
+        assert ws.block_epoch == 1
+
+
+@pytest.mark.unit
 async def test_protected_pause_notification_forge_failure_does_not_strand_block(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

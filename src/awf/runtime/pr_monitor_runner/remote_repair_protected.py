@@ -247,8 +247,10 @@ async def _pause_monitor_for_protected_scope_block(
     content so a second/different violation re-notifies.
 
     A stale CAS (the row already left ``monitoring_pr`` — cancelled/failed/merged
-    upstream) returns a plain failed result WITHOUT pausing, so a raced monitor
-    cannot clobber the new state.
+    upstream, OR a newer worker reclaimed the expired monitor lease so
+    ``monitor_claimed_by`` no longer matches this runner's ``_monitor_owner_id``)
+    returns a plain failed result WITHOUT pausing, so a raced/superseded monitor
+    cannot clobber the new state with its stale preserved worktree commit.
     """
     del monitor_log
     violations = tuple(protected_scope_block.violations)
@@ -266,6 +268,7 @@ async def _pause_monitor_for_protected_scope_block(
             violations=violations,
             resume_phase=resume_phase,
             block_type=PROTECTED_QUALITY_GATE_BLOCK_TYPE,
+            monitor_owner_id=getattr(self, "_monitor_owner_id", None),
             extra_payload=extra_payload,
         )
         if ws is None:

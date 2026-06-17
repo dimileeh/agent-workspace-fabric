@@ -67,6 +67,7 @@ async def enter_blocked_for_protected_violation_in_session(
     block_type: str = PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     block_reason_code: str = QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
     execution_owner_id: str | None = None,
+    monitor_owner_id: str | None = None,
     extra_payload: Mapping[str, Any] | None = None,
 ) -> Workspace | None:
     """Atomically CAS a workspace into ``blocked`` and write the block columns.
@@ -75,6 +76,18 @@ async def enter_blocked_for_protected_violation_in_session(
     owns the commit and any caller-specific finalization), or ``None`` when the
     epoch-fenced CAS matched 0 rows (a stale/raced claimant); the caller then
     handles the stale path.
+
+    The CAS is gated on the row still being in ``from_status`` and — when the
+    dispatching identity is known — still claimed by it: ``execution_owner_id``
+    fences pre-PR origins on ``execution_claimed_by``; ``monitor_owner_id`` fences
+    the POST-PR monitor pause on ``monitor_claimed_by``. A status-only fence is
+    insufficient on the monitor resume path because ``claim_monitoring_pr`` can
+    reassign an expired monitor lease to a new worker while the row is still
+    ``monitoring_pr`` and the old runner is still alive (its heartbeat only logs
+    on lost claim, it does not cancel the run). Without the owner fence a stale
+    monitor could win this CAS in that takeover window and clobber the new
+    claimant's work with its stale preserved worktree commit
+    (PRRT_kwDOSJAM6s6KHtX5).
 
     ``block_epoch`` is bumped on every entry so a re-block invalidates all prior
     operator grants — the mechanism that makes a later DIFFERENT change re-block.
@@ -87,7 +100,9 @@ async def enter_blocked_for_protected_violation_in_session(
     normalized = quality_gate_violation_details(violations)
     extra_conditions: tuple[ColumnElement[bool], ...] = ()
     if execution_owner_id is not None:
-        extra_conditions = (Workspace.execution_claimed_by == execution_owner_id,)
+        extra_conditions += (Workspace.execution_claimed_by == execution_owner_id,)
+    if monitor_owner_id is not None:
+        extra_conditions += (Workspace.monitor_claimed_by == monitor_owner_id,)
     payload: dict[str, Any] = {
         "block_type": block_type,
         "block_reason_code": block_reason_code,
