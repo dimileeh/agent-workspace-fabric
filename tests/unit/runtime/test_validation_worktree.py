@@ -1247,7 +1247,41 @@ async def test_check_validation_worktree_clean_preserves_dirty_paths_when_gitlin
     assert "tracked.py" in check.paths
 
 
-def _init_worktree_with_deinitialized_submodule(tmp_path: Path) -> Path:
+@pytest.mark.unit
+def test_gitlink_paths_tolerates_non_utf8_tracked_paths(
+    tmp_path: Path,
+) -> None:
+    """Non-UTF-8 tracked paths must not crash gitlink enumeration.
+
+    Regression for PR #606 review thread PRRT_kwDOSJAM6s6KIO_4:
+    ``git ls-tree -z`` emits raw path bytes; decoding them strictly with
+    ``subprocess.run(..., text=True)`` raises ``UnicodeDecodeError`` before
+    the _GitlinkLookupError path can run. The empty-directory cleanup then
+    has no gitlink boundary and may remove tracked directories.
+    """
+    worktree = _init_worktree_with_deinitialized_submodule(
+        tmp_path, submodule_name="\udcffsub"
+    )
+    submodule = worktree / "\udcffsub"
+    plain_empty_dir = worktree / "generated"
+    plain_empty_dir.mkdir()
+
+    gitlink_paths = validation_worktree._gitlink_paths(worktree)
+
+    assert "\udcffsub" in gitlink_paths
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(removed) == ["generated/"]
+    assert submodule.exists()
+    assert not plain_empty_dir.exists()
+
+
+def _init_worktree_with_deinitialized_submodule(
+    tmp_path: Path, *, submodule_name: str = "sub"
+) -> Path:
     """Create a real git worktree that contains a deinitialized submodule."""
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True)
@@ -1259,7 +1293,7 @@ def _init_worktree_with_deinitialized_submodule(tmp_path: Path) -> Path:
     )
     _run_real_git(worktree, "config", "user.email", "agent@example.com")
     _run_real_git(worktree, "config", "user.name", "AWF Agent")
-    submodule = worktree / "sub"
+    submodule = worktree / submodule_name
     submodule.mkdir()
     (submodule / ".git").mkdir()
     (submodule / "file.txt").write_text("x\n", encoding="utf-8")
@@ -1268,9 +1302,9 @@ def _init_worktree_with_deinitialized_submodule(tmp_path: Path) -> Path:
     _run_real_git(submodule, "config", "user.name", "AWF Agent")
     _run_real_git(submodule, "add", "file.txt")
     _run_real_git(submodule, "commit", "-m", "init")
-    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
+    _run_real_git(worktree, "submodule", "add", f"./{submodule_name}", submodule_name)
     _run_real_git(worktree, "commit", "-m", "add sub")
-    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
+    _run_real_git(worktree, "submodule", "deinit", "-f", submodule_name)
     assert not (submodule / ".git").exists()
     assert not any(submodule.iterdir())
     return worktree
@@ -1283,6 +1317,7 @@ def _run_real_git(worktree: Path, *args: str) -> subprocess.CompletedProcess[str
         check=True,
         capture_output=True,
         text=True,
+        errors="surrogateescape",
     )
 
 

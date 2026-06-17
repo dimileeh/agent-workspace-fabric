@@ -191,9 +191,13 @@ def _is_tracked_gitlink(worktree_path: Path, path: Path) -> bool:
             relative,
         ],
         capture_output=True,
-        text=True,
     )
-    return result.returncode == 0 and result.stdout.startswith("160000")
+    stdout = (
+        result.stdout.decode("utf-8", errors="surrogateescape")
+        if isinstance(result.stdout, bytes)
+        else result.stdout
+    )
+    return result.returncode == 0 and stdout.startswith("160000")
 
 
 class _GitlinkLookupError(Exception):
@@ -235,15 +239,24 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
             "HEAD",
         ],
         capture_output=True,
-        text=True,
     )
     if result.returncode != 0:
+        stderr = (
+            result.stderr.decode("utf-8", errors="surrogateescape")
+            if isinstance(result.stderr, bytes)
+            else result.stderr
+        )
         raise _GitlinkLookupError(
             "Could not enumerate tracked gitlinks with `git ls-tree`.",
-            stderr=result.stderr,
+            stderr=stderr,
         )
+    stdout = (
+        result.stdout.decode("utf-8", errors="surrogateescape")
+        if isinstance(result.stdout, bytes)
+        else result.stdout
+    )
     paths: set[str] = set()
-    for entry in result.stdout.split("\0"):
+    for entry in stdout.split("\0"):
         if entry.startswith("160000"):
             # ls-tree output format: "<mode> <type> <sha>\t<path>"
             tab_index = entry.find("\t")
