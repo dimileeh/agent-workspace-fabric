@@ -204,6 +204,34 @@ async def guide_workspace(
     persist_operator_hint(monitor_state, hint)
     workspace.monitor_threads_addressed = monitor_state
     pending_operator_hint = build_pending_operator_hint_payload(hint)
+    # A directive is the latest operator decision and supersedes any grant armed
+    # by an EARLIER approve-and-keep guide on this same block epoch. The monitor
+    # resume loads ``_active_operator_grant_specs()`` for every protected-file push
+    # gate regardless of the directive, so a pre-existing current-epoch grant would
+    # still suppress a violation on its path even though the latest operator
+    # decision was to revert/redo — letting an unreverted protected change push
+    # anyway. Revoke those stale grants so the latest directive wins (mirror of the
+    # pre-PR ``_guide_blocked_workspace`` directive path). The post-PR branch never
+    # records new grants (grants are rejected above for a non-blocked workspace), so
+    # every active current-epoch grant here is pre-existing and must be revoked.
+    revoke_now = utcnow()
+    stale_grants = (
+        (
+            await self._session.execute(
+                select(OperatorGrantAuditRecord).where(
+                    OperatorGrantAuditRecord.workspace_id == workspace.id,
+                    OperatorGrantAuditRecord.block_epoch == workspace.block_epoch,
+                    OperatorGrantAuditRecord.consumed_at.is_(None),
+                    OperatorGrantAuditRecord.revoked_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    revoked_grants = [stale_grant.normalized_path for stale_grant in stale_grants]
+    for stale_grant in stale_grants:
+        stale_grant.revoked_at = revoke_now
     # Re-engaging the monitor with a fresh directive must pre-empt any
     # in-flight PR-monitor validate_only/rebase_only recovery op (same guard
     # remonitor applies); otherwise the stale recovery cycle keeps running
@@ -257,6 +285,7 @@ async def guide_workspace(
         "operation_id": operation.id,
         "claims_reset": claims_reset,
         "pending_operator_hint": pending_operator_hint,
+        "revoked_grants": revoked_grants or None,
     }
     if state_reset is not None:
         event_payload["state_reset"] = state_reset
@@ -299,6 +328,8 @@ async def guide_workspace(
         result["state_reset"] = state_reset
     if cancelled_recovery_operations:
         result["cancelled_recovery_operations"] = cancelled_recovery_operations
+    if revoked_grants:
+        result["revoked_grants"] = revoked_grants
     await operations.finish(
         operation,
         status=OperationStatus.succeeded,
