@@ -530,12 +530,11 @@ async def _repair_protected_scope_commits_before_push(
     attempted_head = await self._rev_parse_head(worktree_path)
 
     # Primary path: pause into ``blocked`` and PRESERVE the commit (no reset).
-    paused = await self._enter_blocked_for_monitor_protected_violation(
+    block_epoch = await self._enter_blocked_for_monitor_protected_violation(
         workspace_id=workspace_id,
         violations=violations,
     )
-    if paused:
-        block_epoch = await self._current_block_epoch(workspace_id)
+    if block_epoch is not None:
         paused_details: dict[str, object] = {
             "phase": "pre_push_committed_diff",
             "paths": paths,
@@ -1520,7 +1519,7 @@ async def _enter_blocked_for_monitor_protected_violation(
     *,
     workspace_id: str,
     violations: Sequence[QualityGateViolation],
-) -> bool:
+) -> int | None:
     """Pause a ``monitoring_pr`` workspace into ``blocked`` (post-PR variant).
 
     The monitor-side counterpart to the executor's pre-PR
@@ -1528,9 +1527,11 @@ async def _enter_blocked_for_monitor_protected_violation(
     ``monitoring_pr -> blocked`` CAS and stamps the SAME block-state columns via
     the shared :func:`apply_protected_block_columns` (block type/reason, epoch
     bump, cleared directive). The ``block_resume_phase`` is the monitor sentinel
-    so the worker routes the resume back INTO the PR monitor. Returns ``True``
-    only when the CAS won (the row was still ``monitoring_pr``); a lost CAS means
-    the row already moved on and the caller must not claim a pause.
+    so the worker routes the resume back INTO the PR monitor. Returns the bumped
+    ``block_epoch`` (always >= 1) when the CAS won (the row was still
+    ``monitoring_pr``) so the caller reuses the same round-trip for the block
+    notification key; returns ``None`` on a lost CAS, meaning the row already
+    moved on and the caller must not claim a pause.
     """
     normalized = quality_gate_violation_details(violations)
     async with self._deps.session_factory() as session:
@@ -1548,21 +1549,14 @@ async def _enter_blocked_for_monitor_protected_violation(
             },
         )
         if ws is None:
-            return False
+            return None
         apply_protected_block_columns(
             ws,
             violations_normalized=normalized,
             resume_phase=MONITOR_PR_PROTECTED_PUSH_RESUME_PHASE,
         )
         await session.commit()
-        return True
-
-
-async def _current_block_epoch(self: Any, workspace_id: str) -> int | None:
-    """Return the workspace's current ``block_epoch`` for block notifications."""
-    async with self._deps.session_factory() as session:
-        ws = await WorkspaceRepository(session).get(workspace_id)
-        return ws.block_epoch if ws is not None else None
+        return ws.block_epoch
 
 
 async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[Any]:
