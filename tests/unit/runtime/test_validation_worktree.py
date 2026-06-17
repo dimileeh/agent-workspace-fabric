@@ -1259,9 +1259,7 @@ def test_gitlink_paths_tolerates_non_utf8_tracked_paths(
     the _GitlinkLookupError path can run. The empty-directory cleanup then
     has no gitlink boundary and may remove tracked directories.
     """
-    worktree = _init_worktree_with_deinitialized_submodule(
-        tmp_path, submodule_name="\udcffsub"
-    )
+    worktree = _init_worktree_with_deinitialized_submodule(tmp_path, submodule_name="\udcffsub")
     submodule = worktree / "\udcffsub"
     plain_empty_dir = worktree / "generated"
     plain_empty_dir.mkdir()
