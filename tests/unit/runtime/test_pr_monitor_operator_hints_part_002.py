@@ -1485,3 +1485,158 @@ async def test_operator_hint_paused_into_blocked_ends_monitor_without_failing(
             .one()
         )
     assert operation.result["outcome"] == "protected_scope_paused"
+
+
+@pytest.mark.unit
+async def test_operator_hint_directive_drop_restart_finalizes_without_rerunning_cli(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restart-after-consume recovery for a directive-only resume that DROPPED the
+    preserved commit (PRRT_kwDOSJAM6s6KUf46): the resume dropped the preserved
+    offending commit, pushed a corrected head, then crashed BEFORE the processed
+    marker persisted. On restart there is no grant (a directive-only resume never had
+    one) and the dropped preserved SHA is intentionally NOT on the remote, so the
+    preserved-on-remote shortcut cannot fire. Re-invoking the directive CLI against
+    the already-resolved branch would create extra unreviewed commits or re-block the
+    workspace. The monitor must instead recognize the corrected HEAD is already on the
+    remote and finalize the bookkeeping WITHOUT re-running the directive CLI."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    # No active grant: a directive-only revert/drop resume never carried one.
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="drop the protected edit and keep the rest",
+        directive="revert the protected-file change, keep the remaining work",
+        operation_id="op_directive_drop_restart",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    calls: list[object] = []
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("recorded-preserved-sha", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("a directive drop restart must NOT re-invoke the CLI")
+
+    async def _on_remote(**kwargs: object) -> bool:
+        calls.append(kwargs.get("preserved_head_sha"))
+        # The dropped preserved commit is NOT on the remote (the existing
+        # preserved-on-remote shortcut is keyed on it), but the corrected HEAD IS
+        # — confirmed by the ``preserved_head_sha=None`` containment check.
+        return kwargs.get("preserved_head_sha") is None
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("an already-pushed corrected head must NOT be re-pushed")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "corrected-head-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    # The existing shortcut probed with the recorded SHA (returned False -> dropped),
+    # then the new branch probed with ``None`` to confirm the corrected head landed.
+    assert calls == ["recorded-preserved-sha", None]
+    assert state.last_push_sha == "corrected-head-sha"
+    assert state.pending_operator_hint is None  # hint processed without the agent
+    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_operator_hint_directive_drop_restart_tolerates_missing_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The directive-drop restart shortcut still finalizes when the worktree HEAD
+    cannot be resolved: ``last_push_sha`` is left untouched rather than overwritten
+    with a missing SHA, mirroring the other restart-recovery branches."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="drop the protected edit and keep the rest",
+        directive="revert the protected-file change, keep the remaining work",
+        operation_id="op_directive_drop_restart_no_head",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.last_push_sha = "prior-push-sha"
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("recorded-preserved-sha", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("a directive drop restart must NOT re-invoke the CLI")
+
+    async def _on_remote(**kwargs: object) -> bool:
+        return kwargs.get("preserved_head_sha") is None
+
+    async def _no_head(*_args: object, **_kwargs: object) -> str | None:
+        return None
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _on_remote)
+    monkeypatch.setattr(runner, "_rev_parse_head", _no_head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert state.last_push_sha == "prior-push-sha"  # untouched when HEAD is missing
+    assert state.pending_operator_hint is None
+    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids

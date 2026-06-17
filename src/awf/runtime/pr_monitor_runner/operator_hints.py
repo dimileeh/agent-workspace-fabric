@@ -99,7 +99,11 @@ async def _run_operator_hint_cycle(
     # are tight enough to exclude a genuine first run: a plain remonitor has no
     # marker; a first-run grant (or directive+grant) resume still has an active
     # grant; and a first-run directive-only revert has not yet pushed its preserved
-    # commit, so it is not ``already_on_remote``.
+    # commit, so it is not ``already_on_remote``. This shortcut keys on the preserved
+    # commit being ON the remote, which covers a grant resume or a revert-on-top
+    # directive (both publish the preserved commit). A directive that DROPS the
+    # preserved commit publishes a corrected head WITHOUT the preserved SHA, so the
+    # adjacent branch below handles it (PRRT_kwDOSJAM6s6KUf46).
     if (
         not active_grant_specs
         and preserved_head_sha
@@ -109,6 +113,40 @@ async def _run_operator_hint_cycle(
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
             preserved_head_sha=preserved_head_sha,
+        )
+    ):
+        pushed_head_sha = await self._rev_parse_head(worktree_path)
+        if pushed_head_sha:
+            state.last_push_sha = pushed_head_sha
+        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+    # Restart-after-consume recovery for a DIRECTIVE that DROPPED the preserved
+    # commit. A directive-only resume can resolve the block by dropping the preserved
+    # offending commit and pushing a corrected head, then crash BEFORE the processed
+    # marker persists. On restart the persisted state still carries the pending
+    # directive and the preserved marker but no grant (a directive-only resume never
+    # had one), so ``not active_grant_specs`` is True; the shortcut above never fires
+    # because the dropped preserved SHA is intentionally NOT on the remote. Without
+    # this branch the fall-through would re-invoke the directive CLI against the
+    # already-resolved branch, creating extra unreviewed commits or re-blocking the
+    # workspace instead of just finalizing the hint (PRRT_kwDOSJAM6s6KUf46). Detect the
+    # finished drop instead: the corrected HEAD is already on the remote — the push
+    # landed — confirmed with ``preserved_head_sha=None`` so the dropped preserved
+    # commit is NOT required to be present (it was deliberately removed). Finalize the
+    # bookkeeping rather than re-running the agent; this mirrors the no-op-push directive
+    # branch further below, just early enough to skip the wasteful CLI re-invocation. A
+    # genuine first run is excluded: its preserved offending commit is still the unpushed
+    # HEAD, which differs from the remote, so the corrected HEAD is not yet on the remote.
+    if (
+        hint.directive
+        and not active_grant_specs
+        and preserved_head_sha
+        and await self._preserved_commit_already_on_remote(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            preserved_head_sha=None,
         )
     ):
         pushed_head_sha = await self._rev_parse_head(worktree_path)
