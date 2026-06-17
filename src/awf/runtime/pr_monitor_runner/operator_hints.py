@@ -70,6 +70,36 @@ async def _run_operator_hint_cycle(
     # directive AND active operator grants — skips the CLI (no tokens) and pushes
     # the PRESERVED commit straight through the now grant-aware gate.
     active_grant_specs = await self._active_operator_grant_specs(workspace_id)
+    preserved_head_sha = state.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY)
+    # Restart-after-consume recovery: a prior grant-only (approve-and-keep) resume
+    # can push the preserved commit and consume its grant (committed immediately)
+    # and then crash BEFORE the processed marker is persisted. On restart the
+    # grant is gone, so ``not active_grant_specs`` is True and the CLI would re-run
+    # WITHOUT a directive on just the reason string — letting the agent make
+    # unapproved commits. The preserved-head marker (recorded at block time,
+    # durable across the restart) flags this as that protected-block resume; if the
+    # approved preserved commit is already on the remote the work is done, so finish
+    # the bookkeeping instead of re-invoking the agent. A plain remonitor has no
+    # marker and a first-run grant resume still has an active grant, so neither
+    # reaches this branch.
+    if (
+        not hint.directive
+        and not active_grant_specs
+        and preserved_head_sha
+        and await self._preserved_commit_already_on_remote(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            preserved_head_sha=preserved_head_sha,
+        )
+    ):
+        pushed_head_sha = await self._rev_parse_head(worktree_path)
+        if pushed_head_sha:
+            state.last_push_sha = pushed_head_sha
+        await self._consume_active_operator_grants(workspace_id)
+        mark_operator_hint_processed(state)
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
     if hint.directive or not active_grant_specs:
         prompt = operator_hint_prompt(
             pr_number=pr_number,
