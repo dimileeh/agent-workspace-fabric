@@ -18,6 +18,7 @@ from typing import Any, cast
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
 from awf.common.commands import CommandResult
+from awf.common.forge_errors import ForgeClientError
 from awf.common.git_identity import (
     git_safe_directory_config_args,
 )
@@ -80,6 +81,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_porcelain,
     _changed_paths_from_porcelain_z,
     _quality_gate_violation_paths,
+    _redact_and_truncate_forge_error,
     _untracked_paths_from_porcelain,
     _untracked_paths_from_porcelain_z,
 )
@@ -800,15 +802,32 @@ async def _post_protected_block_notification(
         "a protected quality-gate file was changed and AWF paused the workspace "
         f"for an operator decision: {quality_gate_violation_message(list(violations))}"
     )
-    await self._deps.gh.post_comment(
-        repo=repo,
-        pr_number=pr_number,
-        body=ready_to_merge_comment(
+    try:
+        await self._deps.gh.post_comment(
+            repo=repo,
             pr_number=pr_number,
-            head_sha=pr_head_sha,
-            blocker_reason=blocker_reason,
-        ),
-    )
+            body=ready_to_merge_comment(
+                pr_number=pr_number,
+                head_sha=pr_head_sha,
+                blocker_reason=blocker_reason,
+            ),
+        )
+    except ForgeClientError as exc:
+        # The workspace is already committed into ``blocked`` (the durable record);
+        # this PR comment is best-effort courtesy. A transient/permission forge
+        # fault (GitHub or Bitbucket, both ``ForgeClientError`` subclasses) MUST
+        # NOT escape — otherwise the caller never reaches its
+        # ``paused_into_blocked`` branch, stranding the protected pause with the
+        # monitor operation left running and state markers unpersisted. Swallow
+        # and log; the dedupe marker stays unset so a later resume re-notifies.
+        _log.warning(
+            "monitor.protected_scope_paused_notification_failed",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            block_epoch=block_epoch,
+            stderr=_redact_and_truncate_forge_error(exc.redacted_detail()),
+        )
+        return
     state.mark_addressed(notification_key, "notified")
 
 

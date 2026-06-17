@@ -10,6 +10,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.forge_errors import ForgeClientError
 from awf.common.github_client import RepoRef
 from awf.control.quality_gates import QualityGateViolation
 from awf.db.repositories import (
@@ -244,6 +245,96 @@ async def test_fix_cycle_pauses_into_blocked_and_preserves_protected_commit(
 
 
 @pytest.mark.unit
+async def test_protected_pause_notification_forge_failure_does_not_strand_block(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WS-2: after the ``monitoring_pr -> blocked`` commit, a transient/permission
+    forge fault on the best-effort PR notification comment MUST NOT escape. If it
+    did, the caller would never reach its ``paused_into_blocked`` branch, leaving
+    the monitor operation running and state markers unpersisted while the row is
+    already blocked. The pause result must still come back ``paused_into_blocked``
+    and the notification dedupe marker must stay unset so a resume re-notifies."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
+    cmd.queue_result(returncode=0, stdout="start-sha\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout="blocked-head-sha\n")  # preserved HEAD
+    gh = _FailingPostGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    thread = ReviewThread(
+        thread_id="T_protected",
+        path="tests/unit/control/test_ci_workflow_toolchain.py",
+        line=49,
+        body_excerpt="this test requires a protected workflow edit",
+        author="reviewer",
+    )
+    state = MonitorState()
+
+    async def _address_thread(**_kwargs: object) -> str:
+        return "fix_committed"
+
+    async def _fetch_clean_status(**_kwargs: object) -> PRStatus:
+        return _status_for_helpers()
+
+    async def _protected_block(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return _ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=(
+                QualityGateViolation(
+                    path=".github/workflows/ci.yml",
+                    protected_pattern=".github/**",
+                ),
+            ),
+        )
+
+    async def _unexpected_push(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("a paused workspace must not push")
+
+    monkeypatch.setattr(runner, "_address_thread", _address_thread)
+    monkeypatch.setattr(runner._deps.gh, "fetch_pr_status", _fetch_clean_status, raising=False)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_block)
+    monkeypatch.setattr(runner, "_git_push_result", _unexpected_push)
+
+    # The forge fault on the notification comment must not propagate out.
+    result = await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="start-sha",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is True
+    assert result.failed is True
+    # The notification was attempted but failed; the dedupe marker stays unset so a
+    # later resume re-notifies rather than silently suppressing the comment.
+    assert gh.attempts == 1
+    assert not any(key.startswith("__awf_protected_block__") for key in state.threads_addressed_ids)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == "blocked"
+
+
+@pytest.mark.unit
 async def test_fix_cycle_returns_failed_push_when_review_fix_hits_policy_block(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -455,6 +546,17 @@ class _RecordingGh:
 
     async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
         self.posts.append({"repo": repo, "pr_number": pr_number, "body": body})
+
+
+class _FailingPostGh:
+    """gh double whose ``post_comment`` raises a forge fault (transient/permission)."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def post_comment(self, *, repo: object, pr_number: int, body: str) -> None:
+        self.attempts += 1
+        raise ForgeClientError("forge unavailable")
 
 
 @pytest.mark.unit
