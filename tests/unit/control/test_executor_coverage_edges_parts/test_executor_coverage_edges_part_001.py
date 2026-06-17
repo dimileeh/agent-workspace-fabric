@@ -901,21 +901,29 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
         deposited.append((plan_present, report_present))
         real_deposit(*args, **kwargs)
 
-    import awf.control.executor.planning_ops as _planning_ops_module
+    from awf.control.executor import mixins as _executor_mixins
 
     monkeypatch.setattr(
-        _planning_ops_module,
+        _executor_mixins._planning_ops,
         "deposit_workspace_planning_artifacts",
         _spy_deposit,
     )
 
     # Create the on-worktree plan and a stale report. The conformance call only
     # emits the report in stdout, so the file on disk stays stale and should be
-    # overwritten by the AWF-synthesized satisfied report before removal.
+    # overwritten by the AWF-synthesized satisfied report before removal. We
+    # intentionally make the AWF-synthesized write fail (by creating a directory
+    # at the report path) so the in-memory deposit path runs; this exercises the
+    # branch the PR review thread identified as missing the plan.md copy.
     plan_abs.parent.mkdir(parents=True, exist_ok=True)
     plan_abs.write_text("# plan\n", encoding="utf-8")
     report_abs.parent.mkdir(parents=True, exist_ok=True)
     report_abs.write_text('{"status":"stale"}', encoding="utf-8")
+    # Before the conformance call writes the synthesized report, replace the
+    # report file with a directory so the write fails and the in-memory deposit
+    # branch is exercised.
+    report_abs.unlink()
+    report_abs.mkdir()
 
     profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
     handoff = _PlanningValidationHandoff(
@@ -946,10 +954,12 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
 
     assert failure is None
     assert recorded == ["validation-run-1"]
-    # Deposit ran while the worktree report copy still existed.
-    assert deposited == [(True, True)]
-    # The on-worktree report copy is removed last.
-    assert not report_abs.exists()
+    # The in-memory deposit branch ran because the synthesized write failed;
+    # ``deposit_workspace_planning_artifacts`` is not invoked in that branch.
+    assert deposited == []
+    # The on-worktree report copy is removed last; the directory at the report
+    # path cannot be removed by the unlink fallback, so it remains.
+    assert report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
         "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
@@ -958,7 +968,8 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
     # The final served artifact dir contains the satisfied conformance report
-    # (written with the AWF-synthesized JSON shape, which includes a reason_code).
+    # (written with the AWF-synthesized JSON shape, which includes a reason_code)
+    # and the plan, confirming the in-memory deposit path copies plan.md too.
     artifact_dir = executor_service_artifacts.workspace_artifact_dir(
         tmp_path / "compose" / "..", "ws_post"
     ).resolve()

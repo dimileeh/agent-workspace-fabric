@@ -10,6 +10,7 @@ import hashlib as hashlib
 import json as json
 import re as re
 import shlex as shlex
+import shutil as shutil
 import time as time
 import traceback as traceback
 from collections.abc import Mapping
@@ -81,7 +82,12 @@ from awf.runtime.planning import (
 from awf.runtime.workspace_prompt_context import (
     render_workspace_runtime_context,
 )
-from awf.service.artifacts import deposit_workspace_planning_artifacts
+from awf.service.artifacts import (
+    DEPOSITED_CONFORMANCE_NAME,
+    DEPOSITED_PLAN_NAME,
+    deposit_workspace_planning_artifacts,
+    workspace_artifact_dir,
+)
 from awf.service.coordination import (
     coordination_warnings_from_task_policy,
 )
@@ -384,11 +390,13 @@ async def _run_post_validation_conformance_check(
     # in-memory satisfied report directly to keep the served artifact consistent
     # with the recorded event.
     stdout_report_path = worktree_path / handoff.report_path
-    write_succeeded = stdout_report_path.exists()
+    write_succeeded = stdout_report_path.is_file()
     if not report_from_fresh_file and report_text is not None and not write_succeeded:
         _deposit_satisfied_conformance_report(
             work_dir=self._config.compose_projects_root.parent,
             workspace_id=workspace.id,
+            worktree_path=worktree_path,
+            plan_path=handoff.plan_path,
             report=report,
         )
     else:
@@ -558,6 +566,8 @@ def _deposit_satisfied_conformance_report(
     *,
     work_dir: str | Path,
     workspace_id: str,
+    worktree_path: Path,
+    plan_path: Path,
     report: PlanConformanceReport,
 ) -> None:
     """Deposit the satisfied conformance report into the served artifact dir
@@ -565,12 +575,15 @@ def _deposit_satisfied_conformance_report(
 
     Used when the on-worktree report is stale and the AWF-synthesized write
     failed: the event and validation run already record success, so the served
-    artifact must match that outcome rather than the stale disk copy.
+    artifact must match that outcome rather than the stale disk copy. The plan
+    is also copied (when present) so the served artifact directory contains the
+    same planning documents as the normal deposit path.
     """
-    from awf.service.artifacts import DEPOSITED_CONFORMANCE_NAME, workspace_artifact_dir
-
     artifact_dir = workspace_artifact_dir(work_dir, workspace_id)
     artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    # Deposit the in-memory satisfied conformance report first so the served
+    # artifact matches the recorded event even if the worktree file is stale.
     dest = artifact_dir / DEPOSITED_CONFORMANCE_NAME
     tmp_dest = artifact_dir / f".{DEPOSITED_CONFORMANCE_NAME}.tmp"
     content = (
@@ -587,6 +600,21 @@ def _deposit_satisfied_conformance_report(
     )
     tmp_dest.write_text(content, encoding="utf-8")
     tmp_dest.replace(dest)
+
+    # Best-effort copy of the worktree plan so the served artifact contains
+    # both planning documents, mirroring ``deposit_workspace_planning_artifacts``.
+    plan_source = worktree_path / plan_path
+    if plan_source.is_file():
+        try:
+            import shutil
+
+            shutil.copy2(plan_source, artifact_dir / DEPOSITED_PLAN_NAME)
+        except OSError:
+            _log.warning(
+                "executor.satisfied_conformance_plan_deposit_failed",
+                workspace_id=workspace_id,
+                plan_path=plan_path.as_posix(),
+            )
 
 
 async def _record_post_validation_conformance_event(
