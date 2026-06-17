@@ -1118,6 +1118,8 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
     monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
+    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
     runner = make_runner(
         factory=factory,
@@ -1130,6 +1132,7 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
     commit_dirty = AsyncMock(return_value=True)
     monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
     state = MonitorState()
+    operation_start_head = "0" * 40
 
     result = await pre_push_validation_module._run_pre_push_validation(
         runner,
@@ -1139,6 +1142,7 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
+        operation_start_head=operation_start_head,
     )
 
     assert result.passed is True
@@ -1152,6 +1156,204 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
     )
     cleanup.assert_awaited_once()
     assert check_worktree_clean.await_count == 2
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_skips_unrelated_dirt_outside_operation_delta(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Unrelated dirt outside the operation's committed delta must stay fail-closed.
+
+    The pre-push dirty finalize must only commit dirt the current monitor
+    operation owns — i.e. paths within its committed delta
+    (``operation_start_head..HEAD``). Dirt on a path that the operation never
+    touched (introduced after the repair-start dirty guard by a failed cleanup
+    or another local process) must NOT be swept into the PR via
+    ``_commit_dirty_worktree``; the finalize must skip and the push must
+    fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (regression for
+    review thread ``PRRT_kwDOSJAM6s6KXLaI``).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    # Dirt on an unrelated path the operation never committed.
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("unrelated/lefover.log",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    # The finalize must not commit unrelated dirt.
+    commit_dirty.assert_not_awaited()
+    # Validation must never run on a dirty worktree.
+    assert validation.calls == []
+    # The dirty check is not re-run after a skipped finalize (no verify pass).
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_skips_when_no_operation_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A dirty finalize with no operation-owned anchor must stay fail-closed.
+
+    Callers without an operation-start anchor (e.g. ``_run_sync_base``) pass
+    ``operation_start_head=None``. The finalize must not commit unowned dirt
+    in that case — it must skip and the push must fail-closed as
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` so unrelated dirt is never swept
+    into the PR (review thread ``PRRT_kwDOSJAM6s6KXLaI``).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=None,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    # No anchor -> the finalize must not commit.
+    commit_dirty.assert_not_awaited()
+    assert validation.calls == []
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_skips_when_operation_delta_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A dirty finalize whose operation delta cannot be resolved must stay fail-closed.
+
+    ``_operation_owned_delta_paths`` runs ``git diff --name-only
+    operation_start_head..HEAD``. When that git command fails (e.g. the start
+    ref is unknown), the delta cannot be proven, so the finalize must skip and
+    the push must fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
+    rather than commit unowned dirt (review thread ``PRRT_kwDOSJAM6s6KXLaI``).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # The operation-owned delta diff fails -> delta unavailable.
+    cmd.queue_result(returncode=1, stdout="", stderr="unknown revision")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+    operation_start_head = "deadbeef" * 5
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    # Delta unavailable -> the finalize must not commit.
+    commit_dirty.assert_not_awaited()
+    assert validation.calls == []
+    assert check_worktree_clean.await_count == 1
 
 
 @pytest.mark.unit
@@ -1197,6 +1399,8 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
     monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
@@ -1210,6 +1414,7 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
     commit_dirty = AsyncMock(return_value=False)
     monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
     state = MonitorState()
+    operation_start_head = "0" * 40
 
     result = await pre_push_validation_module._run_pre_push_validation(
         runner,
@@ -1219,6 +1424,7 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
+        operation_start_head=operation_start_head,
     )
 
     assert result.passed is True
@@ -1272,6 +1478,8 @@ async def test_pre_push_validation_finalize_preserves_policy_blocked_reason_code
     )
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1286,6 +1494,7 @@ async def test_pre_push_validation_finalize_preserves_policy_blocked_reason_code
         AsyncMock(side_effect=_MonitorPolicyBlockedError("policy blocked finalize")),
     )
     state = MonitorState()
+    operation_start_head = "0" * 40
 
     result = await pre_push_validation_module._run_pre_push_validation(
         runner,
@@ -1295,6 +1504,7 @@ async def test_pre_push_validation_finalize_preserves_policy_blocked_reason_code
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
+        operation_start_head=operation_start_head,
     )
 
     assert result.passed is False
@@ -1344,6 +1554,8 @@ async def test_pre_push_validation_finalize_preserves_ownership_repair_reason_co
     )
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1362,6 +1574,7 @@ async def test_pre_push_validation_finalize_preserves_ownership_repair_reason_co
         ),
     )
     state = MonitorState()
+    operation_start_head = "0" * 40
 
     result = await pre_push_validation_module._run_pre_push_validation(
         runner,
@@ -1371,6 +1584,7 @@ async def test_pre_push_validation_finalize_preserves_ownership_repair_reason_co
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
+        operation_start_head=operation_start_head,
     )
 
     assert result.passed is False
@@ -1419,6 +1633,8 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
     )
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1433,6 +1649,7 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
         AsyncMock(side_effect=ProtectedScopeDiffError("diff baseline unavailable")),
     )
     state = MonitorState()
+    operation_start_head = "0" * 40
 
     result = await pre_push_validation_module._run_pre_push_validation(
         runner,
@@ -1442,6 +1659,7 @@ async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unava
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
+        operation_start_head=operation_start_head,
     )
 
     assert result.passed is False
@@ -1487,6 +1705,8 @@ async def test_pre_push_validation_finalize_propagates_provider_recovery_retry(
     )
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -1501,6 +1721,7 @@ async def test_pre_push_validation_finalize_propagates_provider_recovery_retry(
         AsyncMock(side_effect=ProviderRecoveryRetryError()),
     )
     state = MonitorState()
+    operation_start_head = "0" * 40
 
     with pytest.raises(ProviderRecoveryRetryError):
         await pre_push_validation_module._run_pre_push_validation(
@@ -1511,6 +1732,7 @@ async def test_pre_push_validation_finalize_propagates_provider_recovery_retry(
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
             state=state,
+            operation_start_head=operation_start_head,
         )
 
     # The finalize failure must not re-check the tree (no verify/recheck pass).

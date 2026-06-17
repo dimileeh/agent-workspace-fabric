@@ -147,6 +147,7 @@ async def _run_operator_hint_cycle(
             compose_file=compose_file,
             remote_url=remote_push_url,
             state=state,
+            operation_start_head=operation_start_head,
         )
     )
     if push_result.failed:

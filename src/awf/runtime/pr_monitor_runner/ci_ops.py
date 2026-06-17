@@ -193,5 +193,6 @@ async def _run_ci_fix(
             compose_file=compose_file,
             remote_url=remote_push_url,
             state=state,
+            operation_start_head=operation_start_head,
         ),
     )

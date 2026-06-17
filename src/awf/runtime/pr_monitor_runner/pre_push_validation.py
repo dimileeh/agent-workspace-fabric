@@ -359,6 +359,7 @@ async def _validated_git_push_result(
     remote_url: str | None = None,
     refspec: str | None = None,
     state: object | None = None,
+    operation_start_head: str | None = None,
 ) -> _GitPushResult:
     """Run pre-push validation with optional fix passes before pushing."""
     if self._deps.validation is None:
@@ -380,6 +381,7 @@ async def _validated_git_push_result(
         remote_branch=remote_branch,
         remote_url=remote_url,
         state=state,
+        operation_start_head=operation_start_head,
     )
     if not validation_result.passed:
         return _GitPushResult(
@@ -411,6 +413,7 @@ async def _run_pre_push_validation_with_fix_passes(
     remote_branch: str,
     remote_url: str | None,
     state: object | None,
+    operation_start_head: str | None = None,
 ) -> _PrePushValidationResult:
     """Execute pre-push validation plus optional fix/retry attempts."""
     max_fix_passes = max(0, self._runner_config.pre_push_validation_fix_passes)
@@ -425,6 +428,7 @@ async def _run_pre_push_validation_with_fix_passes(
             compose_file=compose_file,
             remote_branch=remote_branch,
             state=state,
+            operation_start_head=operation_start_head,
         )
 
         if validation_result.passed:
@@ -548,6 +552,35 @@ async def _pre_push_validation_worktree_check(
     )
 
 
+async def _operation_owned_delta_paths(
+    self: Any,
+    *,
+    worktree_path: Path,
+    operation_start_head: str,
+) -> set[str] | None:
+    """Return paths changed by the current operation's committed delta.
+
+    The repair-start dirty guard proves the worktree was clean at
+    ``operation_start_head``, so ``git diff --name-only
+    operation_start_head..HEAD`` is exactly the set of paths the current
+    monitor operation owns. Returns ``None`` when the delta cannot be
+    resolved (e.g. the start ref is unknown or git failed) so the caller can
+    keep the fail-closed dirty path instead of committing unowned dirt.
+    """
+    result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "diff", "--name-only", f"{operation_start_head}..HEAD")
+    )
+    if not result.ok:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_delta_unavailable",
+            operation_start_head=operation_start_head,
+            returncode=result.returncode,
+            stderr=(result.stderr or "")[:400],
+        )
+        return None
+    return {line for line in (result.stdout or "").splitlines() if line}
+
+
 async def _try_finalize_pre_push_dirty_repair_state(
     self: Any,
     *,
@@ -557,14 +590,53 @@ async def _try_finalize_pre_push_dirty_repair_state(
     compose_file: Path,
     state: object | None,
     check: ValidationWorktreeCheck,
+    operation_start_head: str | None = None,
 ) -> ValidationWorktreeCheck | None:
-    """Commit monitor-owned residual repair dirt before pre-push validation."""
+    """Commit monitor-owned residual repair dirt before pre-push validation.
+
+    The finalize is gated on the dirty paths being operation-owned: the
+    repair-start dirty guard (``_pre_existing_dirty_repair_worktree_result``)
+    proves the worktree was clean at ``operation_start_head``, so the current
+    monitor operation's own committed delta is exactly
+    ``git diff --name-only operation_start_head..HEAD``. Only dirt confined to
+    those paths is safe to finalize — dirt on any other path was introduced
+    after the repair-start guard (e.g. by a failed cleanup or another local
+    process) and must stay fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
+    so it is never silently swept into the PR (review thread
+    ``PRRT_kwDOSJAM6s6KXLaI``). When ``operation_start_head`` is unavailable
+    (no operation-owned anchor), the finalize is skipped entirely.
+    """
 
     # Skip finalization if: no state provided, the tree is already clean, or
     # the worktree status check itself failed. When the status check failed,
     # the working tree state cannot be reliably determined, so committing
     # would be unsafe; skip and let the caller surface the failed status.
     if state is None or check.clean or check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
+        return None
+    # Without an operation-owned anchor the finalize cannot prove the dirt is
+    # operation-owned, so it must not commit. Keep the fail-closed dirty path.
+    if operation_start_head is None:
+        return None
+    owned_delta_paths = await _operation_owned_delta_paths(
+        self,
+        worktree_path=worktree_path,
+        operation_start_head=operation_start_head,
+    )
+    if owned_delta_paths is None:
+        # The delta could not be resolved; do not commit unowned dirt.
+        return None
+    dirty_paths = set(check.paths)
+    if not dirty_paths:
+        return None
+    unrelated_dirty = dirty_paths - owned_delta_paths
+    if unrelated_dirty:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_skipped_unrelated_dirt",
+            workspace_id=workspace_id,
+            operation_start_head=operation_start_head,
+            dirty_paths=sorted(dirty_paths),
+            unrelated_dirty=sorted(unrelated_dirty),
+        )
         return None
     from awf.runtime.validation_worktree import ValidationWorktreeCheck
 
@@ -1320,6 +1392,7 @@ async def _run_pre_push_validation(
     compose_file: Path,
     remote_branch: str,
     state: object | None = None,
+    operation_start_head: str | None = None,
 ) -> _PrePushValidationResult:
     """Run a single pre-push validation cycle and persist run metadata."""
     async with self._deps.session_factory() as session:
@@ -1350,6 +1423,7 @@ async def _run_pre_push_validation(
             compose_file=compose_file,
             state=state,
             check=pre_validation_check,
+            operation_start_head=operation_start_head,
         )
         if finalized_check is not None:
             pre_validation_check = finalized_check
