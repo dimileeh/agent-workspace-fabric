@@ -557,6 +557,44 @@ async def test_check_validation_worktree_clean_preserves_untracked_files_when_as
 
 
 @pytest.mark.unit
+async def test_check_validation_worktree_clean_does_not_remove_empty_dirs_when_dirty(
+    tmp_path: Path,
+) -> None:
+    """Empty untracked dirs are only removed when status-derived paths are otherwise clean.
+
+    Regression for PR #606 review thread PRRT_kwDOSJAM6s6KHePe: a workspace with
+    ``?? generated/out.txt`` and an empty sibling ``generated/cache/`` had
+    ``generated/cache/`` deleted before the dirty failure was returned, mutating
+    unrelated workspace state for a blocked push.
+    """
+    worktree = _init_fake_worktree(tmp_path)
+    generated_dir = worktree / "generated"
+    generated_file = generated_dir / "out.txt"
+    empty_sibling = generated_dir / "cache"
+    generated_file.parent.mkdir(parents=True)
+    generated_file.write_text("generated\n", encoding="utf-8")
+    empty_sibling.mkdir(parents=True)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command reporting the untracked file only."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "?? generated/out.txt\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert "generated/out.txt" in check.paths
+    assert empty_sibling.exists()
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_removes_nested_empty_untracked_dirs_when_asked(
     tmp_path: Path,
 ) -> None:

@@ -572,22 +572,36 @@ async def check_validation_worktree_clean(
         include_ignored=True,
     )
 
+    # Ignored roots only suppress untracked or ignored artifacts; tracked files
+    # below those roots must stay visible so cleanup can restore them.
+    ignored_untracked_paths = {
+        path
+        for path in untracked_paths_from_status
+        if _is_under_ignored_path(path, ignored_paths_to_ignore)
+    }
+    visible_changed_paths = tuple(
+        path for path in changed_paths if path not in ignored_untracked_paths
+    )
+    visible_untracked_paths = tuple(
+        path for path in untracked_paths_from_status if path not in ignored_untracked_paths
+    )
+
     # The snapshot appends its results unfiltered below, so it must skip the
     # AWF-agent-runtime roots itself — an empty ``.claude/agent-memory/<agent>/``
     # (created before any file is written) would otherwise surface the root
     # and its parents as dirty, escaping the unconditional suppression above.
     snapshot_ignored_paths = (*ignored_paths, *AWF_AGENT_RUNTIME_IGNORED_ROOTS)
+    empty_untracked_dirs: tuple[str, ...] = ()
     try:
         if remove_empty_untracked_dirs:
-            # Return value intentionally discarded: the removal is a pure side
-            # effect. The dirty check below relies only on git-status output, which
-            # never reports truly empty directories, so no removed-path list is
-            # needed here.
-            _remove_empty_untracked_dirs(
-                worktree_path=worktree_path,
-                ignored_paths=snapshot_ignored_paths,
-            )
-            empty_untracked_dirs: tuple[str, ...] = ()
+            # Only remove empty directories when the status-derived paths are
+            # otherwise clean. Otherwise a failed precondition check mutates
+            # unrelated workspace state before returning the dirty failure.
+            if not visible_changed_paths and not visible_untracked_paths:
+                _remove_empty_untracked_dirs(
+                    worktree_path=worktree_path,
+                    ignored_paths=snapshot_ignored_paths,
+                )
         else:
             empty_untracked_dirs = _snapshot_empty_untracked_dirs(
                 worktree_path=worktree_path,
@@ -606,17 +620,10 @@ async def check_validation_worktree_clean(
             ),
             command_stderr=(exc.stderr or "")[:1000],
         )
-    # Ignored roots only suppress untracked or ignored artifacts; tracked files
-    # below those roots must stay visible so cleanup can restore them.
-    ignored_untracked_paths = {
-        path
-        for path in untracked_paths_from_status
-        if _is_under_ignored_path(path, ignored_paths_to_ignore)
-    }
     paths = tuple(
         dict.fromkeys(
             (
-                *(path for path in changed_paths if path not in ignored_untracked_paths),
+                *visible_changed_paths,
                 *empty_untracked_dirs,
             )
         )
@@ -624,11 +631,7 @@ async def check_validation_worktree_clean(
     untracked_paths = tuple(
         dict.fromkeys(
             (
-                *(
-                    path
-                    for path in untracked_paths_from_status
-                    if path not in ignored_untracked_paths
-                ),
+                *visible_untracked_paths,
                 *empty_untracked_dirs,
             )
         )
