@@ -1381,6 +1381,143 @@ async def test_pre_push_validation_finalize_preserves_ownership_repair_reason_co
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_finalize_preserves_protected_scope_diff_unavailable_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A protected-scope-diff-unavailable finalize must surface its reason code, not generic dirty.
+
+    ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
+    raises ``ProtectedScopeDiffError`` when the committed diff against the remote
+    PR branch cannot be verified. Before the fix, the broad ``except Exception`` in
+    ``_try_finalize_pre_push_dirty_repair_state`` swallowed it and returned
+    ``None``, so the stale dirty check was reused and the failure was reported
+    as the generic ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``, losing the
+    protected-scope diff-unavailable reason code end-to-end (regression for thread
+    ``PRRT_kwDOSJAM6s6KWpSB``).
+    """
+    from awf.runtime.pr_monitor_runner.constants import (
+        _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+    )
+    from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(side_effect=ProtectedScopeDiffError("diff baseline unavailable")),
+    )
+    state = MonitorState()
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON
+    assert result.validation_run_id is None
+    # The finalize failure must not re-check the tree (no verify/recheck pass).
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_propagates_provider_recovery_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A provider-recovery-retry finalize must propagate, not collapse into generic dirty.
+
+    ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
+    raises ``ProviderRecoveryRetryError`` when provider recovery suppresses the CLI
+    and the operation must back off and retry later. The loop's
+    ``except ProviderRecoveryRetryError`` handler surfaces ``PROVIDER_OUTAGE`` retry
+    semantics, so the finalize must re-raise it instead of swallowing it (the broad
+    ``except Exception`` previously returned ``None``, reusing the stale dirty check
+    and reporting the generic ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``) — regression
+    for thread ``PRRT_kwDOSJAM6s6KWpSB``.
+    """
+    from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(side_effect=ProviderRecoveryRetryError()),
+    )
+    state = MonitorState()
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await pre_push_validation_module._run_pre_push_validation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=state,
+        )
+
+    # The finalize failure must not re-check the tree (no verify/recheck pass).
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fails(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],

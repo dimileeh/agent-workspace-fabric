@@ -35,7 +35,10 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
-from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
+from awf.runtime.pr_monitor_runner.constants import (
+    _MONITOR_POLICY_BLOCKED_REASON,
+    _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+)
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
@@ -47,6 +50,8 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
+    ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
 )
@@ -611,6 +616,41 @@ async def _try_finalize_pre_push_dirty_repair_state(
             reason_code=exc.reason_code,
             message=str(exc) or "agent runtime ownership repair failed",
         )
+    except ProtectedScopeDiffError as exc:
+        # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
+        # raises this when the committed diff against the remote PR branch cannot be
+        # verified (e.g. the protected-scope remote-diff baseline is unavailable). Like
+        # the other commit callers (``ci_ops.py``, ``operator_hints.py``,
+        # ``fix_cycle.py``, ``remote_ops.py``), preserve the
+        # ``PROTECTED_SCOPE_DIFF_UNAVAILABLE`` reason code end-to-end instead of
+        # letting it collapse into the generic pre-existing-dirty failure.
+        # Returning a non-clean check carrying the reason code flows through
+        # ``_pre_push_dirty_result`` into ``_GitPushResult.reason_code``.
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_protected_scope_diff_unavailable",
+            workspace_id=workspace_id,
+            error=repr(exc),
+            paths=list(check.paths),
+        )
+        return ValidationWorktreeCheck(
+            clean=False,
+            paths=check.paths,
+            reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+            message=str(exc) or "protected-scope diff unavailable before pre-push dirty finalize",
+        )
+    except ProviderRecoveryRetryError:
+        # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
+        # raises this when provider recovery suppresses the CLI and the operation must
+        # back off and retry later. Every other commit caller lets it propagate so the
+        # loop's ``except ProviderRecoveryRetryError`` handler surfaces ``PROVIDER_OUTAGE``
+        # retry semantics; re-raise here instead of swallowing it into the generic
+        # pre-existing-dirty failure.
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_provider_recovery_retry",
+            workspace_id=workspace_id,
+            paths=list(check.paths),
+        )
+        raise
     except Exception as exc:
         _log.warning(
             "monitor.pre_push_dirty_finalize_failed",
