@@ -713,7 +713,7 @@ async def repair_mirror_hooks_path(mirror_path: Path) -> bool:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    await proc.communicate()
     assert proc.returncode is not None
 
     if proc.returncode != 0:
