@@ -942,25 +942,34 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
     )
 
-    # 1.pre A pending protected-block DIRECTIVE resume runs BEFORE SyncBase.
-    # When a monitor-origin protected-scope block is resolved with a directive
-    # (revert/redo) and the base advanced during the human decision window,
-    # letting SyncBase run first re-validates the STILL-PRESERVED protected
-    # commit — and a directive guide revoked the grants that would have
-    # suppressed it (controls_guide), so ``_run_sync_base`` pauses the workspace
-    # back into ``blocked`` before the directive ever runs, a re-block loop where
-    # the operator's directive is silently discarded each base update
-    # (PRRT_kwDOSJAM6s6KFgtj). Running the hint first lets the directive
-    # revert/redo the edit and push it to the PR branch (a base update does not
-    # make THAT push non-fast-forward); SyncBase then integrates the base on a
-    # later iteration once the violation is cleared. Scoped to a pending
-    # directive WITH the preserved-head marker: an ordinary remonitor (no
-    # directive) and a grant-only approve-and-keep resume (grant still suppresses
-    # the violation) keep syncing base first.
+    # 1.pre A pending protected-block resume — DIRECTIVE or GRANT-ONLY — runs
+    # BEFORE SyncBase. When a monitor-origin protected-scope block is resolved and
+    # the base advanced during the human decision window, letting SyncBase run
+    # first mishandles the STILL-PRESERVED protected commit in two distinct ways:
+    #
+    #   * DIRECTIVE (revert/redo): the directive guide revoked the grants that
+    #     would have suppressed the preserved violation (controls_guide), so
+    #     ``_run_sync_base`` re-validates it and pauses the workspace back into
+    #     ``blocked`` before the directive ever runs — a re-block loop where the
+    #     operator's directive is silently discarded each base update
+    #     (PRRT_kwDOSJAM6s6KFgtj).
+    #   * GRANT-ONLY (approve-and-keep): the path-scoped grant is still active
+    #     (it is only consumed when the hint runs), so if SyncBase hits a conflict
+    #     and its resolution agent edits the SAME granted protected path,
+    #     ``_protected_scope_violations_for_sync_base_push`` honors that grant and
+    #     pushes the NEW protected edit under an approval meant only for the
+    #     preserved commit — a grant leak (PRRT_kwDOSJAM6s6KGX2A).
+    #
+    # Running the hint first resolves the block (directive revert/redo, or
+    # grant-only push of the preserved commit) and pushes it to the PR branch — a
+    # base update does not make THAT push non-fast-forward — and spends the grant;
+    # SyncBase then integrates the base on a later iteration with no active grant,
+    # so any sync-base protected edit re-blocks. Scoped to a pending resume WITH
+    # the preserved-head marker: an ordinary remonitor (no preserved block) keeps
+    # syncing base first.
     if (
         state.pending_operator_hint is not None
         and state.pending_operator_hint.status == "pending"
-        and state.pending_operator_hint.directive is not None
         and state.has_preserved_protected_block
     ):
         return AddressOperatorHint(hint=state.pending_operator_hint)

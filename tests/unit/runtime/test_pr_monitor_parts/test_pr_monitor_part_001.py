@@ -339,10 +339,27 @@ class TestOperatorHints:
         assert action == AddressOperatorHint(hint=hint)
 
     @pytest.mark.unit
-    def test_grant_only_resume_with_preserved_block_still_syncs_base(self) -> None:
-        """A grant-only (no directive) approve-and-keep resume keeps SyncBase
-        first: the active grant suppresses the protected violation, so SyncBase
-        does not re-block — the directive carve-out must not apply here."""
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_grant_only_resume_with_preserved_block_runs_before_sync_base(
+        self,
+        status: PRStatus,
+    ) -> None:
+        """A grant-only (no directive) approve-and-keep resume must ALSO beat
+        SyncBase. The path-scoped grant is only consumed when the hint runs, so
+        if SyncBase ran first and its conflict-resolution agent edited the same
+        granted protected path, ``_protected_scope_violations_for_sync_base_push``
+        would honor the still-active grant and push that NEW protected edit under
+        an approval meant only for the preserved commit — a grant leak. Running
+        the hint first pushes the preserved commit and spends the grant before any
+        sync-base repair can author additional protected changes
+        (PRRT_kwDOSJAM6s6KGX2A)."""
         hint = OperatorHint(
             reason="operator approved keeping the protected change",
             directive=None,
@@ -353,9 +370,9 @@ class TestOperatorHints:
             threads_addressed_ids={_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "deadbeefcafef00d"},
         )
 
-        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
+        action = decide(status, state, MonitorConfig(auto_merge=True))
 
-        assert isinstance(action, SyncBase)
+        assert action == AddressOperatorHint(hint=hint)
 
     @pytest.mark.unit
     def test_non_pending_directive_with_preserved_block_does_not_loop_hint(self) -> None:
