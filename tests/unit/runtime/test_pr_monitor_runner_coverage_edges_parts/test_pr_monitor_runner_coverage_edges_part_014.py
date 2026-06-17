@@ -223,7 +223,7 @@ async def test_fix_cycle_pauses_into_blocked_and_preserves_protected_commit(
     assert _git_worktree_command(worktree, "reset", "--hard", "start-sha") not in [
         call.args for call in cmd.calls
     ]
-    assert not any(call.args[:3] == ["git", "reset", "--hard"] for call in cmd.calls)
+    assert not any(call.args[5:7] == ["reset", "--hard"] for call in cmd.calls)
     # An operator notification comment was posted to the PR.
     assert len(gh.posts) == 1
 
