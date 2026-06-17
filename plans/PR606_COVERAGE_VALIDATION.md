@@ -58,13 +58,13 @@ Result: `All checks passed!` / `Success: no issues found in 2 source files`.
 
 ## Coverage impact analysis
 
-CI run 27666319065 produced `coverage.xml` with:
+CI run 27666319065 produced `coverage.xml` with the pre-fix totals:
 
 - `lines-valid`: 59500
 - `lines-covered`: 59140
 - `branches-valid`: 18542
 - `branches-covered`: 18116
-- Combined coverage: `77256 / 78042 = 98.99 %` (below the 99 % gate by 6 units).
+- Pre-fix combined coverage: `77256 / 78042 = 98.99 %` (below the 99 % gate by 6 units).
 
 The owned gaps in this fix are:
 
@@ -75,7 +75,7 @@ The owned gaps in this fix are:
 - `runtime/pr_monitor_runner/pre_push_validation.py`: new regression test covers
   the previously uncovered rollback-failure-after-exception path (2 lines, 4 branches).
 
-These changes close the shortfall without touching the threshold configuration.
+These changes close the owned-path gaps without touching the threshold configuration.
 The full combined-coverage gate is intentionally left to AWF/GitHub CI; the
 local checks above target only the files and behaviors changed.
 
@@ -97,5 +97,6 @@ local checks above target only the files and behaviors changed.
 ## Remaining gaps
 
 None identified in the owned paths. Pre-existing coverage gaps in unrelated
-modules were not addressed because they are outside this agent's owned scope and
-the owned-path fix is sufficient to lift the combined total above the gate.
+modules were not addressed because they are outside this agent's owned scope; AWF/GitHub
+CI owns the combined-coverage gate and will determine whether the owned-path fixes lift
+the combined total above the threshold.
