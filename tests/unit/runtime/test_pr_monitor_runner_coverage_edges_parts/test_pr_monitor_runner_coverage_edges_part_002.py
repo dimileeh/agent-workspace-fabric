@@ -44,6 +44,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
 from tests.postgres import postgres_test_engine
@@ -1109,6 +1110,102 @@ async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_ownership_repa
     assert result.returncode == 1
     assert result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
     assert result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+@pytest.mark.unit
+async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_head_object_missing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_head",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="reviewer",
+    )
+
+    async def _head_object_missing(**_kwargs: object) -> str:
+        raise _MonitorHeadObjectMissingError(
+            "HEAD_OBJECT_MISSING_UNRECOVERABLE",
+            "HEAD object missing for workspace ws_head_thread and recovery failed",
+        )
+
+    monkeypatch.setattr(runner, "_address_thread", _head_object_missing)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_head_thread",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch="awf/ws_head_thread",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.returncode == 1
+    assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert "HEAD object missing" in result.stderr
+
+
+@pytest.mark.unit
+async def test_fix_cycle_returns_failed_push_when_review_fix_hits_head_object_missing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    review = ReviewComment(
+        comment_id="C_head",
+        body_excerpt="please adjust this",
+        author="reviewer",
+    )
+
+    async def _head_object_missing(**_kwargs: object) -> object:
+        raise _MonitorHeadObjectMissingError(
+            "HEAD_OBJECT_MISSING_UNRECOVERABLE",
+            "HEAD object missing for workspace ws_head_review and recovery failed",
+        )
+
+    monkeypatch.setattr(runner, "_address_review_comment_result", _head_object_missing)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_head_review",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        initial_threads=(),
+        initial_reviews=(review,),
+        state=MonitorState(),
+        remote_branch="awf/ws_head_review",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.returncode == 1
+    assert result.reason_code == "HEAD_OBJECT_MISSING_UNRECOVERABLE"
+    assert "HEAD object missing" in result.stderr
 
 
 @pytest.mark.unit
