@@ -611,6 +611,23 @@ async def check_validation_worktree_clean(
         # A failed gitlink lookup is an infrastructure failure, not a clean
         # tree. Proceeding with an empty set would let empty-directory cleanup
         # remove deinitialized tracked submodules and report a false-clean.
+        # If the worktree already has tracked or untracked dirty paths, report
+        # those paths with the usual pre-existing-dirty reason so callers still
+        # see what made the worktree dirty.
+        if visible_changed_paths or visible_untracked_paths:
+            paths = tuple(dict.fromkeys((*visible_changed_paths,)))
+            untracked_paths = tuple(dict.fromkeys((*visible_untracked_paths,)))
+            return ValidationWorktreeCheck(
+                clean=False,
+                paths=paths,
+                untracked_paths=untracked_paths,
+                ignored_paths=ignored_paths,
+                reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+                message=(
+                    "Validation worktree has pre-existing uncommitted changes; "
+                    "refusing to run AWF-owned validation from a dirty tree."
+                ),
+            )
         return ValidationWorktreeCheck(
             clean=False,
             reason_code=VALIDATION_WORKTREE_STATUS_FAILED,

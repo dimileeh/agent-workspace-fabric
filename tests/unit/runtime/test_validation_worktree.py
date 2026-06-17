@@ -1055,30 +1055,8 @@ async def test_check_validation_worktree_clean_fails_when_gitlink_lookup_fails(
     tracked submodule directory, and the cleanliness decision (made from the
     pre-removal ``git status`` output) would falsely report the tree as clean.
     """
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    worktree = _init_worktree_with_deinitialized_submodule(tmp_path)
     submodule = worktree / "sub"
-    submodule.mkdir()
-    (submodule / ".git").mkdir()
-    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
-    _run_real_git(submodule, "init")
-    _run_real_git(submodule, "config", "user.email", "agent@example.com")
-    _run_real_git(submodule, "config", "user.name", "AWF Agent")
-    _run_real_git(submodule, "add", "file.txt")
-    _run_real_git(submodule, "commit", "-m", "init")
-    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
-    _run_real_git(worktree, "commit", "-m", "add sub")
-    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
-    assert not (submodule / ".git").exists()
-    assert not any(submodule.iterdir())
 
     original_run = subprocess.run
 
@@ -1109,6 +1087,79 @@ async def test_check_validation_worktree_clean_fails_when_gitlink_lookup_fails(
     assert "gitlink" in check.message.lower()
     assert check.command_stderr == "ls-tree exploded"
     assert submodule.exists()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_preserves_dirty_paths_when_gitlink_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gitlink failure with pre-existing dirty paths reports those paths.
+
+    Regression for PR #606 review thread PRRT_kwDOSJAM6s6KHy0I: when
+    ``remove_empty_untracked_dirs`` is false and ``_gitlink_paths`` fails, the
+    pre-existing dirty paths from ``git status`` must be preserved with
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` instead of being replaced by the
+    infrastructure ``VALIDATION_WORKTREE_STATUS_FAILED`` failure.
+    """
+    worktree = _init_worktree_with_deinitialized_submodule(tmp_path)
+
+    original_run = subprocess.run
+
+    def fail_ls_tree(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "ls-tree" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=128, stdout="", stderr="ls-tree exploded"
+            )
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_ls_tree)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a status command reporting a tracked modification."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, " M tracked.py\n", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=False,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert "tracked.py" in check.paths
+
+
+def _init_worktree_with_deinitialized_submodule(tmp_path: Path) -> Path:
+    """Create a real git worktree that contains a deinitialized submodule."""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    submodule = worktree / "sub"
+    submodule.mkdir()
+    (submodule / ".git").mkdir()
+    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
+    _run_real_git(submodule, "init")
+    _run_real_git(submodule, "config", "user.email", "agent@example.com")
+    _run_real_git(submodule, "config", "user.name", "AWF Agent")
+    _run_real_git(submodule, "add", "file.txt")
+    _run_real_git(submodule, "commit", "-m", "init")
+    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
+    _run_real_git(worktree, "commit", "-m", "add sub")
+    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
+    assert not (submodule / ".git").exists()
+    assert not any(submodule.iterdir())
+    return worktree
 
 
 def _run_real_git(worktree: Path, *args: str) -> subprocess.CompletedProcess[str]:
