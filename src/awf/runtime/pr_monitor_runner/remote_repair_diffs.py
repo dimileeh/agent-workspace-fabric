@@ -24,14 +24,14 @@ from awf.control.quality_gates import (
     ProtectedFileDiff,
     diff_classified_protected_paths,
 )
+from awf.runtime.pr_monitor_runner.constants import (
+    _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS,
+)
 from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_name_status_z,
     _read_worktree_text,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
-from awf.runtime.pr_monitor_runner.remote_ops import (
-    _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS,
-)
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
 )
