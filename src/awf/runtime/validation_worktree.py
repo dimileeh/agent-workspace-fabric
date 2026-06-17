@@ -256,6 +256,31 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
     return frozenset(paths)
 
 
+def _is_ignored_path(worktree_path: Path, path: str) -> bool:
+    """Return whether ``path`` matches a gitignore rule.
+
+    ``git status --ignored=matching`` only prints ignored entries that contain
+    at least one tracked or untracked file. Empty directories matched by a
+    wildcard rule such as ``cache/**`` are not listed, so the cleanup helpers
+    consult ``git check-ignore`` directly for directory candidates that would
+    otherwise be treated as untracked side effects.
+    """
+    result = subprocess.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "check-ignore",
+            "--no-index",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() != ""
+
+
 def _remove_empty_untracked_dirs(
     *,
     worktree_path: Path,
@@ -263,9 +288,10 @@ def _remove_empty_untracked_dirs(
 ) -> tuple[str, ...]:
     """Remove empty untracked directories from the worktree and return their paths.
 
-    Only directories that are truly empty, inside ``worktree_path``, and not
-    symlinks are removed. Empty directories under ``ignored_paths`` are left
-    alone so the cleanup/provenance contract continues to treat them as
+    Only directories that are truly empty, inside ``worktree_path``, not
+    symlinks, and not matched by a gitignore rule are removed. Empty
+    directories under ``ignored_paths`` or matched by ``git check-ignore`` are
+    left alone so the cleanup/provenance contract continues to treat them as
     setup-owned or ignored state.
     """
     removed: list[str] = []
@@ -315,6 +341,8 @@ def _remove_empty_untracked_dirs(
         except ValueError:
             return False
         dir_path = f"{relative}/"
+        if _is_ignored_path(worktree_path, dir_path):
+            return False
         try:
             directory.rmdir()
         except FileNotFoundError:
@@ -370,7 +398,10 @@ def _snapshot_empty_untracked_dirs(
             if has_file_descendant(child):
                 has_file = True
             else:
-                empty_dirs.append(child_path)
+                if _is_ignored_path(worktree_path, child_path):
+                    has_file = True
+                else:
+                    empty_dirs.append(child_path)
         return has_file
 
     has_file_descendant(worktree_path)

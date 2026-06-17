@@ -1042,6 +1042,120 @@ def _init_fake_worktree(tmp_path: Path) -> Path:
     return worktree
 
 
+def _init_real_worktree_with_gitignore(
+    tmp_path: Path,
+    gitignore_content: str = "cache/**\n",
+) -> Path:
+    """Create a real git worktree with a committed .gitignore file.
+
+    Tests that need gitignore rules to be evaluated by ``git check-ignore``
+    require an actual worktree (not a fake ``.git`` pointer) because ignore
+    rules are read from the worktree's index and working tree.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    (worktree / ".gitignore").write_text(gitignore_content, encoding="utf-8")
+    _run_real_git(worktree, "add", ".gitignore")
+    _run_real_git(worktree, "commit", "-m", "add gitignore")
+    return worktree
+
+
+@pytest.mark.unit
+def test_remove_empty_untracked_dirs_preserves_wildcard_ignored_empty_dir(
+    tmp_path: Path,
+) -> None:
+    """Empty directories ignored by wildcard rules must not be removed.
+
+    Regression for PR #606 review thread PRRT_kwDOSJAM6s6KH8Na:
+    ``git status --ignored=matching`` does not print empty directories that
+    match a pattern such as ``cache/**``. Without a direct ``git check-ignore``
+    probe, ``_remove_empty_untracked_dirs`` would rmdir the directory and
+    report the worktree clean.
+    """
+    worktree = _init_real_worktree_with_gitignore(tmp_path)
+    ignored_dir = worktree / "cache"
+    ignored_dir.mkdir()
+
+    removed = validation_worktree._remove_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(removed) == []
+    assert ignored_dir.exists()
+    status = _run_real_git(
+        worktree,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignored=matching",
+    )
+    assert status.stdout == ""
+
+
+@pytest.mark.unit
+def test_snapshot_empty_untracked_dirs_preserves_wildcard_ignored_empty_dir(
+    tmp_path: Path,
+) -> None:
+    """Wildcard-ignored empty directories must not be surfaced as dirty."""
+    worktree = _init_real_worktree_with_gitignore(tmp_path)
+    ignored_dir = worktree / "cache"
+    ignored_dir.mkdir()
+
+    empty_dirs = validation_worktree._snapshot_empty_untracked_dirs(
+        worktree_path=worktree,
+        ignored_paths=(),
+    )
+
+    assert sorted(empty_dirs) == []
+    assert ignored_dir.exists()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_preserves_wildcard_ignored_empty_dir(
+    tmp_path: Path,
+) -> None:
+    """Pre-push guard treats a wildcard-ignored empty dir as clean."""
+    worktree = _init_real_worktree_with_gitignore(tmp_path)
+    ignored_dir = worktree / "cache"
+    ignored_dir.mkdir()
+
+    check = await check_validation_worktree_clean(
+        run_git=_run_git_in_real_worktree(worktree),
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
+
+    assert check.clean is True
+    assert check.reason_code is None
+    assert check.paths == ()
+    assert check.untracked_paths == ()
+    assert ignored_dir.exists()
+
+
+def _run_git_in_real_worktree(worktree: Path):
+    """Return a GitRunner that executes real git commands in ``worktree``."""
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        result = _run_real_git(worktree, *args)
+        return _CommandResultLike(
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+
+    return run_git
+
+
 @pytest.mark.unit
 async def test_check_validation_worktree_clean_fails_when_gitlink_lookup_fails(
     tmp_path: Path,
