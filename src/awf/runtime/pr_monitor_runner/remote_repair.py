@@ -1387,8 +1387,9 @@ async def _preserved_commit_already_on_remote(
     worktree_path: Path,
     remote_branch: str,
     remote_push_url: str | None = None,
+    preserved_head_sha: str | None = None,
 ) -> bool:
-    """Return whether the local HEAD is already on the remote PR branch.
+    """Return whether the preserved commit is already on the remote PR branch.
 
     Divergence recovery (WS-2 §5): a monitor/worker restart can re-run the
     post-PR resume after the preserved commit's push already landed. Pushing
@@ -1397,7 +1398,16 @@ async def _preserved_commit_already_on_remote(
     changed-path set means HEAD is an ancestor of (or equals) the remote head —
     already pushed — so the caller treats the push as a no-op. A fetch/diff
     failure returns ``False`` so the normal push path runs and surfaces the
-    error rather than silently skipping a real push."""
+    error rather than silently skipping a real push.
+
+    An empty changed-path set only proves the CURRENT worktree HEAD content is on
+    the remote. If the worktree was reset or recreated at the remote PR head
+    during the blocked interval, HEAD no longer carries the operator-approved
+    preserved commit yet the diff is still empty — declaring a no-op would
+    silently drop the approved protected commit. When the pause recorded a
+    preserved HEAD SHA (``preserved_head_sha``), positively confirm THAT commit
+    is contained in the freshly-fetched remote head before declaring the no-op;
+    if it is not, return ``False`` so the caller does not skip a real push."""
     if not worktree_path.exists():
         return False
     try:
@@ -1410,12 +1420,48 @@ async def _preserved_commit_already_on_remote(
         return False
     if changed_paths:
         return False
+    if preserved_head_sha and not await self._preserved_head_on_remote_fetch_head(
+        worktree_path=worktree_path,
+        preserved_head_sha=preserved_head_sha,
+    ):
+        _log.warning(
+            "monitor.protected_scope_preserved_commit_not_on_remote",
+            workspace_id=workspace_id,
+            remote_branch=remote_branch,
+            preserved_head_sha=preserved_head_sha,
+        )
+        return False
     _log.info(
         "monitor.protected_scope_preserved_commit_already_on_remote",
         workspace_id=workspace_id,
         remote_branch=remote_branch,
     )
     return True
+
+
+async def _preserved_head_on_remote_fetch_head(
+    self: Any,
+    *,
+    worktree_path: Path,
+    preserved_head_sha: str,
+) -> bool:
+    """Return whether ``preserved_head_sha`` is contained in the fetched remote.
+
+    Runs ``git merge-base --is-ancestor`` against ``FETCH_HEAD`` (freshly written
+    by :meth:`_remote_branch_diff_base_and_changed_paths`), which exits 0 when the
+    preserved commit is an ancestor of — or equal to — the remote PR head. A
+    non-zero exit (including an unknown SHA) means the preserved commit never
+    landed, so the caller must not treat the push as a no-op."""
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "merge-base",
+            "--is-ancestor",
+            preserved_head_sha,
+            "FETCH_HEAD",
+        )
+    )
+    return bool(result.ok)
 
 
 async def _consume_active_operator_grants(self: Any, workspace_id: str) -> int:

@@ -17,6 +17,7 @@ from awf.runtime.pr_monitor import MonitorState, OperatorHint
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.remote_repair import _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
@@ -170,6 +171,9 @@ async def _run_operator_hint_cycle(
         worktree_path=worktree_path,
         remote_branch=remote_branch,
         remote_push_url=remote_push_url,
+        preserved_head_sha=state.threads_addressed_ids.get(
+            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
+        ),
     ):
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:

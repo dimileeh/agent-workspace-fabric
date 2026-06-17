@@ -44,6 +44,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import helpers as runner_helpers
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
+from awf.runtime.pr_monitor_runner.remote_repair import _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
@@ -1811,6 +1812,71 @@ async def test_operator_hint_resume_no_op_push_when_commit_already_on_remote(
 
 
 @pytest.mark.unit
+async def test_operator_hint_resume_threads_recorded_preserved_sha_into_no_op_check(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grant-only resume must thread the pause-recorded preserved HEAD SHA
+    into the idempotent no-op check so a reset/recreated worktree cannot make it
+    silently drop the approved protected commit (PRRT_kwDOSJAM6s6KEHsN)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_active_grant(factory, workspace_id, path="pyproject.toml")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="approved the protected change",
+        operation_id="op_thread",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    captured: dict[str, object] = {}
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("recorded-preserved-sha", None)
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _already_on_remote(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "recorded-preserved-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _already_on_remote)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert captured.get("preserved_head_sha") == "recorded-preserved-sha"
+
+
+@pytest.mark.unit
 def test_monitor_while_blocked_new_comment_not_dropped_on_resume() -> None:
     """Scope #3: the reserved protected-block state keys (preserved-head marker,
     epoch/content notification key) must NOT mark an untriaged comment addressed.
@@ -2084,4 +2150,82 @@ async def test_preserved_commit_already_on_remote_diff_error_returns_false(
             remote_branch="awf/ws_err",
         )
         is False
+    )
+
+
+@pytest.mark.unit
+async def test_preserved_commit_already_on_remote_recorded_sha_not_on_remote_returns_false(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worktree reset/recreated at the remote head during the blocked interval:
+    the diff is empty but the recorded preserved SHA is NOT on the branch, so the
+    no-op MUST be refused or the approved protected commit is silently dropped."""
+    worktree = tmp_path / "worktrees" / "ws_reset"
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    # merge-base --is-ancestor <preserved> FETCH_HEAD exits non-zero: not on remote.
+    cmd.queue_result(returncode=1)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _diff(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        return ("base-sha", ())
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _diff)
+
+    assert (
+        await runner._preserved_commit_already_on_remote(
+            workspace_id="ws_reset",
+            worktree_path=worktree,
+            remote_branch="awf/ws_reset",
+            preserved_head_sha="preserved-sha",
+        )
+        is False
+    )
+    ancestry_calls = [c for c in cmd.calls if "--is-ancestor" in c.args]
+    assert ancestry_calls, "expected a merge-base --is-ancestor verification"
+    assert "preserved-sha" in ancestry_calls[0].args
+    assert "FETCH_HEAD" in ancestry_calls[0].args
+
+
+@pytest.mark.unit
+async def test_preserved_commit_already_on_remote_recorded_sha_on_remote_returns_true(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Genuine idempotent restart: the preserved commit truly landed on the
+    remote (ancestry check passes), so the push is a legitimate no-op."""
+    worktree = tmp_path / "worktrees" / "ws_idem"
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _diff(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        return ("base-sha", ())
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _diff)
+
+    assert (
+        await runner._preserved_commit_already_on_remote(
+            workspace_id="ws_idem",
+            worktree_path=worktree,
+            remote_branch="awf/ws_idem",
+            preserved_head_sha="preserved-sha",
+        )
+        is True
     )

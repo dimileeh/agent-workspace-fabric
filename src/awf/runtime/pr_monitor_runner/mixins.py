@@ -122,6 +122,7 @@ class RunnerDelegatesMixin:
     _active_operator_grant_specs = _remote_repair._active_operator_grant_specs
     _consume_active_operator_grants = _remote_repair._consume_active_operator_grants
     _preserved_commit_already_on_remote = _remote_repair._preserved_commit_already_on_remote
+    _preserved_head_on_remote_fetch_head = _remote_repair._preserved_head_on_remote_fetch_head
     _rollback_protected_scope_repair_delta_before_push = (
         _remote_repair._rollback_protected_scope_repair_delta_before_push
     )
