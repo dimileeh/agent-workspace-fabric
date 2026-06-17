@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -23,9 +24,22 @@ from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     VALIDATION_WORKTREE_SIDE_EFFECTS_CLEANED,
 )
+from awf.service import artifacts as executor_service_artifacts
 from tests.unit.control.test_executor_coverage_edges_parts.test_executor_coverage_edges_part_003 import (
     _command_result,
 )
+
+
+def _workspace() -> SimpleNamespace:
+    return SimpleNamespace(
+        resolved_profile={"name": "validation-callback-race"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        test_commands=[],
+        task_class=None,
+        operations=[],
+    )
 
 
 @pytest.mark.unit
@@ -300,15 +314,7 @@ async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanu
     tmp_path: Path,
 ) -> None:
     profile = WorkspaceProfile.model_validate({"name": "validation-callback-race"})
-    workspace = SimpleNamespace(
-        resolved_profile={"name": "validation-callback-race"},
-        requested_profile=None,
-        profile_ref=None,
-        env_profile=None,
-        test_commands=[],
-        task_class=None,
-        operations=[],
-    )
+    workspace = _workspace()
 
     class _ThrowingValidation:
         async def run_profile_phases(self, **_kwargs: object) -> object:
@@ -399,6 +405,131 @@ async def test_execution_validation_stops_if_callback_becomes_stale_after_cleanu
 
 
 @pytest.mark.unit
+async def test_execution_validation_deposits_artifacts_before_stale_callback_after_normal_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A callback-terminal status after normal cleanup must still deposit planning artifacts."""
+    profile = WorkspaceProfile.model_validate(
+        {"name": "validation-callback-terminal-deposit", "planning": {"required": True}}
+    )
+    workspace = _workspace()
+    calls: list[str] = []
+    real_deposit = (
+        executor_execution_validation._planning_artifacts._deposit_planning_artifacts_best_effort
+    )
+
+    def _spy_deposit(*_args: object, **_kwargs: object) -> None:
+        calls.append("deposit")
+        real_deposit(*_args, **_kwargs)
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_command_result(tmp_path, returncode=0)])
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-callback-terminal-deposit"),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=True),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+    )
+
+    async def _sync_resolved_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    worktree_path = tmp_path / "worktree"
+    plan_path = worktree_path / "docs" / "awf-plans" / "ws_callback_terminal_deposit.md"
+    report_path = (
+        worktree_path / "docs" / "awf-plans" / "ws_callback_terminal_deposit.conformance.json"
+    )
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# plan\n", encoding="utf-8")
+    report_path.write_text('{"status":"satisfied"}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_resolved_profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=True,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id="ws_callback_terminal_deposit",
+        ws=workspace,  # type: ignore[arg-type]
+        worktree_path=worktree_path,
+        compose_project="awf_ws_callback_terminal_deposit",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch="awf/ws_callback_terminal_deposit",
+        adapter=object(),  # type: ignore[arg-type]
+        default_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert result.stop
+    assert calls == ["deposit"]
+    executor._finish_validation_callback_if_terminal.assert_awaited_once()
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        (tmp_path / "artifacts").parent, "ws_callback_terminal_deposit"
+    )
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan\n"
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("callback_results", "expected_callback_checks", "workspace_suffix"),
     [
@@ -416,15 +547,7 @@ async def test_execution_validation_fails_cleanup_when_callback_becomes_stale_af
     profile = WorkspaceProfile.model_validate({"name": "validation-stale-cleanup-failure"})
     workspace_id = f"ws_stale_cleanup_failure_{workspace_suffix}"
     validation_run_id = f"vr-stale-cleanup-failure-{workspace_suffix}"
-    workspace = SimpleNamespace(
-        resolved_profile={"name": "validation-stale-cleanup-failure"},
-        requested_profile=None,
-        profile_ref=None,
-        env_profile=None,
-        test_commands=[],
-        task_class=None,
-        operations=[],
-    )
+    workspace = _workspace()
 
     class _ThrowingValidation:
         async def run_profile_phases(self, **_kwargs: object) -> object:

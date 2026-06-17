@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -37,6 +38,7 @@ from awf.runtime.validation_worktree import ValidationWorktreeCheck
 from awf.runtime.validation_worktree_constants import (
     VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
 )
+from awf.service import artifacts as executor_service_artifacts
 
 
 def _command_result(tmp_path: Path, *, returncode: int = 1) -> ValidationCommandResult:
@@ -641,16 +643,62 @@ async def test_auto_retry_planning_scope_failure_records_skip_and_retry_errors(
 @pytest.mark.unit
 async def test_execution_validation_returns_stop_when_start_transition_is_stale(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {"name": "validation-stale-start", "planning": {"required": True}}
+    )
+    calls: list[str] = []
+    real_deposit = (
+        executor_execution_validation._planning_artifacts._deposit_planning_artifacts_best_effort
+    )
+
+    def _spy_deposit(*_args: object, **_kwargs: object) -> None:
+        calls.append("deposit")
+        real_deposit(*_args, **_kwargs)
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
     executor = SimpleNamespace(
         _transition_if_current=AsyncMock(return_value=False),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _session_factory=AsyncMock,
     )
+
+    async def _sync_resolved_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_sync_resolved_profile",
+        _sync_resolved_profile,
+    )
+
+    worktree_path = tmp_path / "worktree"
+    plan_path = worktree_path / "docs" / "awf-plans" / "ws_stale_validation.md"
+    report_path = worktree_path / "docs" / "awf-plans" / "ws_stale_validation.conformance.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# plan\n", encoding="utf-8")
+    report_path.write_text('{"status":"satisfied"}', encoding="utf-8")
 
     result = await executor_execution_validation.run_validation_and_fix_cycle(
         executor,
         workspace_id="ws_stale_validation",
-        ws=SimpleNamespace(),
-        worktree_path=tmp_path / "worktree",
+        ws=SimpleNamespace(resolved_profile=profile.model_dump()),
+        worktree_path=worktree_path,
         compose_project="awf_ws_stale_validation",
         compose_file=tmp_path / "compose.yml",
         base_commit="b" * 40,
@@ -665,6 +713,13 @@ async def test_execution_validation_returns_stop_when_start_transition_is_stale(
     )
 
     assert result.stop
+    assert calls == ["deposit"]
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        (tmp_path / "artifacts").parent, "ws_stale_validation"
+    )
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan\n"
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
 
 
 @pytest.mark.unit
@@ -672,16 +727,35 @@ async def test_execution_validation_returns_stop_when_validate_recheck_is_stale(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {"name": "validation-stale", "planning": {"required": True}}
+    )
+    calls: list[str] = []
+    real_deposit = (
+        executor_execution_validation._planning_artifacts._deposit_planning_artifacts_best_effort
+    )
+
+    def _spy_deposit(*_args: object, **_kwargs: object) -> None:
+        calls.append("deposit")
+        real_deposit(*_args, **_kwargs)
+
+    monkeypatch.setattr(
+        executor_execution_validation._planning_artifacts,
+        "_deposit_planning_artifacts_best_effort",
+        _spy_deposit,
+    )
+
     executor = SimpleNamespace(
         _transition_if_current=AsyncMock(return_value=True),
         _recheck_status=AsyncMock(return_value=False),
         _config=SimpleNamespace(
             max_validation_fix_passes=0,
             planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
         ),
     )
     workspace = SimpleNamespace(
-        resolved_profile={"name": "validation-stale"},
+        resolved_profile=profile.model_dump(),
         requested_profile=None,
         profile_ref=None,
         env_profile=None,
@@ -689,12 +763,23 @@ async def test_execution_validation_returns_stop_when_validate_recheck_is_stale(
         task_class=None,
         operations=[],
     )
+    worktree_path = tmp_path / "worktree"
+    plan_path = worktree_path / "docs" / "awf-plans" / "ws_recheck_stale.md"
+    report_path = worktree_path / "docs" / "awf-plans" / "ws_recheck_stale.conformance.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text("# plan\n", encoding="utf-8")
+    report_path.write_text('{"status":"satisfied"}', encoding="utf-8")
 
     async def _sync_profile_passthrough(*_args: object, **kwargs: object) -> WorkspaceProfile:
-        profile = kwargs["profile"]
-        assert isinstance(profile, WorkspaceProfile)
-        return profile
+        passthrough = kwargs["profile"]
+        assert isinstance(passthrough, WorkspaceProfile)
+        return passthrough
 
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
     monkeypatch.setattr(
         executor_execution_validation,
         "_sync_resolved_profile",
@@ -705,7 +790,7 @@ async def test_execution_validation_returns_stop_when_validate_recheck_is_stale(
         executor,
         workspace_id="ws_recheck_stale",
         ws=workspace,  # type: ignore[arg-type]
-        worktree_path=tmp_path / "worktree",
+        worktree_path=worktree_path,
         compose_project="awf_ws_recheck_stale",
         compose_file=tmp_path / "compose.yml",
         base_commit="b" * 40,
@@ -720,6 +805,13 @@ async def test_execution_validation_returns_stop_when_validate_recheck_is_stale(
     )
 
     assert result.stop
+    assert calls == ["deposit"]
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        (tmp_path / "artifacts").parent, "ws_recheck_stale"
+    )
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan\n"
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
 
 
 @pytest.mark.unit

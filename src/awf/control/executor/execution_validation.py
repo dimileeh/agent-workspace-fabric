@@ -182,19 +182,6 @@ async def run_validation_and_fix_cycle(
     successful_validation_workspace_head_sha: str | None = None
 
     # ── Step 2: validation (tests + optional Alembic), with fix-cycle ──
-    if not await self._transition_if_current(
-        workspace_id,
-        from_status=WorkspaceStatus.running,
-        to=WorkspaceStatus.validating,
-        reason="AGENT_RUN_OK",
-        action="start_validation",
-    ):
-        return ExecutionValidationResult(
-            stop=True,
-            successful_validation_run_id=successful_validation_run_id,
-            successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
-        )
-
     max_fix_passes = 0 if resume_disable_fix_passes else self._config.max_validation_fix_passes
     profile = _profile_for_workspace(
         ws,
@@ -208,6 +195,37 @@ async def run_validation_and_fix_cycle(
         profile=profile,
         planning_max_iterations_default=self._config.planning_max_iterations_default,
     )
+
+    def _deposit_planning_artifacts_if_required() -> None:
+        # Best-effort deposit for terminal paths that do not already pass through
+        # one of the preserving helpers below. In particular, when the workspace
+        # reaches a callback-terminal status during validation,
+        # ``_finish_validation_callback_if_terminal`` returns True and this
+        # cycle returns stop=True before the normal validation-success deposit.
+        # The console keys its artifact refetch on ``updated_at``; depositing
+        # before the caller observes the terminal status orders artifact
+        # availability ahead of the polling signal. Idempotent and gated on
+        # ``planning.required``.
+        _planning_artifacts._deposit_planning_artifacts_best_effort(
+            self,
+            profile=profile,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+        )
+
+    if not await self._transition_if_current(
+        workspace_id,
+        from_status=WorkspaceStatus.running,
+        to=WorkspaceStatus.validating,
+        reason="AGENT_RUN_OK",
+        action="start_validation",
+    ):
+        _deposit_planning_artifacts_if_required()
+        return ExecutionValidationResult(
+            stop=True,
+            successful_validation_run_id=successful_validation_run_id,
+            successful_validation_workspace_head_sha=successful_validation_workspace_head_sha,
+        )
 
     async def _mark_failed_preserving_planning_artifacts(**mark_kwargs: Any) -> None:
         # Deposit the worktree plan + conformance report into the served
@@ -278,6 +296,7 @@ async def run_validation_and_fix_cycle(
             expected=WorkspaceStatus.validating,
             action="validate",
         ):
+            _deposit_planning_artifacts_if_required()
             return ExecutionValidationResult(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
@@ -509,6 +528,7 @@ async def run_validation_and_fix_cycle(
             validation_run_id=validation_run_id,
             requested_tier=validation_tier,
         ):
+            _deposit_planning_artifacts_if_required()
             return ExecutionValidationResult(
                 stop=True,
                 successful_validation_run_id=successful_validation_run_id,
