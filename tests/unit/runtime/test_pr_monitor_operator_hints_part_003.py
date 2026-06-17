@@ -242,8 +242,11 @@ async def test_operator_hint_directive_with_uncovering_grant_still_leaks_needs_h
     )
 
     assert result.pushed is False
-    assert result.failed is True
-    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    # Operator-actionable, NOT terminal: a ``failed``/terminal result would
+    # ``_terminate_failed`` the workspace and strand the needs_human hint
+    # (PRRT_kwDOSJAM6s6KHEEU). Refuse the leak WITHOUT failing the workspace.
+    assert result.failed is False
+    assert result.terminal_monitor_failure is False
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "needs_human"
     assert "preserved-ungranted-sha" in (state.pending_operator_hint.status_reason or "")
@@ -321,9 +324,11 @@ async def test_operator_hint_directive_revert_on_top_leaks_preserved_commit_need
     )
 
     assert result.pushed is False
-    assert result.failed is True
-    assert result.terminal_monitor_failure is True
-    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    # Refuse the leak WITHOUT terminally failing: the guard surfaces needs_human
+    # and the loop must park the workspace at ``monitoring_pr`` awaiting the
+    # operator, not ``_terminate_failed`` it (PRRT_kwDOSJAM6s6KHEEU).
+    assert result.failed is False
+    assert result.terminal_monitor_failure is False
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "needs_human"
     assert "preserved-offending-sha" in (state.pending_operator_hint.status_reason or "")

@@ -277,13 +277,17 @@ async def _run_operator_hint_cycle(
             "the preserved commit, or approve-and-keep the protected path, then resume."
         )
         mark_operator_hint_needs_human(state, reason)
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=reason,
-            reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
-        )
+        # Operator-actionable, NOT terminal. A ``failed`` protected-scope result
+        # makes ``terminal_monitor_failure`` True, so the ``AddressOperatorHint``
+        # failure branch would ``_terminate_failed`` the workspace — failing it
+        # instead of waiting for the operator to do exactly what this message asks
+        # (reset the preserved commit, or approve-and-keep the protected path and
+        # resume). A failed/terminal row also rejects a later approve-and-keep grant
+        # because the workspace is no longer recoverable. Return a NON-failed
+        # needs-human result so the loop parks the workspace at ``monitoring_pr``
+        # awaiting the operator, mirroring the other needs-human branches above
+        # (e.g. the ``_MonitorPolicyBlockedError`` branch) (PRRT_kwDOSJAM6s6KHEEU).
+        return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
     # after the push landed), treat it as a no-op rather than re-pushing.
