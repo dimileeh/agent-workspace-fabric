@@ -393,14 +393,12 @@ async def _run_post_validation_conformance_check(
     # The report may be tracked in the project profile. When the path is
     # tracked, ``git restore --source=base_commit --worktree --staged``
     # restores the original base content to both the index and worktree, so
-    # the worktree is clean and the file must be left alone. Restoring from
-    # HEAD would resurrect any stale AWF-authored report committed by an
-    # earlier fix pass; base_commit is the pre-workspace baseline and is the
-    # only safe source. ``unlink()`` would re-delete the restored file and
-    # leave an unstaged deletion (`` D ...``). For paths that do not exist at
-    # base_commit or are untracked/gitignored, the restore will fail; fall
-    # back to a plain unlink in that case. Use ``--`` to avoid
-    # mis-interpreting report paths that start with a dash.
+    # the worktree is clean and the file must be left alone. ``unlink()`` would
+    # re-delete the restored file and leave an unstaged deletion
+    # (`` D ...``). For paths that do not exist at base_commit or are
+    # untracked/gitignored, the restore will fail; fall back to a plain unlink
+    # in that case. Use ``--`` to avoid mis-interpreting report paths that
+    # start with a dash.
     restore_result = await self._runner.run(
         [
             "git",
@@ -423,11 +421,33 @@ async def _run_post_validation_conformance_check(
         # Tracked report: restore put the committed copy back; leave it there.
         return None
     if restore_result.ok:
-        # The restore command exited 0, but the worktree is still dirty
-        # relative to HEAD (e.g. the report was staged/committed by an
-        # earlier fix pass and --source=base_commit cannot restore a
-        # clean state). Log the partial restore so we do not silently leave
-        # the stale AWF-authored report in the push candidate.
+        # ``git restore --source=base_commit`` can leave the path staged
+        # relative to HEAD when base_commit differs from HEAD (e.g. an earlier
+        # fix pass committed the AWF-authored report). HEAD is the only tree
+        # that matches the current commit, so restoring from HEAD cleans both
+        # the index and worktree and preserves the committed report state.
+        head_restore_result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "restore",
+                "--source",
+                "HEAD",
+                "--worktree",
+                "--staged",
+                "--",
+                handoff.report_path.as_posix(),
+            ]
+        )
+        if head_restore_result.ok and not await _report_path_is_dirty(
+            self, worktree_path, handoff.report_path
+        ):
+            return None
+        # The path is still dirty after restoring from both base_commit and
+        # HEAD. Log the partial restore so we do not silently leave the stale
+        # AWF-authored report in the push candidate.
         _log.warning(
             "executor.post_validation_conformance_report_restore_left_dirty",
             workspace_id=workspace.id,

@@ -673,9 +673,93 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
     assert failure is None
 
 
-# ---------------------------------------------------------------------------
-# _build_conformance_stall_failure — no-baseline and successful event record
-# ---------------------------------------------------------------------------
+@pytest.mark.unit
+async def test_post_validation_conformance_staged_deletion_restored_from_head(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KKSZU regression: when ``base_commit`` lacks the report
+    but HEAD contains it, ``git restore --source=base_commit`` stages a
+    deletion. The executor must restore from HEAD so the committed report copy
+    remains on disk and the index is clean."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    # base_commit restore exits 0 but leaves staged deletion relative to HEAD.
+    runner.queue_result(returncode=0, stdout=f"D  {report_path.as_posix()}\n")
+    # Cleanliness check after base_commit restore still sees the staged deletion.
+    runner.queue_result(returncode=0, stdout=f"D  {report_path.as_posix()}\n")
+    # HEAD restore exits 0 and cleans the path.
+    runner.queue_result(returncode=0, stdout="")
+    # Final cleanliness check after HEAD restore is clean.
+    runner.queue_result(returncode=0, stdout="")
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    async def _record_event(**_kwargs: object) -> None:
+        return None
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    # Preserve the committed HEAD copy on disk; the real writer would overwrite
+    # it with the AWF-synthesized satisfied report.
+    def _no_overwrite(**kwargs: object) -> None:
+        del kwargs
+
+    executor._write_satisfied_post_validation_conformance_report = _no_overwrite  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    # Simulate the committed HEAD copy by writing it to disk; the fake HEAD
+    # restore command leaves the file untouched, but the cleanliness check
+    # returns an empty status after it.
+    report_abs.parent.mkdir(parents=True, exist_ok=True)
+    report_abs.write_text('{"status":"committed","summary":"from head"}', encoding="utf-8")
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is None
+    assert report_abs.exists()
+    joined_calls = [" ".join(call.args) for call in runner.calls]
+    assert any(
+        "restore --source HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        in call
+        for call in joined_calls
+    )
+    assert all("add" not in call.args for call in runner.calls)
+    assert all("commit" not in call.args for call in runner.calls)
 
 
 def _stall_evidence() -> ConformanceStallEvidence:
