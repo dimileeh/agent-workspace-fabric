@@ -598,8 +598,20 @@ def _deposit_satisfied_conformance_report(
         )
         + "\n"
     )
-    tmp_dest.write_text(content, encoding="utf-8")
-    tmp_dest.replace(dest)
+    try:
+        tmp_dest.write_text(content, encoding="utf-8")
+        tmp_dest.replace(dest)
+    except OSError as exc:
+        # The served conformance report is a convenience artifact; the outcome
+        # is already recorded by the event and validation run. A disk or
+        # permission failure here must not fail the post-validation check.
+        _log.warning(
+            "executor.satisfied_conformance_report_deposit_failed",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+            errno=exc.errno,
+        )
+        return
 
     # Best-effort copy of the worktree plan so the served artifact contains
     # both planning documents, mirroring ``deposit_workspace_planning_artifacts``.

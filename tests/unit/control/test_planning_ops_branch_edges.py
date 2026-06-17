@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
 
 from awf.adapters.base import AgentRunError
 from awf.common.commands import CommandResult, FakeCommandRunner
@@ -671,6 +672,64 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
         )
 
     assert failure is None
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_report_deposit_oserror_is_non_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6KL4ab regression: an OSError depositing the served
+    satisfied conformance report must not propagate and fail the
+    post-validation conformance check."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="validated evidence satisfies plan",
+        gaps=(),
+    )
+
+    # Ensure the artifact directory parent exists so mkdir passes; block only
+    # the temporary report write so we exercise the new error path.
+    real_write_text = Path.write_text
+
+    def _raise_on_report_tmp(self: Path, content: str, *, encoding: str | None = None) -> int:
+        if self.name == ".conformance.json.tmp":
+            raise OSError(13, "Permission denied")
+        return real_write_text(self, content, encoding=encoding)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", _raise_on_report_tmp)
+
+    # Make sure the best-effort plan copy is not executed after the early return.
+    plan_source = worktree_path / plan_path
+    plan_source.parent.mkdir(parents=True, exist_ok=True)
+    plan_source.write_text("# plan", encoding="utf-8")
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    # The artifact dir is created before the deposit attempt.
+    assert (work_dir / "artifacts" / "ws_deposit").is_dir()
+    # The served report is absent because the deposit failed.
+    assert not (work_dir / "artifacts" / "ws_deposit" / "conformance.json").exists()
+    # The best-effort plan copy is skipped when the report deposit returns early.
+    assert not (work_dir / "artifacts" / "ws_deposit" / "plan.md").exists()
+
+    assert any(
+        entry["event"] == "executor.satisfied_conformance_report_deposit_failed"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["error_type"] == "PermissionError"
+        and entry["errno"] == 13
+        for entry in captured
+    )
 
 
 @pytest.mark.unit
