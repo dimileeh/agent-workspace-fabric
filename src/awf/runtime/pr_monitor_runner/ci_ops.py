@@ -118,6 +118,8 @@ async def _run_ci_fix(
             task_tag=task_tag,
         )
     except ProtectedScopeDiffError as exc:
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
         return cast(
             _GitPushResult,
             await self._protected_scope_diff_unavailable_push_result(
@@ -127,6 +129,8 @@ async def _run_ci_fix(
             ),
         )
     except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
         return _GitPushResult(
             pushed=False,
             failed=True,
@@ -135,6 +139,8 @@ async def _run_ci_fix(
             reason_code=exc.reason_code,
         )
     except _MonitorPolicyBlockedError as exc:
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
         return _GitPushResult(
             pushed=False,
             failed=True,

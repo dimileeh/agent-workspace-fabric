@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.base import AgentRunError
 from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import RepoRef
@@ -45,6 +46,7 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorPolicyBlockedError,
 )
 from awf.service.merge_queue import MergeQueueBlocker
 from awf.service.supply_chain_policy import SupplyChainPolicyRefreshService
@@ -643,6 +645,107 @@ async def test_ci_fix_ownership_repair_failure_blocks_push(
     assert push_result.returncode == 1
     assert push_result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
     assert push_result.stderr == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "commit_sink_exc",
+    [
+        ProtectedScopeDiffError("diff baseline unavailable"),
+        _MonitorAgentRuntimeOwnershipRepairFailedError(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        ),
+        _MonitorPolicyBlockedError("Supply-chain policy blocked CI fix."),
+    ],
+    ids=["protected_scope_diff", "ownership_repair_failed", "policy_blocked"],
+)
+async def test_ci_fix_records_provider_agent_run_error_before_commit_sink_early_return(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commit_sink_exc: Exception,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KUiEG.
+
+    When the agent run fails with an ``AgentRunError`` AND ``_commit_dirty_worktree``
+    raises one of the three early-return exceptions, the stored agent run error
+    must still be passed to ``_handle_provider_agent_run_error`` before the early
+    return so provider retry/cooldown state is recorded.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    expected_stderr = "Gemini MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    adapter.queue(
+        stdout="",
+        stderr=expected_stderr,
+        returncode=1,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    handle_calls: list[tuple[str, AgentRunError]] = []
+
+    async def _spy_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: MonitorState | None = None,
+    ) -> str:
+        # Record the call but do NOT raise; that lets the early-return path
+        # proceed so we can assert the spy was invoked with the stored error.
+        handle_calls.append((workspace_id_arg, exc))
+        return "deterministic"
+
+    async def _raise_commit_sink_exc(**_kwargs: object) -> bool:
+        raise commit_sink_exc
+
+    async def _protected_scope_diff_block(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="protected scope diff unavailable",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _spy_handle_provider_agent_run_error,
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _raise_commit_sink_exc)
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_diff_unavailable_push_result",
+        _protected_scope_diff_block,
+    )
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    # The early-return path must still produce a failed push result.
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    # The provider agent run error handler must have been invoked exactly once
+    # with the workspace_id and the stored AgentRunError, before the early
+    # return — this is the regression for the reported bug. The stored error is
+    # the one the adapter raised (identified by its distinctive stderr), not a
+    # re-constructed one.
+    assert len(handle_calls) == 1
+    assert handle_calls[0][0] == workspace_id
+    assert handle_calls[0][1].result.stderr == expected_stderr
 
 
 @pytest.mark.unit
