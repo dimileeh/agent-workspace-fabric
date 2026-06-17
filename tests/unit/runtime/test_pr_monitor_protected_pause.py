@@ -435,6 +435,77 @@ async def test_execute_paused_branch_does_not_fail_workspace(
 
 
 @pytest.mark.unit
+async def test_run_sync_base_protected_block_pauses_into_blocked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A base-sync commit touching a protected path PAUSES rather than fails.
+
+    Regression for PRRT_kwDOSJAM6s6KE3Ij: ``_run_sync_base`` must route a
+    protected-scope violation through the shared pause/repair path (preserving
+    the merge/conflict-resolution commit for an operator) instead of returning a
+    raw ``PROTECTED_SCOPE_PUSH_BLOCKED`` result that the loop treats as a terminal
+    monitor failure — which would bypass the post-PR pause/resume flow.
+    """
+    from awf.control.quality_gates import QualityGateViolation
+    from awf.runtime.pr_monitor_runner.remote_ops import _ProtectedScopePushBlock
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _no_fetch(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head(*_args: object, **_kwargs: object) -> str:
+        return "start-head-sha"
+
+    violations = (
+        QualityGateViolation(path=".github/workflows/ci.yml", protected_pattern=".github/**"),
+    )
+
+    async def _block(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return _ProtectedScopePushBlock(
+            message="protected scope blocked",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            violations=violations,
+        )
+
+    monkeypatch.setattr(runner, "_fetch_base", _no_fetch)
+    monkeypatch.setattr(runner, "_rev_parse_head", _start_head)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _block)
+
+    push_result = await runner._run_sync_base(
+        workspace_id=workspace_id,
+        state=MonitorState(),
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The workspace paused into ``blocked`` with the commit preserved — NOT a
+    # terminal protected-scope failure that fails the workspace.
+    assert push_result.paused_into_blocked is True
+    assert push_result.reason_code == "PROTECTED_SCOPE_PAUSED_FOR_OPERATOR"
+    assert push_result.terminal_monitor_failure is False
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.blocked.value
+
+
+@pytest.mark.unit
 async def test_monitor_reblock_after_unresolved_directive_bumps_epoch(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

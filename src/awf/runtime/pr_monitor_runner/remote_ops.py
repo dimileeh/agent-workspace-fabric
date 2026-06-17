@@ -15,7 +15,7 @@ from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.common.task_tag import commit_message_with_task_tag
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationType, WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
@@ -727,6 +727,10 @@ async def _run_sync_base(
                 f"Merge remote-tracking branch 'origin/{base_branch}'", task_tag
             ),
         )
+    # Capture HEAD before the merge so a protected-scope pause can preserve the
+    # merge/conflict-resolution commit and the CAS-lost rollback fallback has a
+    # known-good reset target (mirrors the other push sites' ``operation_start_head``).
+    operation_start_head = await runner._rev_parse_head(worktree_path)
     rc, _stdout, stderr = await _git(*merge_args)
     if rc != 0:
         _rc_status, status_out, _ = await _git("status", "--porcelain")
@@ -805,12 +809,23 @@ async def _run_sync_base(
         base_branch=base_branch,
     )
     if protected_scope_block is not None:
-        return _GitPushResult(
-            pushed=False,
-            failed=True,
-            returncode=1,
-            stderr=protected_scope_block.message,
-            reason_code=protected_scope_block.reason_code,
+        # Route protected-scope violations through the shared pause/repair path so
+        # a base-sync merge/conflict-resolution commit that touches a protected
+        # path PAUSES the workspace into ``blocked`` (commit preserved for an
+        # operator) instead of bypassing the pause flow and failing the workspace.
+        # Mirrors the comment, CI-fix, and operator-hint push sites.
+        return await runner._repair_protected_scope_commits_before_push(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            protected_scope_block=protected_scope_block,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            base_branch=base_branch,
+            operation_type=OperationType.sync_base.value,
+            operation_start_head=operation_start_head,
+            source_head_sha=operation_start_head,
         )
     return await runner._validated_git_push_result(
         workspace_id=workspace_id,
