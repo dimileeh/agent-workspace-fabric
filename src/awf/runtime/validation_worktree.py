@@ -300,6 +300,7 @@ def _is_ignored_path(worktree_path: Path, path: str) -> bool:
             str(worktree_path),
             "check-ignore",
             "--no-index",
+            "--",
             path,
         ],
         capture_output=True,
