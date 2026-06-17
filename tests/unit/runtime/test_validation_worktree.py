@@ -58,6 +58,14 @@ def test_validation_worktree_cleanup_helpers_handle_defensive_path_edges() -> No
 
 
 @pytest.mark.unit
+def test_collapse_descendant_cleanup_paths_keeps_later_ancestor() -> None:
+    """A descendant added before its ancestor is dropped once the ancestor is seen."""
+    assert validation_worktree._collapse_descendant_cleanup_paths(
+        ["root/child/file.txt", "root/child", "root"]
+    ) == ["root"]
+
+
+@pytest.mark.unit
 def test_is_under_agent_runtime_root_matches_collapsed_root_directory() -> None:
     """A collapsed untracked-root entry (``.claude/agent-memory/``) must match.
 

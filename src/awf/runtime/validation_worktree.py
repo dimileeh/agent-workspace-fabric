@@ -229,8 +229,12 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
         if entry.startswith("160000"):
             # ls-tree output format: "<mode> <type> <sha>\t<path>"
             tab_index = entry.find("\t")
-            if tab_index != -1:
-                paths.add(entry[tab_index + 1 :])
+            if tab_index == -1:  # pragma: no cover
+                # Defensive: real ``git ls-tree -z`` output always separates
+                # mode/type/sha from the path with a tab. Skip the impossible
+                # malformed entry rather than crashing the cleanup traversal.
+                continue
+            paths.add(entry[tab_index + 1 :])
     return frozenset(paths)
 
 
@@ -293,12 +297,6 @@ def _remove_empty_untracked_dirs(
         except ValueError:
             return False
         dir_path = f"{relative}/"
-        if _is_under_ignored_path(dir_path, ignored_path_set):
-            return False
-        # Do not remove a tracked gitlink directory even when it is empty.
-        if relative in gitlink_paths:
-            return False
-
         try:
             directory.rmdir()
         except FileNotFoundError:
