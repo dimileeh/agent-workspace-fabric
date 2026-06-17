@@ -9,6 +9,7 @@ helpers, and the fresh-vs-stale post-validation conformance report paths.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -33,6 +34,7 @@ from awf.runtime.planning import (
     PlanConformanceReport,
     PlanConformanceStatus,
 )
+from awf.service import artifacts as executor_service_artifacts
 from awf.service.workspaces import WorkspaceRetrySourceRuntimeNotReleasedError
 
 # ---------------------------------------------------------------------------
@@ -585,6 +587,90 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     # #604: the fresh on-worktree report is also removed so it cannot dirty the
     # tree during later validation/push cleanliness checks.
     assert not report_abs.exists()
+
+
+@pytest.mark.unit
+async def test_post_validation_conformance_stale_report_with_failed_rewrite_uses_in_memory_deposit(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KL7-o regression: when stdout supplies the satisfied
+    report but the AWF-synthesized rewrite fails while a stale handoff report
+    remains on disk, the served artifact must receive the in-memory satisfied
+    report, not the stale disk copy."""
+    runner = FakeCommandRunner()
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    plan_path = Path("docs/awf-plans/ws_post.md")
+    worktree_path = tmp_path / "worktree"
+    report_abs = worktree_path / report_path
+    plan_abs = worktree_path / plan_path
+    satisfied = '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="validated-head\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(
+        returncode=128, stderr="fatal: path not in index\n"
+    )  # git restore fails; fallback to unlink
+
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDATION_OK"
+    )
+
+    async def _record_event(**_kwargs: object) -> None:
+        return None
+
+    executor._record_post_validation_conformance_event = _record_event  # type: ignore[method-assign]
+
+    # The worktree carries a stale unsatisfied report, but the conformance call
+    # only emits the satisfied report in stdout.
+    plan_abs.parent.mkdir(parents=True, exist_ok=True)
+    plan_abs.write_text("# plan\n", encoding="utf-8")
+    report_abs.parent.mkdir(parents=True, exist_ok=True)
+    stale_content = '{"status":"needs_iteration","summary":"stale unsatisfied","gaps":["do work"]}'
+    report_abs.write_text(stale_content, encoding="utf-8")
+
+    def _fail_rewrite(**_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    executor._write_satisfied_post_validation_conformance_report = _fail_rewrite  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=plan_path,
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(satisfied),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is None
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        tmp_path / "compose" / "..", "ws_post"
+    ).resolve()
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
+    assert deposited_report["summary"] == "validated evidence satisfies plan"
+    assert deposited_report["gaps"] == []
 
 
 class _PlanningAdapter:

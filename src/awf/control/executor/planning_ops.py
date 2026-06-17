@@ -349,6 +349,14 @@ async def _run_post_validation_conformance_check(
     report = parse_conformance_report(report_text or "")
     if not report.satisfied:
         return _build_unsatisfied_failure(report, handoff, validation_run_id)
+    # Track whether the on-worktree report actually carries the satisfied
+    # report we want to serve. A fresh file is already correct; an AWF-
+    # synthesized rewrite from stdout/stale disk is correct only when the
+    # write call itself succeeds. We must not infer success from file presence,
+    # because a stale handoff report may still exist on disk after a failed
+    # rewrite, which would make the served artifact disagree with the recorded
+    # event (PRRT_kwDOSJAM6s6KL7-o).
+    rewrite_succeeded = report_from_fresh_file
     if not report_from_fresh_file:
         try:
             self._write_satisfied_post_validation_conformance_report(
@@ -356,6 +364,7 @@ async def _run_post_validation_conformance_check(
                 report_path=handoff.report_path,
                 report=report,
             )
+            rewrite_succeeded = True
         except OSError as exc:
             # The report is written to ``docs/awf-plans/`` purely as an
             # inspectable on-worktree copy (the path is gitignored and the
@@ -389,9 +398,7 @@ async def _run_post_validation_conformance_check(
     # the worktree file would still carry the stale report, so deposit the
     # in-memory satisfied report directly to keep the served artifact consistent
     # with the recorded event.
-    stdout_report_path = worktree_path / handoff.report_path
-    write_succeeded = stdout_report_path.is_file()
-    if not report_from_fresh_file and report_text is not None and not write_succeeded:
+    if not report_from_fresh_file and report_text is not None and not rewrite_succeeded:
         _deposit_satisfied_conformance_report(
             work_dir=self._config.compose_projects_root.parent,
             workspace_id=workspace.id,
