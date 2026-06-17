@@ -457,6 +457,69 @@ async def test_terminate_failed_with_matching_monitor_owner_still_fails(
 
 
 @pytest.mark.unit
+async def test_terminate_failed_locks_row_before_owner_fence(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Address review comment 4514137893: the owner fence + ``failed`` transition
+    must be atomic. ``_terminate_failed`` must load the row with ``get_for_update``
+    (``SELECT ... FOR UPDATE``) — not the non-locking ``get`` — so a newer worker
+    cannot reclaim the monitor lease in the TOCTOU window between reading
+    ``monitor_claimed_by`` and committing the state change. Guard the lock here so
+    the fix cannot silently regress to an unlocked read."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "worker-current"  # the live claimant
+
+    locked_ids: list[str] = []
+    original_get_for_update = WorkspaceRepository.get_for_update
+
+    async def _recording_get_for_update(
+        self: WorkspaceRepository,
+        requested_workspace_id: str,
+        *,
+        skip_locked: bool = False,
+    ) -> object | None:
+        locked_ids.append(requested_workspace_id)
+        return await original_get_for_update(self, requested_workspace_id, skip_locked=skip_locked)
+
+    async def _forbidden_get(
+        self: WorkspaceRepository,
+        requested_workspace_id: str,
+    ) -> object | None:
+        raise AssertionError("_terminate_failed must lock the row with get_for_update, not get")
+
+    monkeypatch.setattr(WorkspaceRepository, "get_for_update", _recording_get_for_update)
+    monkeypatch.setattr(WorkspaceRepository, "get", _forbidden_get)
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+    monkeypatch.undo()  # restore real get/get_for_update for the verification read
+
+    assert locked_ids == [workspace_id]
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "failed"
+        assert ws.failure_message == "protected scope blocked"
+
+
+@pytest.mark.unit
 async def test_protected_pause_notification_forge_failure_does_not_strand_block(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

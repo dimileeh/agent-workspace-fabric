@@ -1035,7 +1035,13 @@ async def _terminate_failed(
 ) -> None:
     async with self._deps.session_factory() as s:
         repo = WorkspaceRepository(s)
-        ws = await repo.get(workspace_id)
+        # Lock the row before the owner fence below: a plain ``get`` leaves a
+        # TOCTOU window where this stale runner reads its old ``monitor_claimed_by``,
+        # a newer worker reclaims the monitor lease (``claim_monitoring_pr``
+        # reassigns expired leases), and this session still commits ``failed`` at
+        # the transition below. ``get_for_update`` holds the row from this read
+        # through the commit so the fence check and the state write are atomic.
+        ws = await repo.get_for_update(workspace_id)
         if ws is None:
             return
         rc = reason_code.value if isinstance(reason_code, AbortReason) else reason_code
