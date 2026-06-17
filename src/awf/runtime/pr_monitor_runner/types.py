@@ -14,6 +14,7 @@ from awf.common.forge import ForgeClient
 from awf.runtime.logs import LogStore
 from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
 from awf.runtime.pr_monitor_runner.config import PostMergeTargetReconciler
+from awf.runtime.pr_monitor_runner.constants import _MIRROR_HOOKS_PATH_POISONED_REASON
 from awf.runtime.validation import ValidationRunner
 
 
@@ -80,6 +81,14 @@ class _MonitorAgentRuntimeOwnershipRepairFailedError(RuntimeError):
     def reason_code(self: Any) -> str:
         """Return the fixed reason code for ownership repair failures."""
         return AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+
+
+class _MonitorMirrorHooksPathRepairFailedError(RuntimeError):
+    """Raised when monitor cannot repair a poisoned ``core.hooksPath`` on the shared mirror."""
+
+    @property
+    def reason_code(self: Any) -> str:
+        return _MIRROR_HOOKS_PATH_POISONED_REASON
 
 
 class _MonitorHeadObjectMissingError(Exception):

@@ -93,6 +93,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
     _ProtectedScopeRollbackDeltaEvidence,
 )
@@ -411,6 +412,7 @@ async def _commit_dirty_worktree(
                 workspace_id=workspace_id,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
             )
+            raise _MonitorMirrorHooksPathRepairFailedError() from None
 
     head_object_exists = await verify_head_object_exists(worktree_path)
     if not head_object_exists:

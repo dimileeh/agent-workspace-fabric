@@ -917,6 +917,7 @@ async def _run_pre_push_validation_fix_pass(
                 pass_number=pass_number,
                 reason_code=_MIRROR_HOOKS_PATH_POISONED_REASON,
             )
+            return False, _MIRROR_HOOKS_PATH_POISONED_REASON
 
     head_object_exists = await verify_head_object_exists(worktree_path)
     if not head_object_exists:

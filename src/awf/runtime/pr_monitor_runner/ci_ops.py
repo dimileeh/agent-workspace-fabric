@@ -47,6 +47,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 
@@ -176,6 +177,14 @@ async def _run_ci_fix(
             returncode=1,
             stderr=str(exc),
             reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+        )
+    except _MonitorMirrorHooksPathRepairFailedError as exc:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(exc),
+            reason_code=exc.reason_code,
         )
 
     if agent_run_err is not None:

@@ -64,6 +64,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorHeadObjectMissingError,
+    _MonitorMirrorHooksPathRepairFailedError,
     _MonitorPolicyBlockedError,
 )
 
@@ -211,6 +212,16 @@ async def _run_fix_cycle(
                     stderr=str(exc),
                     reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
                 )
+            except _MonitorMirrorHooksPathRepairFailedError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
+                )
             # The same thread can be re-addressed in a later settle pass after
             # new reviewer feedback changes its verdict. Remove stale
             # publish/resolve queues before recording the latest outcome so
@@ -323,6 +334,16 @@ async def _run_fix_cycle(
                     returncode=1,
                     stderr=str(exc),
                     reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+                )
+            except _MonitorMirrorHooksPathRepairFailedError as exc:
+                for item_id in publish_dependent_ids:
+                    _clear_addressed_state_by_id(state, item_id)
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=str(exc),
+                    reason_code=exc.reason_code,
                 )
             verdict = verdict_result.verdict
             # Review-level comments can also be re-addressed across settle
