@@ -167,6 +167,33 @@ async def _preserved_head_on_remote_fetch_head(
     return bool(result.ok)
 
 
+async def _preserved_commit_reachable_from_head(
+    self: Any,
+    *,
+    worktree_path: Path,
+    preserved_head_sha: str,
+) -> bool:
+    """Return whether ``preserved_head_sha`` is reachable from the worktree HEAD.
+
+    Runs ``git merge-base --is-ancestor <preserved> HEAD``, which exits 0 when the
+    preserved commit is an ancestor of — or equal to — the current local HEAD. A
+    non-zero exit (including an unknown SHA, or a worktree that was reset away from
+    the commit) means the preserved protected commit is no longer in local history,
+    so re-blocking would record a stale marker that strands the operator. Fails
+    closed (``False``) when HEAD cannot be resolved so the caller parks the hint
+    instead of re-blocking against a moved HEAD."""
+    result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "merge-base",
+            "--is-ancestor",
+            preserved_head_sha,
+            "HEAD",
+        )
+    )
+    return bool(result.ok)
+
+
 async def _preserved_commit_in_unpushed_range(
     self: Any,
     *,

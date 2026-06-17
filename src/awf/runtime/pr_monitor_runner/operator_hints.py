@@ -647,8 +647,29 @@ async def _terminal_directive_grant_reblock(
     ``active_grant_specs`` present). Returns ``None`` otherwise — a plain remonitor,
     a directive-only resume, or a grant-only resume (which never runs the CLI) keep
     the existing park-the-hint behavior — and also when no violation can be
-    reconstructed, so the caller falls back to parking the terminal hint."""
+    reconstructed, so the caller falls back to parking the terminal hint. Returns
+    ``None`` too when the directive CLI moved HEAD away from the preserved commit so
+    it is no longer reachable: re-blocking would overwrite the preserved marker with
+    the moved HEAD and let a later grant-only resume no-op while consuming the grant
+    (PRRT_kwDOSJAM6s6KVCYD)."""
     if not (preserved_head_sha and active_grant_specs):
+        return None
+    # The combined directive CLI may have MOVED HEAD before returning the terminal
+    # verdict — e.g. it reset the worktree back to the remote PR head (dropping the
+    # preserved protected commit) and then reported needs_human. Re-blocking here
+    # routes through ``_pause_monitor_for_protected_scope_block``, which re-records
+    # the CURRENT rev-parse HEAD as the preserved marker, OVERWRITING the original
+    # ``preserved_head_sha``. With the marker now pointing at the reset HEAD (already
+    # on the remote), a later grant-only resume would see it already pushed, finalize
+    # as a no-op, and CONSUME the single-use grant while the approved protected commit
+    # never lands. Only re-block while the ORIGINAL preserved commit is still
+    # reachable from HEAD (the operator can still land it via approve-and-keep);
+    # otherwise fall back to parking the terminal hint so the operator is surfaced
+    # without silently burning the grant (PRRT_kwDOSJAM6s6KVCYD).
+    if not await self._preserved_commit_reachable_from_head(
+        worktree_path=worktree_path,
+        preserved_head_sha=preserved_head_sha,
+    ):
         return None
     message = (
         f"operator directive resume returned '{verdict.verdict}' before landing the "

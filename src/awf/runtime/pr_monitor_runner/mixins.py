@@ -141,6 +141,9 @@ class RunnerDelegatesMixin:
     _preserved_head_on_remote_fetch_head = (
         _remote_repair_protected_grants._preserved_head_on_remote_fetch_head
     )
+    _preserved_commit_reachable_from_head = (
+        _remote_repair_protected_grants._preserved_commit_reachable_from_head
+    )
     _rollback_protected_scope_repair_delta_before_push = (
         _remote_repair_protected._rollback_protected_scope_repair_delta_before_push
     )
