@@ -1071,6 +1071,88 @@ async def test_operator_hint_grant_consumed_restart_skips_cli_when_commit_on_rem
 
 
 @pytest.mark.unit
+async def test_operator_hint_directive_grant_consumed_restart_skips_cli_when_commit_on_remote(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restart-after-consume recovery for a combined ``--directive ... --grant ...``
+    resume (PRRT_kwDOSJAM6s6KUNoL): the resume runs the directive CLI, pushes the
+    preserved commit, consumes the single-use grant (committed immediately), then
+    crashes BEFORE the processed marker persists. On restart the grant is gone but
+    the durable preserved-head marker remains and the approved commit is already on
+    the remote. A directive hint must take the SAME short-circuit as a grant-only
+    resume — finalize the bookkeeping WITHOUT re-invoking the directive CLI, which
+    would otherwise run without the consumed grant and create extra unapproved work
+    or re-block an already resolved pause."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    # No active grant: it was already consumed by the crashed prior pass.
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="approved the protected change and asked to fix the rest",
+        directive="keep the protected edit, fix the remaining files",
+        operation_id="op_directive_grant_consumed_restart",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    captured: dict[str, object] = {}
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("recorded-preserved-sha", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> object:
+        pytest.fail("a consumed-grant directive restart must NOT re-invoke the CLI")
+
+    async def _already_on_remote(**kwargs: object) -> bool:
+        captured.update(kwargs)
+        return True
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("an already-pushed preserved commit must NOT be re-pushed")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "recorded-preserved-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _already_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    assert captured.get("preserved_head_sha") == "recorded-preserved-sha"
+    assert state.last_push_sha == "recorded-preserved-sha"
+    assert state.pending_operator_hint is None  # hint processed without the agent
+    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
 async def test_operator_hint_resume_push_clears_preserved_head_marker(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

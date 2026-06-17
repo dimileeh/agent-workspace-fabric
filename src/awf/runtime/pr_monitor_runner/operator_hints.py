@@ -83,20 +83,25 @@ async def _run_operator_hint_cycle(
     # the PRESERVED commit straight through the now grant-aware gate.
     active_grant_specs = await self._active_operator_grant_specs(workspace_id)
     preserved_head_sha = state.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY)
-    # Restart-after-consume recovery: a prior grant-only (approve-and-keep) resume
-    # can push the preserved commit and consume its grant (committed immediately)
-    # and then crash BEFORE the processed marker is persisted. On restart the
-    # grant is gone, so ``not active_grant_specs`` is True and the CLI would re-run
-    # WITHOUT a directive on just the reason string — letting the agent make
-    # unapproved commits. The preserved-head marker (recorded at block time,
-    # durable across the restart) flags this as that protected-block resume; if the
-    # approved preserved commit is already on the remote the work is done, so finish
-    # the bookkeeping instead of re-invoking the agent. A plain remonitor has no
-    # marker and a first-run grant resume still has an active grant, so neither
-    # reaches this branch.
+    # Restart-after-consume recovery: a prior approve-and-keep resume — grant-only
+    # OR combined ``--directive ... --grant ...`` — can push the preserved commit
+    # and consume its single-use grant (committed immediately by
+    # ``_finalize_operator_hint_resume``) and then crash BEFORE the processed marker
+    # is persisted. On restart the grant is gone, so ``not active_grant_specs`` is
+    # True. A grant-only hint would re-run the CLI on just the reason string; a
+    # directive hint would re-run the directive CLI WITHOUT the consumed grant —
+    # either way the agent can make extra unapproved commits, and a directive re-run
+    # can re-block an already-resolved pause (PRRT_kwDOSJAM6s6KUNoL). The
+    # preserved-head marker (recorded at block time, durable across the restart)
+    # plus the approved commit already being on the remote prove the protected work
+    # is finished, so finalize the bookkeeping instead of re-invoking the agent —
+    # regardless of whether the consumed resume carried a directive. The conditions
+    # are tight enough to exclude a genuine first run: a plain remonitor has no
+    # marker; a first-run grant (or directive+grant) resume still has an active
+    # grant; and a first-run directive-only revert has not yet pushed its preserved
+    # commit, so it is not ``already_on_remote``.
     if (
-        not hint.directive
-        and not active_grant_specs
+        not active_grant_specs
         and preserved_head_sha
         and await self._preserved_commit_already_on_remote(
             workspace_id=workspace_id,
