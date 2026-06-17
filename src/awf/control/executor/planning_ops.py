@@ -341,83 +341,101 @@ async def _run_post_validation_conformance_check(
     if report_text is None and compare_result.stdout:
         report_text = compare_result.stdout
     report = parse_conformance_report(report_text or "")
-    if report.satisfied:
-        if not report_from_fresh_file:
-            try:
-                self._write_satisfied_post_validation_conformance_report(
-                    worktree_path=worktree_path,
-                    report_path=handoff.report_path,
-                    report=report,
-                )
-            except OSError as exc:
-                # The report is written to ``docs/awf-plans/`` purely as an
-                # inspectable on-worktree copy (the path is gitignored and the
-                # file is deliberately not committed). The conformance outcome
-                # is already durably captured by the event recorded below plus
-                # the validation-run artifacts, so a write failure (e.g. a
-                # read-only worktree or a full disk) must never discard the
-                # agent's completed work. Log and proceed instead of failing.
-                _log.warning(
-                    "executor.post_validation_conformance_report_write_failed",
-                    workspace_id=workspace.id,
-                    validation_run_id=validation_run_id,
-                    report_path=handoff.report_path.as_posix(),
-                    error_type=type(exc).__name__,
-                    errno=exc.errno,
-                )
-        await self._record_post_validation_conformance_event(
+    if not report.satisfied:
+        return _build_unsatisfied_failure(report, handoff, validation_run_id)
+    if not report_from_fresh_file:
+        try:
+            self._write_satisfied_post_validation_conformance_report(
+                worktree_path=worktree_path,
+                report_path=handoff.report_path,
+                report=report,
+            )
+        except OSError as exc:
+            # The report is written to ``docs/awf-plans/`` purely as an
+            # inspectable on-worktree copy (the path is gitignored and the
+            # file is deliberately not committed). The conformance outcome
+            # is already durably captured by the event recorded below plus
+            # the validation-run artifacts, so a write failure (e.g. a
+            # read-only worktree or a full disk) must never discard the
+            # agent's completed work. Log and proceed instead of failing.
+            _log.warning(
+                "executor.post_validation_conformance_report_write_failed",
+                workspace_id=workspace.id,
+                validation_run_id=validation_run_id,
+                report_path=handoff.report_path.as_posix(),
+                error_type=type(exc).__name__,
+                errno=exc.errno,
+            )
+    await self._record_post_validation_conformance_event(
+        workspace_id=workspace.id,
+        handoff=handoff,
+        report=report,
+        validation_run_id=validation_run_id,
+    )
+    # For successful planned workspaces where the report was produced from
+    # stdout or a fresh on-disk file, deposit a snapshot into the served
+    # artifact dir BEFORE removing the on-worktree copy. The deposit is
+    # best-effort and gated on ``planning.required`` so the console still
+    # surfaces the conformance report after teardown.
+    deposit_workspace_planning_artifacts(
+        work_dir=self._config.compose_projects_root.parent,
+        workspace_id=workspace.id,
+        worktree_path=worktree_path,
+        plan_path=handoff.plan_path,
+        report_path=handoff.report_path,
+    )
+    # The satisfied conformance report is an AWF artifact/event, not source
+    # work. Remove the on-worktree copy so project-specific profiles that
+    # track the conformance report path do not see a dirty worktree at
+    # pre-push validation time. The outcome is already captured by the event
+    # above and by the validation-run artifact deposit.
+    #
+    # The report may be tracked in the project profile. When the path is
+    # tracked, ``git restore --source=base_commit --worktree --staged``
+    # restores the original base content to both the index and worktree, so
+    # the worktree is clean and the file must be left alone. Restoring from
+    # HEAD would resurrect any stale AWF-authored report committed by an
+    # earlier fix pass; base_commit is the pre-workspace baseline and is the
+    # only safe source. ``unlink()`` would re-delete the restored file and
+    # leave an unstaged deletion (`` D ...``). For paths that do not exist at
+    # base_commit or are untracked/gitignored, the restore will fail; fall
+    # back to a plain unlink in that case. Use ``--`` to avoid
+    # mis-interpreting report paths that start with a dash.
+    restore_result = await self._runner.run(
+        [
+            "git",
+            *git_safe_directory_config_args(worktree_path),
+            "-C",
+            str(worktree_path),
+            "restore",
+            "--source",
+            base_commit,
+            "--worktree",
+            "--staged",
+            "--",
+            handoff.report_path.as_posix(),
+        ]
+    )
+    restore_succeeded = restore_result.ok and not await _report_path_is_dirty(
+        self, worktree_path, handoff.report_path
+    )
+    if restore_succeeded:
+        # Tracked report: restore put the committed copy back; leave it there.
+        return None
+    if restore_result.ok:
+        # The restore command exited 0, but the worktree is still dirty
+        # relative to HEAD (e.g. the report was staged/committed by an
+        # earlier fix pass and --source=base_commit cannot restore a
+        # clean state). Log the partial restore so we do not silently leave
+        # the stale AWF-authored report in the push candidate.
+        _log.warning(
+            "executor.post_validation_conformance_report_restore_left_dirty",
             workspace_id=workspace.id,
-            handoff=handoff,
-            report=report,
             validation_run_id=validation_run_id,
+            report_path=handoff.report_path.as_posix(),
+            base_commit=base_commit,
         )
-        # For successful planned workspaces where the report was produced from
-        # stdout or a fresh on-disk file, deposit a snapshot into the served
-        # artifact dir BEFORE removing the on-worktree copy. The deposit is
-        # best-effort and gated on ``planning.required`` so the console still
-        # surfaces the conformance report after teardown.
-        deposit_workspace_planning_artifacts(
-            work_dir=self._config.compose_projects_root.parent,
-            workspace_id=workspace.id,
-            worktree_path=worktree_path,
-            plan_path=handoff.plan_path,
-            report_path=handoff.report_path,
-        )
-        # The satisfied conformance report is an AWF artifact/event, not source
-        # work. Remove the on-worktree copy so project-specific profiles that
-        # track the conformance report path do not see a dirty worktree at
-        # pre-push validation time. The outcome is already captured by the event
-        # above and by the validation-run artifact deposit.
-        #
-        # The report may be tracked in the project profile. When the path is
-        # tracked, ``git restore --source=base_commit --worktree --staged``
-        # restores the original base content to both the index and worktree, so
-        # the worktree is clean and the file must be left alone. Restoring from
-        # HEAD would resurrect any stale AWF-authored report committed by an
-        # earlier fix pass; base_commit is the pre-workspace baseline and is the
-        # only safe source. ``unlink()`` would re-delete the restored file and
-        # leave an unstaged deletion (`` D ...``). For paths that do not exist at
-        # base_commit or are untracked/gitignored, the restore will fail; fall
-        # back to a plain unlink in that case. Use ``--`` to avoid
-        # mis-interpreting report paths that start with a dash.
-        restore_result = await self._runner.run(
-            [
-                "git",
-                *git_safe_directory_config_args(worktree_path),
-                "-C",
-                str(worktree_path),
-                "restore",
-                "--source",
-                base_commit,
-                "--worktree",
-                "--staged",
-                "--",
-                handoff.report_path.as_posix(),
-            ]
-        )
-        if restore_result.ok:
-            # Tracked report: restore put the committed copy back; leave it there.
-            return None
+    else:
         _log.warning(
             "executor.post_validation_conformance_report_git_restore_failed",
             workspace_id=workspace.id,
@@ -425,19 +443,42 @@ async def _run_post_validation_conformance_check(
             report_path=handoff.report_path.as_posix(),
             stderr=restore_result.stderr,
         )
-        try:
-            (worktree_path / handoff.report_path).unlink(missing_ok=True)
-        except OSError as exc:
-            _log.warning(
-                "executor.post_validation_conformance_report_unlink_failed",
-                workspace_id=workspace.id,
-                validation_run_id=validation_run_id,
-                report_path=handoff.report_path.as_posix(),
-                error_type=type(exc).__name__,
-                errno=exc.errno,
-            )
-        return None
+    try:
+        (worktree_path / handoff.report_path).unlink(missing_ok=True)
+    except OSError as exc:
+        _log.warning(
+            "executor.post_validation_conformance_report_unlink_failed",
+            workspace_id=workspace.id,
+            validation_run_id=validation_run_id,
+            report_path=handoff.report_path.as_posix(),
+            error_type=type(exc).__name__,
+            errno=exc.errno,
+        )
+    return None
 
+
+async def _report_path_is_dirty(
+    self: Any,
+    worktree_path: Path,
+    report_path: Path,
+) -> bool:
+    """Return True if report_path is dirty relative to HEAD.
+
+    A successful git restore --source=base_commit can still leave the
+    path staged or modified relative to HEAD when the base content differs
+    from the current commit (e.g. an AWF-authored report was committed by a
+    previous fix pass). Treating the command exit code alone as success would
+    publish that stale report, so we inspect the actual worktree state.
+    """
+    changed = await self._changed_paths(worktree_path)
+    return report_path in changed
+
+
+def _build_unsatisfied_failure(
+    report: PlanConformanceReport,
+    handoff: _PlanningValidationHandoff,
+    validation_run_id: str,
+) -> _PlanningRunFailure:
     gap_text = "; ".join(report.gaps) or report.summary
     return _PlanningRunFailure(
         message=f"post-validation plan conformance was not satisfied: {gap_text}",

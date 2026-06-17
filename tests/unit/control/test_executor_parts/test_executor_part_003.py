@@ -538,6 +538,7 @@ class TestHappyPathPart002:
         )
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
         fake.queue_result(returncode=0, stdout="")  # git restore report path
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -672,6 +673,7 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
         fake.queue_result(returncode=0, stdout="")  # git restore report path after satisfaction
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
         _queue_pre_push_diagnostics(fake, head="c" * 40)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -822,6 +824,7 @@ class TestHappyPathPart002:
         fake.queue_result(returncode=0, stdout=f"?? {report_path}\n")
         fake.queue_result(returncode=0, stdout="")  # committed paths since scope HEAD
         fake.queue_result(returncode=0, stdout="")  # git restore report path
+        fake.queue_result(returncode=0, stdout="")  # post-restore cleanliness check
         _queue_pre_push_diagnostics(fake, head="d" * 40)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
