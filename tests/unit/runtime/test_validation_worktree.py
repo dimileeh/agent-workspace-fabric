@@ -107,7 +107,7 @@ def test_empty_dir_snapshot_helpers_tolerate_iterdir_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Filesystem inspection errors should leave cleanup snapshots conservative."""
-    worktree = tmp_path / "worktree"
+    worktree = _init_fake_worktree(tmp_path)
     ignored_root = worktree / "ignored"
     ignored_root.mkdir(parents=True)
     original_iterdir = Path.iterdir
@@ -134,7 +134,7 @@ def test_empty_dir_snapshot_helpers_tolerate_relative_path_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unexpected relative-path failures should not make snapshots unsafe."""
-    worktree = tmp_path / "worktree"
+    worktree = _init_fake_worktree(tmp_path)
     empty_ignored_dir = worktree / "ignored" / "empty"
     empty_untracked_dir = worktree / "generated"
     empty_ignored_dir.mkdir(parents=True)
@@ -589,9 +589,7 @@ def test_remove_empty_untracked_dirs_skips_symlinks_and_non_empty_dirs(
     tmp_path: Path,
 ) -> None:
     """Only real, empty, inside-the-worktree directories are removed."""
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    worktree = _init_fake_worktree(tmp_path)
     empty_dir = worktree / "empty"
     empty_dir.mkdir()
     non_empty_dir = worktree / "non_empty"
@@ -617,9 +615,7 @@ def test_remove_empty_untracked_dirs_honors_ignored_roots(
     tmp_path: Path,
 ) -> None:
     """Empty directories under ignored roots are left alone."""
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    worktree = _init_fake_worktree(tmp_path)
     ignored_empty_dir = worktree / ".venv" / "empty"
     plain_empty_dir = worktree / "generated"
     ignored_empty_dir.mkdir(parents=True)
@@ -640,9 +636,7 @@ def test_remove_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
     tmp_path: Path,
 ) -> None:
     """Directories containing a `.git` marker must not be traversed or removed."""
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    worktree = _init_fake_worktree(tmp_path)
     nested_git_dir = worktree / "submodule"
     nested_empty_dir = nested_git_dir / "empty"
     plain_empty_dir = worktree / "generated"
@@ -834,16 +828,7 @@ def test_remove_empty_untracked_dirs_batch_gitlink_checks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only one ``git ls-tree`` call should be issued for many directories."""
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    subprocess.run(
-        ["git", "init", str(worktree)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    _run_real_git(worktree, "config", "user.email", "agent@example.com")
-    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    worktree = _init_fake_worktree(tmp_path)
 
     # Create a handful of empty directories; none are submodules.
     for name in ("a", "b", "c", "a/nested", "b/nested"):
@@ -876,9 +861,7 @@ def test_snapshot_empty_untracked_dirs_treats_nested_git_marker_as_boundary(
     tmp_path: Path,
 ) -> None:
     """Directories containing a `.git` marker must not expose empty descendants."""
-    worktree = tmp_path / "worktree"
-    worktree.mkdir(parents=True)
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    worktree = _init_fake_worktree(tmp_path)
     nested_git_dir = worktree / "nested-worktree"
     nested_empty_dir = nested_git_dir / "empty"
     plain_empty_dir = worktree / "generated"
@@ -915,6 +898,11 @@ def test_remove_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
         capture_output=True,
         text=True,
     )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    # ``ls-tree HEAD`` requires an actual commit to resolve HEAD. An unborn
+    # branch makes git fail with "Not a valid object name HEAD".
+    _run_real_git(worktree, "commit", "--allow-empty", "-m", "init")
     plain_empty_dir = worktree / "generated"
     plain_empty_dir.mkdir()
 
@@ -941,6 +929,11 @@ def test_snapshot_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
         capture_output=True,
         text=True,
     )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    # ``ls-tree HEAD`` requires an actual commit to resolve HEAD. An unborn
+    # branch makes git fail with "Not a valid object name HEAD".
+    _run_real_git(worktree, "commit", "--allow-empty", "-m", "init")
     plain_empty_dir = worktree / "generated"
     plain_empty_dir.mkdir()
 
@@ -981,11 +974,103 @@ async def test_check_validation_worktree_clean_reports_tracked_path_under_ignore
 
 
 def _init_fake_worktree(tmp_path: Path) -> Path:
-    """Create a fake worktree path with a minimal `.git` marker."""
+    """Create a fake worktree path with a real git control directory.
+
+    The helper points ``.git`` at a real repository's ``.git`` directory so
+    ``git -C <worktree> ls-tree HEAD`` succeeds when the empty-directory
+    cleanup helpers enumerate gitlinks. A fake or bare pointer would make the
+    helpers fail and break tests that are not exercising the gitlink-lookup
+    failure path.
+    """
     worktree = tmp_path / "worktree"
     worktree.mkdir(parents=True, exist_ok=True)
-    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    repo_dir = tmp_path / "fake-worktree-repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", str(repo_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(repo_dir, "config", "user.email", "agent@example.com")
+    _run_real_git(repo_dir, "config", "user.name", "AWF Agent")
+    # ``ls-tree HEAD`` requires an actual commit to resolve HEAD. An unborn
+    # branch makes git fail with "Not a valid object name HEAD".
+    _run_real_git(repo_dir, "commit", "--allow-empty", "-m", "init")
+    # The worktree's ``.git`` file must point at the actual git control
+    # directory (the ``.git`` subdirectory of the real repository), not at the
+    # repository root, or ``git -C <worktree>`` will reject it.
+    (worktree / ".git").write_text(f"gitdir: {repo_dir / '.git'}\n", encoding="utf-8")
     return worktree
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_fails_when_gitlink_lookup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed gitlink enumeration must make the clean check fail, not lie clean.
+
+    Regression for PR #606 review thread PRRT_kwDOSJAM6s6KHcyk: if ``git ls-tree``
+    fails, ``_gitlink_paths`` used to return an empty set. With no gitlink
+    boundary, ``_remove_empty_untracked_dirs`` would rmdir a deinitialized
+    tracked submodule directory, and the cleanliness decision (made from the
+    pre-removal ``git status`` output) would falsely report the tree as clean.
+    """
+    worktree = tmp_path / "worktree"
+    worktree.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", str(worktree)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run_real_git(worktree, "config", "user.email", "agent@example.com")
+    _run_real_git(worktree, "config", "user.name", "AWF Agent")
+    submodule = worktree / "sub"
+    submodule.mkdir()
+    (submodule / ".git").mkdir()
+    (submodule / "file.txt").write_text("x\n", encoding="utf-8")
+    _run_real_git(submodule, "init")
+    _run_real_git(submodule, "config", "user.email", "agent@example.com")
+    _run_real_git(submodule, "config", "user.name", "AWF Agent")
+    _run_real_git(submodule, "add", "file.txt")
+    _run_real_git(submodule, "commit", "-m", "init")
+    _run_real_git(worktree, "submodule", "add", "./sub", "sub")
+    _run_real_git(worktree, "commit", "-m", "add sub")
+    _run_real_git(worktree, "submodule", "deinit", "-f", "sub")
+    assert not (submodule / ".git").exists()
+    assert not any(submodule.iterdir())
+
+    original_run = subprocess.run
+
+    def fail_ls_tree(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "ls-tree" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=128, stdout="", stderr="ls-tree exploded"
+            )
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_ls_tree)
+
+    async def run_git(args: list[str]) -> _CommandResultLike:
+        """Simulate a clean git status output."""
+        if args == list(_VALIDATION_STATUS_ARGS):
+            return _CommandResultLike(0, "", None)
+        raise AssertionError(f"unexpected git command: {args!r}")
+
+    check = await check_validation_worktree_clean(
+        run_git=run_git,
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "gitlink" in check.message.lower()
+    assert check.command_stderr == "ls-tree exploded"
+    assert submodule.exists()
 
 
 def _run_real_git(worktree: Path, *args: str) -> subprocess.CompletedProcess[str]:

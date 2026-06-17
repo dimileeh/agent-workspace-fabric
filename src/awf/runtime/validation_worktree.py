@@ -196,6 +196,14 @@ def _is_tracked_gitlink(worktree_path: Path, path: Path) -> bool:
     return result.returncode == 0 and result.stdout.startswith("160000")
 
 
+class _GitlinkLookupError(Exception):
+    """Raised when ``git ls-tree`` cannot enumerate tracked gitlinks."""
+
+    def __init__(self, message: str, *, stderr: str | None = None) -> None:
+        super().__init__(message)
+        self.stderr = stderr
+
+
 def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
     """Return all tracked gitlink (submodule) paths under HEAD.
 
@@ -206,6 +214,13 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
     ``-z`` emits NUL-terminated entries and disables C-quoting, so gitlinks
     whose paths contain non-ASCII characters or whitespace are returned as
     their real on-disk names rather than quoted text.
+
+    Raises:
+        _GitlinkLookupError: If ``git ls-tree`` fails. Returning an empty set
+        on failure is unsafe: callers use the result as a traversal boundary,
+        and an empty set would let cleanup remove a deinitialized tracked
+        submodule directory, dirtying the worktree without the pre-removal
+        ``git status`` noticing.
     """
     result = subprocess.run(
         [
@@ -223,7 +238,10 @@ def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
         text=True,
     )
     if result.returncode != 0:
-        return frozenset()
+        raise _GitlinkLookupError(
+            "Could not enumerate tracked gitlinks with `git ls-tree`.",
+            stderr=result.stderr,
+        )
     paths: set[str] = set()
     for entry in result.stdout.split("\0"):
         if entry.startswith("160000"):
@@ -559,20 +577,34 @@ async def check_validation_worktree_clean(
     # (created before any file is written) would otherwise surface the root
     # and its parents as dirty, escaping the unconditional suppression above.
     snapshot_ignored_paths = (*ignored_paths, *AWF_AGENT_RUNTIME_IGNORED_ROOTS)
-    if remove_empty_untracked_dirs:
-        # Return value intentionally discarded: the removal is a pure side
-        # effect. The dirty check below relies only on git-status output, which
-        # never reports truly empty directories, so no removed-path list is
-        # needed here.
-        _remove_empty_untracked_dirs(
-            worktree_path=worktree_path,
-            ignored_paths=snapshot_ignored_paths,
-        )
-        empty_untracked_dirs: tuple[str, ...] = ()
-    else:
-        empty_untracked_dirs = _snapshot_empty_untracked_dirs(
-            worktree_path=worktree_path,
-            ignored_paths=snapshot_ignored_paths,
+    try:
+        if remove_empty_untracked_dirs:
+            # Return value intentionally discarded: the removal is a pure side
+            # effect. The dirty check below relies only on git-status output, which
+            # never reports truly empty directories, so no removed-path list is
+            # needed here.
+            _remove_empty_untracked_dirs(
+                worktree_path=worktree_path,
+                ignored_paths=snapshot_ignored_paths,
+            )
+            empty_untracked_dirs: tuple[str, ...] = ()
+        else:
+            empty_untracked_dirs = _snapshot_empty_untracked_dirs(
+                worktree_path=worktree_path,
+                ignored_paths=snapshot_ignored_paths,
+            )
+    except _GitlinkLookupError as exc:
+        # A failed gitlink lookup is an infrastructure failure, not a clean
+        # tree. Proceeding with an empty set would let empty-directory cleanup
+        # remove deinitialized tracked submodules and report a false-clean.
+        return ValidationWorktreeCheck(
+            clean=False,
+            reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
+            message=(
+                "Could not enumerate tracked gitlinks for validation worktree "
+                "empty-directory cleanup with `git ls-tree`."
+            ),
+            command_stderr=(exc.stderr or "")[:1000],
         )
     # Ignored roots only suppress untracked or ignored artifacts; tracked files
     # below those roots must stay visible so cleanup can restore them.
