@@ -349,8 +349,20 @@ async def _validated_git_push_result(
     remote_url: str | None = None,
     refspec: str | None = None,
     state: object | None = None,
+    allow_validation_fix_passes: bool = True,
 ) -> _GitPushResult:
-    """Run pre-push validation with optional fix passes before pushing."""
+    """Run pre-push validation with optional fix passes before pushing.
+
+    ``allow_validation_fix_passes`` gates the agent fix-pass + commit retry loop.
+    The operator-hint resume path sets it ``False`` while an approve-and-keep grant
+    is still active: a fix pass commits through ``_commit_dirty_worktree``, whose
+    protected-scope check consults the STILL-ACTIVE grant (the grant is consumed
+    only after the push), so a fix pass that edits the granted protected path would
+    publish extra protected edits under an approval meant only for the preserved
+    commit (PR #609 comment 4512881681). Disabling the fix passes leaves validation
+    itself intact: a real failure surfaces (the grant survives for a re-resume)
+    rather than being papered over with ungranted protected commits.
+    """
     if self._deps.validation is None:
         return cast(
             _GitPushResult,
@@ -370,6 +382,7 @@ async def _validated_git_push_result(
         remote_branch=remote_branch,
         remote_url=remote_url,
         state=state,
+        allow_validation_fix_passes=allow_validation_fix_passes,
     )
     if not validation_result.passed:
         return _GitPushResult(
@@ -401,9 +414,19 @@ async def _run_pre_push_validation_with_fix_passes(
     remote_branch: str,
     remote_url: str | None,
     state: object | None,
+    allow_validation_fix_passes: bool = True,
 ) -> _PrePushValidationResult:
-    """Execute pre-push validation plus optional fix/retry attempts."""
-    max_fix_passes = max(0, self._runner_config.pre_push_validation_fix_passes)
+    """Execute pre-push validation plus optional fix/retry attempts.
+
+    When ``allow_validation_fix_passes`` is ``False`` the fix-pass budget is forced
+    to zero, so a failing validation returns its failure unchanged without invoking
+    an agent fix pass (see ``_validated_git_push_result``).
+    """
+    max_fix_passes = (
+        max(0, self._runner_config.pre_push_validation_fix_passes)
+        if allow_validation_fix_passes
+        else 0
+    )
     pass_index = 0
     validation_commands: tuple[str, ...] | None = None
     while True:

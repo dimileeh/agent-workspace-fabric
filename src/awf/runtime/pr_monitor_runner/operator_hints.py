@@ -327,6 +327,15 @@ async def _run_operator_hint_cycle(
             compose_file=compose_file,
             remote_url=remote_push_url,
             state=state,
+            # Disable the pre-push validation fix passes while an approve-and-keep
+            # grant is still active (grant-only or directive+grant resume). The grant
+            # is consumed only by ``_finalize_operator_hint_resume`` AFTER this push,
+            # so a fix pass committing through ``_commit_dirty_worktree`` — which
+            # consults the still-active grant — could publish NEW edits to the granted
+            # protected path under an approval meant only for the preserved commit
+            # (PR #609 comment 4512881681). Validation still runs; a real failure
+            # surfaces and the grant survives for a re-resume.
+            allow_validation_fix_passes=not active_grant_specs,
         )
     )
     if push_result.failed:
