@@ -79,7 +79,6 @@ class ExecutorDelegatesMixin:
         _planning_ops._record_planning_validation_handoff_event
     )
     _run_post_validation_conformance_check = _planning_ops._run_post_validation_conformance_check
-    _report_path_is_dirty = _planning_ops._report_path_is_dirty
     _write_satisfied_post_validation_conformance_report = staticmethod(
         _planning_ops._write_satisfied_post_validation_conformance_report
     )
