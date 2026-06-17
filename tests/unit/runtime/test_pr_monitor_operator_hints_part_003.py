@@ -1,0 +1,365 @@
+"""Regression tests for operator remonitor hints — directive leak slice (part 3).
+
+Split out of ``test_pr_monitor_operator_hints_part_002`` to keep that module under
+the first-party line limit. These cases cover the directive-resume guard that
+refuses to publish the preserved ungranted protected commit when a directive
+resolves the block by reverting ON TOP of it rather than dropping it
+(PRRT_kwDOSJAM6s6KFytV / comment 4512006075).
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.common.commands import FakeCommandRunner
+from awf.common.github_client import RepoRef
+from awf.db.session import make_session_factory
+from awf.runtime.pr_monitor import (
+    _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
+    MonitorState,
+    OperatorHint,
+)
+from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+from tests.postgres import postgres_test_engine
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    seed_monitoring_workspace,
+)
+
+
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    async with postgres_test_engine() as engine:
+        yield make_session_factory(engine)
+
+
+@pytest.mark.unit
+async def test_operator_hint_directive_revert_on_top_leaks_preserved_commit_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DIRECTIVE that resolves a protected block by adding a revert commit ON TOP
+    of the preserved offending commit leaves the net tree matching the remote PR
+    branch, so ``_protected_scope_push_block`` is None. Pushing HEAD would still
+    fast-forward the remote branch over the ungranted protected-file commit plus its
+    revert. The directive guard detects the preserved commit is still in the pushed
+    range and surfaces needs_human WITHOUT pushing (comment 4512006075)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert the protected edit",
+        directive="revert it",
+        operation_id="op_directive_revert_on_top",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-offending-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-offending-sha", None)
+
+    async def _fixed_verdict(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _preserved_in_range(**_kwargs: object) -> bool:
+        return True
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _validated_push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("leaking directive push must be refused before validation/push")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_in_unpushed_range", _preserved_in_range)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated_push_must_not_run)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is True
+    assert result.terminal_monitor_failure is True
+    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert "preserved-offending-sha" in (state.pending_operator_hint.status_reason or "")
+    # The preserved marker is retained so a corrected resume keeps the divergence
+    # context; it is only dropped once the resume is finalized.
+    assert (
+        state.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY)
+        == "preserved-offending-sha"
+    )
+
+
+@pytest.mark.unit
+async def test_operator_hint_directive_revert_dropped_preserved_commit_pushes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the directive dropped the preserved commit (reset away), the guard does
+    not fire and the validated push proceeds: the legitimate revert path is not
+    wedged by the leak guard."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert the protected edit",
+        directive="revert it",
+        operation_id="op_directive_revert_dropped",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "dropped-preserved-sha")
+    push_calls: list[dict[str, object]] = []
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("redone-head-sha", None)
+
+    async def _fixed_verdict(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _preserved_not_in_range(**_kwargs: object) -> bool:
+        return False
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _validated_push(**kwargs: object) -> _GitPushResult:
+        push_calls.append(kwargs)
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "redone-head-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_in_unpushed_range", _preserved_not_in_range)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated_push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert result.failed is False
+    assert push_calls, "the legitimate dropped-commit directive push must run"
+    assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
+async def test_preserved_commit_in_unpushed_range_missing_inputs_returns_false(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """No preserved SHA, or a missing worktree, cannot leak: return False without
+    touching git."""
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / "ws_present"
+    worktree.mkdir(parents=True)
+
+    assert (
+        await runner._preserved_commit_in_unpushed_range(
+            workspace_id="ws_present",
+            worktree_path=worktree,
+            remote_branch="awf/ws_present",
+            preserved_head_sha=None,
+        )
+        is False
+    )
+    assert (
+        await runner._preserved_commit_in_unpushed_range(
+            workspace_id="ws_missing",
+            worktree_path=tmp_path / "worktrees" / "ws_missing",
+            remote_branch="awf/ws_missing",
+            preserved_head_sha="preserved-sha",
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+async def test_preserved_commit_in_unpushed_range_reset_away_returns_false(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A preserved commit no longer reachable from HEAD (the directive reset it
+    away) is not in the pushed range — no fetch is needed."""
+    worktree = tmp_path / "worktrees" / "ws_reset"
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    # merge-base --is-ancestor <preserved> HEAD exits non-zero: not an ancestor.
+    cmd.queue_result(returncode=1)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert (
+        await runner._preserved_commit_in_unpushed_range(
+            workspace_id="ws_reset",
+            worktree_path=worktree,
+            remote_branch="awf/ws_reset",
+            preserved_head_sha="preserved-sha",
+        )
+        is False
+    )
+    ancestry_calls = [c for c in cmd.calls if "--is-ancestor" in c.args]
+    assert len(ancestry_calls) == 1
+    assert "preserved-sha" in ancestry_calls[0].args
+    assert "HEAD" in ancestry_calls[0].args
+
+
+@pytest.mark.unit
+async def test_preserved_commit_in_unpushed_range_diff_error_returns_false(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fetch/diff failure fails open (False) so the normal push path surfaces the
+    error rather than silently blocking a legitimate directive resume."""
+    worktree = tmp_path / "worktrees" / "ws_err"
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # ancestor of HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _diff(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        raise ProtectedScopeDiffError("fetch failed")
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _diff)
+
+    assert (
+        await runner._preserved_commit_in_unpushed_range(
+            workspace_id="ws_err",
+            worktree_path=worktree,
+            remote_branch="awf/ws_err",
+            preserved_head_sha="preserved-sha",
+        )
+        is False
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("on_remote_returncode", "expected"),
+    [
+        (1, True),  # preserved NOT on remote: still in the unpushed range -> leak
+        (0, False),  # preserved already on remote: cannot be un-leaked
+    ],
+)
+async def test_preserved_commit_in_unpushed_range_on_remote_decides_outcome(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    on_remote_returncode: int,
+    expected: bool,
+) -> None:
+    """An ancestor-of-HEAD preserved commit leaks only when it is not already
+    contained in the freshly-fetched remote PR head."""
+    worktree = tmp_path / "worktrees" / "ws_range"
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge-base --is-ancestor <preserved> HEAD: ancestor
+    cmd.queue_result(returncode=on_remote_returncode)  # ... <preserved> FETCH_HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _diff(**_kwargs: object) -> tuple[str, tuple[str, ...]]:
+        return ("base-sha", ())
+
+    monkeypatch.setattr(runner, "_remote_branch_diff_base_and_changed_paths", _diff)
+
+    assert (
+        await runner._preserved_commit_in_unpushed_range(
+            workspace_id="ws_range",
+            worktree_path=worktree,
+            remote_branch="awf/ws_range",
+            preserved_head_sha="preserved-sha",
+        )
+        is expected
+    )
+    ancestry_calls = [c for c in cmd.calls if "--is-ancestor" in c.args]
+    assert len(ancestry_calls) == 2
+    assert "HEAD" in ancestry_calls[0].args
+    assert "FETCH_HEAD" in ancestry_calls[1].args

@@ -217,6 +217,43 @@ async def _run_operator_hint_cycle(
             # a fresh one (mirrors ``blocked_transition`` clearing the pre-PR column).
             state.pending_operator_hint = None
         return reblock_result
+    # Directive resumes must not LEAK the ungranted protected commit. A DIRECTIVE
+    # (revert/redo) that resolves the block by adding a revert commit ON TOP of the
+    # preserved offending commit — rather than resetting it away — leaves the net
+    # tree matching the remote PR branch, so ``protected_scope_block`` is None, yet
+    # pushing HEAD would still fast-forward the remote branch over the original
+    # ungranted protected-file commit plus its revert. Only an approve-and-keep
+    # grant (no directive) authorizes publishing the preserved commit, so this guard
+    # is scoped to directive resumes. When the preserved commit is still inside the
+    # range this push would publish, surface needs_human instead of leaking it; the
+    # operator can re-issue a directive that resets the worktree (or grant the path)
+    # (PRRT_kwDOSJAM6s6KFytV).
+    if (
+        protected_scope_block is None
+        and hint.directive
+        and preserved_head_sha
+        and await self._preserved_commit_in_unpushed_range(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+            preserved_head_sha=preserved_head_sha,
+        )
+    ):
+        reason = (
+            "operator directive resolved the protected block by reverting on top of "
+            f"the preserved commit {preserved_head_sha} instead of dropping it; pushing "
+            "would publish the ungranted protected change. Reset the worktree to remove "
+            "the preserved commit, or approve-and-keep the protected path, then resume."
+        )
+        mark_operator_hint_needs_human(state, reason)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=reason,
+            reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+        )
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
     # after the push landed), treat it as a no-op rather than re-pushing.

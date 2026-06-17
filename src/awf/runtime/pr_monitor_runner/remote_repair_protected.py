@@ -1099,6 +1099,70 @@ async def _preserved_head_on_remote_fetch_head(
     return bool(result.ok)
 
 
+async def _preserved_commit_in_unpushed_range(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    remote_branch: str,
+    remote_push_url: str | None = None,
+    preserved_head_sha: str | None = None,
+) -> bool:
+    """Return whether a DIRECTIVE push would still publish the preserved commit.
+
+    A DIRECTIVE (revert/redo) resume must NOT publish the ungranted protected
+    commit — only an approve-and-keep grant authorizes that. If the directive
+    resolves the block by adding a revert commit ON TOP of the preserved offending
+    commit (instead of resetting it away), the final tree can match the remote PR
+    branch, so the net-diff ``_protected_scope_push_block`` finds no violation
+    (PRRT_kwDOSJAM6s6KFytV scoped the no-op guard to grant-only resumes). Pushing
+    HEAD would still fast-forward the remote branch over the original ungranted
+    protected-file commit plus its revert.
+
+    Detect that by confirming the preserved commit is (a) an ancestor of the local
+    HEAD this push would publish AND (b) not already contained in the
+    freshly-fetched remote PR head (an already-published commit cannot be
+    un-leaked, and a grant-only resume legitimately lands it). A fetch/ancestry
+    failure returns ``False`` so the normal push path runs and surfaces any error
+    rather than silently blocking a legitimate directive resume."""
+    if not preserved_head_sha or not worktree_path.exists():
+        return False
+    ancestry = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path,
+            "merge-base",
+            "--is-ancestor",
+            preserved_head_sha,
+            "HEAD",
+        )
+    )
+    if not ancestry.ok:
+        # The directive reset the preserved commit away (it is no longer reachable
+        # from HEAD), so this push cannot publish it: the legitimate revert path.
+        return False
+    try:
+        # Populate FETCH_HEAD with the remote PR head for the containment check.
+        await self._remote_branch_diff_base_and_changed_paths(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            remote_push_url=remote_push_url,
+        )
+    except ProtectedScopeDiffError:
+        return False
+    if await self._preserved_head_on_remote_fetch_head(
+        worktree_path=worktree_path,
+        preserved_head_sha=preserved_head_sha,
+    ):
+        return False
+    _log.warning(
+        "monitor.protected_scope_directive_preserved_commit_in_push_range",
+        workspace_id=workspace_id,
+        remote_branch=remote_branch,
+        preserved_head_sha=preserved_head_sha,
+    )
+    return True
+
+
 async def _consume_active_operator_grants(self: Any, workspace_id: str) -> int:
     """Mark the workspace's active operator grants consumed (single-use).
 

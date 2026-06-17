@@ -127,6 +127,9 @@ class RunnerDelegatesMixin:
     _preserved_commit_already_on_remote = (
         _remote_repair_protected._preserved_commit_already_on_remote
     )
+    _preserved_commit_in_unpushed_range = (
+        _remote_repair_protected._preserved_commit_in_unpushed_range
+    )
     _preserved_head_on_remote_fetch_head = (
         _remote_repair_protected._preserved_head_on_remote_fetch_head
     )
