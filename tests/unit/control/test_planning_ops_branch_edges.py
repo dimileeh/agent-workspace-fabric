@@ -819,6 +819,89 @@ async def test_post_validation_conformance_report_deposit_oserror_is_non_fatal(
 
 
 @pytest.mark.unit
+def test_deposit_satisfied_conformance_report_rejects_symlinked_plan(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KMbis regression: the fallback satisfied-conformance
+    deposit must not follow a symlinked plan into host-readable files."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="validated evidence satisfies plan",
+        gaps=(),
+    )
+
+    secret = tmp_path / "host-secret.txt"
+    secret.write_text("TOP SECRET", encoding="utf-8")
+    (worktree_path / plan_path.parent).mkdir(parents=True, exist_ok=True)
+    (worktree_path / plan_path).symlink_to(secret)
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    assert (artifact_dir / "conformance.json").exists()
+    assert not (artifact_dir / "plan.md").exists()
+    assert any(
+        entry["event"] == "service.planning_artifact_deposit_rejected"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["reason"] == "symlink"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
+def test_deposit_satisfied_conformance_report_rejects_plan_escaping_worktree(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KMbis regression: a plan reached via an intermediate
+    directory symlink outside the worktree must not be deposited."""
+    work_dir = tmp_path / "work_dir"
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_deposit.md")
+    report = PlanConformanceReport(
+        status=PlanConformanceStatus.satisfied,
+        summary="validated evidence satisfies plan",
+        gaps=(),
+    )
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    (outside_dir / plan_path.name).write_text("# outside plan", encoding="utf-8")
+
+    plans_dir = worktree_path / plan_path.parent
+    plans_dir.parent.mkdir(parents=True, exist_ok=True)
+    plans_dir.symlink_to(outside_dir, target_is_directory=True)
+
+    with structlog.testing.capture_logs() as captured:
+        planning_ops._deposit_satisfied_conformance_report(
+            work_dir=work_dir,
+            workspace_id="ws_deposit",
+            worktree_path=worktree_path,
+            plan_path=plan_path,
+            report=report,
+        )
+
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(work_dir, "ws_deposit")
+    assert (artifact_dir / "conformance.json").exists()
+    assert not (artifact_dir / "plan.md").exists()
+    assert any(
+        entry["event"] == "service.planning_artifact_deposit_rejected"
+        and entry["workspace_id"] == "ws_deposit"
+        and entry["reason"] == "escapes_worktree"
+        for entry in captured
+    )
+
+
+@pytest.mark.unit
 async def test_post_validation_conformance_staged_deletion_restored_from_head(
     tmp_path: Path,
 ) -> None:

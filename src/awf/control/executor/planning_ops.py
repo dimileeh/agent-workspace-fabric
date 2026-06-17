@@ -10,7 +10,6 @@ import hashlib as hashlib
 import json as json
 import re as re
 import shlex as shlex
-import shutil as shutil
 import time as time
 import traceback as traceback
 from collections.abc import Mapping
@@ -85,6 +84,7 @@ from awf.runtime.workspace_prompt_context import (
 from awf.service.artifacts import (
     DEPOSITED_CONFORMANCE_NAME,
     DEPOSITED_PLAN_NAME,
+    _deposit_one_planning_artifact,
     deposit_workspace_planning_artifacts,
     workspace_artifact_dir,
 )
@@ -622,18 +622,15 @@ def _deposit_satisfied_conformance_report(
 
     # Best-effort copy of the worktree plan so the served artifact contains
     # both planning documents, mirroring ``deposit_workspace_planning_artifacts``.
-    plan_source = worktree_path / plan_path
-    if plan_source.is_file():
-        try:
-            import shutil
-
-            shutil.copy2(plan_source, artifact_dir / DEPOSITED_PLAN_NAME)
-        except OSError:
-            _log.warning(
-                "executor.satisfied_conformance_plan_deposit_failed",
-                workspace_id=workspace_id,
-                plan_path=plan_path.as_posix(),
-            )
+    # Use the hardened single-artifact deposit so symlink/worktree-escape/hard-
+    # link/oversized guards apply even in this fallback path.
+    _deposit_one_planning_artifact(
+        artifact_dir=artifact_dir,
+        workspace_id=workspace_id,
+        source=worktree_path / plan_path,
+        dest_name=DEPOSITED_PLAN_NAME,
+        worktree_root=worktree_path.resolve(),
+    )
 
 
 async def _record_post_validation_conformance_event(
