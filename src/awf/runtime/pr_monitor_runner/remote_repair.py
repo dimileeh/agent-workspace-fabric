@@ -267,6 +267,26 @@ async def _resolve_block_resume_phase(self: Any, workspace_id: str) -> str | Non
         return workspace.block_resume_phase if workspace is not None else None
 
 
+async def _clear_block_resume_phase(self: Any, workspace_id: str) -> None:
+    """Clear the recorded protected-scope block resume phase once its resume settles.
+
+    The phase column discriminates a sync-base-originated pause
+    (``monitor_protected_scope_sync_base``) when ``_run_operator_hint_cycle`` selects
+    the protected-scope validator. It is set at block time and never overwritten
+    except by a fresh block. A later operator-hint or remonitor cycle on
+    ``monitoring_pr`` arms a hint WITHOUT re-blocking, so the stale sync-base phase
+    would still select the sync-base-aware validator — letting a repair that reverts
+    an unowned protected file back to base contents push without a grant or re-block.
+    Reset it to ``None`` once the resume is finalized so the next cycle falls back to
+    the generic unpushed-commit validator (PRRT_kwDOSJAM6s6KFqEg)."""
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None or workspace.block_resume_phase is None:
+            return
+        workspace.block_resume_phase = None
+        await session.commit()
+
+
 async def _commit_dirty_worktree(
     self: Any,
     *,

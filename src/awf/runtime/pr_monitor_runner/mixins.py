@@ -112,6 +112,7 @@ class RunnerDelegatesMixin:
     _open_merge_candidate_head_sha = _remote_repair._open_merge_candidate_head_sha
     _resolve_task_tag = _remote_repair._resolve_task_tag
     _resolve_block_resume_phase = _remote_repair._resolve_block_resume_phase
+    _clear_block_resume_phase = _remote_repair._clear_block_resume_phase
     _commit_dirty_worktree = _remote_repair._commit_dirty_worktree
     _repair_protected_scope_commits_before_push = (
         _remote_repair._repair_protected_scope_commits_before_push

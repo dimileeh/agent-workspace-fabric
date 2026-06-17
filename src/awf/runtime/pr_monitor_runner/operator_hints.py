@@ -101,8 +101,7 @@ async def _run_operator_hint_cycle(
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
-        await self._consume_active_operator_grants(workspace_id)
-        _finalize_processed_operator_hint(state)
+        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     if hint.directive or not active_grant_specs:
         prompt = operator_hint_prompt(
@@ -233,8 +232,7 @@ async def _run_operator_hint_cycle(
         pushed_head_sha = await self._rev_parse_head(worktree_path)
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
-        await self._consume_active_operator_grants(workspace_id)
-        _finalize_processed_operator_hint(state)
+        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     push_result = (
         await self._repair_protected_scope_commits_before_push(
@@ -303,8 +301,7 @@ async def _run_operator_hint_cycle(
             )
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
-        await self._consume_active_operator_grants(workspace_id)
-        _finalize_processed_operator_hint(state)
+        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
         return cast(_GitPushResult, push_result)
 
     pushed_head_sha = await self._rev_parse_head(worktree_path)
@@ -312,9 +309,25 @@ async def _run_operator_hint_cycle(
         state.last_push_sha = pushed_head_sha
     # Single-use: consume the operator grants now that the resumed change pushed,
     # so a later DIFFERENT protected change re-blocks and must be granted again.
-    await self._consume_active_operator_grants(workspace_id)
-    _finalize_processed_operator_hint(state)
+    await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
     return cast(_GitPushResult, push_result)
+
+
+async def _finalize_operator_hint_resume(
+    self: Any, *, workspace_id: str, state: MonitorState
+) -> None:
+    """Close out a settled protected-block resume so the next cycle starts clean.
+
+    Bundles the three teardown steps a finalized resume must perform: consume the
+    single-use operator grants, reset the ``block_resume_phase`` discriminator (set
+    at block time and never overwritten except by a fresh block) so a later
+    operator-hint / remonitor cycle — which arms a hint WITHOUT re-blocking — cannot
+    reuse a stale sync-base phase to skew the protected-scope validator selection
+    (PRRT_kwDOSJAM6s6KFqEg), and mark the operator hint processed (which also drops
+    the preserved-head marker, PRRT_kwDOSJAM6s6KE2BX)."""
+    await self._consume_active_operator_grants(workspace_id)
+    await self._clear_block_resume_phase(workspace_id)
+    _finalize_processed_operator_hint(state)
 
 
 def _finalize_processed_operator_hint(state: MonitorState) -> None:
