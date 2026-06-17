@@ -137,7 +137,7 @@ async def _run_operator_hint_cycle(
         # that didn't actually revert, or a grant that doesn't cover the path).
         # RE-BLOCK with a bumped epoch — invalidating the just-applied grants and
         # re-arming a fresh notification — instead of proceeding toward merge.
-        return cast(
+        reblock_result = cast(
             _GitPushResult,
             await self._pause_monitor_for_protected_scope_block(
                 workspace_id=workspace_id,
@@ -153,6 +153,15 @@ async def _run_operator_hint_cycle(
                 source_head_sha=operation_start_head,
             ),
         )
+        if reblock_result.paused_into_blocked:
+            # The shared block transition clears the pre-PR ``pending_operator_hint``
+            # column but cannot reach the monitor hint map. Clear the in-memory
+            # monitor hint too so the state the loop persists after this re-block
+            # does not show a pending resume while status is already ``blocked``;
+            # the bumped block epoch supersedes this hint and a later resume re-arms
+            # a fresh one (mirrors ``blocked_transition`` clearing the pre-PR column).
+            state.pending_operator_hint = None
+        return reblock_result
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
     # after the push landed), treat it as a no-op rather than re-pushing.

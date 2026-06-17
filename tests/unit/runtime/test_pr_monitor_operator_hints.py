@@ -1654,6 +1654,92 @@ async def test_operator_hint_resume_reblocks_when_violation_unresolved(
 
     assert result.paused_into_blocked is True
     assert captured["protected_scope_block"] is still_blocking
+    # A landed re-block must clear the in-memory monitor hint so the state the
+    # loop persists afterward does not show a pending resume while the workspace
+    # is already ``blocked`` (the bumped block epoch supersedes this hint).
+    assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("paused", [True, False])
+async def test_operator_hint_reblock_clears_hint_only_when_pause_lands(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    paused: bool,
+) -> None:
+    """The re-block clears the pending monitor hint only when the pause actually
+    transitioned the workspace into ``blocked``. A stale CAS (the row already left
+    ``monitoring_pr``) returns a plain failed result and PRESERVES the hint so the
+    caller's normal failed handling runs against whatever terminal state won."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert the protected edit",
+        directive="revert it",
+        operation_id="op_reblock_branch",
+        requested_at="2026-06-16T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    still_blocking = _ProtectedScopePushBlock(
+        message="still touches a protected file",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(path="pyproject.toml", protected_pattern="pyproject.toml"),
+        ),
+    )
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fixed_verdict(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _still_blocking(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return still_blocking
+
+    async def _pause(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PAUSED_BLOCKED",
+            paused_into_blocked=paused,
+        )
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _still_blocking)
+    monkeypatch.setattr(runner, "_pause_monitor_for_protected_scope_block", _pause)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is paused
+    if paused:
+        assert state.pending_operator_hint is None
+    else:
+        assert state.pending_operator_hint == hint
 
 
 @pytest.mark.unit
