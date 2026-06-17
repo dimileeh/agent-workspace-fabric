@@ -377,6 +377,7 @@ async def _commit_dirty_worktree(
     protected_scope_revert_remote_branch: str | None = None,
     remote_push_url: str | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> bool:
     """Commit dirty monitor-agent edits so PR feedback is not stranded.
 
@@ -408,13 +409,15 @@ async def _commit_dirty_worktree(
             workspace_id=workspace_id,
             reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
         )
-        operation_start_head = await _open_merge_candidate_head_sha(self, workspace_id)
-        if operation_start_head is not None:
+        recovery_head = operation_start_head or await _open_merge_candidate_head_sha(
+            self, workspace_id
+        )
+        if recovery_head is not None:
             recovered = await _recover_missing_head_object_from_filesystem(
                 self,
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
-                operation_start_head=operation_start_head,
+                operation_start_head=recovery_head,
                 task_tag=(
                     await _resolve_task_tag(self, workspace_id)
                     if isinstance(task_tag, _TaskTagUnset)

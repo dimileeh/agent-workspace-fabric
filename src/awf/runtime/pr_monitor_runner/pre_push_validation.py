@@ -955,6 +955,7 @@ async def _run_pre_push_validation_fix_pass(
                 command_evidence=command_evidence,
                 protected_scope_revert_remote_branch=remote_branch,
                 remote_push_url=remote_url,
+                operation_start_head=fix_start_head,
             )
         )
     except Exception as exc:

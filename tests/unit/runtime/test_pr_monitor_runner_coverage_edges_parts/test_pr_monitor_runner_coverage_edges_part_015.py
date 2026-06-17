@@ -122,6 +122,7 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
         await s.commit()
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="abc123\n")
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge
@@ -262,6 +263,7 @@ async def test_sync_base_allows_base_owned_protected_quality_gate_changes_before
         await s.commit()
 
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="abc123\n")
     cmd.queue_result(returncode=0)  # merge --abort
     cmd.queue_result(returncode=0)  # fetch base
     cmd.queue_result(returncode=0)  # merge

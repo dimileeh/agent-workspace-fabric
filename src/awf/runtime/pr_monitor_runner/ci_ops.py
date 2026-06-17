@@ -33,7 +33,10 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
-from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
+from awf.runtime.pr_monitor_runner.constants import (
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
+    _MONITOR_POLICY_BLOCKED_REASON,
+)
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
@@ -43,6 +46,7 @@ from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
 
@@ -138,6 +142,7 @@ async def _run_ci_fix(
             compose_file=compose_file,
             command_evidence=command_evidence,
             task_tag=task_tag,
+            operation_start_head=operation_start_head,
         )
     except ProtectedScopeDiffError as exc:
         return cast(
@@ -163,6 +168,14 @@ async def _run_ci_fix(
             returncode=1,
             stderr=str(exc),
             reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+        )
+    except _MonitorHeadObjectMissingError as exc:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr=str(exc),
+            reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
         )
 
     if agent_run_err is not None:

@@ -24,6 +24,7 @@ from awf.runtime.ownership import (
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
+    _HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
@@ -39,6 +40,7 @@ from awf.runtime.pr_monitor_runner.types import (
     BaseFetchError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorHeadObjectMissingError,
     _MonitorPolicyBlockedError,
 )
 from awf.runtime.validation_worktree_constants import (
@@ -690,6 +692,14 @@ async def _run_sync_base(
 
     worktree_path = runner._worktrees_root / workspace_id
 
+    operation_start_head, head_result = await runner._repair_operation_start_head_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree_path,
+        operation_type="sync_base",
+    )
+    if head_result is not None:
+        return head_result
+
     async def _git(*args: str) -> tuple[int, str, str]:
         """Run a git command in the sync-base worktree."""
         r = await runner._deps.runner.run(git_worktree_command(worktree_path, *args))
@@ -778,6 +788,7 @@ async def _run_sync_base(
                 message=f"fix: resolve PR #{pr_number} base conflicts",
                 command_evidence=command_evidence,
                 task_tag=task_tag,
+                operation_start_head=operation_start_head,
             )
         except _MonitorPolicyBlockedError as exc:
             return _GitPushResult(
@@ -793,6 +804,14 @@ async def _run_sync_base(
                 returncode=1,
                 stderr=str(exc),
                 reason_code=exc.reason_code,
+            )
+        except _MonitorHeadObjectMissingError as exc:
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=1,
+                stderr=str(exc),
+                reason_code=_HEAD_OBJECT_MISSING_UNRECOVERABLE_REASON,
             )
 
         if agent_run_err is not None:

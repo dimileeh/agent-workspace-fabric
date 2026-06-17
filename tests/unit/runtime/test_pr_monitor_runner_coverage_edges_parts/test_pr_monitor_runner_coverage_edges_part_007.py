@@ -1421,6 +1421,7 @@ async def test_provider_recovery_suppression_blocks_all_monitor_agent_invocation
             remote_branch="awf/ws_suppressed",
         )
 
+    cmd.queue_result(returncode=0, stdout="abc123\n")
     cmd.queue_result(returncode=0)  # git merge --abort
     cmd.queue_result(returncode=0)  # git fetch origin development
     cmd.queue_result(returncode=1, stderr="conflict")  # git merge

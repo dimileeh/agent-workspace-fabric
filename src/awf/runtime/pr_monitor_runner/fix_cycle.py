@@ -163,6 +163,7 @@ async def _run_fix_cycle(
                     state=state,
                     owned_paths=owned_paths,
                     task_tag=task_tag,
+                    operation_start_head=operation_start_head,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:
@@ -265,6 +266,7 @@ async def _run_fix_cycle(
                     state=state,
                     owned_paths=owned_paths,
                     task_tag=task_tag,
+                    operation_start_head=operation_start_head,
                 )
             except ProtectedScopeDiffError as exc:
                 for item_id in publish_dependent_ids:

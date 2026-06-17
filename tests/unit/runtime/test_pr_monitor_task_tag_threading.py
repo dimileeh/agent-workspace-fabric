@@ -54,6 +54,29 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
+@pytest.fixture(autouse=True)
+def _mock_remote_repair_safe_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return True
+
+    async def _repair_agent_runtime_ownership(**kwargs: object) -> bool:
+        del kwargs
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.ownership.repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+
 _FAKE_REPO = SimpleNamespace(slug=lambda: "owner/repo")
 
 
@@ -257,6 +280,7 @@ def _verdict_runner(sink_task_tags: list[object]) -> SimpleNamespace:
         return True
 
     return SimpleNamespace(
+        _worktrees_root=Path("/tmp"),
         _provider_recovery_suppresses_cli=_suppress,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _deps=SimpleNamespace(adapter=SimpleNamespace(run=_adapter_run)),
@@ -816,6 +840,16 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
     async def _validated(**_kwargs: object) -> _GitPushResult:
         return _GitPushResult(pushed=True, failed=False, returncode=0)
 
+    async def _repair_operation_start_head_result(
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        operation_type: str,
+        fallback_head_sha: str | None = None,
+    ) -> tuple[str, None]:
+        del workspace_id, worktree_path, operation_type, fallback_head_sha
+        return "abc123", None
+
     runner = SimpleNamespace(
         _worktrees_root=tmp_path,
         _workspace_runtime_context="",
@@ -825,6 +859,7 @@ async def test_run_sync_base_resolves_once_and_threads_to_sink(
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
         _validated_git_push_result=_validated,
+        _repair_operation_start_head_result=_repair_operation_start_head_result,
         _deps=SimpleNamespace(runner=fake_runner, adapter=SimpleNamespace(run=_adapter_run)),
     )
 

@@ -58,6 +58,7 @@ async def _address_thread(
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> Verdict:
     from awf.runtime.pr_monitor_runner.helpers import (
         _defer_reason_state_key,
@@ -95,6 +96,7 @@ async def _address_thread(
         compose_file=compose_file,
         state=state,
         task_tag=resolved_task_tag,
+        operation_start_head=operation_start_head,
     )
     # Stash the agent's defer reason so the deferred-capture path can preserve it
     # in the filed tracking issue (the verdict alone loses that follow-up detail).
@@ -123,6 +125,7 @@ async def _address_review_comment(
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> Verdict:
     result = await runner._address_review_comment_result(
         workspace_id=workspace_id,
@@ -134,6 +137,7 @@ async def _address_review_comment(
         state=state,
         owned_paths=owned_paths,
         task_tag=task_tag,
+        operation_start_head=operation_start_head,
     )
     return result.verdict
 
@@ -150,6 +154,7 @@ async def _address_review_comment_result(
     state: MonitorState | None = None,
     owned_paths: Sequence[str] | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> VerdictResult:
     prompt_owned_paths = (
         owned_paths
@@ -182,6 +187,7 @@ async def _address_review_comment_result(
         compose_file=compose_file,
         state=state,
         task_tag=resolved_task_tag,
+        operation_start_head=operation_start_head,
     )
 
 
@@ -222,6 +228,7 @@ async def _invoke_cli_for_verdict(
     compose_file: Path,
     state: MonitorState | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> Verdict:
     return (
         await runner._invoke_cli_for_verdict_result(
@@ -232,6 +239,7 @@ async def _invoke_cli_for_verdict(
             compose_file=compose_file,
             state=state,
             task_tag=task_tag,
+            operation_start_head=operation_start_head,
         )
     ).verdict
 
@@ -246,6 +254,7 @@ async def _invoke_cli_for_verdict_result(
     compose_file: Path,
     state: MonitorState | None = None,
     task_tag: str | None | _TaskTagUnset = _TASK_TAG_UNSET,
+    operation_start_head: str | None = None,
 ) -> VerdictResult:
     from awf.runtime.pr_monitor_runner.helpers import _parse_verdict_result
 
@@ -298,6 +307,7 @@ async def _invoke_cli_for_verdict_result(
         state=state,
         command_evidence=command_evidence,
         task_tag=task_tag,
+        operation_start_head=operation_start_head,
     )
 
     if agent_run_err is not None:

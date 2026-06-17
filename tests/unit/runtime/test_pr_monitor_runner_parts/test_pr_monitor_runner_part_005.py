@@ -88,6 +88,17 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
 
 
+@pytest.fixture(autouse=True)
+def _mock_verify_head_object_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _verify_head_object_exists(_worktree_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.remote_repair.verify_head_object_exists",
+        _verify_head_object_exists,
+    )
+
+
 class PersistCheckingSleep(RecordedSleep):
     def __init__(
         self,
