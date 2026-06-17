@@ -1155,6 +1155,87 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A no-op finalize (protected-scope repair restored the only dirty files) must recheck the tree.
+
+    ``_commit_dirty_worktree`` can have side effects (e.g. protected-scope
+    repair) but return False because there was nothing left to commit. Before
+    the fix, the stale dirty ``pre_validation_check`` was reused and pre-push
+    validation failed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` even though
+    the worktree was now clean. The no-commit path must re-run
+    ``_pre_push_validation_worktree_check`` so a cleanup-only repair can proceed
+    to validation instead of being stranded as pre-existing dirty.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    # First check is dirty; the no-op finalize recheck must observe a clean tree.
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cleanup = AsyncMock(
+        return_value=ValidationWorktreeCleanup(
+            cleaned=False,
+            check=clean_check,
+            restore_ref="b" * 40,
+        )
+    )
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    # Protected-scope repair restored the only dirty file -> nothing to commit.
+    commit_dirty = AsyncMock(return_value=False)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+    )
+
+    assert result.passed is True
+    assert result.workspace_head_sha == "b" * 40
+    # The no-op finalize path rechecks the worktree once (dirty check + recheck).
+    assert check_worktree_clean.await_count == 2
+    commit_dirty.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        message=f"awf: finalize PR monitor repair for {workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+    )
+    cleanup.assert_awaited_once()
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fails(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],

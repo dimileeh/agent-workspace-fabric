@@ -571,12 +571,29 @@ async def _try_finalize_pre_push_dirty_repair_state(
         )
         return None
     if not committed:
+        # ``_commit_dirty_worktree`` can have side effects (e.g. protected-scope
+        # repair restores the only dirty files) yet return False because there
+        # was nothing left to commit. Re-check the tree before giving up so a
+        # cleanup-only repair can proceed to validation instead of being
+        # stranded as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` on the stale
+        # dirty check captured before the finalize attempt.
+        recheck = await _pre_push_validation_worktree_check(
+            self,
+            worktree_path=worktree_path,
+        )
+        if recheck.clean:
+            _log.info(
+                "monitor.pre_push_dirty_finalize_no_commit_clean",
+                workspace_id=workspace_id,
+                paths=list(check.paths),
+            )
+            return recheck
         _log.warning(
             "monitor.pre_push_dirty_finalize_no_commit",
             workspace_id=workspace_id,
             paths=list(check.paths),
         )
-        return None
+        return recheck
 
     verify = await _pre_push_validation_worktree_check(
         self,
