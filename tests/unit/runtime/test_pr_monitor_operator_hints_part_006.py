@@ -62,6 +62,8 @@ async def _seed_grant_and_block_violations(
 
     grant_id = new_operator_grant_id()
     async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
         session.add(
             OperatorGrantAuditRecord(
                 id=grant_id,
@@ -69,12 +71,10 @@ async def _seed_grant_and_block_violations(
                 operator="op@example.com",
                 reason="approved keeping the protected change",
                 normalized_path=grant_path,
-                block_epoch=0,
+                block_epoch=workspace.block_epoch,
                 approve_policy_downgrade=True,
             )
         )
-        workspace = await WorkspaceRepository(session).get(workspace_id)
-        assert workspace is not None
         workspace.block_violations = [{"path": path} for path in violation_paths]
         await session.commit()
     return grant_id
