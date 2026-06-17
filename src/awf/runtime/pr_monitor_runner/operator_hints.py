@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.common.github_client import RepoRef
-from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+from awf.control.blocked_transition import (
+    MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+    MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+)
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
 from awf.runtime.operator_hints import (
@@ -192,6 +195,18 @@ async def _run_operator_hint_cycle(
         # that didn't actually revert, or a grant that doesn't cover the path).
         # RE-BLOCK with a bumped epoch — invalidating the just-applied grants and
         # re-arming a fresh notification — instead of proceeding toward merge.
+        # Preserve the resume ORIGIN when re-blocking. A sync-base-originated block
+        # whose directive resume still leaves a violation must re-record the
+        # ``monitor_protected_scope_sync_base`` phase, NOT fall back to the default
+        # generic phase: otherwise the next resume would select the generic
+        # unpushed-commit validator and re-block on a target-branch-owned protected
+        # change the base merge pulled in, even after the agent-authored protected
+        # edit was correctly reverted (PRRT_kwDOSJAM6s6KGCXl).
+        reblock_resume_phase = (
+            MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+            if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+            else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+        )
         reblock_result = cast(
             _GitPushResult,
             await self._pause_monitor_for_protected_scope_block(
@@ -200,6 +215,7 @@ async def _run_operator_hint_cycle(
                 pr_head_sha=pr_head_sha,
                 protected_scope_block=protected_scope_block,
                 worktree_path=worktree_path,
+                resume_phase=reblock_resume_phase,
                 state=state,
                 remote_branch=remote_branch,
                 base_branch=base_branch or "",

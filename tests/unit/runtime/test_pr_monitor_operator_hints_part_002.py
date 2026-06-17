@@ -512,10 +512,106 @@ async def test_operator_hint_resume_reblocks_when_violation_unresolved(
 
     assert result.paused_into_blocked is True
     assert captured["protected_scope_block"] is still_blocking
+    # No sync-base origin was recorded, so the re-block records the generic
+    # ``monitor_protected_scope_push`` phase (default).
+    assert captured["resume_phase"] == MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
     # A landed re-block must clear the in-memory monitor hint so the state the
     # loop persists afterward does not show a pending resume while the workspace
     # is already ``blocked`` (the bumped block epoch supersedes this hint).
     assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
+async def test_operator_hint_reblock_preserves_sync_base_resume_phase(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-blocking a sync-base-originated resume must KEEP the sync-base phase.
+
+    When a ``monitor_protected_scope_sync_base`` block is resumed and the directive
+    still leaves a violation, the re-block must record the sync-base phase again —
+    NOT fall back to the default ``monitor_protected_scope_push``. Otherwise the
+    next operator resume would select the generic unpushed-commit validator and
+    re-block on a target-branch-owned protected change the base merge pulled in,
+    even after the agent-authored protected edit was correctly reverted
+    (PRRT_kwDOSJAM6s6KGCXl)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_block_resume_phase(
+        factory, workspace_id, MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert the protected edit",
+        directive="revert it",
+        operation_id="op_reblock_sync_base",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    still_blocking = _ProtectedScopePushBlock(
+        message="still touches a protected file",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(path="pyproject.toml", protected_pattern="pyproject.toml"),
+        ),
+    )
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fixed_verdict(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _still_blocking(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return still_blocking
+
+    captured: dict[str, object] = {}
+
+    async def _pause(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PAUSED_BLOCKED",
+            paused_into_blocked=True,
+        )
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("a re-block must NOT push")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _still_blocking)
+    monkeypatch.setattr(runner, "_pause_monitor_for_protected_scope_block", _pause)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is True
+    assert captured["resume_phase"] == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
 
 
 @pytest.mark.unit
