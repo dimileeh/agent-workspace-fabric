@@ -14,6 +14,7 @@ from awf.runtime.pr_monitor_runner import operations as _operations
 from awf.runtime.pr_monitor_runner import operator_hints as _operator_hints
 from awf.runtime.pr_monitor_runner import outdated_resolution as _outdated_resolution
 from awf.runtime.pr_monitor_runner import pre_push_validation as _pre_push_validation
+from awf.runtime.pr_monitor_runner import protected_scope_blocks as _protected_scope_blocks
 from awf.runtime.pr_monitor_runner import provider_ops as _provider_ops
 from awf.runtime.pr_monitor_runner import remote_ops as _remote_ops
 from awf.runtime.pr_monitor_runner import remote_prompt_ops as _remote_prompt_ops
@@ -142,15 +143,17 @@ class RunnerDelegatesMixin:
     _protected_scope_violations_for_sync_base_push = (
         _remote_repair._protected_scope_violations_for_sync_base_push
     )
-    _protected_scope_diff_unavailable_block = _remote_repair._protected_scope_diff_unavailable_block
+    _protected_scope_diff_unavailable_block = (
+        _protected_scope_blocks._protected_scope_diff_unavailable_block
+    )
     _protected_scope_diff_unavailable_push_result = (
-        _remote_repair._protected_scope_diff_unavailable_push_result
+        _protected_scope_blocks._protected_scope_diff_unavailable_push_result
     )
-    _protected_scope_push_block = _remote_repair._protected_scope_push_block
+    _protected_scope_push_block = _protected_scope_blocks._protected_scope_push_block
     _enter_blocked_for_monitor_protected_violation = (
-        _remote_repair._enter_blocked_for_monitor_protected_violation
+        _protected_scope_blocks._enter_blocked_for_monitor_protected_violation
     )
-    _active_operator_grant_specs = _remote_repair._active_operator_grant_specs
+    _active_operator_grant_specs = _protected_scope_blocks._active_operator_grant_specs
     _protected_scope_repair_prompt = _remote_prompt_ops._protected_scope_repair_prompt
     _protected_scope_committed_repair_prompt = (
         _remote_prompt_ops._protected_scope_committed_repair_prompt

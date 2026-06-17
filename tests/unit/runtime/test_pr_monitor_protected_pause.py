@@ -35,7 +35,7 @@ from awf.runtime.pr_monitor import (
     SyncBase,
 )
 from awf.runtime.pr_monitor_runner.helpers import _protected_block_notification_key
-from awf.runtime.pr_monitor_runner.loop import (
+from awf.runtime.pr_monitor_runner.pause_notifications import (
     _post_protected_block_notification_best_effort,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
