@@ -290,6 +290,9 @@ async def _execute(
                 remote_push_url=remote_push_url,
                 compose_project=compose_project,
                 compose_file=compose_file,
+                operation_id=operation.operation_id if operation is not None else None,
+                operation_type=OperationType.sync_base.value,
+                monitor_log=monitor_log,
             )
             _clear_transient_base_fetch_retry_state(state, context="sync_base")
         except ProviderRecoveryRetryError:

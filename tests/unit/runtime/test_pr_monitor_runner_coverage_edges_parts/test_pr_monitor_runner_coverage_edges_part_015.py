@@ -282,6 +282,11 @@ async def test_execute_sync_base_protected_violation_pauses_into_blocked_not_ter
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        paused_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.monitor_protected_scope_paused",
+            limit=10,
+        )
     assert ws is not None
     assert ws.status == WorkspaceStatus.blocked.value
     assert ws.block_resume_phase == "monitor_protected_scope_sync_base"
@@ -290,6 +295,15 @@ async def test_execute_sync_base_protected_violation_pauses_into_blocked_not_ter
     assert sync_op.result is not None
     assert sync_op.result["outcome"] == "protected_scope_paused"
     assert sync_op.result["reason_code"] == "PROTECTED_SCOPE_PAUSED_BLOCKED"
+    # The sync-base pause must forward the same diagnostic fields the ci_ops and
+    # fix_cycle pause call sites provide, so the audit event is not missing the
+    # operation context (PRRT_kwDOSJAM6s6KKf67).
+    assert len(paused_events) == 1
+    paused_payload = paused_events[0].payload
+    assert paused_payload is not None
+    assert paused_payload["operation_id"] == sync_op.id
+    assert paused_payload["operation_type"] == "sync_base"
+    assert paused_payload["source_head_sha"] == "abc1234567890def"
 
 
 @pytest.mark.unit

@@ -46,6 +46,7 @@ from awf.runtime.validation_worktree_constants import (
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
+    from awf.runtime.logs import WorkspaceLogSink
     from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
@@ -692,6 +693,9 @@ async def _run_sync_base(
     remote_push_url: str | None = None,
     compose_project: str,
     compose_file: Path,
+    operation_id: str | None = None,
+    operation_type: str | None = None,
+    monitor_log: WorkspaceLogSink | None = None,
 ) -> _GitPushResult:
     """Merge the latest base branch into the workspace and push the repair."""
     from awf.runtime.monitor_prompts import sync_base_conflict_prompt
@@ -824,6 +828,10 @@ async def _run_sync_base(
                 state=cast("MonitorState | None", state),
                 remote_branch=remote_branch,
                 base_branch=base_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                source_head_sha=pr_head_sha,
             )
         return _GitPushResult(
             pushed=False,
