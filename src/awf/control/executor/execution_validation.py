@@ -738,6 +738,19 @@ async def run_validation_and_fix_cycle(
                         attempt=post_validation_conformance_fix_attempts,
                     )
             if conformance_failure is None:
+                if planning_validation_handoff is None:
+                    # Planning was required but conformance was satisfied inline
+                    # (no AWF-validation handoff). The plan/conformance report was
+                    # never deposited by _run_post_validation_conformance_check,
+                    # so deposit it now while the worktree still exists and before
+                    # the terminal success transition makes artifacts refetchable.
+                    # Best-effort and idempotent, gated on planning.required.
+                    _planning_artifacts._deposit_planning_artifacts_best_effort(
+                        self,
+                        profile=profile,
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                    )
                 successful_validation_run_id = validation_run_id
                 successful_validation_workspace_head_sha = validation_workspace_head_sha
                 if recovery is not None and ws.pr_url and planning_validation_handoff is not None:

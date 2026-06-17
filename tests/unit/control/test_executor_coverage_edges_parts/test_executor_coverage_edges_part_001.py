@@ -935,6 +935,143 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
 
 
 @pytest.mark.unit
+async def test_validation_success_path_deposits_inline_satisfied_planning_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PRRT_kwDOSJAM6s6KDGKY: when planning is required but conformance is
+    satisfied inline (no AWF-validation handoff), a passing validation must
+    still deposit the plan and conformance report into the served artifact dir.
+
+    ``_run_post_validation_conformance_check`` is skipped when
+    ``planning_validation_handoff`` is ``None``, so the success path must do
+    the best-effort deposit before returning to ``execution_flow``.
+    """
+    profile = WorkspaceProfile.model_validate(
+        {"name": "prof-inline-satisfied", "planning": {"required": True}}
+    )
+    workspace = SimpleNamespace(
+        resolved_profile={"name": "prof-inline-satisfied"},
+        requested_profile=None,
+        profile_ref=None,
+        env_profile=None,
+        task_class=None,
+        operations=[],
+        test_commands=[],
+        task_title="A task",
+        agent="codex",
+        owned_paths=(),
+        id="ws_inline_satisfied",
+        pr_url=None,
+        task_tag=None,
+    )
+
+    from awf.control.executor import execution_validation as executor_execution_validation
+
+    async def _sync_profile(*_args: object, **_kwargs: object) -> WorkspaceProfile:
+        return profile
+
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_profile_for_workspace",
+        lambda *_args, **_kwargs: profile,
+    )
+    monkeypatch.setattr(executor_execution_validation, "_sync_resolved_profile", _sync_profile)
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "profile_phase_command_plan",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "_validation_tier_for_workspace",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "check_validation_worktree_clean",
+        AsyncMock(return_value=ValidationWorktreeCheck(clean=True)),
+    )
+    monkeypatch.setattr(
+        executor_execution_validation,
+        "cleanup_validation_worktree_side_effects",
+        AsyncMock(
+            return_value=ValidationWorktreeCleanup(
+                cleaned=True,
+                check=ValidationWorktreeCheck(clean=True),
+                restore_ref="c" * 40,
+            )
+        ),
+    )
+
+    class _Validation:
+        async def run_profile_phases(self, **_kwargs: object) -> ValidationResult:
+            return ValidationResult(commands=[_passing_validation_command(tmp_path)])
+
+    executor = SimpleNamespace(
+        _transition_if_current=AsyncMock(return_value=True),
+        _recheck_status=AsyncMock(return_value=True),
+        _config=SimpleNamespace(
+            max_validation_fix_passes=0,
+            planning_max_iterations_default=3,
+            compose_projects_root=tmp_path / "artifacts",
+        ),
+        _capture_workspace_head_sha=AsyncMock(return_value="c" * 40),
+        _start_validation_run=AsyncMock(return_value="vr-inline-satisfied"),
+        _finish_validation_run=AsyncMock(),
+        _finish_pending_validate_operations=AsyncMock(),
+        _mark_failed=AsyncMock(),
+        _finish_validation_callback_if_terminal=AsyncMock(return_value=False),
+        _update_subphase=AsyncMock(),
+        _validation=_Validation(),
+        _run_post_validation_conformance_check=AsyncMock(return_value=None),
+    )
+
+    worktree_path = tmp_path / "worktree"
+    plan_path = Path("docs/awf-plans/ws_inline_satisfied.md")
+    report_path = Path("docs/awf-plans/ws_inline_satisfied.conformance.json")
+    plan_abs = worktree_path / plan_path
+    report_abs = worktree_path / report_path
+    plan_abs.parent.mkdir(parents=True, exist_ok=True)
+    plan_abs.write_text("# plan\n", encoding="utf-8")
+    satisfied_report = {
+        "status": "satisfied",
+        "summary": "plan satisfied inline",
+        "reason_code": "PLAN_CONFORMANCE_SATISFIED",
+        "gaps": [],
+    }
+    report_abs.write_text(json.dumps(satisfied_report), encoding="utf-8")
+
+    result = await executor_execution_validation.run_validation_and_fix_cycle(
+        executor,
+        workspace_id=workspace.id,
+        ws=workspace,
+        worktree_path=worktree_path,
+        compose_project=f"awf_{workspace.id}",
+        compose_file=tmp_path / "compose.yml",
+        base_commit="b" * 40,
+        expected_branch=f"awf/{workspace.id}",
+        adapter=SimpleNamespace(run=AsyncMock()),
+        run_model=None,
+        baseline_coverage=None,
+        planning_validation_handoff=None,
+        recovery=None,
+        rebase_recovery_result=None,
+        git_in_worktree=AsyncMock(return_value=CommandResult(returncode=0, stdout="", stderr="")),
+    )
+
+    assert not result.stop
+    executor._run_post_validation_conformance_check.assert_not_awaited()
+    artifact_dir = executor_service_artifacts.workspace_artifact_dir(
+        tmp_path / "artifacts" / "..", workspace.id
+    ).resolve()
+    assert (artifact_dir / "plan.md").read_text(encoding="utf-8") == "# plan\n"
+    deposited_report = json.loads((artifact_dir / "conformance.json").read_text(encoding="utf-8"))
+    assert deposited_report["status"] == "satisfied"
+    assert deposited_report["summary"] == "plan satisfied inline"
+
+
+@pytest.mark.unit
 async def test_validation_success_path_does_not_redeposit_after_conformance_unlink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
