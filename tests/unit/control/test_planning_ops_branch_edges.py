@@ -615,7 +615,7 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
     runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
     runner.queue_result(returncode=0, stdout="")  # after_compare
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since
-    runner.queue_result(returncode=0, stdout="")  # git restore report path
+    runner.queue_result(returncode=1, stdout="", stderr="restore failed")  # git restore report path
 
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
