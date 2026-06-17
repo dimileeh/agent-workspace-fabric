@@ -360,6 +360,7 @@ async def _resolve_worktree_branch_ref(worktree_path: Path) -> str | None:
     """Resolve the full branch ref (e.g. ``refs/heads/awf/ws_...``) for a worktree."""
     proc = await asyncio.create_subprocess_exec(
         "git",
+        *git_safe_directory_config_args(worktree_path),
         "-C",
         str(worktree_path),
         "symbolic-ref",
