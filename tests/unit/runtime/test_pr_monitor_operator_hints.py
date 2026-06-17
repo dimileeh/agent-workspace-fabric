@@ -1576,6 +1576,83 @@ async def test_operator_hint_grant_only_resume_skips_cli_and_consumes_grant(
 
 
 @pytest.mark.unit
+async def test_operator_hint_resume_threads_base_branch_into_protected_scope_block(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resume must thread ``base_branch`` into ``_protected_scope_push_block`` so a
+    sync-base-originated block (``monitor_protected_scope_sync_base``) re-validates
+    with the sync-base-aware validator that filters out base-owned protected changes
+    — matching how ``_run_sync_base`` first raised the block. Omitting it would run
+    the generic validator and re-block on a target-branch-owned change a directive
+    cannot revert (PRRT_kwDOSJAM6s6KFDHO)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert the protected edit",
+        directive="revert it",
+        operation_id="op_base_branch_thread",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fixed_verdict(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    captured: dict[str, object] = {}
+
+    async def _capture_block(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _pushed(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=True, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "pushed-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _capture_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _pushed)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        base_branch="main",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is True
+    assert captured["base_branch"] == "main"
+
+
+@pytest.mark.unit
 async def test_operator_hint_resume_reblocks_when_violation_unresolved(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

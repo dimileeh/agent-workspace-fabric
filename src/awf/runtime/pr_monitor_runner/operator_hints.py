@@ -162,6 +162,17 @@ async def _run_operator_hint_cycle(
         worktree_path=worktree_path,
         remote_branch=remote_branch,
         remote_push_url=remote_push_url,
+        # Thread the base branch so a resume of a sync-base-originated block
+        # (``monitor_protected_scope_sync_base``) re-validates with the
+        # sync-base-aware validator that filters out base-owned protected
+        # changes the merge pulled in — matching how ``_run_sync_base`` first
+        # raised the block. Without it the generic unpushed-commit validator
+        # runs and a directive that correctly reverts only the agent-authored
+        # protected edit can still re-block on a target-branch-owned change,
+        # wedging the resume or forcing an unnecessary grant. ``base_branch``
+        # is ``None`` only off the monitor loop, where it falls back to the
+        # generic validator (PRRT_kwDOSJAM6s6KFDHO).
+        base_branch=base_branch,
     )
     if protected_scope_block is not None and protected_scope_block.violations:
         # The resume did NOT clear the protected violation (a "revert" directive
