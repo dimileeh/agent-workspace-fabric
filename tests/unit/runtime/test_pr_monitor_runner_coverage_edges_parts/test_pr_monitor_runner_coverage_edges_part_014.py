@@ -308,6 +308,126 @@ async def test_protected_pause_fences_on_stale_monitor_claim_owner(
 
 
 @pytest.mark.unit
+async def test_protected_pause_inline_handoff_fences_on_recovery_monitor_claim(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KKmGo: the inline initial handoff runs the monitor with no
+    monitor claim (``_monitor_owner_id`` is None) while the row sits in
+    ``monitoring_pr`` with a NULL lease, which ``claim_monitoring_pr`` can reclaim
+    for a recovery monitor on another worker. A status-only CAS would let this
+    unclaimed inline monitor clobber the takeover, so the pause must fail closed
+    once the row has been claimed by anyone: a plain failed result (NOT paused),
+    leaving the row in ``monitoring_pr`` for the recovery claimant."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # A recovery monitor on another worker reclaimed the unclaimed handoff row.
+        ws.monitor_claimed_by = "worker-recovery"
+        await session.commit()
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="stale-preserved-head\n")  # rev-parse HEAD
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    # Inline handoff: no monitor claim was taken, so the runner owner stays None.
+    assert runner._monitor_owner_id is None
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.failed is True
+    # The fail-closed CAS path is taken: a plain failed result, NOT a pause.
+    assert result.paused_into_blocked is not True
+    assert result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    # No clobber: no PR notification, row stays in monitoring_pr for the claimant.
+    assert gh.posts == []
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "monitoring_pr"
+
+
+@pytest.mark.unit
+async def test_protected_pause_inline_handoff_unclaimed_pauses_into_blocked(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The fail-closed fence only rejects an inline monitor when the row has since
+    been claimed: the normal inline handoff (no monitor claim, row still
+    unclaimed) still pauses into ``blocked`` and preserves the offending commit."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="preserved-head\n")  # rev-parse HEAD
+    gh = _RecordingGh()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        gh=gh,
+    )
+    assert runner._monitor_owner_id is None  # inline handoff holds no monitor claim
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=MonitorState(),
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.paused_into_blocked is True
+    assert result.reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "blocked"
+        assert ws.block_epoch == 1
+
+
+@pytest.mark.unit
 async def test_protected_pause_with_matching_monitor_owner_pauses_into_blocked(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

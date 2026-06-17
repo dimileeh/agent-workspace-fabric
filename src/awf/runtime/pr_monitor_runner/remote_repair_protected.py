@@ -248,9 +248,13 @@ async def _pause_monitor_for_protected_scope_block(
 
     A stale CAS (the row already left ``monitoring_pr`` — cancelled/failed/merged
     upstream, OR a newer worker reclaimed the expired monitor lease so
-    ``monitor_claimed_by`` no longer matches this runner's ``_monitor_owner_id``)
+    ``monitor_claimed_by`` no longer matches this runner's ``_monitor_owner_id``,
+    OR — on the inline initial handoff that holds no monitor claim — the row was
+    claimed by a recovery monitor after the unclaimed ``monitoring_pr`` handoff)
     returns a plain failed result WITHOUT pausing, so a raced/superseded monitor
-    cannot clobber the new state with its stale preserved worktree commit.
+    cannot clobber the new state with its stale preserved worktree commit. The
+    inline-handoff arm is fenced via ``fence_unclaimed_monitor`` because its
+    ``_monitor_owner_id`` is None (PRRT_kwDOSJAM6s6KKmGo).
     """
     del monitor_log
     violations = tuple(protected_scope_block.violations)
@@ -269,6 +273,7 @@ async def _pause_monitor_for_protected_scope_block(
             resume_phase=resume_phase,
             block_type=PROTECTED_QUALITY_GATE_BLOCK_TYPE,
             monitor_owner_id=getattr(self, "_monitor_owner_id", None),
+            fence_unclaimed_monitor=True,
             extra_payload=extra_payload,
         )
         if ws is None:

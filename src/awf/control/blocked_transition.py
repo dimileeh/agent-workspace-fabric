@@ -68,6 +68,7 @@ async def enter_blocked_for_protected_violation_in_session(
     block_reason_code: str = QUALITY_GATE_POLICY_CHANGED_REASON_CODE,
     execution_owner_id: str | None = None,
     monitor_owner_id: str | None = None,
+    fence_unclaimed_monitor: bool = False,
     extra_payload: Mapping[str, Any] | None = None,
 ) -> Workspace | None:
     """Atomically CAS a workspace into ``blocked`` and write the block columns.
@@ -89,6 +90,18 @@ async def enter_blocked_for_protected_violation_in_session(
     claimant's work with its stale preserved worktree commit
     (PRRT_kwDOSJAM6s6KHtX5).
 
+    The inline initial handoff runs the monitor WITHOUT a monitor claim
+    (``monitor_owner_id`` is None) while the row sits in ``monitoring_pr`` with a
+    NULL ``monitor_claim_expires_at`` — exactly the state ``claim_monitoring_pr``
+    can immediately reclaim for a recovery monitor on another worker. A status-only
+    fence would then let this unclaimed inline monitor win the CAS and clobber the
+    takeover with its preserved worktree commit. ``fence_unclaimed_monitor`` closes
+    that gap on the monitor pause path: when set with no ``monitor_owner_id`` the
+    CAS additionally requires the row to still be unclaimed
+    (``monitor_claimed_by IS NULL``), so once a recovery monitor has claimed it the
+    inline pause fails closed (PRRT_kwDOSJAM6s6KKmGo). Pre-PR origins leave it
+    False so their ``execution_owner_id`` fence is unaffected.
+
     ``block_epoch`` is bumped on every entry so a re-block invalidates all prior
     operator grants — the mechanism that makes a later DIFFERENT change re-block.
     ``extra_payload`` is folded into the transition event payload (e.g. the
@@ -103,6 +116,8 @@ async def enter_blocked_for_protected_violation_in_session(
         extra_conditions += (Workspace.execution_claimed_by == execution_owner_id,)
     if monitor_owner_id is not None:
         extra_conditions += (Workspace.monitor_claimed_by == monitor_owner_id,)
+    elif fence_unclaimed_monitor:
+        extra_conditions += (Workspace.monitor_claimed_by.is_(None),)
     payload: dict[str, Any] = {
         "block_type": block_type,
         "block_reason_code": block_reason_code,
