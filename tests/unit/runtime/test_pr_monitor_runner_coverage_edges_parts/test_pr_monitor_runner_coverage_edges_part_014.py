@@ -577,6 +577,92 @@ async def test_terminate_failed_with_matching_monitor_owner_still_fails(
 
 
 @pytest.mark.unit
+async def test_terminate_failed_fences_inline_handoff_after_recovery_claim(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KTj4R: the inline initial monitor handoff runs with no
+    monitor claim (``_monitor_owner_id`` is None). When a recovery monitor on
+    another worker claims the unclaimed ``monitoring_pr`` row, the inline pause
+    fails closed and returns a TERMINAL protected-scope failed push, which the
+    loop turns into ``_terminate_failed``. The owner fence only ignored
+    superseded runners when ``_monitor_owner_id`` was set, so the stale inline
+    runner could still clobber the live takeover to ``failed``. It must instead
+    fence on ``monitor_claimed_by`` being set and record an ignored callback."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "recovery-worker"  # a recovery monitor took over
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = None  # inline initial handoff holds no monitor claim
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # No clobber: the row stays in monitoring_pr for the live recovery monitor.
+        assert ws.status == "monitoring_pr"
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
+        ignored_events = [
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
+        ]
+    assert ignored_events
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_failed",
+        "expected_status": "monitoring_pr",
+        "actual_status": "monitoring_pr",
+        "requested_status": "failed",
+        "reason_code": "PROTECTED_SCOPE_PUSH_BLOCKED",
+    }
+
+
+@pytest.mark.unit
+async def test_terminate_failed_inline_handoff_without_claim_still_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The inline-handoff fence only triggers once a recovery monitor has claimed
+    the row. A genuine inline handoff (no monitor claim, ``monitor_claimed_by`` is
+    None) on a real terminal failure must still move the workspace to ``failed``."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = None  # inline initial handoff, row still unclaimed
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "failed"
+        assert ws.failure_message == "protected scope blocked"
+
+
+@pytest.mark.unit
 async def test_terminate_failed_locks_row_before_owner_fence(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
