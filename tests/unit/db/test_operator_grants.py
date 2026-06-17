@@ -234,6 +234,43 @@ async def test_list_resumable_blocked_ids_selects_only_operator_cleared(
 
 
 @pytest.mark.unit
+async def test_list_resumable_blocked_ids_monitor_prefix_underscore_is_literal(
+    session: AsyncSession,
+) -> None:
+    """The monitor-origin exclusion must treat ``monitor_`` as a literal prefix.
+
+    ``_`` is a single-char LIKE wildcard, so a naive ``LIKE 'monitor_%'`` filter is
+    broader than the Python ``is_monitor_origin_block_resume_phase`` discriminator
+    (a literal ``startswith('monitor_')``). A pre-PR executor phase that merely
+    starts with ``monitor`` followed by a non-underscore char (e.g. ``monitorX``)
+    is NOT monitor-origin and must stay eligible for executor resume — otherwise
+    the loose wildcard would wrongly drop it.
+    """
+    repo = WorkspaceRepository(session)
+    armed_hint = {
+        "status": "pending",
+        "reason": "revert the protected change",
+        "directive": "revert it",
+    }
+
+    # Phase starts with ``monitor`` + a non-underscore char: NOT monitor-origin.
+    pre_pr_lookalike = await _blocked_workspace(session)
+    pre_pr_lookalike.block_resume_phase = "monitorX_phase"
+    pre_pr_lookalike.pending_operator_hint = dict(armed_hint)
+
+    # A genuine monitor-origin phase (literal ``monitor_`` prefix) stays excluded.
+    monitor_origin = await _blocked_workspace(session)
+    monitor_origin.block_resume_phase = "monitor_protected_scope_push"
+    monitor_origin.pending_operator_hint = dict(armed_hint)
+
+    await session.flush()
+
+    ids = set(await repo.list_resumable_blocked_ids(limit=10))
+    assert pre_pr_lookalike.id in ids
+    assert monitor_origin.id not in ids
+
+
+@pytest.mark.unit
 async def test_list_resumable_blocked_ids_scopes_to_owning_node(
     session: AsyncSession,
 ) -> None:

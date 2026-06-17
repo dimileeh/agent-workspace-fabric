@@ -99,9 +99,22 @@ async def list_resumable_blocked_ids(
     # ``block_resume_phase`` prefix. A NULL or pre-PR (executor-phase) resume
     # phase stays eligible here. Selecting a monitor-origin row would let the
     # executor and monitor race to resume the same workspace.
+    # ``_`` and ``%`` are LIKE wildcards, so a bare ``f"{PREFIX}%"`` pattern would
+    # treat the literal underscore in ``monitor_`` as "any single char" and diverge
+    # from the Python ``is_monitor_origin_block_resume_phase`` discriminator (a
+    # literal ``startswith(MONITOR_BLOCK_RESUME_PHASE_PREFIX)``): a non-monitor phase
+    # such as ``monitorX`` would match the loose pattern and be wrongly excluded from
+    # executor resume. Escape the prefix's wildcard chars so the predicate matches the
+    # literal prefix exactly, keeping the SQL filter and the Python check in lockstep.
+    like_escape = "\\"
+    escaped_prefix = (
+        MONITOR_BLOCK_RESUME_PHASE_PREFIX.replace(like_escape, like_escape * 2)
+        .replace("_", like_escape + "_")
+        .replace("%", like_escape + "%")
+    )
     not_monitor_origin = or_(
         Workspace.block_resume_phase.is_(None),
-        Workspace.block_resume_phase.notlike(f"{MONITOR_BLOCK_RESUME_PHASE_PREFIX}%"),
+        Workspace.block_resume_phase.notlike(f"{escaped_prefix}%", escape=like_escape),
     )
     stmt = select(Workspace.id).where(
         Workspace.status == WorkspaceStatus.blocked.value,
