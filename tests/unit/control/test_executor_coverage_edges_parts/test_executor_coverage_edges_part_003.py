@@ -16,6 +16,7 @@ from awf.control.executor import (
 )
 from awf.control.executor import execution_validation as executor_execution_validation
 from awf.control.executor import helpers as executor_helpers
+from awf.control.executor import planning_conformance as executor_planning_conformance
 from awf.control.executor import planning_ops as executor_planning_ops
 from awf.control.executor import quality_gates as executor_quality_gates
 from awf.db.enums import (
@@ -497,8 +498,8 @@ async def test_planning_event_helpers_skip_missing_workspace_and_missing_validat
         async def get(self, _run_id: str) -> object | None:
             return None
 
-    monkeypatch.setattr(executor_planning_ops, "WorkspaceRepository", _MissingWorkspaceRepo)
-    monkeypatch.setattr(executor_planning_ops, "ValidationRunRepository", _MissingRunRepo)
+    monkeypatch.setattr(executor_planning_conformance, "WorkspaceRepository", _MissingWorkspaceRepo)
+    monkeypatch.setattr(executor_planning_conformance, "ValidationRunRepository", _MissingRunRepo)
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     executor._session_factory = lambda: _FakeExecutorSession()  # type: ignore[method-assign]
     handoff = executor_planning_ops._PlanningValidationHandoff(  # noqa: SLF001

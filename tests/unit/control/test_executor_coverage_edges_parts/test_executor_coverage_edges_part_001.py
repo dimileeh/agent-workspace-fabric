@@ -904,7 +904,7 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     from awf.control.executor import mixins as _executor_mixins
 
     monkeypatch.setattr(
-        _executor_mixins._planning_ops,
+        _executor_mixins._planning_conformance,
         "deposit_workspace_planning_artifacts",
         _spy_deposit,
     )
