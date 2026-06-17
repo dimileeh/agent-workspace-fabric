@@ -286,12 +286,22 @@ async def _run_operator_hint_cycle(
         # it. When a preserved HEAD SHA was recorded and is NOT on the remote head,
         # keep the grant active and surface needs_human instead of finishing the
         # bookkeeping (PRRT_kwDOSJAM6s6KEtU2).
-        if preserved_head_sha and not await self._preserved_commit_already_on_remote(
-            workspace_id=workspace_id,
-            worktree_path=worktree_path,
-            remote_branch=remote_branch,
-            remote_push_url=remote_push_url,
-            preserved_head_sha=preserved_head_sha,
+        #
+        # Scope this to grant-only (approve-and-keep) resumes: a DIRECTIVE revert
+        # can legitimately remove the preserved commit by resetting/cleaning the
+        # worktree back to the remote PR head, so an up-to-date no-op push is a valid
+        # successful revert — requiring the old preserved SHA on the remote would
+        # wedge an applied directive at needs_human (PRRT_kwDOSJAM6s6KFytV).
+        if (
+            not hint.directive
+            and preserved_head_sha
+            and not await self._preserved_commit_already_on_remote(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                remote_branch=remote_branch,
+                remote_push_url=remote_push_url,
+                preserved_head_sha=preserved_head_sha,
+            )
         ):
             reason = (
                 "operator-approved preserved commit "

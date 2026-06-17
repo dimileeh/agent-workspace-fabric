@@ -753,6 +753,84 @@ async def test_operator_hint_resume_no_op_push_with_missing_preserved_commit_nee
 
 
 @pytest.mark.unit
+async def test_operator_hint_directive_revert_no_op_push_finishes_without_preserved_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DIRECTIVE revert can resolve a protected block by resetting the worktree
+    back to the remote PR head, removing the preserved local commit. The CLI ran,
+    the violation is cleared, and an up-to-date no-op push is a valid successful
+    revert. The missing-preserved-commit guard is scoped to grant-only
+    approve-and-keep resumes, so a directive revert must finish the bookkeeping
+    instead of being wedged at needs_human (PRRT_kwDOSJAM6s6KFytV)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert the protected edit",
+        directive="revert it",
+        operation_id="op_directive_revert_noop",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    # The block recorded the preserved HEAD; the revert removed that commit.
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "reverted-preserved-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fixed_verdict(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _no_op_push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(pushed=False, failed=False, returncode=0)
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "reset-to-remote-head-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _no_op_push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.pushed is False
+    assert result.failed is False
+    # The applied directive is finished, not wedged at needs_human.
+    assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
 async def test_operator_hint_resume_threads_recorded_preserved_sha_into_no_op_check(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
