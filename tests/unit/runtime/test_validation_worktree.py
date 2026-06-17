@@ -1145,6 +1145,7 @@ def _init_fake_worktree(tmp_path: Path) -> Path:
 def _init_real_worktree_with_gitignore(
     tmp_path: Path,
     gitignore_content: str = "cache/**\n",
+    submodule_name: str = "sub",
 ) -> Path:
     """Create a real git worktree with a committed .gitignore file.
 

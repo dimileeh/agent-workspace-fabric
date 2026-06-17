@@ -303,15 +303,24 @@ def _is_ignored_path(worktree_path: Path, path: str) -> bool:
             path,
         ],
         capture_output=True,
-        text=True,
+    )
+    stdout = (
+        result.stdout.decode("utf-8", errors="surrogateescape")
+        if isinstance(result.stdout, bytes)
+        else result.stdout
+    )
+    stderr = (
+        result.stderr.decode("utf-8", errors="surrogateescape")
+        if isinstance(result.stderr, bytes)
+        else result.stderr
     )
     if result.returncode == 0:
-        return result.stdout.strip() != ""
+        return stdout.strip() != ""
     if result.returncode == 1:
         return False
     raise _IgnoreCheckError(
         "Could not determine whether path is ignored with `git check-ignore`.",
-        stderr=result.stderr or "",
+        stderr=stderr or "",
     )
 
 
