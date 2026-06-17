@@ -254,6 +254,18 @@ async def _resolve_task_tag(self: Any, workspace_id: str) -> str | None:
         return workspace.task_tag if workspace is not None else None
 
 
+async def _resolve_block_resume_phase(self: Any, workspace_id: str) -> str | None:
+    """Load the workspace's recorded protected-scope block resume phase.
+
+    Persisted by ``enter_blocked_for_protected_violation_in_session`` and used to
+    discriminate a sync-base-originated pause (``monitor_protected_scope_sync_base``)
+    from a generic push pause or a no-block remonitor when selecting the
+    protected-scope validator on an operator-hint resume."""
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        return workspace.block_resume_phase if workspace is not None else None
+
+
 async def _commit_dirty_worktree(
     self: Any,
     *,

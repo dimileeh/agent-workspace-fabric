@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from awf.common.github_client import RepoRef
+from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
 from awf.runtime.operator_hints import (
@@ -157,22 +158,32 @@ async def _run_operator_hint_cycle(
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
 
+    # Select the protected-scope validator by the resume's ORIGIN. Only a
+    # sync-base-originated block (``monitor_protected_scope_sync_base``) may use
+    # the sync-base-aware validator: it intentionally drops paths whose final
+    # tree matches the merged base so a directive that reverts the agent-authored
+    # protected edit is not re-blocked by a target-branch-owned change the merge
+    # pulled in — matching how ``_run_sync_base`` first raised the block
+    # (PRRT_kwDOSJAM6s6KFDHO). For an ordinary remonitor or a non-sync-base
+    # protected-block resume the monitor loop still supplies ``base_branch``, so
+    # passing it unconditionally would wrongly select that validator: a repair
+    # that reverts an UNOWNED protected file back to the base contents (while the
+    # PR branch held a different protected version) drops out of
+    # ``changed_from_base`` and would push without re-blocking or a grant. Gate on
+    # the recorded resume phase and fall back to the generic unpushed-commit
+    # validator otherwise (PRRT_kwDOSJAM6s6KFZN_).
+    block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
+    protected_scope_base_branch = (
+        base_branch
+        if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+        else None
+    )
     protected_scope_block = await self._protected_scope_push_block(
         workspace_id=workspace_id,
         worktree_path=worktree_path,
         remote_branch=remote_branch,
         remote_push_url=remote_push_url,
-        # Thread the base branch so a resume of a sync-base-originated block
-        # (``monitor_protected_scope_sync_base``) re-validates with the
-        # sync-base-aware validator that filters out base-owned protected
-        # changes the merge pulled in — matching how ``_run_sync_base`` first
-        # raised the block. Without it the generic unpushed-commit validator
-        # runs and a directive that correctly reverts only the agent-authored
-        # protected edit can still re-block on a target-branch-owned change,
-        # wedging the resume or forcing an unnecessary grant. ``base_branch``
-        # is ``None`` only off the monitor loop, where it falls back to the
-        # generic validator (PRRT_kwDOSJAM6s6KFDHO).
-        base_branch=base_branch,
+        base_branch=protected_scope_base_branch,
     )
     if protected_scope_block is not None and protected_scope_block.violations:
         # The resume did NOT clear the protected violation (a "revert" directive
