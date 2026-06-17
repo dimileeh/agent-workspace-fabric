@@ -130,30 +130,36 @@ async def _run_operator_hint_cycle(
     # this branch the fall-through would re-invoke the directive CLI against the
     # already-resolved branch, creating extra unreviewed commits or re-blocking the
     # workspace instead of just finalizing the hint (PRRT_kwDOSJAM6s6KUf46). Detect the
-    # finished drop instead: the corrected HEAD is already on the remote — the push
-    # landed — confirmed with ``preserved_head_sha=None`` so the dropped preserved
-    # commit is NOT required to be present (it was deliberately removed). Finalize the
-    # bookkeeping rather than re-running the agent; this mirrors the no-op-push directive
-    # branch further below, just early enough to skip the wasteful CLI re-invocation. A
-    # genuine first run is excluded: its preserved offending commit is still the unpushed
-    # HEAD, which differs from the remote, so the corrected HEAD is not yet on the remote.
-    if (
-        hint.directive
-        and not active_grant_specs
-        and preserved_head_sha
-        and await self._preserved_commit_already_on_remote(
+    # finished drop instead: confirm the LOCAL HEAD itself is contained in the freshly
+    # fetched remote (an ancestor of — or equal to — the remote PR head), proving the
+    # corrected push landed and NO unpushed commit remains in local history. Pass the
+    # local HEAD as ``preserved_head_sha`` so the helper runs the ancestry check, NOT
+    # ``None`` (which checks only that the worktree TREE matches the remote). A
+    # tree-only check is unsafe: a prior directive that reverted the preserved edit ON
+    # TOP and re-blocked resets the preserved marker to that revert-on-top commit,
+    # whose tree matches the remote PR branch even though the commit was never pushed
+    # and the ungranted protected commit still sits below it in local history; a
+    # tree-only match would finalize, clear the leak marker, and let a later repair
+    # push publish that ungranted history (PRRT_kwDOSJAM6s6KUx2T). Requiring HEAD
+    # containment proves the entire local history is already published, so finalizing
+    # is safe. Finalize the bookkeeping rather than re-running the agent; this mirrors
+    # the no-op-push directive branch further below, just early enough to skip the
+    # wasteful CLI re-invocation. A genuine first run is excluded: its preserved
+    # offending commit is still the unpushed HEAD, which is not contained in the
+    # remote. When HEAD cannot be resolved we cannot prove containment, so the shortcut
+    # is skipped and the fall-through runs the directive CLI behind the leak guard.
+    if hint.directive and not active_grant_specs and preserved_head_sha:
+        local_head_sha = await self._rev_parse_head(worktree_path)
+        if local_head_sha and await self._preserved_commit_already_on_remote(
             workspace_id=workspace_id,
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
-            preserved_head_sha=None,
-        )
-    ):
-        pushed_head_sha = await self._rev_parse_head(worktree_path)
-        if pushed_head_sha:
-            state.last_push_sha = pushed_head_sha
-        await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
-        return _GitPushResult(pushed=False, failed=False, returncode=0)
+            preserved_head_sha=local_head_sha,
+        ):
+            state.last_push_sha = local_head_sha
+            await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
+            return _GitPushResult(pushed=False, failed=False, returncode=0)
     if hint.directive or not active_grant_specs:
         prompt = operator_hint_prompt(
             pr_number=pr_number,
