@@ -162,14 +162,15 @@ def _executor_with_runner(
     return executor
 
 
-class _GitRmFakeRunner(FakeCommandRunner):
-    """FakeCommandRunner that simulates ``git rm`` by deleting the target path.
+class _GitRestoreFakeRunner(FakeCommandRunner):
+    """FakeCommandRunner that simulates ``git restore --source=HEAD`` by deleting
+    the target path.
 
-    Unit tests for the post-validation conformance report cleanup use a fake
-    git runner. The real cleanup now issues ``git rm`` instead of
-    ``git restore`` + ``unlink``; this subclass makes a successful ``git rm``
-    actually remove the on-worktree file so the tests can assert the file is
-    gone and the staged-deletion semantics are exercised.
+    The post-validation conformance report cleanup restores the report path to
+    its committed state in the index/worktree, then unlinks the on-worktree
+    copy. This subclass makes a successful ``git restore`` actually remove
+    the on-worktree file so the tests can assert the file is gone and the
+    worktree is clean for tracked-report projects.
     """
 
     def __init__(self, worktree_path: Path) -> None:
@@ -184,7 +185,7 @@ class _GitRmFakeRunner(FakeCommandRunner):
         cwd: str | None = None,
     ) -> CommandResult:
         result = await super().run(args, input_bytes=input_bytes, cwd=cwd)
-        if result.ok and args and args[0] == "git" and "rm" in args and "--" in args:
+        if result.ok and args and args[0] == "git" and "restore" in args and "--" in args:
             sep_index = args.index("--")
             for path_arg in args[sep_index + 1 :]:
                 target = self._worktree_path / path_arg
@@ -686,7 +687,7 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
     runner.queue_result(
         returncode=128, stderr="fatal: path not in index\n"
-    )  # git rm fails for untracked/gitignored report; fallback to unlink
+    )  # git restore fails for untracked/gitignored report; fallback to unlink
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -738,8 +739,12 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
     report_abs = worktree_path / report_path
     assert not report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
-    assert any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
-    assert not any("restore" in call for call in joined_calls)
+    assert any(
+        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        in call
+        for call in joined_calls
+    )
+    assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
     # No staging or committing of the AWF artifact.
     assert all("add" not in call.args for call in runner.calls)
     assert all("commit" not in call.args for call in runner.calls)
@@ -749,7 +754,7 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
 async def test_satisfied_post_validation_conformance_report_untracked_fallback_to_unlink(
     tmp_path: Path,
 ) -> None:
-    """When the report path is untracked/gitignored, ``git rm`` fails; the
+    """When the report path is untracked/gitignored, ``git restore`` fails; the
     executor must still remove the on-worktree copy via plain ``unlink`` so the
     path does not dirty the worktree as an unignored untracked file."""
     runner = FakeCommandRunner()
@@ -767,7 +772,7 @@ async def test_satisfied_post_validation_conformance_report_untracked_fallback_t
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
     runner.queue_result(
         returncode=128, stderr="fatal: pathspec '...' did not match any files\n"
-    )  # git rm fails
+    )  # git restore fails
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -810,8 +815,13 @@ async def test_satisfied_post_validation_conformance_report_untracked_fallback_t
     assert event_markers == ["record"]
     assert not report_file.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
-    assert any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
-    assert not any("restore" in call for call in joined_calls)
+    assert any(
+        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        in call
+        for call in joined_calls
+    )
+    assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
+    # No staging or committing of the AWF artifact.
     assert all("add" not in call.args for call in runner.calls)
     assert all("commit" not in call.args for call in runner.calls)
 
@@ -836,7 +846,7 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     worktree copy is deleted before ``execution_validation.py`` can deposit it.
     """
     worktree_path = tmp_path / "worktree"
-    runner = _GitRmFakeRunner(worktree_path)
+    runner = _GitRestoreFakeRunner(worktree_path)
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
     plan_path = Path("docs/awf-plans/ws_post.md")
     report_abs = worktree_path / report_path
@@ -847,7 +857,7 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     runner.queue_result(returncode=0, stdout="validated-head\n")  # before_compare_head
     runner.queue_result(returncode=0, stdout="")  # after_compare
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
-    runner.queue_result(returncode=0, stdout="")  # git rm report path
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
 
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
@@ -921,8 +931,12 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     # The on-worktree report copy is removed last.
     assert not report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
-    assert any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
-    assert not any("restore" in call for call in joined_calls)
+    assert any(
+        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        in call
+        for call in joined_calls
+    )
+    assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
     # The final served artifact dir contains the satisfied conformance report
     # (written with the AWF-synthesized JSON shape, which includes a reason_code).
     artifact_dir = executor_service_artifacts.workspace_artifact_dir(
@@ -1692,7 +1706,7 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
     is never ``git add``-ed or committed (#544: the path is gitignored, so
     committing it crashed the workspace and discarded completed agent work)."""
     worktree_path = tmp_path / "worktree"
-    runner = _GitRmFakeRunner(worktree_path)
+    runner = _GitRestoreFakeRunner(worktree_path)
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
     report_file = worktree_path / report_path
     report_file.parent.mkdir(parents=True)
@@ -1706,7 +1720,7 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
     runner.queue_result(
         returncode=0, stdout="D  docs/awf-plans/ws_post.conformance.json\n"
-    )  # git rm report path
+    )  # git restore report path
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -1751,8 +1765,12 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
     assert not report_file.exists()
     assert event_markers == ["record"]
     joined_calls = [" ".join(call.args) for call in runner.calls]
-    assert any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
-    assert not any("restore" in call for call in joined_calls)
+    assert any(
+        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        in call
+        for call in joined_calls
+    )
+    assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
     # It is never staged or committed.
     assert all("add" not in call.args for call in runner.calls)
     assert all("commit" not in call.args for call in runner.calls)
@@ -1763,7 +1781,7 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
     tmp_path: Path,
 ) -> None:
     worktree_path = tmp_path / "worktree"
-    runner = _GitRmFakeRunner(worktree_path)
+    runner = _GitRestoreFakeRunner(worktree_path)
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
     report_file = worktree_path / report_path
     report_file.parent.mkdir(parents=True)
@@ -1782,7 +1800,7 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
     runner.queue_result(returncode=0, stdout="validated-head\n")
     runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
     runner.queue_result(returncode=0, stdout="")
-    runner.queue_result(returncode=0, stdout="")  # git rm report path
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -1820,8 +1838,12 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
     assert not report_file.exists()
     executor._record_post_validation_conformance_event.assert_awaited_once()  # type: ignore[attr-defined]
     joined_calls = [" ".join(call.args) for call in runner.calls]
-    assert any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
-    assert not any("restore" in call for call in joined_calls)
+    assert any(
+        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        in call
+        for call in joined_calls
+    )
+    assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
 
 
 @pytest.mark.unit
@@ -1889,7 +1911,7 @@ async def test_post_validation_conformance_failure_counts_handoff_iterations(
     runner.queue_result(returncode=0, stdout="validated-head\n")
     runner.queue_result(returncode=0, stdout=f"?? {report_path.as_posix()}\n")
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
-    runner.queue_result(returncode=0, stdout="")  # git rm report path
+    runner.queue_result(returncode=0, stdout="")  # git restore report path
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -2121,7 +2143,7 @@ async def test_satisfied_post_validation_conformance_report_unlinks_tracked_repo
     report file is removed so the PR monitor's dirty-worktree guard sees a clean
     tree. The conformance event is still recorded and no git add/commit runs."""
     worktree_path = tmp_path / "worktree"
-    runner = _GitRmFakeRunner(worktree_path)
+    runner = _GitRestoreFakeRunner(worktree_path)
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
     report_file = worktree_path / report_path
     report_file.parent.mkdir(parents=True)
@@ -2136,7 +2158,7 @@ async def test_satisfied_post_validation_conformance_report_unlinks_tracked_repo
     runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
     runner.queue_result(
         returncode=0, stdout="D  docs/awf-plans/ws_post.conformance.json\n"
-    )  # git rm report path
+    )  # git restore report path
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
         return_value="VALIDATION_OK"
@@ -2179,11 +2201,15 @@ async def test_satisfied_post_validation_conformance_report_unlinks_tracked_repo
     assert event_markers == ["record"]
     # The on-worktree report is removed so it cannot dirty the tree later.
     assert not report_file.exists()
-    # ``git rm`` stages the deletion, avoiding the unstaged-deletion dirty-tree
-    # class of issue #604.
+    # The cleanup restores to HEAD then unlinks, avoiding both staged and
+    # unstaged deletion dirty-tree classes of issue #604/#608.
     joined_calls = [" ".join(call.args) for call in runner.calls]
-    assert any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
-    assert not any("restore" in call for call in joined_calls)
+    assert any(
+        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        in call
+        for call in joined_calls
+    )
+    assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
     # No staging or committing of the AWF artifact.
     assert all("add" not in call.args for call in runner.calls)
     assert all("commit" not in call.args for call in runner.calls)

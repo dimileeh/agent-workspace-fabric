@@ -389,42 +389,47 @@ async def _run_post_validation_conformance_check(
         # above and by the validation-run artifact deposit.
         #
         # The report may be tracked in the project profile. Deleting a tracked
-        # file with ``unlink`` leaves an unstaged deletion versus the index, so
-        # git cleanliness checks still see a dirty worktree. Use ``git rm`` to
-        # stage the deletion and remove the worktree copy atomically. For an
-        # untracked or gitignored report, ``git rm`` will fail; fall back to a
+        # file with ``unlink`` leaves an unstaged deletion (`` D ...``), and
+        # ``git rm`` stages a deletion (``D  ...``). Both leave a porcelain entry
+        # that ``check_validation_worktree_clean`` and the PR monitor pre-push
+        # guard treat as dirty. Instead, restore the path to its committed state
+        # in both the index and worktree, then remove the on-worktree copy. For
+        # untracked or gitignored reports the restore will fail; fall back to a
         # plain unlink in that case. Use ``--`` to avoid mis-interpreting report
         # paths that start with a dash.
-        rm_result = await self._runner.run(
+        restore_result = await self._runner.run(
             [
                 "git",
                 *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
-                "rm",
+                "restore",
+                "--source=HEAD",
+                "--worktree",
+                "--staged",
                 "--",
                 handoff.report_path.as_posix(),
             ]
         )
-        if not rm_result.ok:
+        if not restore_result.ok:
             _log.warning(
-                "executor.post_validation_conformance_report_git_rm_failed",
+                "executor.post_validation_conformance_report_git_restore_failed",
                 workspace_id=workspace.id,
                 validation_run_id=validation_run_id,
                 report_path=handoff.report_path.as_posix(),
-                stderr=rm_result.stderr,
+                stderr=restore_result.stderr,
             )
-            try:
-                (worktree_path / handoff.report_path).unlink(missing_ok=True)
-            except OSError as exc:
-                _log.warning(
-                    "executor.post_validation_conformance_report_unlink_failed",
-                    workspace_id=workspace.id,
-                    validation_run_id=validation_run_id,
-                    report_path=handoff.report_path.as_posix(),
-                    error_type=type(exc).__name__,
-                    errno=exc.errno,
-                )
+        try:
+            (worktree_path / handoff.report_path).unlink(missing_ok=True)
+        except OSError as exc:
+            _log.warning(
+                "executor.post_validation_conformance_report_unlink_failed",
+                workspace_id=workspace.id,
+                validation_run_id=validation_run_id,
+                report_path=handoff.report_path.as_posix(),
+                error_type=type(exc).__name__,
+                errno=exc.errno,
+            )
         return None
 
     gap_text = "; ".join(report.gaps) or report.summary
