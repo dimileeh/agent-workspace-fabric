@@ -166,6 +166,7 @@ class RunnerDelegatesMixin:
     _remote_branch_diff_base_and_changed_paths = (
         _remote_repair_diffs._remote_branch_diff_base_and_changed_paths
     )
+    _remote_branch_fetch_once = _remote_repair_diffs._remote_branch_fetch_once
     _merge_base_with_head = _remote_repair_diffs._merge_base_with_head
     _changed_paths_between_ref_and_head = _remote_repair_diffs._changed_paths_between_ref_and_head
     _protected_file_diffs_for_status_paths = (

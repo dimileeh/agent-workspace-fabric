@@ -1050,6 +1050,7 @@ async def _protected_scope_violations_for_unpushed_commits(
         owned_paths = list(workspace.owned_paths)
 
     local_base, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
+        workspace_id=workspace_id,
         worktree_path=worktree_path,
         remote_branch=remote_branch,
         remote_push_url=remote_push_url,
@@ -1100,6 +1101,7 @@ async def _protected_scope_violations_for_sync_base_push(
         remote_branch_base,
         changed_from_remote,
     ) = await self._remote_branch_diff_base_and_changed_paths(
+        workspace_id=workspace_id,
         worktree_path=worktree_path,
         remote_branch=remote_branch,
         remote_push_url=remote_push_url,

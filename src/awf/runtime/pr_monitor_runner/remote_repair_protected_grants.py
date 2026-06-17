@@ -114,6 +114,7 @@ async def _preserved_commit_already_on_remote(
         return False
     try:
         _local_base, changed_paths = await self._remote_branch_diff_base_and_changed_paths(
+            workspace_id=workspace_id,
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
@@ -214,6 +215,7 @@ async def _preserved_commit_in_unpushed_range(
     try:
         # Populate FETCH_HEAD with the remote PR head for the containment check.
         await self._remote_branch_diff_base_and_changed_paths(
+            workspace_id=workspace_id,
             worktree_path=worktree_path,
             remote_branch=remote_branch,
             remote_push_url=remote_push_url,
