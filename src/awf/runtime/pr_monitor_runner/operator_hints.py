@@ -230,6 +230,7 @@ async def _run_operator_hint_cycle(
                 return reblock_result
             await _clear_dropped_preserved_marker_after_terminal_directive(
                 self,
+                workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 state=state,
                 hint=hint,
@@ -260,6 +261,7 @@ async def _run_operator_hint_cycle(
                 return reblock_result
             await _clear_dropped_preserved_marker_after_terminal_directive(
                 self,
+                workspace_id=workspace_id,
                 worktree_path=worktree_path,
                 state=state,
                 hint=hint,
@@ -763,6 +765,7 @@ async def _terminal_directive_grant_reblock(
 async def _clear_dropped_preserved_marker_after_terminal_directive(
     self: Any,
     *,
+    workspace_id: str,
     worktree_path: Path,
     state: MonitorState,
     hint: OperatorHint,
@@ -796,7 +799,19 @@ async def _clear_dropped_preserved_marker_after_terminal_directive(
     commit is gone from local history: an unresolvable HEAD is ambiguous (the drop may
     not have landed), so the marker is RETAINED to keep the leak guard armed for the
     corrected resume — mirroring the shortcut's own HEAD-missing skip
-    (PRRT_kwDOSJAM6s6KUx2T)."""
+    (PRRT_kwDOSJAM6s6KUx2T).
+
+    The clear is made DURABLE before returning, not left to the outer loop's later
+    ``_persist_state``. The block-time RECORDING of the marker is durable as soon as
+    the block transition commits (PRRT_kwDOSJAM6s6KEtU6); the clear must be symmetric.
+    The terminal verdict that drove this drop is marked in memory by the caller AFTER
+    this returns and persisted only at the end of the loop cycle, so a crash in that
+    window would otherwise reload the pending directive with the STALE marker — and the
+    directive-drop restart shortcut at the top of ``_run_operator_hint_cycle`` (which
+    only checks the local HEAD is on the remote) would finalize the new hint as a no-op,
+    SKIP the CLI, and swallow the terminal verdict (PRRT_kwDOSJAM6s6KWAIx). Removing the
+    key durably leaves NO marker after a crash, so the shortcut is skipped and the
+    directive CLI re-runs behind the normal guards and re-derives the verdict."""
     if not (hint.directive and preserved_head_sha) or active_grant_specs:
         return
     local_head_sha = await self._rev_parse_head(worktree_path)
@@ -808,6 +823,7 @@ async def _clear_dropped_preserved_marker_after_terminal_directive(
     ):
         return
     state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
+    await self._clear_preserved_head_marker_durably(workspace_id)
 
 
 async def _finalize_operator_hint_resume(

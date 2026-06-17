@@ -41,6 +41,7 @@ from awf.runtime.operator_hints import (
     persist_operator_hint,
 )
 from awf.runtime.pr_monitor import (
+    _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     AbortReason,
     MonitorState,
     OperatorHint,
@@ -512,6 +513,34 @@ async def _remove_forge_transient_retry_count(
             return
         threads_addressed = dict(ws.monitor_threads_addressed or {})
         if threads_addressed.pop(key, None) is None:
+            return
+        ws.monitor_threads_addressed = threads_addressed
+        await s.commit()
+
+
+async def _clear_preserved_head_marker_durably(self: Any, workspace_id: str) -> None:
+    """Remove ONLY the protected-block preserved-head marker from the persisted row.
+
+    The block-time RECORDING of ``_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY`` is
+    durable as soon as the ``monitoring_pr -> blocked`` transition commits — not only
+    in the in-memory ``MonitorState`` that the loop flushes later
+    (PRRT_kwDOSJAM6s6KEtU6). The CLEAR must be symmetric: when a directive-only
+    terminal resume drops the preserved commit and clears the in-memory marker, that
+    clear is otherwise not durable until the outer loop's later :func:`_persist_state`.
+    A crash in that window reloads the pending directive with the STALE marker, and the
+    directive-drop restart shortcut in ``_run_operator_hint_cycle`` — which only checks
+    that the local HEAD is on the remote — would finalize the new hint as a no-op,
+    SKIP the CLI, and swallow the terminal verdict (PRRT_kwDOSJAM6s6KWAIx). Removing the
+    key durably (merged onto the DB row, never flushing the rest of the in-memory state,
+    which may still carry an unset terminal verdict) closes that window: a later crash
+    leaves NO marker, so the shortcut is skipped and the directive CLI re-runs behind the
+    normal guards and re-derives the verdict. No-ops when the key is already absent."""
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        if threads_addressed.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None) is None:
             return
         ws.monitor_threads_addressed = threads_addressed
         await s.commit()

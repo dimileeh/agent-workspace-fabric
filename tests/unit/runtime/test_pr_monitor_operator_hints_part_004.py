@@ -364,3 +364,118 @@ async def test_terminal_directive_drop_clears_stale_preserved_marker(
     # ... and the stale preserved-head marker is CLEARED so a later directive guide is
     # not silently short-circuited by the directive-drop restart shortcut.
     assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
+
+
+@pytest.mark.unit
+async def test_terminal_directive_drop_clears_stale_preserved_marker_durably(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal-directive-drop marker clear must be DURABLE on the workspace row,
+    not only in the in-memory ``state`` the loop flushes later (PRRT_kwDOSJAM6s6KWAIx).
+
+    The block-time RECORDING of the preserved-head marker is durable as soon as the
+    block commits (PRRT_kwDOSJAM6s6KEtU6); the clear must be symmetric. The terminal
+    verdict that drove the drop is persisted only at the END of the loop cycle, so a
+    crash after this clear but before that flush would reload the pending directive
+    with the STALE marker — and the directive-drop restart shortcut would finalize the
+    next guide as a no-op, SKIP the CLI, and swallow the terminal verdict. Assert the
+    marker is gone from the persisted ``monitor_threads_addressed`` row WITHOUT any
+    ``_persist_state`` flush, mirroring ``test_protected_block_persists_preserved_head_marker_atomically``."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    # The marker is DURABLE on the row (recorded at block time), not just in memory.
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {
+            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "recorded-preserved-sha"
+        }
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="drop the protected edit and keep the rest",
+        directive="revert the protected-file change, keep the remaining work",
+        operation_id="op_terminal_directive_drop_durable",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "recorded-preserved-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("recorded-preserved-sha", None)
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _needs_human(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="needs_human", reason="cannot finish the revert")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "corrected-head-sha"
+
+    async def _preserved_dropped(**_kwargs: object) -> bool:
+        return False
+
+    async def _fail_persist_state(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("durable clear must not rely on the outer _persist_state flush")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _needs_human)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_preserved_commit_reachable_from_head", _preserved_dropped)
+    monkeypatch.setattr(runner, "_persist_state", _fail_persist_state)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    # The marker is gone from the persisted row WITHOUT any later ``_persist_state`` flush.
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in (
+            workspace.monitor_threads_addressed or {}
+        )
+
+
+@pytest.mark.unit
+async def test_clear_preserved_head_marker_durably_missing_workspace_is_noop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The durable marker clear no-ops when the workspace row is gone (a GC/destroy
+    race between the terminal resume and the clear) rather than raising."""
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    # Must not raise even though no such workspace exists.
+    await runner._clear_preserved_head_marker_durably("ws_does_not_exist")
