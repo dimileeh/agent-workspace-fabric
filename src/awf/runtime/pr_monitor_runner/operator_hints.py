@@ -24,6 +24,9 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
+from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_VALIDATION_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
@@ -350,6 +353,33 @@ async def _run_operator_hint_cycle(
             )
             reason = (push_result.stderr or "").strip() or default_reason
             mark_operator_hint_needs_human(state, reason)
+            return cast(_GitPushResult, push_result)
+        if (
+            push_result.reason_code == _PRE_PUSH_VALIDATION_FAILED_REASON
+            and active_grant_specs
+            and not hint.directive
+        ):
+            # Grant-only (approve-and-keep) resume: the CLI is SKIPPED (no directive)
+            # and the pre-push validation fix passes are DISABLED while the grant is
+            # active (see ``allow_validation_fix_passes`` above), so NOTHING in the
+            # worktree can change between iterations. ``PRE_PUSH_VALIDATION_FAILED`` is
+            # non-terminal, so the ``AddressOperatorHint`` failure branch would leave
+            # the hint pending and the next monitor cycle would re-run the identical
+            # grant-only resume — re-failing the same validation unchanged until the
+            # outer loop eventually ``_terminate_failed``s the workspace (which also
+            # rejects a later approve-and-keep grant because the row is no longer
+            # recoverable), never surfacing an operator-actionable pause. Mark the hint
+            # ``needs_human`` and return a NON-failed result so the loop parks the
+            # workspace at ``monitoring_pr`` awaiting the operator (who must fix the
+            # preserved commit or withdraw the grant, then resume), mirroring the other
+            # needs-human branches (PRRT_kwDOSJAM6s6KI221).
+            reason = (push_result.stderr or "").strip() or (
+                "grant-only operator resume could not pass pre-push validation and has "
+                "no CLI or fix-pass step to change the worktree; fix the preserved "
+                "commit or withdraw the approve-and-keep grant, then resume"
+            )
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
         return cast(_GitPushResult, push_result)
     if not push_result.pushed:
         # A fixed verdict can reflect non-code PR work (for example posting an

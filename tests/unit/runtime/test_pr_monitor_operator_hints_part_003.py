@@ -24,6 +24,9 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_VALIDATION_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from tests.postgres import postgres_test_engine
@@ -778,3 +781,93 @@ async def test_operator_hint_remonitor_without_grant_keeps_validation_fix_passes
     assert result.pushed is True
     assert push_calls, "the directive resume push must run"
     assert push_calls[0]["allow_validation_fix_passes"] is True
+
+
+@pytest.mark.unit
+async def test_operator_hint_grant_only_validation_failure_parks_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grant-only (approve-and-keep) resume whose pre-push validation FAILS must
+    park the hint at ``needs_human`` instead of leaving it pending.
+
+    With an active grant the CLI is skipped (no directive) AND the validation fix
+    passes are disabled, so nothing in the worktree can change between iterations. A
+    plain ``PRE_PUSH_VALIDATION_FAILED`` is non-terminal, so leaving the hint pending
+    would re-run the identical grant-only resume every monitor cycle — re-failing the
+    same validation unchanged until the outer loop eventually fails the workspace,
+    never surfacing an operator-actionable pause. Surface ``needs_human`` with a
+    NON-failed result so the loop parks the workspace at ``monitoring_pr``
+    (PRRT_kwDOSJAM6s6KI221)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep the protected edit",
+        directive=None,
+        operation_id="op_grant_only_fail",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GRANT",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _validated_push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="pytest failed",
+            reason_code=_PRE_PUSH_VALIDATION_FAILED_REASON,
+        )
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _validated_push)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # NON-failed result so the loop parks at ``monitoring_pr`` (it does not
+    # ``_terminate_failed`` and the grant survives for a re-resume after the
+    # operator fixes the preserved commit or withdraws the approval).
+    assert result.failed is False
+    assert result.pushed is False
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    assert "pytest failed" in (state.pending_operator_hint.status_reason or "")
