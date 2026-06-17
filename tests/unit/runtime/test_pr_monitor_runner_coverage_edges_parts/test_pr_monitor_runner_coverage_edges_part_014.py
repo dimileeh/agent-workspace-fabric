@@ -365,6 +365,98 @@ async def test_protected_pause_with_matching_monitor_owner_pauses_into_blocked(
 
 
 @pytest.mark.unit
+async def test_terminate_failed_fences_on_superseded_monitor_owner(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KIep5: the protected-scope pause fence makes a superseded
+    runner return a TERMINAL failed push result (NOT paused). The monitor loop
+    treats that as ``terminal_monitor_failure`` and calls ``_terminate_failed``.
+    Because the new owner kept the row in ``monitoring_pr``, the status guard
+    alone does not catch the race, so ``_terminate_failed`` must additionally
+    fence on the monitor claim owner — a superseded runner must NOT move the live
+    claimant's workspace to ``failed``; it records an ignored terminal callback
+    and leaves the row in ``monitoring_pr`` for the takeover."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "stale-worker"  # superseded — lease lost to worker-current
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        # No clobber: the row stays in monitoring_pr for the live claimant and no
+        # failure provenance is stamped by the superseded runner.
+        assert ws.status == "monitoring_pr"
+        assert ws.failure_reason is None
+        assert ws.failure_message is None
+        ignored_events = [
+            event for event in ws.events if event.event_type == "workspace.stale_callback_ignored"
+        ]
+    assert ignored_events
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_failed",
+        "expected_status": "monitoring_pr",
+        "actual_status": "monitoring_pr",
+        "requested_status": "failed",
+        "reason_code": "PROTECTED_SCOPE_PUSH_BLOCKED",
+    }
+
+
+@pytest.mark.unit
+async def test_terminate_failed_with_matching_monitor_owner_still_fails(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The owner fence only rejects a superseded runner: the live monitor claim
+    owner (and the inline handoff with no monitor claim) still terminally fails
+    the workspace on a genuine protected-scope push failure."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = "worker-current"
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._monitor_owner_id = "worker-current"  # the live claimant
+
+    await runner._terminate_failed(
+        workspace_id,
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+    )
+
+    async with factory() as session:
+        ws = await WorkspaceRepository(session).get(workspace_id)
+        assert ws is not None
+        assert ws.status == "failed"
+        assert ws.failure_message == "protected scope blocked"
+
+
+@pytest.mark.unit
 async def test_protected_pause_notification_forge_failure_does_not_strand_block(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

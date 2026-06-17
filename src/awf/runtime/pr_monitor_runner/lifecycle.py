@@ -1049,6 +1049,34 @@ async def _terminate_failed(
             )
             await s.commit()
             return
+        if self._monitor_owner_id is not None and ws.monitor_claimed_by != self._monitor_owner_id:
+            # A superseded monitor runner — its lease expired and a newer worker
+            # reclaimed the row (``claim_monitoring_pr`` reassigns expired leases)
+            # while this stale runner stayed alive — must NOT clobber the live
+            # claimant's workspace to ``failed``. The status guard above misses
+            # this race because the takeover keeps the row in ``monitoring_pr``;
+            # the protected-scope pause fence (PRRT_kwDOSJAM6s6KHtX5) already
+            # stops the stale runner from PAUSING, but the fenced CAS-miss returns
+            # a TERMINAL failed push result, so the loop would otherwise reach here
+            # and fail the takeover. Mirror that owner fence at this terminal sink
+            # and record an ignored terminal callback instead (PRRT_kwDOSJAM6s6KIep5).
+            # The inline initial handoff has no monitor claim (``_monitor_owner_id``
+            # is None) and is unaffected.
+            _log.warning(
+                "monitor.terminal_failed_ignored_superseded_owner",
+                workspace_id=workspace_id,
+                reason_code=rc,
+                monitor_owner_id=self._monitor_owner_id,
+                monitor_claimed_by=ws.monitor_claimed_by,
+            )
+            await _record_ignored_monitor_terminal_callback(
+                repo,
+                ws,
+                requested_status=WorkspaceStatus.failed,
+                reason_code=rc,
+            )
+            await s.commit()
+            return
         safe_message = redact_audit_text(message, limit=2000)
         ws.failure_reason = FailureReason.infrastructure_failure.value
         ws.failure_message = safe_message
