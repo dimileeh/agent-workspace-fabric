@@ -555,6 +555,10 @@ async def _try_finalize_pre_push_dirty_repair_state(
 ) -> ValidationWorktreeCheck | None:
     """Commit monitor-owned residual repair dirt before pre-push validation."""
 
+    # Skip finalization if: no state provided, the tree is already clean, or
+    # the worktree status check itself failed. When the status check failed,
+    # the working tree state cannot be reliably determined, so committing
+    # would be unsafe; skip and let the caller surface the failed status.
     if state is None or check.clean or check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
         return None
     from awf.runtime.validation_worktree import ValidationWorktreeCheck
