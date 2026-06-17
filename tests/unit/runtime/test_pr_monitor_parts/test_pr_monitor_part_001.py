@@ -375,15 +375,24 @@ class TestOperatorHints:
         assert action == AddressOperatorHint(hint=hint)
 
     @pytest.mark.unit
-    def test_non_pending_directive_with_preserved_block_does_not_loop_hint(self) -> None:
-        """The carve-out is scoped to ``pending`` directives: a directive that
-        already resolved to ``needs_human`` must not be re-dispatched as a repair
-        (it falls through to the normal SyncBase/NotifyHuman handling)."""
+    @pytest.mark.parametrize("status_value", ("needs_human", "agent_failed"))
+    def test_terminal_directive_with_preserved_block_notifies_before_sync_base(
+        self, status_value: str
+    ) -> None:
+        """A directive that already resolved to a TERMINAL status must NOT be
+        re-dispatched as a repair, but it ALSO must not fall through to SyncBase
+        while the preserved protected commit and its single-use grant remain
+        unfinalized. SyncBase's push path loads the still-active grant, so it would
+        push the preserved protected commit — or a conflict-resolution edit on the
+        granted path — under an approval meant only for the original preserved
+        commit before the failed hint is resolved or the grant consumed. The
+        unfinalized block outranks SyncBase: surface NotifyHuman instead
+        (PRRT_kwDOSJAM6s6KHtX0)."""
         hint = OperatorHint(
             reason="operator resolved the protected-scope block",
             directive="revert the change to the protected file",
             reason_code="OPERATOR_GUIDE",
-            status="needs_human",
+            status=status_value,  # type: ignore[arg-type]
             status_reason="agent could not revert",
         )
         state = MonitorState(
@@ -394,7 +403,10 @@ class TestOperatorHints:
         action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
 
         assert not isinstance(action, AddressOperatorHint)
-        assert isinstance(action, SyncBase)
+        assert not isinstance(action, SyncBase)
+        assert isinstance(action, NotifyHuman)
+        assert action.message is not None
+        assert "agent could not revert" in action.message
 
     @pytest.mark.unit
     def test_pending_directive_without_preserved_block_keeps_sync_base_first(self) -> None:

@@ -872,6 +872,17 @@ def _should_rerun_transient_ci(
 # ── The decision function ──────────────────────────────────────────────────
 
 
+def _operator_hint_needs_human_notice(hint: OperatorHint) -> NotifyHuman:
+    """``NotifyHuman`` for a terminal (``needs_human`` / ``agent_failed``) hint."""
+    reason_suffix = f" Reason: {hint.status_reason}" if hint.status_reason else ""
+    return NotifyHuman(
+        message=(
+            f"An {hint.control_label} still requires human attention before "
+            f"this PR can merge.{reason_suffix}"
+        )
+    )
+
+
 def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> MonitorAction:
     """Pure policy: which ``MonitorAction`` should the runner take next?
 
@@ -964,15 +975,26 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # grant-only push of the preserved commit) and pushes it to the PR branch — a
     # base update does not make THAT push non-fast-forward — and spends the grant;
     # SyncBase then integrates the base on a later iteration with no active grant,
-    # so any sync-base protected edit re-blocks. Scoped to a pending resume WITH
-    # the preserved-head marker: an ordinary remonitor (no preserved block) keeps
+    # so any sync-base protected edit re-blocks. Scoped to a resume WITH the
+    # preserved-head marker: an ordinary remonitor (no preserved block) keeps
     # syncing base first.
-    if (
-        state.pending_operator_hint is not None
-        and state.pending_operator_hint.status == "pending"
-        and state.has_preserved_protected_block
-    ):
-        return AddressOperatorHint(hint=state.pending_operator_hint)
+    #
+    # A TERMINAL hint (needs_human / agent_failed) here means the directive pass
+    # already ran and failed BEFORE any push, so the preserved protected commit and
+    # its single-use grant are BOTH still unfinalized (the grant is consumed and the
+    # marker dropped only on a successful resume). Falling through to SyncBase would
+    # let ``_protected_scope_violations_for_sync_base_push`` load that still-active
+    # grant and push the preserved protected commit — or a conflict-resolution edit
+    # on the granted path — under an approval meant only for the original preserved
+    # commit, before the failed hint is resolved or the grant consumed
+    # (PRRT_kwDOSJAM6s6KHtX0). So an unfinalized preserved block outranks SyncBase
+    # regardless of hint status: surface NotifyHuman instead, and a later resume
+    # pushes the resolved block before SyncBase integrates the base with no grant.
+    if state.pending_operator_hint is not None and state.has_preserved_protected_block:
+        hint = state.pending_operator_hint
+        if hint.status == "pending":
+            return AddressOperatorHint(hint=hint)
+        return _operator_hint_needs_human_notice(hint)
 
     # 1. Base-behind / DIRTY check runs BEFORE comments and operator hints.
     # Rationale: on a PR with an active bot-review fleet every push triggers a
@@ -1017,13 +1039,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         hint = state.pending_operator_hint
         if hint.status == "pending":
             return AddressOperatorHint(hint=hint)
-        reason_suffix = f" Reason: {hint.status_reason}" if hint.status_reason else ""
-        return NotifyHuman(
-            message=(
-                f"An {hint.control_label} still requires human attention before "
-                f"this PR can merge.{reason_suffix}"
-            )
-        )
+        return _operator_hint_needs_human_notice(hint)
 
     # 3. Unresolved comments, filtered to those we haven't handled yet.
     # Review comments get one agent pass so the monitor records whether the
