@@ -39,12 +39,14 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
 )
+from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
     _ProtectedScopePushBlock,
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
 )
@@ -743,6 +745,125 @@ async def test_ci_fix_records_provider_agent_run_error_before_commit_sink_early_
     # return — this is the regression for the reported bug. The stored error is
     # the one the adapter raised (identified by its distinctive stderr), not a
     # re-constructed one.
+    assert len(handle_calls) == 1
+    assert handle_calls[0][0] == workspace_id
+    assert handle_calls[0][1].result.stderr == expected_stderr
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "commit_sink_exc,expected_reason_code",
+    [
+        (
+            ProtectedScopeDiffError("diff baseline unavailable"),
+            "PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        ),
+        (
+            _MonitorAgentRuntimeOwnershipRepairFailedError(
+                AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+            ),
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE,
+        ),
+        (
+            _MonitorPolicyBlockedError("Supply-chain policy blocked CI fix."),
+            _MONITOR_POLICY_BLOCKED_REASON,
+        ),
+    ],
+    ids=["protected_scope_diff", "ownership_repair_failed", "policy_blocked"],
+)
+async def test_ci_fix_preserves_commit_sink_failure_when_provider_recovers(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commit_sink_exc: Exception,
+    expected_reason_code: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KXLaI (discussion r3431603601).
+
+    When the agent run fails with a recoverable ``AgentRunError`` AND
+    ``_commit_dirty_worktree`` raises one of the three early-return
+    exceptions, ``_handle_provider_agent_run_error`` records the provider
+    recovery state and then raises a recovery control-flow exception
+    (``ProviderRecoveryRetryError`` / ``ProviderRecoveryFallbackError`` /
+    ``ProviderRecoveryAuthError``). That raise must NOT clobber the
+    commit-sink failure result: the operator must see the specific
+    commit-sink reason (protected-scope diff unavailable / ownership
+    repair failed / policy blocked), not ``PROVIDER_OUTAGE``. Otherwise
+    the dirty tree is left behind and the next attempt trips the
+    pre-existing dirty guard instead of surfacing the commit-sink
+    failure.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    expected_stderr = "Gemini MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    adapter.queue(
+        stdout="",
+        stderr=expected_stderr,
+        returncode=1,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    handle_calls: list[tuple[str, AgentRunError]] = []
+
+    async def _raising_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: MonitorState | None = None,
+    ) -> str:
+        # Record the call (so we can prove the provider state was
+        # recorded) and then raise the retry control-flow exception, as
+        # the real handler does for recoverable provider errors.
+        handle_calls.append((workspace_id_arg, exc))
+        raise ProviderRecoveryRetryError()
+
+    async def _raise_commit_sink_exc(**_kwargs: object) -> bool:
+        raise commit_sink_exc
+
+    async def _protected_scope_diff_block(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="protected scope diff unavailable",
+            reason_code="PROTECTED_SCOPE_DIFF_UNAVAILABLE",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _raising_handle_provider_agent_run_error,
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _raise_commit_sink_exc)
+    monkeypatch.setattr(
+        runner,
+        "_protected_scope_diff_unavailable_push_result",
+        _protected_scope_diff_block,
+    )
+
+    # The recovery control-flow exception must NOT propagate: the
+    # commit-sink failure result must be returned to the loop so the
+    # operator sees the specific reason code, not PROVIDER_OUTAGE.
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == expected_reason_code
+    # The provider recovery state was still recorded (handler invoked).
     assert len(handle_calls) == 1
     assert handle_calls[0][0] == workspace_id
     assert handle_calls[0][1].result.stderr == expected_stderr

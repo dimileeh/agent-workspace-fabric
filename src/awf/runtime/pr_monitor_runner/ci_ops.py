@@ -6,6 +6,7 @@ This module contains mechanically moved methods from ``awf.runtime.pr_monitor_ru
 from __future__ import annotations
 
 import asyncio as asyncio
+import contextlib
 import hashlib as hashlib
 import json as json
 import os as os
@@ -36,6 +37,8 @@ from awf.runtime.pr_monitor_runner.remote_ops import (
 )
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
@@ -119,7 +122,20 @@ async def _run_ci_fix(
         )
     except ProtectedScopeDiffError as exc:
         if agent_run_err is not None:
-            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+            # Record provider recovery state, but do not let the recovery
+            # control-flow exception (retry/fallback/auth) clobber the
+            # commit-sink failure result below — the operator must see the
+            # specific protected-scope-diff reason, not PROVIDER_OUTAGE.
+            # The recording side-effects (_persist_state +
+            # _record_provider_agent_run_error) already ran before the raise.
+            with contextlib.suppress(
+                ProviderRecoveryRetryError,
+                ProviderRecoveryFallbackError,
+                ProviderRecoveryAuthError,
+            ):
+                await self._handle_provider_agent_run_error(
+                    workspace_id, agent_run_err, state=state
+                )
         return cast(
             _GitPushResult,
             await self._protected_scope_diff_unavailable_push_result(
@@ -130,7 +146,17 @@ async def _run_ci_fix(
         )
     except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
         if agent_run_err is not None:
-            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+            # See the ProtectedScopeDiffError handler: preserve the
+            # ownership-repair-failed reason code over the provider
+            # recovery control-flow exception.
+            with contextlib.suppress(
+                ProviderRecoveryRetryError,
+                ProviderRecoveryFallbackError,
+                ProviderRecoveryAuthError,
+            ):
+                await self._handle_provider_agent_run_error(
+                    workspace_id, agent_run_err, state=state
+                )
         return _GitPushResult(
             pushed=False,
             failed=True,
@@ -140,7 +166,17 @@ async def _run_ci_fix(
         )
     except _MonitorPolicyBlockedError as exc:
         if agent_run_err is not None:
-            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+            # See the ProtectedScopeDiffError handler: preserve the
+            # policy-blocked reason code over the provider recovery
+            # control-flow exception.
+            with contextlib.suppress(
+                ProviderRecoveryRetryError,
+                ProviderRecoveryFallbackError,
+                ProviderRecoveryAuthError,
+            ):
+                await self._handle_provider_agent_run_error(
+                    workspace_id, agent_run_err, state=state
+                )
         return _GitPushResult(
             pushed=False,
             failed=True,
