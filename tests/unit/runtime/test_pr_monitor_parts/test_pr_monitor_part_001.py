@@ -7,6 +7,7 @@ import time
 import pytest
 
 from awf.runtime.pr_monitor import (
+    _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     Abort,
     AbortReason,
     AddressComments,
@@ -301,6 +302,95 @@ class TestOperatorHints:
         state = MonitorState(pending_operator_hint=hint)
 
         action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        (
+            _status(base_behind=2),
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+        ),
+    )
+    def test_pending_directive_with_preserved_block_runs_before_sync_base(
+        self,
+        status: PRStatus,
+    ) -> None:
+        """A monitor-origin protected-block DIRECTIVE resume must beat SyncBase.
+
+        If SyncBase ran first it would re-validate the still-preserved protected
+        commit (the directive guide revoked its grants) and pause the workspace
+        back into ``blocked`` before the directive ever runs — a re-block loop on
+        every base update (PRRT_kwDOSJAM6s6KFgtj)."""
+        hint = OperatorHint(
+            reason="operator resolved the protected-scope block",
+            directive="revert the change to the protected file",
+            reason_code="OPERATOR_GUIDE",
+        )
+        state = MonitorState(
+            pending_operator_hint=hint,
+            threads_addressed_ids={_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "deadbeefcafef00d"},
+        )
+
+        action = decide(status, state, MonitorConfig(auto_merge=True))
+
+        assert action == AddressOperatorHint(hint=hint)
+
+    @pytest.mark.unit
+    def test_grant_only_resume_with_preserved_block_still_syncs_base(self) -> None:
+        """A grant-only (no directive) approve-and-keep resume keeps SyncBase
+        first: the active grant suppresses the protected violation, so SyncBase
+        does not re-block — the directive carve-out must not apply here."""
+        hint = OperatorHint(
+            reason="operator approved keeping the protected change",
+            directive=None,
+            reason_code="OPERATOR_GUIDE",
+        )
+        state = MonitorState(
+            pending_operator_hint=hint,
+            threads_addressed_ids={_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "deadbeefcafef00d"},
+        )
+
+        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
+
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    def test_non_pending_directive_with_preserved_block_does_not_loop_hint(self) -> None:
+        """The carve-out is scoped to ``pending`` directives: a directive that
+        already resolved to ``needs_human`` must not be re-dispatched as a repair
+        (it falls through to the normal SyncBase/NotifyHuman handling)."""
+        hint = OperatorHint(
+            reason="operator resolved the protected-scope block",
+            directive="revert the change to the protected file",
+            reason_code="OPERATOR_GUIDE",
+            status="needs_human",
+            status_reason="agent could not revert",
+        )
+        state = MonitorState(
+            pending_operator_hint=hint,
+            threads_addressed_ids={_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "deadbeefcafef00d"},
+        )
+
+        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
+
+        assert not isinstance(action, AddressOperatorHint)
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    def test_pending_directive_without_preserved_block_keeps_sync_base_first(self) -> None:
+        """No preserved protected commit → SyncBase would not re-block, so the
+        documented SyncBase-before-hint ordering still wins for a stale base."""
+        hint = OperatorHint(
+            reason="operator guidance recorded",
+            directive="implement the forge-neutral fix",
+            reason_code="OPERATOR_GUIDE",
+        )
+        state = MonitorState(pending_operator_hint=hint)
+
+        action = decide(_status(base_behind=2), state, MonitorConfig(auto_merge=True))
 
         assert isinstance(action, SyncBase)
 

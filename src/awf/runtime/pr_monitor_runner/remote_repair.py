@@ -54,6 +54,7 @@ from awf.runtime.ownership import (
     repair_agent_runtime_ownership,
 )
 from awf.runtime.pr_monitor import (
+    _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
     MonitorState,
     PRStatus,
 )
@@ -627,11 +628,10 @@ async def _repair_protected_scope_commits_before_push(
     )
 
 
-_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY = "__awf_protected_block_preserved_head__"
-"""Reserved ``MonitorState.threads_addressed_ids`` key carrying the preserved
-(unpushed) commit SHA of a POST-PR protected-scope pause, so a monitor/worker
-restart reconstructs it and the idempotent-push ancestry check avoids a
-duplicate push (WS-2 §5)."""
+# ``_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY`` is defined in the pure core
+# (``awf.runtime.pr_monitor``) so ``decide`` can spot a still-preserved protected
+# commit; it is imported above and re-exported here for the runner modules
+# (e.g. ``operator_hints``) that read/write the marker.
 
 
 async def _pause_monitor_for_protected_scope_block(

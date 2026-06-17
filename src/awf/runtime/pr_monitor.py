@@ -263,6 +263,15 @@ class PRStatus:
 # ── State — small, serialisable, lives on the workspace row ────────────────
 
 
+_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY = "__awf_protected_block_preserved_head__"
+"""Reserved ``MonitorState.threads_addressed_ids`` key carrying the preserved
+(unpushed) commit SHA of a POST-PR protected-scope pause, so a monitor/worker
+restart reconstructs it and the idempotent-push ancestry check avoids a
+duplicate push (WS-2 §5). Defined here (the pure core) so ``decide`` can spot a
+still-preserved protected commit; the runner re-exports it from
+``remote_repair``."""
+
+
 @dataclass
 class MonitorState:
     """Mutable state the runner keeps across iterations.
@@ -291,6 +300,15 @@ class MonitorState:
     def mark_addressed(self, thread_id: str, verdict: str) -> None:
         self.threads_addressed_ids[thread_id] = verdict
         self._changed_thread_ids.add(thread_id)
+
+    @property
+    def has_preserved_protected_block(self) -> bool:
+        """Whether a POST-PR protected-scope pause preserved an unpushed commit.
+
+        True between the block and the resume that pushes/reverts it — i.e. while
+        the offending protected commit is still sitting on the workspace HEAD.
+        """
+        return bool(self.threads_addressed_ids.get(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY))
 
     def changed_thread_ids(self) -> set[str]:
         return set(self._changed_thread_ids)
@@ -923,6 +941,29 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         if _agent_can_triage_review_comment(c)
         and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
     )
+
+    # 1.pre A pending protected-block DIRECTIVE resume runs BEFORE SyncBase.
+    # When a monitor-origin protected-scope block is resolved with a directive
+    # (revert/redo) and the base advanced during the human decision window,
+    # letting SyncBase run first re-validates the STILL-PRESERVED protected
+    # commit — and a directive guide revoked the grants that would have
+    # suppressed it (controls_guide), so ``_run_sync_base`` pauses the workspace
+    # back into ``blocked`` before the directive ever runs, a re-block loop where
+    # the operator's directive is silently discarded each base update
+    # (PRRT_kwDOSJAM6s6KFgtj). Running the hint first lets the directive
+    # revert/redo the edit and push it to the PR branch (a base update does not
+    # make THAT push non-fast-forward); SyncBase then integrates the base on a
+    # later iteration once the violation is cleared. Scoped to a pending
+    # directive WITH the preserved-head marker: an ordinary remonitor (no
+    # directive) and a grant-only approve-and-keep resume (grant still suppresses
+    # the violation) keep syncing base first.
+    if (
+        state.pending_operator_hint is not None
+        and state.pending_operator_hint.status == "pending"
+        and state.pending_operator_hint.directive is not None
+        and state.has_preserved_protected_block
+    ):
+        return AddressOperatorHint(hint=state.pending_operator_hint)
 
     # 1. Base-behind / DIRTY check runs BEFORE comments and operator hints.
     # Rationale: on a PR with an active bot-review fleet every push triggers a
