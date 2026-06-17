@@ -1160,9 +1160,13 @@ async def _preserved_commit_in_unpushed_range(
     Detect that by confirming the preserved commit is (a) an ancestor of the local
     HEAD this push would publish AND (b) not already contained in the
     freshly-fetched remote PR head (an already-published commit cannot be
-    un-leaked, and a grant-only resume legitimately lands it). A fetch/ancestry
-    failure returns ``False`` so the normal push path runs and surfaces any error
-    rather than silently blocking a legitimate directive resume."""
+    un-leaked, and a grant-only resume legitimately lands it). When the preserved
+    commit is NOT an ancestor of HEAD the directive reset it away — no leak — so
+    return ``False``. But once (a) is confirmed the push WOULD publish the commit,
+    so a failed containment fetch cannot prove it is already on the remote: fail
+    closed (return ``True``) to surface needs_human rather than leak the ungranted
+    protected commit, since the normal push may still succeed despite this fetch
+    failing."""
     if not preserved_head_sha or not worktree_path.exists():
         return False
     ancestry = await self._deps.runner.run(
@@ -1186,7 +1190,18 @@ async def _preserved_commit_in_unpushed_range(
             remote_push_url=remote_push_url,
         )
     except ProtectedScopeDiffError:
-        return False
+        # Ancestry is already confirmed above, so this push WOULD publish the
+        # preserved commit. A failed containment fetch cannot prove the commit is
+        # already on the remote, so fail closed: block the leak and surface
+        # needs_human rather than let the (still potentially-succeeding) push leak
+        # the ungranted protected commit.
+        _log.warning(
+            "monitor.protected_scope_directive_preserved_commit_fetch_failed",
+            workspace_id=workspace_id,
+            remote_branch=remote_branch,
+            preserved_head_sha=preserved_head_sha,
+        )
+        return True
     if await self._preserved_head_on_remote_fetch_head(
         worktree_path=worktree_path,
         preserved_head_sha=preserved_head_sha,

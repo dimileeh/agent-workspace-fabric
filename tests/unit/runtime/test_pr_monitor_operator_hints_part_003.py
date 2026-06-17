@@ -488,13 +488,14 @@ async def test_preserved_commit_in_unpushed_range_reset_away_returns_false(
 
 
 @pytest.mark.unit
-async def test_preserved_commit_in_unpushed_range_diff_error_returns_false(
+async def test_preserved_commit_in_unpushed_range_diff_error_fails_closed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fetch/diff failure fails open (False) so the normal push path surfaces the
-    error rather than silently blocking a legitimate directive resume."""
+    """Once the preserved commit is confirmed an ancestor of HEAD, a containment
+    fetch failure cannot prove it is already published, so fail closed (True) to
+    surface needs_human rather than leak the ungranted protected commit."""
     worktree = tmp_path / "worktrees" / "ws_err"
     worktree.mkdir(parents=True)
     cmd = FakeCommandRunner()
@@ -519,8 +520,13 @@ async def test_preserved_commit_in_unpushed_range_diff_error_returns_false(
             remote_branch="awf/ws_err",
             preserved_head_sha="preserved-sha",
         )
-        is False
+        is True
     )
+    # Failing the fetch must not reach the FETCH_HEAD containment merge-base: only
+    # the ancestry check ran before fail-closed.
+    ancestry_calls = [c for c in cmd.calls if "--is-ancestor" in c.args]
+    assert len(ancestry_calls) == 1
+    assert "HEAD" in ancestry_calls[0].args
 
 
 @pytest.mark.unit
