@@ -1144,7 +1144,9 @@ async def _repair_protected_scope_changes_before_commit(
         reason="monitor_agent_pre_launch",
         event_name=MONITOR_AGENT_RUNTIME_OWNERSHIP_REPAIR_EVENT_NAME,
     ):
-        return None
+        raise _MonitorAgentRuntimeOwnershipRepairFailedError(
+            AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+        )
     agent_run_err = None
     try:
         await self._deps.adapter.run(
