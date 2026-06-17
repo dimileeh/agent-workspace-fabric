@@ -1027,11 +1027,23 @@ async def _protected_scope_violations_for_status(
             "for validation before commit: "
             f"{exc}"
         ) from exc
+    # Deliberately NOT grant-aware (PRRT_kwDOSJAM6s6KJhxd). This validator runs on
+    # the DIRTY worktree before commit, so it only ever sees NEW uncommitted edits —
+    # the preserved blocked commit is already committed and is authorized by the
+    # grant-aware *committed*-path push checks
+    # (``_protected_scope_violations_for_unpushed_commits`` /
+    # ``_protected_scope_violations_for_sync_base_push``). During a combined
+    # ``--directive ... --grant ...`` resume the directive agent runs before the
+    # grant is consumed, so honoring the grant here would let a fresh agent edit to
+    # the granted protected file be committed (and then pushed under the grant-aware
+    # push check) under an approval meant to KEEP the preserved commit rather than
+    # authorize new protected changes. Flag such edits so the repair prompt / re-block
+    # fires; the legitimate keep-preserved-commit flow is unaffected because the
+    # preserved change is not dirty.
     return find_protected_quality_gate_changes(
         changed_paths=changed_paths,
         owned_paths=owned_paths,
         protected_file_diffs=protected_file_diffs,
-        operator_granted_paths=await self._active_operator_grant_specs(workspace_id),
     )
 
 

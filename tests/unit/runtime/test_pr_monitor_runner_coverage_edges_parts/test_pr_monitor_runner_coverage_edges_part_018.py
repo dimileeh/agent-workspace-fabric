@@ -678,6 +678,58 @@ async def test_protected_scope_status_check_ignores_empty_or_missing_workspace(
 
 
 @pytest.mark.unit
+async def test_protected_scope_status_check_ignores_grant_for_new_dirty_edit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A grant must NOT suppress a NEW dirty protected edit (PRRT_kwDOSJAM6s6KJhxd).
+
+    The pre-commit dirty validator only ever sees uncommitted edits — the
+    preserved blocked commit is committed and authorized by the grant-aware
+    *committed*-path push checks. During a combined ``--directive ... --grant ...``
+    resume the directive agent runs before the grant is consumed, so honoring the
+    grant here would let a fresh agent edit to the granted protected file be
+    committed (and then pushed under the grant-aware push check) under an approval
+    meant to keep the preserved commit, not to authorize new edits. The dirty
+    validator must flag that new edit regardless of the active grant.
+    """
+    from awf.common.ids import new_operator_grant_id
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        session.add(
+            OperatorGrantAuditRecord(
+                id=new_operator_grant_id(),
+                workspace_id=workspace_id,
+                operator="op@example.com",
+                reason="approved keeping the preserved protected change",
+                normalized_path=".coveragerc",
+                block_epoch=0,
+                approve_policy_downgrade=True,
+            )
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    violations = await runner._protected_scope_violations_for_status(
+        workspace_id=workspace_id,
+        status_stdout=" M .coveragerc\n",
+    )
+    assert [violation.path for violation in violations] == [".coveragerc"]
+
+
+@pytest.mark.unit
 async def test_git_helpers_handle_bad_base_count_and_push_rejection_recovery(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
