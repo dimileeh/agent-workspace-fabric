@@ -41,17 +41,18 @@ def test_builds_tracked_exec_wrapper_with_unique_invocation_id() -> None:
         "-T",
     ]
     exec_idx = args.index("exec")
-    assert args[exec_idx : exec_idx + 3] == ["exec", "-T", "-e"]
-    assert "GIT_OBJECT_DIRECTORY=" in args
-    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES=" in args
+    assert args[exec_idx : exec_idx + 3] == ["exec", "-T", "-w"]
+    assert "GIT_OBJECT_DIRECTORY=" not in args
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES=" not in args
     assert "-w" in args
     assert "/workspace" in args
     assert "agent" in args
-    assert args[exec_idx + 9 : exec_idx + 12] == ["sh", "-lc", invocation.wrapper_script]
+    assert args[exec_idx + 5 : exec_idx + 8] == ["sh", "-lc", invocation.wrapper_script]
     assert "AWF_EXEC_INVOCATION_ID" in invocation.wrapper_script
+    assert "unset GIT_OBJECT_DIRECTORY" in invocation.wrapper_script
     assert "pkill" not in invocation.wrapper_script
     assert "killall" not in invocation.wrapper_script
-    assert args[exec_idx + 12 :] == [
+    assert args[exec_idx + 8 :] == [
         "awf-exec",
         "awf_test_invocation",
         "codex",
@@ -85,14 +86,14 @@ def test_cleanup_command_targets_only_invocation_id() -> None:
         "-T",
     ]
     exec_idx = cleanup.index("exec")
-    assert cleanup[exec_idx : exec_idx + 3] == ["exec", "-T", "-e"]
-    assert "GIT_OBJECT_DIRECTORY=" in cleanup
-    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES=" in cleanup
+    assert cleanup[exec_idx : exec_idx + 3] == ["exec", "-T", "-w"]
+    assert "GIT_OBJECT_DIRECTORY=" not in cleanup
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES=" not in cleanup
     assert "-w" in cleanup
     assert "/workspace" in cleanup
     assert "agent" in cleanup
-    assert cleanup[exec_idx + 9 : exec_idx + 12] == ["sh", "-lc", invocation.cleanup_script]
-    assert cleanup[exec_idx + 12 :] == ["awf-cleanup", "awf_cleanup_target"]
+    assert cleanup[exec_idx + 5 : exec_idx + 8] == ["sh", "-lc", invocation.cleanup_script]
+    assert cleanup[exec_idx + 8 :] == ["awf-cleanup", "awf_cleanup_target"]
     assert "AWF_EXEC_INVOCATION_ID=awf_cleanup_target" in invocation.cleanup_script
     forbidden = ("pkill claude", "pkill codex", "pkill pytest", "killall")
     assert all(marker not in invocation.cleanup_script for marker in forbidden)
@@ -350,21 +351,15 @@ def test_compose_exec_prefix_unsets_dangerous_git_object_env_vars() -> None:
         workdir="/workspace",
     )
 
-    assert "-e" in prefix
-    assert "GIT_OBJECT_DIRECTORY=" in prefix
-    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES=" in prefix
-
-    e_indices = [i for i, arg in enumerate(prefix) if arg == "-e"]
-    assert len(e_indices) >= 2
-
-    for idx in e_indices:
-        value = prefix[idx + 1]
-        assert value in {"GIT_OBJECT_DIRECTORY=", "GIT_ALTERNATE_OBJECT_DIRECTORIES="}
-
-    assert "-e" not in prefix[e_indices[-1] + 2 :]
+    assert "GIT_OBJECT_DIRECTORY=" not in prefix
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES=" not in prefix
+    assert "-e" not in prefix
 
     assert "GIT_ASKPASS" not in prefix
     assert "GIT_TERMINAL_PROMPT" not in prefix
     assert "GIT_CONFIG_COUNT" not in prefix
     assert not any(arg.startswith("GIT_CONFIG_KEY_") for arg in prefix)
     assert not any(arg.startswith("GIT_CONFIG_VALUE_") for arg in prefix)
+
+    wrapper = compose_exec._tracked_exec_wrapper_script()  # noqa: SLF001
+    assert "unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES" in wrapper

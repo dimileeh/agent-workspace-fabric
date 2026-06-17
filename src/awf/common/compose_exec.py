@@ -229,10 +229,6 @@ def _compose_exec_prefix(
         str(compose_file),
         "exec",
         "-T",
-        "-e",
-        "GIT_OBJECT_DIRECTORY=",
-        "-e",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES=",
         "-w",
         workdir,
         service,
@@ -299,6 +295,7 @@ rm -f "$stdin_path" 2>/dev/null || true
 set +e
 invocation_id=$1
 shift
+unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES 2>/dev/null || true
 export AWF_EXEC_INVOCATION_ID="$invocation_id"
 awf_exec_dir="/tmp/awf-exec/$invocation_id"
 mkdir -p "$awf_exec_dir" 2>/dev/null || true
