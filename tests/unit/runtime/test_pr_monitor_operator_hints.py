@@ -2463,3 +2463,71 @@ async def test_preserved_commit_already_on_remote_recorded_sha_on_remote_returns
         )
         is True
     )
+
+
+@pytest.mark.unit
+async def test_protected_block_persists_preserved_head_marker_atomically(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preserved HEAD SHA must be durable on the workspace row AS SOON AS the
+    ``monitoring_pr -> blocked`` transition commits — not only in the in-memory
+    ``state`` that the loop flushes later. A crash after the block commit but
+    before ``_persist_state`` would otherwise lose the only monitor-state copy of
+    the preserved head; the next grant-only resume would read
+    ``preserved_head_sha=None`` and treat a reset/recreated worktree's empty diff
+    as already-pushed, silently dropping the approved commit (PRRT_kwDOSJAM6s6KEtU6)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "blocked-head-sha"
+
+    async def _no_notification(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_post_protected_block_notification", _no_notification)
+
+    # A fresh state whose in-memory marker we deliberately IGNORE afterwards: the
+    # durable copy must come from the block commit, not from a later flush.
+    state = MonitorState()
+    block = _ProtectedScopePushBlock(
+        message="protected scope blocked",
+        reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        violations=(
+            QualityGateViolation(
+                path=".github/workflows/ci.yml",
+                protected_pattern=".github/**",
+            ),
+        ),
+    )
+
+    result = await runner._pause_monitor_for_protected_scope_block(
+        workspace_id=workspace_id,
+        pr_number=42,
+        pr_head_sha="start-sha",
+        protected_scope_block=block,
+        worktree_path=worktree,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    assert result.paused_into_blocked is True
+    # The marker is durable on the row WITHOUT any later ``_persist_state`` flush.
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == "blocked"
+        assert (workspace.monitor_threads_addressed or {}).get(
+            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
+        ) == "blocked-head-sha"

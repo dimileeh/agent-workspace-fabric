@@ -683,6 +683,19 @@ async def _pause_monitor_for_protected_scope_block(
             )
         block_epoch = ws.block_epoch
         repo_url = ws.repo_url
+        if preserved_head_sha:
+            # Persist the preserved HEAD marker ATOMICALLY with the block commit.
+            # The in-memory ``state`` marker set below is only flushed by the
+            # loop's later ``_persist_state``; a crash after this commit but before
+            # that flush would otherwise lose the only monitor-state copy of the
+            # preserved head, so a later grant-only resume on a reset/recreated
+            # worktree would read ``preserved_head_sha=None``, skip the SHA
+            # containment guard, and treat an empty diff as already-pushed —
+            # silently dropping the approved commit (PRRT_kwDOSJAM6s6KEtU6).
+            # Reassign (not in-place mutate) so the JSON column change is tracked.
+            merged_threads = dict(ws.monitor_threads_addressed or {})
+            merged_threads[_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY] = preserved_head_sha
+            ws.monitor_threads_addressed = merged_threads
         await session.commit()
 
     _log.warning(
