@@ -252,7 +252,10 @@ async def test_operator_hint_grant_only_skips_agent_and_consumes_grant(
     async def _no_block(**_kwargs: object) -> None:
         return None
 
-    async def _pushed(**_kwargs: object) -> _GitPushResult:
+    push_kwargs: dict[str, object] = {}
+
+    async def _pushed(**kwargs: object) -> _GitPushResult:
+        push_kwargs.update(kwargs)
         return _GitPushResult(pushed=True, failed=False, returncode=0)
 
     monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
@@ -282,6 +285,10 @@ async def test_operator_hint_grant_only_skips_agent_and_consumes_grant(
     assert push_result.pushed is True
     # Grant-only resume must NOT re-invoke the agent CLI.
     assert adapter.calls == []
+    # While the single-use grant is active, validation fix passes are disabled so
+    # a fix pass cannot author a fresh protected-file change under (and consume)
+    # the grant — mirroring the executor's ``resume_disable_fix_passes`` gate.
+    assert push_kwargs["disable_validation_fix_passes"] is True
     # The single-use grant was consumed on the successful clear.
     async with factory() as s:
         rows = (await s.execute(select(OperatorGrantAuditRecord))).scalars().all()

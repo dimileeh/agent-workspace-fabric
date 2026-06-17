@@ -158,6 +158,12 @@ async def _run_operator_hint_cycle(
             compose_file=compose_file,
             remote_url=remote_push_url,
             state=state,
+            # An active operator grant is single-use and scoped to the preserved
+            # commit. Disabling validation fix passes here mirrors the executor's
+            # ``resume_disable_fix_passes`` pre-PR gate: a fix pass would re-invoke
+            # the agent, author a fresh protected-file change, and have the
+            # grant-aware check suppress it under (and consume) the same grant.
+            disable_validation_fix_passes=bool(grant_specs),
         )
     )
     if push_result.failed:

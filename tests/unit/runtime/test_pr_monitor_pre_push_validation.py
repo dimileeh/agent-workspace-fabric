@@ -186,6 +186,56 @@ async def test_pre_push_validation_failure_does_not_push(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_disable_fix_passes_overrides_config(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``disable_validation_fix_passes`` forces zero passes even when config allows them."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
+    adapter = FakeAdapter()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=False))  # type: ignore[assignment]
+
+    async def _unexpected_validation_commands(_self: Any, **_kwargs: object) -> tuple[str, ...]:
+        """Fail loudly if a fix pass loads command context despite the disable flag."""
+        pytest.fail("validation commands must not load when fix passes are disabled")
+
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_commands",
+        _unexpected_validation_commands,
+    )
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        disable_validation_fix_passes=True,
+    )
+
+    assert result.failed is True
+    assert result.reason_code == "PRE_PUSH_VALIDATION_FAILED"
+    # No fix pass ran, so the agent CLI was never invoked.
+    assert adapter.calls == []
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
 def test_pre_push_failure_helpers_prefer_real_migration_and_coverage_commands(
     tmp_path: Path,
 ) -> None:

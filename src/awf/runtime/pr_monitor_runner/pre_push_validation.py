@@ -349,8 +349,17 @@ async def _validated_git_push_result(
     remote_url: str | None = None,
     refspec: str | None = None,
     state: object | None = None,
+    disable_validation_fix_passes: bool = False,
 ) -> _GitPushResult:
-    """Run pre-push validation with optional fix passes before pushing."""
+    """Run pre-push validation with optional fix passes before pushing.
+
+    ``disable_validation_fix_passes`` forces zero fix passes regardless of the
+    configured count. The operator-hint grant resume sets it while a single-use
+    operator grant is active so a validation fix pass cannot re-invoke the agent,
+    author a fresh protected-file change, and have that new change silently
+    suppressed (and the grant consumed) by the grant-aware protected-scope check.
+    This mirrors the executor's ``resume_disable_fix_passes`` pre-PR gate.
+    """
     if self._deps.validation is None:
         return cast(
             _GitPushResult,
@@ -370,6 +379,7 @@ async def _validated_git_push_result(
         remote_branch=remote_branch,
         remote_url=remote_url,
         state=state,
+        disable_validation_fix_passes=disable_validation_fix_passes,
     )
     if not validation_result.passed:
         return _GitPushResult(
@@ -401,9 +411,14 @@ async def _run_pre_push_validation_with_fix_passes(
     remote_branch: str,
     remote_url: str | None,
     state: object | None,
+    disable_validation_fix_passes: bool = False,
 ) -> _PrePushValidationResult:
     """Execute pre-push validation plus optional fix/retry attempts."""
-    max_fix_passes = max(0, self._runner_config.pre_push_validation_fix_passes)
+    max_fix_passes = (
+        0
+        if disable_validation_fix_passes
+        else max(0, self._runner_config.pre_push_validation_fix_passes)
+    )
     pass_index = 0
     validation_commands: tuple[str, ...] | None = None
     while True:
