@@ -860,6 +860,7 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -873,6 +874,7 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
     )
 
     paths = await runner._changed_paths_since_remote_branch(
+        workspace_id=workspace_id,
         worktree_path=tmp_path / "worktree",
         remote_branch="awf/ws_remote_missing",
         remote_push_url="https://github.com/org/fork.git",
@@ -900,6 +902,154 @@ async def test_changed_paths_since_remote_branch_fetches_real_push_remote(
         "merge-base-sha..HEAD",
         "--",
     )
+
+
+@pytest.mark.unit
+async def test_remote_branch_diff_base_repairs_orphaned_broken_awf_ref(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Regression: broken AWF ref in the local mirror is repaired before retrying the baseline fetch."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    terminal_id = await seed_monitoring_workspace(factory)
+    await _force_workspace_status(factory, terminal_id, WorkspaceStatus.failed)
+    worktree = tmp_path / "worktree"
+    cmd = FakeCommandRunner()
+    broken_ref = f"refs/heads/awf/{terminal_id}"
+    broken_stderr = f"fatal: bad object {broken_ref}"
+    cmd.queue_result(returncode=128, stderr=broken_stderr)  # first fetch: broken AWF ref
+    cmd.queue_result(returncode=0)  # update-ref -d
+    cmd.queue_result(returncode=0)  # worktree prune
+    cmd.queue_result(returncode=0, stdout="")  # retry fetch: success
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")  # merge-base
+    cmd.queue_result(returncode=0, stdout=_name_status_z("src/fix.py"))  # diff
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    local_base, changed_paths = await runner._remote_branch_diff_base_and_changed_paths(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch="awf/ws_remote_branch",
+    )
+
+    assert local_base == "merge-base-sha"
+    assert changed_paths == ("src/fix.py",)
+    call_args = [call.args for call in cmd.calls]
+    assert call_args[0] == _git_worktree_command(
+        worktree, "fetch", "origin", "refs/heads/awf/ws_remote_branch"
+    )
+    assert [
+        "git",
+        "-c",
+        f"safe.directory={worktree}",
+        "-C",
+        str(worktree),
+        "update-ref",
+        "-d",
+        broken_ref,
+    ] in call_args
+    assert _git_worktree_command(worktree, "worktree", "prune") in call_args
+    assert (
+        call_args.count(
+            _git_worktree_command(worktree, "fetch", "origin", "refs/heads/awf/ws_remote_branch")
+        )
+        == 2
+    )
+
+    async with factory() as s:
+        events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.git_mirror_repaired",
+            limit=10,
+        )
+    assert len(events) == 1
+    assert events[0].reason_code == "GIT_MIRROR_BROKEN_REF_REMOVED"
+    assert events[0].payload is not None
+    assert events[0].payload["broken_ref"] == broken_ref
+    assert events[0].payload["broken_workspace_id"] == terminal_id
+
+
+@pytest.mark.unit
+async def test_remote_branch_diff_base_still_fails_closed_after_unrepairable_fetch(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Non-broken-ref fetch failures still fail closed with PROTECTED_SCOPE_DIFF_UNAVAILABLE."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=128, stderr="unknown remote ref")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(
+        ProtectedScopeDiffError, match="fetch refs/heads/awf/ws_remote_missing"
+    ) as exc_info:
+        await runner._changed_paths_since_remote_branch(
+            workspace_id=workspace_id,
+            worktree_path=tmp_path / "worktree",
+            remote_branch="awf/ws_remote_missing",
+        )
+
+    message = str(exc_info.value)
+    assert "unknown remote ref" in message
+    assert [call.args for call in cmd.calls] == [
+        _git_worktree_command(
+            tmp_path / "worktree",
+            "fetch",
+            "origin",
+            "refs/heads/awf/ws_remote_missing",
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_remote_branch_diff_base_fails_closed_when_broken_ref_workspace_active(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A broken AWF ref belonging to an active workspace must not be deleted."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    active_id = await seed_monitoring_workspace(factory)
+    # Leave active_id in monitoring_pr (non-terminal) so repair refuses removal.
+    worktree = tmp_path / "worktree"
+    cmd = FakeCommandRunner()
+    broken_ref = f"refs/heads/awf/{active_id}"
+    cmd.queue_result(returncode=128, stderr=f"fatal: bad object {broken_ref}")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(ProtectedScopeDiffError) as exc_info:
+        await runner._remote_branch_diff_base_and_changed_paths(
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch="awf/ws_remote_missing",
+        )
+
+    message = str(exc_info.value)
+    assert "fetch refs/heads/awf/ws_remote_missing" in message
+    assert [call.args for call in cmd.calls] == [
+        _git_worktree_command(
+            worktree,
+            "fetch",
+            "origin",
+            "refs/heads/awf/ws_remote_missing",
+        )
+    ]
 
 
 @pytest.mark.unit
@@ -973,8 +1123,10 @@ async def test_changed_paths_since_remote_branch_fails_closed_for_malformed_z_ou
         worktrees_root=tmp_path / "worktrees",
     )
 
+    workspace_id = await seed_monitoring_workspace(factory)
     with pytest.raises(ProtectedScopeDiffError, match="Could not parse committed diff"):
         await runner._changed_paths_since_remote_branch(
+            workspace_id=workspace_id,
             worktree_path=tmp_path / "worktree",
             remote_branch="awf/ws_remote_missing",
         )
@@ -1037,6 +1189,7 @@ async def test_changed_paths_since_remote_branch_reports_only_local_paths_when_r
     )
 
     paths = await runner._changed_paths_since_remote_branch(
+        workspace_id="ws_remote_diverged",
         worktree_path=local,
         remote_branch=remote_branch,
     )
@@ -1059,8 +1212,10 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_refs_are_unav
         worktrees_root=tmp_path / "worktrees",
     )
 
+    workspace_id = await seed_monitoring_workspace(factory)
     with pytest.raises(ProtectedScopeDiffError) as exc_info:
         await runner._changed_paths_since_remote_branch(
+            workspace_id=workspace_id,
             worktree_path=tmp_path / "worktree",
             remote_branch="awf/ws_remote_missing",
         )
@@ -1075,6 +1230,7 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_merge_base_fa
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=1, stderr="no merge base")
@@ -1088,6 +1244,7 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_merge_base_fa
 
     with pytest.raises(ProtectedScopeDiffError) as exc_info:
         await runner._changed_paths_since_remote_branch(
+            workspace_id=workspace_id,
             worktree_path=tmp_path / "worktree",
             remote_branch="awf/ws_remote_missing",
         )
@@ -1102,6 +1259,7 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_diff_fails(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -1116,6 +1274,7 @@ async def test_changed_paths_since_remote_branch_fails_closed_when_diff_fails(
 
     with pytest.raises(ProtectedScopeDiffError) as exc_info:
         await runner._changed_paths_since_remote_branch(
+            workspace_id=workspace_id,
             worktree_path=tmp_path / "worktree",
             remote_branch="awf/ws_remote_missing",
         )
