@@ -17,7 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
-from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+from awf.control.blocked_transition import (
+    MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
+    MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+)
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -596,6 +599,436 @@ async def test_directive_leak_reblock_lets_operator_grant_resolve_workspace(
         resolved = await WorkspaceRepository(session).get(workspace_id)
         assert resolved is not None
         assert resolved.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("terminal_verdict", ["agent_failed", "needs_human"])
+async def test_operator_hint_terminal_directive_with_grant_reblocks(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_verdict: str,
+) -> None:
+    """A combined ``--directive ... --grant ...`` resume of a monitor-origin protected
+    block whose directive CLI returns a TERMINAL verdict BEFORE any push must NOT
+    merely park the hint at ``monitoring_pr``: the preserved commit and the
+    approve-and-keep grant stay unfinalized, ``decide()`` only surfaces NotifyHuman,
+    and ``guide_workspace`` rejects new grants unless the row is ``blocked`` while a
+    new directive revokes the existing grant — stranding the operator. Re-block so
+    ``guide --grant`` / a new directive can resolve it, rebuilding the block from the
+    recorded ``block_violations`` and clearing the in-memory hint
+    (PRRT_kwDOSJAM6s6KT0rd)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep pyproject.toml and fix the rest",
+        directive="redo the unrelated files but keep the protected edit",
+        operation_id="op_terminal_directive_grant",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _terminal(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict=terminal_verdict, reason="agent could not finish")
+
+    captured: dict[str, object] = {}
+
+    async def _pause(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PAUSED_BLOCKED",
+            paused_into_blocked=True,
+        )
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("a terminal directive outcome must re-block, not push")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _terminal)
+    monkeypatch.setattr(runner, "_pause_monitor_for_protected_scope_block", _pause)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is True
+    # The block is rebuilt from the recorded ``block_violations``, and the message
+    # carries the terminal verdict and preserved SHA for operator context.
+    leak_block = captured["protected_scope_block"]
+    assert isinstance(leak_block, _ProtectedScopePushBlock)
+    assert [v.path for v in leak_block.violations] == ["pyproject.toml"]
+    assert "preserved-granted-sha" in leak_block.message
+    assert terminal_verdict in leak_block.message
+    # No sync-base origin was recorded, so the re-block records the generic phase.
+    assert captured["resume_phase"] == MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+    # A landed re-block clears the in-memory monitor hint (the bumped block epoch
+    # supersedes it; the resume re-arms a fresh one).
+    assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
+async def test_operator_hint_terminal_directive_grant_reblock_lets_operator_resolve(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: after a terminal directive+grant resume re-blocks the workspace, an
+    operator ``guide --grant`` is accepted and resolves it. Before this fix the
+    terminal branch parked a needs_human/agent_failed hint at ``monitoring_pr`` where
+    ``guide_workspace`` rejects grant inputs — so the operator could never land the
+    preserved commit (PRRT_kwDOSJAM6s6KT0rd)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep pyproject.toml and fix the rest",
+        directive="redo the unrelated files but keep the protected edit",
+        operation_id="op_terminal_directive_grant_e2e",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _agent_failed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="agent_failed", reason="adapter crashed")
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "preserved-granted-sha"
+
+    async def _no_notification(**_kwargs: object) -> None:
+        return None
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("a terminal directive outcome must re-block, not push")
+
+    # Run the REAL ``_pause_monitor_for_protected_scope_block`` so the workspace
+    # actually transitions ``monitoring_pr -> blocked`` in the DB.
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _agent_failed)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_post_protected_block_notification", _no_notification)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is True
+    assert state.pending_operator_hint is None
+
+    async with factory() as session:
+        blocked = await WorkspaceRepository(session).get(workspace_id)
+        assert blocked is not None
+        assert blocked.status == WorkspaceStatus.blocked.value
+        assert blocked.block_resume_phase == MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+        blocked_version = blocked.version
+
+    # The operator approve-and-keep grant is now accepted (it raised
+    # ``WorkspaceGuideGrantNotAllowedError`` while parked at ``monitoring_pr``) and
+    # resolves the workspace back into the monitor for a grant-aware push.
+    async with factory() as session:
+        service = _guide_service(session)
+        response = await service.guide_workspace(
+            workspace_id,
+            directive="",
+            reason="approve keeping the protected pyproject.toml change",
+            grants=["pyproject.toml"],
+            approve_policy_downgrade=True,
+            operator="op@example.com",
+            idempotency_key="guide-after-terminal-reblock",
+            expected_version=blocked_version,
+        )
+        await session.commit()
+        assert response.status == WorkspaceStatus.monitoring_pr
+
+
+@pytest.mark.unit
+async def test_operator_hint_terminal_directive_grant_reblock_preserves_sync_base_phase(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal directive+grant resume of a SYNC-BASE-originated block must re-block
+    with the ``monitor_protected_scope_sync_base`` phase again — preserving the resume
+    ORIGIN exactly as the net-diff / leak re-block branches do — so the next resume
+    keeps selecting the sync-base-aware validator (PRRT_kwDOSJAM6s6KT0rd)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.block_resume_phase = MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep pyproject.toml and fix the rest",
+        directive="redo the unrelated files but keep the protected edit",
+        operation_id="op_terminal_directive_grant_sync_base",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _agent_failed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="agent_failed", reason="adapter crashed")
+
+    captured: dict[str, object] = {}
+
+    async def _pause(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PAUSED_BLOCKED",
+            paused_into_blocked=True,
+        )
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _agent_failed)
+    monkeypatch.setattr(runner, "_pause_monitor_for_protected_scope_block", _pause)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is True
+    assert captured["resume_phase"] == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+    assert state.pending_operator_hint is None
+
+
+@pytest.mark.unit
+async def test_operator_hint_terminal_directive_grant_stale_cas_keeps_hint(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the re-block pause loses the CAS (the row already left ``monitoring_pr``),
+    ``_pause_monitor_for_protected_scope_block`` returns a NON-paused failed result.
+    The terminal-reblock helper must surface that result WITHOUT clearing the
+    in-memory hint, so the caller's normal failed handling runs against whatever
+    terminal state already won (PRRT_kwDOSJAM6s6KT0rd)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep pyproject.toml and fix the rest",
+        directive="redo the unrelated files but keep the protected edit",
+        operation_id="op_terminal_directive_grant_stale",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _needs_human(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="needs_human", reason="agent asked for help")
+
+    async def _pause_stale_cas(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+            paused_into_blocked=False,
+        )
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _needs_human)
+    monkeypatch.setattr(runner, "_pause_monitor_for_protected_scope_block", _pause_stale_cas)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is False
+    assert result.failed is True
+    # A lost CAS must NOT clear the hint — the row already transitioned elsewhere.
+    assert state.pending_operator_hint is hint
+
+
+@pytest.mark.unit
+async def test_operator_hint_terminal_directive_grant_no_violation_parks_hint(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive fallback: when no protected violation can be reconstructed (no
+    recorded ``block_violations``), the terminal-reblock helper returns ``None`` and
+    the caller falls back to the prior behavior — mark the terminal hint and return a
+    NON-failed result so the loop parks the recoverable workspace at ``monitoring_pr``
+    (PRRT_kwDOSJAM6s6KT0rd)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    # Grant present but NO recorded block_violations to rebuild from.
+    await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=(),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep pyproject.toml and fix the rest",
+        directive="redo the unrelated files but keep the protected edit",
+        operation_id="op_terminal_directive_grant_no_violation",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _agent_failed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="agent_failed", reason="adapter crashed")
+
+    async def _pause_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("no reconstructable violation must NOT re-block")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _agent_failed)
+    monkeypatch.setattr(runner, "_pause_monitor_for_protected_scope_block", _pause_must_not_run)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result == _GitPushResult(pushed=False, failed=False, returncode=0)
+    # Falls back to parking the terminal hint at monitoring_pr.
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "agent_failed"
 
 
 @pytest.mark.unit

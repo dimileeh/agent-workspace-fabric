@@ -161,10 +161,46 @@ async def _run_operator_hint_cycle(
             )
         if verdict.verdict == "agent_failed":
             reason = _operator_hint_block_reason(verdict)
+            reblock_result = await _terminal_directive_grant_reblock(
+                self,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                pr_head_sha=pr_head_sha,
+                worktree_path=worktree_path,
+                state=state,
+                remote_branch=remote_branch,
+                base_branch=base_branch,
+                operation_id=_operation_id,
+                operation_type=_operation_type,
+                operation_start_head=operation_start_head,
+                preserved_head_sha=preserved_head_sha,
+                active_grant_specs=active_grant_specs,
+                verdict=verdict,
+            )
+            if reblock_result is not None:
+                return reblock_result
             mark_operator_hint_agent_failed(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
         if verdict.verdict in {"needs_human", "defer", "false_positive"}:
             reason = _operator_hint_block_reason(verdict)
+            reblock_result = await _terminal_directive_grant_reblock(
+                self,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                pr_head_sha=pr_head_sha,
+                worktree_path=worktree_path,
+                state=state,
+                remote_branch=remote_branch,
+                base_branch=base_branch,
+                operation_id=_operation_id,
+                operation_type=_operation_type,
+                operation_start_head=operation_start_head,
+                preserved_head_sha=preserved_head_sha,
+                active_grant_specs=active_grant_specs,
+                verdict=verdict,
+            )
+            if reblock_result is not None:
+                return reblock_result
             mark_operator_hint_needs_human(state, reason)
             return _GitPushResult(pushed=False, failed=False, returncode=0)
 
@@ -523,6 +559,88 @@ async def _directive_preserved_leak_protected_block(
         reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
         violations=tuple(violations),
     )
+
+
+async def _terminal_directive_grant_reblock(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    pr_head_sha: str,
+    worktree_path: Path,
+    state: MonitorState,
+    remote_branch: str,
+    base_branch: str | None,
+    operation_id: str | None,
+    operation_type: str | None,
+    operation_start_head: str | None,
+    preserved_head_sha: str | None,
+    active_grant_specs: Any,
+    verdict: VerdictResult,
+) -> _GitPushResult | None:
+    """Re-block a TERMINAL combined directive+grant protected-block resume.
+
+    A monitor-origin protected block resumed with a combined ``--directive ...
+    --grant ...`` runs the directive CLI; when that pass returns a TERMINAL verdict
+    (``agent_failed`` / ``needs_human`` / ``defer`` / ``false_positive``) BEFORE any
+    push, the preserved protected commit and the single-use approve-and-keep grant
+    are BOTH still unfinalized (the grant is consumed and the marker dropped only on
+    a successful resume). Merely parking the hint at ``monitoring_pr`` strands the
+    operator: ``decide()`` only surfaces ``NotifyHuman`` while ``guide_workspace``
+    rejects new ``--grant`` inputs unless the row is ``blocked`` and a fresh
+    ``--directive`` revokes the existing grant — so neither approve-and-keep nor
+    consuming the grant to land the preserved commit is reachable. Re-block via the
+    shared WS-1 pause path (mirroring the directive-leak guard above) so
+    ``guide --grant`` / a new directive can resolve it; the preserved commit is kept
+    and the bumped block epoch supersedes the stale grant (PRRT_kwDOSJAM6s6KT0rd).
+
+    Scoped to a grant-bearing preserved-block resume (``preserved_head_sha`` AND
+    ``active_grant_specs`` present). Returns ``None`` otherwise — a plain remonitor,
+    a directive-only resume, or a grant-only resume (which never runs the CLI) keep
+    the existing park-the-hint behavior — and also when no violation can be
+    reconstructed, so the caller falls back to parking the terminal hint."""
+    if not (preserved_head_sha and active_grant_specs):
+        return None
+    message = (
+        f"operator directive resume returned '{verdict.verdict}' before landing the "
+        f"approved protected change for preserved commit {preserved_head_sha}; "
+        "re-blocking so an approve-and-keep grant or a new directive can resolve it"
+    )
+    leak_block = await _directive_preserved_leak_protected_block(
+        self, workspace_id=workspace_id, message=message
+    )
+    if leak_block is None:
+        return None
+    # Preserve the resume ORIGIN exactly as the net-diff / leak re-block branches.
+    block_resume_phase = await self._resolve_block_resume_phase(workspace_id)
+    reblock_resume_phase = (
+        MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+        if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+        else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+    )
+    reblock_result = cast(
+        _GitPushResult,
+        await self._pause_monitor_for_protected_scope_block(
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            pr_head_sha=pr_head_sha,
+            protected_scope_block=leak_block,
+            worktree_path=worktree_path,
+            resume_phase=reblock_resume_phase,
+            state=state,
+            remote_branch=remote_branch,
+            base_branch=base_branch or "",
+            operation_id=operation_id,
+            operation_type=operation_type,
+            source_head_sha=operation_start_head,
+        ),
+    )
+    if reblock_result.paused_into_blocked:
+        # Mirror the leak / net-diff re-block branches: the bumped block epoch
+        # supersedes this hint, so clear the in-memory monitor hint and let the
+        # resume re-arm a fresh one.
+        state.pending_operator_hint = None
+    return reblock_result
 
 
 async def _finalize_operator_hint_resume(
