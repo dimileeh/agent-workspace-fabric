@@ -428,3 +428,109 @@ async def test_operator_hint_terminal_directive_grant_moved_head_parks_not_reblo
         # approval (a grant leak, PRRT_kwDOSJAM6s6KVt_Q). A re-introduced protected
         # change re-blocks and must be granted again.
         assert grant.consumed_at is not None
+
+
+@pytest.mark.unit
+async def test_terminal_directive_grant_drop_clears_stale_preserved_marker_durably(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal directive+grant DROP branch must clear the preserved marker
+    DURABLY on the workspace row, not only in the in-memory ``state`` the loop flushes
+    later (PRRT_kwDOSJAM6s6KWAIx, the grant-bearing sibling of
+    ``test_terminal_directive_drop_clears_stale_preserved_marker_durably``).
+
+    When a combined ``--directive ... --grant ...`` resume drops the preserved commit
+    and returns a TERMINAL verdict, ``_terminal_directive_grant_reblock`` consumes the
+    grant and pops the marker in memory; the follow-up
+    ``_clear_dropped_preserved_marker_after_terminal_directive`` early-returns (its
+    ``active_grant_specs`` arg is still truthy), so without an explicit durable clear
+    nothing persists the removal. After the grant is consumed a crash before the loop's
+    later ``_persist_state`` would reload the pending directive with NO active grants
+    plus the STALE marker — and the directive-drop restart shortcut would finalize the
+    next guide as a no-op, SKIP the CLI, and swallow the terminal verdict. Assert the
+    marker is gone from the persisted ``monitor_threads_addressed`` row WITHOUT any
+    ``_persist_state`` flush."""
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    grant_id = await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+    # The marker is DURABLE on the row (recorded at block time), not just in memory.
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {
+            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "preserved-granted-sha"
+        }
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep pyproject.toml and fix the rest",
+        directive="redo the unrelated files but keep the protected edit",
+        operation_id="op_terminal_directive_grant_drop_durable",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _needs_human(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="needs_human", reason="operator must decide")
+
+    async def _preserved_gone(**_kwargs: object) -> bool:
+        return False
+
+    async def _fail_persist_state(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("durable clear must not rely on the outer _persist_state flush")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _needs_human)
+    monkeypatch.setattr(runner, "_preserved_commit_reachable_from_head", _preserved_gone)
+    monkeypatch.setattr(runner, "_persist_state", _fail_persist_state)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is False
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"
+    # The marker is gone from the persisted row WITHOUT any later ``_persist_state``
+    # flush, and the single-use grant is consumed.
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in (
+            workspace.monitor_threads_addressed or {}
+        )
+        grant = await session.get(OperatorGrantAuditRecord, grant_id)
+        assert grant is not None
+        assert grant.consumed_at is not None

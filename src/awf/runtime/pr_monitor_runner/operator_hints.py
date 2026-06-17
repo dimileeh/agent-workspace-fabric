@@ -718,6 +718,16 @@ async def _terminal_directive_grant_reblock(
         # the marker so nothing carries the stale approval forward; a re-introduced
         # protected change re-blocks and must be granted again.
         state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
+        # Make the marker clear DURABLE before parking, mirroring the directive-only
+        # drop branch (PRRT_kwDOSJAM6s6KWAIx). Popping only the in-memory copy here is
+        # not durable until the loop's later _persist_state, and the follow-up
+        # _clear_dropped_preserved_marker_after_terminal_directive early-returns once a
+        # grant is present, so nothing else persists the removal. The grant is consumed
+        # durably just below; a crash after that but before _persist_state would reload
+        # the pending directive with NO active grants plus the STALE marker, letting the
+        # directive-drop restart shortcut no-op the operator's follow-up and swallow the
+        # terminal verdict (PRRT_kwDOSJAM6s6KWAIx, the grant-bearing sibling).
+        await self._clear_preserved_head_marker_durably(workspace_id)
         await self._consume_active_operator_grants(workspace_id)
         return None
     message = (
