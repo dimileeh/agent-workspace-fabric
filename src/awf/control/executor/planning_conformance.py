@@ -516,7 +516,20 @@ def _deposit_satisfied_conformance_report(
     same planning documents as the normal deposit path.
     """
     artifact_dir = workspace_artifact_dir(work_dir, workspace_id)
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # The served conformance report is a convenience artifact; the outcome
+        # is already recorded by the event and validation run. A permission or
+        # full-disk failure creating the artifact directory must not fail the
+        # post-validation conformance check.
+        _log.warning(
+            "executor.satisfied_conformance_report_deposit_failed",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+            errno=exc.errno,
+        )
+        return
 
     # Deposit the in-memory satisfied conformance report first so the served
     # artifact matches the recorded event even if the worktree file is stale.
