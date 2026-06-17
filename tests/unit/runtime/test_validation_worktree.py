@@ -985,6 +985,106 @@ def test_snapshot_empty_untracked_dirs_treats_worktree_git_dir_as_boundary(
 
 
 @pytest.mark.unit
+def test_remove_empty_untracked_dirs_preserves_wildcard_ignored_empty_dir_when_check_ignore_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing check-ignore probe must not be treated as "not ignored".
+
+    Regression for PR #606 review thread PRRT_kwDOSJAM6s6KIgh1: when
+    ``git check-ignore`` fails with a non-zero, non-1 exit, the helper must not
+    conclude the directory is unignored and remove it.
+    """
+    worktree = _init_real_worktree_with_gitignore(tmp_path)
+    ignored_dir = worktree / "cache"
+    ignored_dir.mkdir()
+
+    original_run = subprocess.run
+
+    def fail_check_ignore(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "check-ignore" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=128, stdout="", stderr="check-ignore exploded"
+            )
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_check_ignore)
+
+    with pytest.raises(validation_worktree._IgnoreCheckError):
+        validation_worktree._remove_empty_untracked_dirs(
+            worktree_path=worktree,
+            ignored_paths=(),
+        )
+
+    assert ignored_dir.exists()
+
+
+@pytest.mark.unit
+def test_snapshot_empty_untracked_dirs_preserves_wildcard_ignored_empty_dir_when_check_ignore_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing check-ignore probe must not surface a wildcard-ignored empty dir as dirty."""
+    worktree = _init_real_worktree_with_gitignore(tmp_path)
+    ignored_dir = worktree / "cache"
+    ignored_dir.mkdir()
+
+    original_run = subprocess.run
+
+    def fail_check_ignore(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "check-ignore" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=128, stdout="", stderr="check-ignore exploded"
+            )
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_check_ignore)
+
+    with pytest.raises(validation_worktree._IgnoreCheckError):
+        validation_worktree._snapshot_empty_untracked_dirs(
+            worktree_path=worktree,
+            ignored_paths=(),
+        )
+
+    assert ignored_dir.exists()
+
+
+@pytest.mark.unit
+async def test_check_validation_worktree_clean_fails_when_check_ignore_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing check-ignore probe must make the clean check fail, not lie clean."""
+    worktree = _init_real_worktree_with_gitignore(tmp_path)
+    ignored_dir = worktree / "cache"
+    ignored_dir.mkdir()
+
+    original_run = subprocess.run
+
+    def fail_check_ignore(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "check-ignore" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=128, stdout="", stderr="check-ignore exploded"
+            )
+        return original_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_check_ignore)
+
+    check = await check_validation_worktree_clean(
+        run_git=_run_git_in_real_worktree(worktree),
+        worktree_path=worktree,
+        ignore_all_ignored=True,
+        remove_empty_untracked_dirs=True,
+    )
+
+    assert check.clean is False
+    assert check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED
+    assert "check-ignore" in check.message.lower()
+    assert check.command_stderr == "check-ignore exploded"
+    assert ignored_dir.exists()
+
+
+@pytest.mark.unit
 async def test_check_validation_worktree_clean_reports_tracked_path_under_ignored_root(
     tmp_path: Path,
 ) -> None:

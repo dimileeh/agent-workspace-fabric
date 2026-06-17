@@ -208,6 +208,14 @@ class _GitlinkLookupError(Exception):
         self.stderr = stderr
 
 
+class _IgnoreCheckError(Exception):
+    """Raised when ``git check-ignore`` cannot determine whether a path is ignored."""
+
+    def __init__(self, message: str, *, stderr: str | None = None) -> None:
+        super().__init__(message)
+        self.stderr = stderr
+
+
 def _gitlink_paths(worktree_path: Path) -> frozenset[str]:
     """Return all tracked gitlink (submodule) paths under HEAD.
 
@@ -277,6 +285,12 @@ def _is_ignored_path(worktree_path: Path, path: str) -> bool:
     wildcard rule such as ``cache/**`` are not listed, so the cleanup helpers
     consult ``git check-ignore`` directly for directory candidates that would
     otherwise be treated as untracked side effects.
+
+    Raises:
+        _IgnoreCheckError: If ``git check-ignore`` fails with an unexpected
+        exit code. Treating a probe failure as "not ignored" would let empty-
+        directory cleanup remove wildcard-ignored empty dirs, mirroring the
+        unsafe pattern fixed for ``_gitlink_paths``.
     """
     result = subprocess.run(
         [
@@ -291,7 +305,14 @@ def _is_ignored_path(worktree_path: Path, path: str) -> bool:
         capture_output=True,
         text=True,
     )
-    return result.returncode == 0 and result.stdout.strip() != ""
+    if result.returncode == 0:
+        return result.stdout.strip() != ""
+    if result.returncode == 1:
+        return False
+    raise _IgnoreCheckError(
+        "Could not determine whether path is ignored with `git check-ignore`.",
+        stderr=result.stderr or "",
+    )
 
 
 def _remove_empty_untracked_dirs(
@@ -354,8 +375,11 @@ def _remove_empty_untracked_dirs(
         except ValueError:
             return False
         dir_path = f"{relative}/"
-        if _is_ignored_path(worktree_path, dir_path):
-            return False
+        try:
+            if _is_ignored_path(worktree_path, dir_path):
+                return False
+        except _IgnoreCheckError:
+            raise
         try:
             directory.rmdir()
         except FileNotFoundError:
@@ -411,7 +435,11 @@ def _snapshot_empty_untracked_dirs(
             if has_file_descendant(child):
                 has_file = True
             else:
-                if _is_ignored_path(worktree_path, child_path):
+                try:
+                    ignored = _is_ignored_path(worktree_path, child_path)
+                except _IgnoreCheckError:
+                    raise
+                if ignored:
                     has_file = True
                 else:
                     empty_dirs.append(child_path)
@@ -651,13 +679,13 @@ async def check_validation_worktree_clean(
                 worktree_path=worktree_path,
                 ignored_paths=snapshot_ignored_paths,
             )
-    except _GitlinkLookupError as exc:
-        # A failed gitlink lookup is an infrastructure failure, not a clean
-        # tree. Proceeding with an empty set would let empty-directory cleanup
-        # remove deinitialized tracked submodules and report a false-clean.
-        # If the worktree already has tracked or untracked dirty paths, report
-        # those paths with the usual pre-existing-dirty reason so callers still
-        # see what made the worktree dirty.
+    except (_GitlinkLookupError, _IgnoreCheckError) as exc:
+        # A failed gitlink or check-ignore lookup is an infrastructure failure,
+        # not a clean tree. Proceeding would let empty-directory cleanup remove
+        # deinitialized tracked submodules or wildcard-ignored empty dirs and
+        # report a false-clean. If the worktree already has tracked or untracked
+        # dirty paths, report those paths with the usual pre-existing-dirty reason
+        # so callers still see what made the worktree dirty.
         if visible_changed_paths or visible_untracked_paths:
             paths = tuple(dict.fromkeys((*visible_changed_paths,)))
             untracked_paths = tuple(dict.fromkeys((*visible_untracked_paths,)))
@@ -672,13 +700,19 @@ async def check_validation_worktree_clean(
                     "refusing to run AWF-owned validation from a dirty tree."
                 ),
             )
+        reason = (
+            "Could not determine whether an empty directory is ignored for "
+            "validation worktree cleanup with `git check-ignore`."
+            if isinstance(exc, _IgnoreCheckError)
+            else (
+                "Could not enumerate tracked gitlinks for validation worktree "
+                "empty-directory cleanup with `git ls-tree`."
+            )
+        )
         return ValidationWorktreeCheck(
             clean=False,
             reason_code=VALIDATION_WORKTREE_STATUS_FAILED,
-            message=(
-                "Could not enumerate tracked gitlinks for validation worktree "
-                "empty-directory cleanup with `git ls-tree`."
-            ),
+            message=reason,
             command_stderr=(exc.stderr or "")[:1000],
         )
     paths = tuple(
