@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.ids import new_operator_grant_id
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import OperatorGrantAuditRecord, Workspace
+from awf.db.models import MergeCandidate, OperatorGrantAuditRecord, Workspace
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+)
 from awf.runtime.operator_hints import pre_pr_operator_hint_from_payload, utcnow
 from awf.service.controls import (
     IdempotencyConflictError,
@@ -23,6 +28,7 @@ from awf.service.controls import (
 )
 from tests.postgres import postgres_test_session
 from tests.unit.service.test_controls_lifecycle_parts.controls_lifecycle_helpers import (
+    _events,
     _service,
     _workspace,
 )
@@ -598,6 +604,73 @@ async def _monitor_origin_blocked_workspace(
     workspace.pr_number = 7
     await session.flush()
     return workspace
+
+
+async def _monitor_origin_blocked_workspace_with_candidate(
+    session: AsyncSession,
+    *,
+    block_epoch: int = 1,
+) -> tuple[Workspace, MergeCandidate]:
+    """A monitor-origin block that also carries a logical task/attempt with an
+    open merge candidate, so guiding it exercises the candidate-reopen path."""
+    workspace = await _monitor_origin_blocked_workspace(session, block_epoch=block_epoch)
+    workspace.branch_name = f"awf/{workspace.id}"
+    workspace.remote_push_branch = workspace.branch_name
+    workspace.base_commit = "a" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    task = await TaskRepository(session).create_or_get(
+        repo_url=workspace.repo_url,
+        base_branch=workspace.branch_base,
+        title=workspace.task_title,
+        prompt=workspace.task_prompt,
+        external_id=workspace.task_external_id,
+        idempotency_key=None,
+        task_class=workspace.task_class,
+        owned_paths=list(workspace.owned_paths),
+    )
+    attempt = await TaskAttemptRepository(session).create_for_workspace(
+        task=task,
+        workspace=workspace,
+    )
+    candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+        task=task,
+        attempt=attempt,
+        workspace=workspace,
+        head_sha=workspace.monitor_last_commit_sha,
+        base_sha=workspace.base_commit,
+    )
+    await session.flush()
+    return workspace, candidate
+
+
+@pytest.mark.unit
+async def test_guide_monitor_origin_blocked_reopens_merge_candidate(
+    session: AsyncSession,
+) -> None:
+    # A monitor-origin block whose attempt still owns an open merge candidate must
+    # have that candidate reopened at its current head when the operator guides it
+    # back into the monitor, so the PR-monitor poll re-claims a live candidate.
+    workspace, candidate = await _monitor_origin_blocked_workspace_with_candidate(session)
+    candidate_repo = MergeCandidateRepository(session)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.guide_workspace(
+        workspace.id,
+        directive="revert the protected workflow edit",
+        reason="operator asked for a revert",
+        idempotency_key="guide-monitor-reopens-candidate",
+        expected_version=workspace.version,
+    )
+
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    # The candidate is reopened at the workspace's current head and recorded as such.
+    reopened = await candidate_repo.get_open_for_workspace_with_merge_inputs(workspace.id)
+    assert reopened is not None
+    assert reopened.id == candidate.id
+    assert reopened.head_sha == "h" * 40
+    events = await _events(session, workspace.id)
+    guide_event = next(e for e in events if e.event_type == "workspace.guide_requested")
+    assert guide_event.payload["state_reset"]["candidate_reopened"] is True
 
 
 @pytest.mark.unit
