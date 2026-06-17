@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.git_auth import GitAuthNotConfiguredError, verify_bitbucket_git_auth
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
@@ -752,6 +753,7 @@ async def verify_head_object_exists(worktree_path: Path) -> bool:
     """
     proc = await asyncio.create_subprocess_exec(
         "git",
+        *git_safe_directory_config_args(worktree_path),
         "-C",
         str(worktree_path),
         "cat-file",
