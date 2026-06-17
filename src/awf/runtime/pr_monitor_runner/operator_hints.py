@@ -98,7 +98,7 @@ async def _run_operator_hint_cycle(
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
         await self._consume_active_operator_grants(workspace_id)
-        mark_operator_hint_processed(state)
+        _finalize_processed_operator_hint(state)
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     if hint.directive or not active_grant_specs:
         prompt = operator_hint_prompt(
@@ -209,7 +209,7 @@ async def _run_operator_hint_cycle(
         if pushed_head_sha:
             state.last_push_sha = pushed_head_sha
         await self._consume_active_operator_grants(workspace_id)
-        mark_operator_hint_processed(state)
+        _finalize_processed_operator_hint(state)
         return _GitPushResult(pushed=False, failed=False, returncode=0)
     push_result = (
         await self._repair_protected_scope_commits_before_push(
@@ -279,7 +279,7 @@ async def _run_operator_hint_cycle(
             mark_operator_hint_needs_human(state, reason)
             return cast(_GitPushResult, push_result)
         await self._consume_active_operator_grants(workspace_id)
-        mark_operator_hint_processed(state)
+        _finalize_processed_operator_hint(state)
         return cast(_GitPushResult, push_result)
 
     pushed_head_sha = await self._rev_parse_head(worktree_path)
@@ -288,8 +288,24 @@ async def _run_operator_hint_cycle(
     # Single-use: consume the operator grants now that the resumed change pushed,
     # so a later DIFFERENT protected change re-blocks and must be granted again.
     await self._consume_active_operator_grants(workspace_id)
-    mark_operator_hint_processed(state)
+    _finalize_processed_operator_hint(state)
     return cast(_GitPushResult, push_result)
+
+
+def _finalize_processed_operator_hint(state: MonitorState) -> None:
+    """Mark the operator hint processed and drop the protected-block preserved-head
+    marker.
+
+    The marker (``_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY``) is recorded at block
+    time and powers the divergence-recovery / restart-after-consume short-circuits
+    for THIS resume only. Once the resume is finalized it has served its purpose;
+    leaving it in persisted monitor state would let a later plain remonitor (no
+    directive, no grant) whose old preserved commit is still on the remote take the
+    restart-recovery shortcut and skip the CLI — silently ignoring the operator's
+    new repair request (PRRT_kwDOSJAM6s6KE2BX). A fresh block re-records the marker.
+    """
+    state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
+    mark_operator_hint_processed(state)
 
 
 def _operator_hint_block_reason(verdict: VerdictResult) -> str:
