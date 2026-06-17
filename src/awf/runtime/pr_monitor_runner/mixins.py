@@ -20,6 +20,9 @@ from awf.runtime.pr_monitor_runner import remote_prompt_ops as _remote_prompt_op
 from awf.runtime.pr_monitor_runner import remote_repair as _remote_repair
 from awf.runtime.pr_monitor_runner import remote_repair_diffs as _remote_repair_diffs
 from awf.runtime.pr_monitor_runner import remote_repair_protected as _remote_repair_protected
+from awf.runtime.pr_monitor_runner import (
+    remote_repair_protected_grants as _remote_repair_protected_grants,
+)
 from awf.runtime.pr_monitor_runner import transient_ops as _transient_ops
 
 
@@ -122,19 +125,21 @@ class RunnerDelegatesMixin:
         _remote_repair_protected._pause_monitor_for_protected_scope_block
     )
     _post_protected_block_notification = _remote_repair_protected._post_protected_block_notification
-    _active_operator_grant_specs = _remote_repair_protected._active_operator_grant_specs
+    _active_operator_grant_specs = _remote_repair_protected_grants._active_operator_grant_specs
     _preserved_protected_change_fully_granted = (
-        _remote_repair_protected._preserved_protected_change_fully_granted
+        _remote_repair_protected_grants._preserved_protected_change_fully_granted
     )
-    _consume_active_operator_grants = _remote_repair_protected._consume_active_operator_grants
+    _consume_active_operator_grants = (
+        _remote_repair_protected_grants._consume_active_operator_grants
+    )
     _preserved_commit_already_on_remote = (
-        _remote_repair_protected._preserved_commit_already_on_remote
+        _remote_repair_protected_grants._preserved_commit_already_on_remote
     )
     _preserved_commit_in_unpushed_range = (
-        _remote_repair_protected._preserved_commit_in_unpushed_range
+        _remote_repair_protected_grants._preserved_commit_in_unpushed_range
     )
     _preserved_head_on_remote_fetch_head = (
-        _remote_repair_protected._preserved_head_on_remote_fetch_head
+        _remote_repair_protected_grants._preserved_head_on_remote_fetch_head
     )
     _rollback_protected_scope_repair_delta_before_push = (
         _remote_repair_protected._rollback_protected_scope_repair_delta_before_push
