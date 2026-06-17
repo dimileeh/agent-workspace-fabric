@@ -2269,14 +2269,13 @@ async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
 
 
 @pytest.mark.unit
-async def test_satisfied_post_validation_conformance_report_unlinks_tracked_report(
+async def test_satisfied_post_validation_conformance_report_restores_tracked_report_from_base_commit(
     tmp_path: Path,
 ) -> None:
-    """#604 regression: an AWF-synthesised satisfied report must not remain as a
-    tracked dirty file. We simulate a tracked repo where the conformance report
-    path is already in the index; after the check returns success, the on-worktree
-    report file is removed so the PR monitor's dirty-worktree guard sees a clean
-    tree. The conformance event is still recorded and no git add/commit runs."""
+    """`#604` regression: for tracked conformance paths, satisfied cleanup must
+    restore from ``base_commit`` so the baseline tracked copy remains on disk
+    without dirtying the tree. The conformance event is still recorded and no
+    git add/commit runs."""
     worktree_path = tmp_path / "worktree"
     runner = _GitRestoreFakeRunner(worktree_path)
     report_path = Path("docs/awf-plans/ws_post.conformance.json")
