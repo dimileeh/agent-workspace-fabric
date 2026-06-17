@@ -497,6 +497,9 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
     async def _psb(**_kwargs: object) -> None:
         return None
 
+    async def _active_operator_grant_specs(_workspace_id: str) -> list[object]:
+        return []
+
     async def _validated(**_kwargs: object) -> _GitPushResult:
         return _GitPushResult(pushed=True, failed=False, returncode=0)
 
@@ -518,6 +521,7 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         _repair_operation_start_head_result=_head,
         _invoke_cli_for_verdict_result=_invoke,
         _protected_scope_push_block=_psb,
+        _active_operator_grant_specs=_active_operator_grant_specs,
         _validated_git_push_result=_validated,
         _rev_parse_head=_rev_parse_head,
     )

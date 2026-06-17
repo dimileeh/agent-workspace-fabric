@@ -52,6 +52,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    race_workspace_out_of_monitoring,
     seed_monitoring_workspace,
 )
 
@@ -467,6 +468,10 @@ async def test_ci_fix_rolls_back_instead_of_committing_verified_protected_revert
         assert workspace is not None
         workspace.owned_paths = ["src/**"]
         await s.commit()
+    # Force the CAS-lost fallback: the row left monitoring_pr before the pause
+    # could win, so the legacy transactional rollback runs (the pause-into-blocked
+    # primary path is covered separately in part_005).
+    await race_workspace_out_of_monitoring(factory, workspace_id)
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
@@ -525,6 +530,10 @@ async def test_ci_fix_rolls_back_before_protected_revert_baseline_fetch(
         assert workspace is not None
         workspace.owned_paths = ["src/**"]
         await s.commit()
+    # Force the CAS-lost fallback: the row left monitoring_pr before the pause
+    # could win, so the legacy transactional rollback runs (the pause-into-blocked
+    # primary path is covered separately in part_005).
+    await race_workspace_out_of_monitoring(factory, workspace_id)
 
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
