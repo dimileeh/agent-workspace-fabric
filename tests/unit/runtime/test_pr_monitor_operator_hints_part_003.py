@@ -1493,7 +1493,10 @@ async def test_operator_hint_terminal_directive_grant_moved_head_parks_not_reblo
     HEAD as the preserved marker — overwriting the original SHA — so a later grant-only
     resume would see the replacement already on the remote, no-op, and CONSUME the grant
     while the approved protected commit never lands. Park the terminal hint instead, so
-    the operator is surfaced and the single-use grant survives (PRRT_kwDOSJAM6s6KVCYD)."""
+    the operator is surfaced (PRRT_kwDOSJAM6s6KVCYD). Because the preserved commit was
+    dropped, the stale marker is cleared AND the single-use grant is consumed so a later
+    base-sync edit cannot push to the granted protected path under the stale approval
+    (PRRT_kwDOSJAM6s6KVt_Q)."""
     from awf.db.models import OperatorGrantAuditRecord
 
     workspace_id = await seed_monitoring_workspace(factory)
@@ -1576,6 +1579,11 @@ async def test_operator_hint_terminal_directive_grant_moved_head_parks_not_reblo
         assert workspace.status == WorkspaceStatus.monitoring_pr.value
         grant = await session.get(OperatorGrantAuditRecord, grant_id)
         assert grant is not None
-        # The single-use grant is NOT burned by the no-op park, so a later resume can
-        # still land the preserved commit once the operator repairs it.
-        assert grant.consumed_at is None
+        # Clearing the marker drops ``has_preserved_protected_block`` to False, so
+        # ``decide()`` no longer runs this protected resume ahead of ``SyncBase``. The
+        # single-use grant approved ONLY the now-dropped preserved commit, so it is
+        # consumed alongside the marker — otherwise a base advance would let SyncBase's
+        # conflict-resolution edit push to the granted protected path under a stale
+        # approval (a grant leak, PRRT_kwDOSJAM6s6KVt_Q). A re-introduced protected
+        # change re-blocks and must be granted again.
+        assert grant.consumed_at is not None

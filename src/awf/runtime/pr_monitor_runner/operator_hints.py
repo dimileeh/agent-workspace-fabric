@@ -668,13 +668,19 @@ async def _terminal_directive_grant_reblock(
     it is no longer reachable: re-blocking would overwrite the preserved marker with
     the moved HEAD and let a later grant-only resume no-op while consuming the grant
     (PRRT_kwDOSJAM6s6KVCYD). In that dropped-commit case it ALSO clears the stale
-    preserved-head marker before parking: with a grant still active,
+    preserved-head marker AND consumes the single-use grant before parking. Clearing
+    the marker is required because with a grant still active
     ``_clear_dropped_preserved_marker_after_terminal_directive`` deliberately skips
-    clearing, so without this a later FRESH directive (which revokes the grant in
+    clearing, so otherwise a later FRESH directive (which revokes the grant in
     ``guide_workspace``) would leave no active grants plus a stale marker and a local
     HEAD already on the remote — satisfying the directive-drop restart shortcut at the
     top of ``_run_operator_hint_cycle``, which would finalize the new hint as a no-op
-    and SKIP the CLI, silently ignoring the operator's follow-up (PRRT_kwDOSJAM6s6KVgwV)."""
+    and SKIP the CLI, silently ignoring the operator's follow-up (PRRT_kwDOSJAM6s6KVgwV).
+    Consuming the grant is required because clearing the marker drops
+    ``has_preserved_protected_block`` to False, so ``decide()`` stops running this
+    resume ahead of ``SyncBase``; a surviving grant for the dropped commit would then
+    let a base-sync conflict edit push to the granted protected path under a stale
+    approval — a grant leak (PRRT_kwDOSJAM6s6KVt_Q)."""
     if not (preserved_head_sha and active_grant_specs):
         return None
     # The combined directive CLI may have MOVED HEAD before returning the terminal
@@ -699,7 +705,18 @@ async def _terminal_directive_grant_reblock(
         # ``_clear_dropped_preserved_marker_after_terminal_directive`` would otherwise
         # leave it set, and a later grant-revoking directive's drop-restart shortcut
         # would silently no-op the operator's follow-up (PRRT_kwDOSJAM6s6KVgwV).
+        # Clearing the marker drops ``state.has_preserved_protected_block`` to False, so
+        # ``decide()`` no longer runs this protected resume ahead of ``SyncBase``. The
+        # single-use grant approved ONLY the now-dropped preserved commit, yet it stays
+        # active until consumed; if the base advanced, the next poll runs ``SyncBase``
+        # first and ``_protected_scope_violations_for_sync_base_push`` loads that
+        # still-active grant, letting a conflict-resolution edit on the granted
+        # protected path push under an approval meant for the dropped commit — a grant
+        # leak (PRRT_kwDOSJAM6s6KVt_Q, the KGX2A class). Consume the grant together with
+        # the marker so nothing carries the stale approval forward; a re-introduced
+        # protected change re-blocks and must be granted again.
         state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
+        await self._consume_active_operator_grants(workspace_id)
         return None
     message = (
         f"operator directive resume returned '{verdict.verdict}' before landing the "
