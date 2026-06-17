@@ -17,6 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY,
@@ -27,8 +30,9 @@ from awf.runtime.pr_monitor_runner.comments import VerdictResult
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
 )
-from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
+from awf.service.controls import WorkspaceControlService
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -169,7 +173,7 @@ async def test_operator_hint_directive_with_covering_grant_keeps_preserved_commi
 
 
 @pytest.mark.unit
-async def test_operator_hint_directive_with_uncovering_grant_still_leaks_needs_human(
+async def test_operator_hint_directive_with_uncovering_grant_reblocks_for_grant(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -178,13 +182,18 @@ async def test_operator_hint_directive_with_uncovering_grant_still_leaks_needs_h
     protected violation still leaves the preserved protected change ungranted. The
     leak guard must keep firing — a partial/mismatched grant cannot authorize
     publishing the ungranted preserved commit (PRRT_kwDOSJAM6s6KG1hs guards against
-    over-honoring grants)."""
+    over-honoring grants) — and now RE-BLOCKS the workspace so the operator can issue
+    the approve-and-keep grant the leak message advertises (which ``guide_workspace``
+    only accepts for a ``blocked`` workspace). The push must NOT run, and the block is
+    rebuilt from the recorded ``block_violations`` (PR #609 codex P2 thread)."""
     workspace_id = await seed_monitoring_workspace(factory)
+    # The empty-path entry exercises the helper's defensive skip; only the real
+    # protected path is rebuilt into the re-block.
     await _seed_grant_and_block_violations(
         factory,
         workspace_id,
         grant_path="setup.cfg",
-        violation_paths=("pyproject.toml",),
+        violation_paths=("", "pyproject.toml"),
     )
     runner = make_runner(
         factory=factory,
@@ -221,6 +230,18 @@ async def test_operator_hint_directive_with_uncovering_grant_still_leaks_needs_h
     async def _not_on_remote(**_kwargs: object) -> bool:
         return False
 
+    captured: dict[str, object] = {}
+
+    async def _pause(**kwargs: object) -> _GitPushResult:
+        captured.update(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            reason_code="PROTECTED_SCOPE_PAUSED_BLOCKED",
+            paused_into_blocked=True,
+        )
+
     async def _validated_push_must_not_run(**_kwargs: object) -> _GitPushResult:
         pytest.fail("a partial-grant leak must be refused before push")
 
@@ -230,6 +251,7 @@ async def test_operator_hint_directive_with_uncovering_grant_still_leaks_needs_h
     monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
     monkeypatch.setattr(runner, "_preserved_commit_in_unpushed_range", _preserved_in_range)
     monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_pause_monitor_for_protected_scope_block", _pause)
     monkeypatch.setattr(runner, "_validated_git_push_result", _validated_push_must_not_run)
 
     result = await runner._run_operator_hint_cycle(
@@ -245,14 +267,18 @@ async def test_operator_hint_directive_with_uncovering_grant_still_leaks_needs_h
     )
 
     assert result.pushed is False
-    # Operator-actionable, NOT terminal: a ``failed``/terminal result would
-    # ``_terminate_failed`` the workspace and strand the needs_human hint
-    # (PRRT_kwDOSJAM6s6KHEEU). Refuse the leak WITHOUT failing the workspace.
-    assert result.failed is False
-    assert result.terminal_monitor_failure is False
-    assert state.pending_operator_hint is not None
-    assert state.pending_operator_hint.status == "needs_human"
-    assert "preserved-ungranted-sha" in (state.pending_operator_hint.status_reason or "")
+    assert result.paused_into_blocked is True
+    # The block is rebuilt from the recorded ``block_violations`` (the preserved
+    # commit's protected path), NOT the partial/mismatched grant path.
+    leak_block = captured["protected_scope_block"]
+    assert isinstance(leak_block, _ProtectedScopePushBlock)
+    assert [v.path for v in leak_block.violations] == ["pyproject.toml"]
+    assert "preserved-ungranted-sha" in leak_block.message
+    # No sync-base origin was recorded, so the re-block records the generic phase.
+    assert captured["resume_phase"] == MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+    # A landed re-block clears the in-memory monitor hint (the bumped block epoch
+    # supersedes it; the resume re-arms a fresh one).
+    assert state.pending_operator_hint is None
 
 
 @pytest.mark.unit
@@ -421,6 +447,155 @@ async def test_operator_hint_directive_revert_dropped_preserved_commit_pushes(
     assert result.failed is False
     assert push_calls, "the legitimate dropped-commit directive push must run"
     assert state.pending_operator_hint is None
+
+
+def _guide_service(session: AsyncSession) -> WorkspaceControlService:
+    """Build a control service for the guide-resolves regression (no stack ops)."""
+
+    async def _unused_stopper(_compose_project_name: str | None) -> None:  # pragma: no cover
+        raise AssertionError("guide must not stop the stack")
+
+    def _unused_cleaner_factory() -> object:  # pragma: no cover
+        raise AssertionError("guide must not clean up the workspace")
+
+    return WorkspaceControlService(
+        session,
+        project_stopper=_unused_stopper,
+        cleaner_factory=_unused_cleaner_factory,
+    )
+
+
+@pytest.mark.unit
+async def test_directive_leak_reblock_lets_operator_grant_resolve_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: after the directive-leak guard fires it RE-BLOCKS the workspace,
+    and an operator approve-and-keep ``guide --grant`` is then accepted and resolves
+    it. Before this fix the guard parked a needs_human hint at ``monitoring_pr``,
+    where ``guide_workspace`` rejects grant inputs (``WorkspaceGuideGrantNotAllowedError``)
+    — so the advertised approve-and-keep was unreachable (PR #609 codex P2 thread)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        # A fully-detailed recorded violation exercises the helper's section/line/
+        # protected_pattern/reason reconstruction.
+        workspace.block_violations = [
+            {
+                "path": "pyproject.toml",
+                "protected_pattern": "pyproject.toml",
+                "section": "tool.coverage",
+                "line": 5,
+                "reason": "coverage threshold weakened",
+            }
+        ]
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="revert pyproject.toml",
+        directive="revert it",
+        operation_id="op_directive_leak_then_grant",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-offending-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-offending-sha", None)
+
+    async def _fixed_verdict(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _preserved_in_range(**_kwargs: object) -> bool:
+        return True
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "preserved-offending-sha"
+
+    async def _no_notification(**_kwargs: object) -> None:
+        return None
+
+    async def _push_must_not_run(**_kwargs: object) -> _GitPushResult:
+        pytest.fail("the leak re-block must NOT push")
+
+    # Run the REAL ``_pause_monitor_for_protected_scope_block`` so the workspace
+    # actually transitions ``monitoring_pr -> blocked`` in the DB; only the git HEAD
+    # read and the best-effort PR notification are stubbed.
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fixed_verdict)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_in_unpushed_range", _preserved_in_range)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _push_must_not_run)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_post_protected_block_notification", _no_notification)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.paused_into_blocked is True
+    assert state.pending_operator_hint is None
+
+    # The guard re-blocked the workspace: status is now ``blocked`` (the precondition
+    # that makes ``guide --grant`` acceptable) with a monitor-origin resume phase.
+    async with factory() as session:
+        blocked = await WorkspaceRepository(session).get(workspace_id)
+        assert blocked is not None
+        assert blocked.status == WorkspaceStatus.blocked.value
+        assert blocked.block_resume_phase == MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+        blocked_version = blocked.version
+
+    # The operator approve-and-keep grant is now accepted (it raised
+    # ``WorkspaceGuideGrantNotAllowedError`` while parked at ``monitoring_pr``) and
+    # resolves the workspace back into the monitor for a grant-aware push.
+    async with factory() as session:
+        service = _guide_service(session)
+        response = await service.guide_workspace(
+            workspace_id,
+            directive="",
+            reason="approve keeping the protected pyproject.toml change",
+            grants=["pyproject.toml"],
+            approve_policy_downgrade=True,
+            operator="op@example.com",
+            idempotency_key="guide-after-leak-reblock",
+            expected_version=blocked_version,
+        )
+        await session.commit()
+        assert response.status == WorkspaceStatus.monitoring_pr
+
+    async with factory() as session:
+        resolved = await WorkspaceRepository(session).get(workspace_id)
+        assert resolved is not None
+        assert resolved.status == WorkspaceStatus.monitoring_pr.value
 
 
 @pytest.mark.unit

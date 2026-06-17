@@ -10,6 +10,8 @@ from awf.control.blocked_transition import (
     MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE,
     MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
 )
+from awf.control.quality_gates import QualityGateViolation
+from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import WorkspaceLogSink
 from awf.runtime.monitor_prompts import operator_hint_prompt
 from awf.runtime.operator_hints import (
@@ -27,7 +29,7 @@ from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_PUSH_BLOCKE
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
 )
-from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
@@ -279,17 +281,60 @@ async def _run_operator_hint_cycle(
             "would publish the ungranted protected change. Reset the worktree to remove "
             "the preserved commit, or approve-and-keep the protected path, then resume."
         )
+        # RE-BLOCK into ``blocked`` so the approve-and-keep grant this message
+        # advertises is actually reachable. ``guide_workspace`` only accepts
+        # ``--grant`` inputs for a ``blocked`` workspace (non-blocked + grants ->
+        # ``WorkspaceGuideGrantNotAllowedError``), so merely parking a needs_human
+        # hint at ``monitoring_pr`` strands the operator with NO way to perform the
+        # approve-and-keep this very message recommends. Rebuild the protected block
+        # from the violations recorded at the original block — exactly the protected
+        # paths the preserved commit changed — and reuse the shared WS-1
+        # ``enter_blocked`` pause path so the existing blocked-status + operator-grant
+        # machinery resolves it (``guide --grant`` -> ``blocked -> monitoring_pr``
+        # grant-only resume -> grant-aware push). Preserve the resume ORIGIN exactly
+        # as the net-diff re-block branch above (PR #609 codex P2 thread).
+        leak_block = await _directive_preserved_leak_protected_block(
+            self, workspace_id=workspace_id, message=reason
+        )
+        if leak_block is not None:
+            reblock_resume_phase = (
+                MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+                if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+                else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+            )
+            reblock_result = cast(
+                _GitPushResult,
+                await self._pause_monitor_for_protected_scope_block(
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    pr_head_sha=pr_head_sha,
+                    protected_scope_block=leak_block,
+                    worktree_path=worktree_path,
+                    resume_phase=reblock_resume_phase,
+                    state=state,
+                    remote_branch=remote_branch,
+                    base_branch=base_branch or "",
+                    operation_id=_operation_id,
+                    operation_type=_operation_type,
+                    source_head_sha=operation_start_head,
+                ),
+            )
+            if reblock_result.paused_into_blocked:
+                # Mirror the net-diff re-block branch: the bumped block epoch
+                # supersedes this hint, so clear the in-memory monitor hint and let
+                # the resume re-arm a fresh one.
+                state.pending_operator_hint = None
+            return reblock_result
+        # Defensive fallback: a real protected block always records >=1 violation
+        # (``_protected_scope_push_block`` only returns a block for non-empty
+        # violations), so this is effectively unreachable once the preserved-head
+        # marker was set by a genuine block. If nothing can be reconstructed, keep
+        # the prior behavior: mark the hint needs_human and return a NON-failed
+        # result so the loop parks the recoverable workspace at ``monitoring_pr``
+        # awaiting the operator rather than ``_terminate_failed``ing it — a
+        # failed/terminal row would also reject a later approve-and-keep grant
+        # (PRRT_kwDOSJAM6s6KHEEU).
         mark_operator_hint_needs_human(state, reason)
-        # Operator-actionable, NOT terminal. A ``failed`` protected-scope result
-        # makes ``terminal_monitor_failure`` True, so the ``AddressOperatorHint``
-        # failure branch would ``_terminate_failed`` the workspace — failing it
-        # instead of waiting for the operator to do exactly what this message asks
-        # (reset the preserved commit, or approve-and-keep the protected path and
-        # resume). A failed/terminal row also rejects a later approve-and-keep grant
-        # because the workspace is no longer recoverable. Return a NON-failed
-        # needs-human result so the loop parks the workspace at ``monitoring_pr``
-        # awaiting the operator, mirroring the other needs-human branches above
-        # (e.g. the ``_MonitorPolicyBlockedError`` branch) (PRRT_kwDOSJAM6s6KHEEU).
         return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
@@ -431,6 +476,53 @@ async def _run_operator_hint_cycle(
     # so a later DIFFERENT protected change re-blocks and must be granted again.
     await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
     return cast(_GitPushResult, push_result)
+
+
+async def _directive_preserved_leak_protected_block(
+    self: Any, *, workspace_id: str, message: str
+) -> _ProtectedScopePushBlock | None:
+    """Rebuild the protected block from the recorded violations for a leak re-block.
+
+    The directive-leak guard fires when the net diff is clean
+    (``_protected_scope_push_block`` returned ``None``) yet the preserved ungranted
+    protected commit is still in the unpushed range. To re-block (so ``guide
+    --grant`` becomes reachable) the shared ``enter_blocked`` pause path needs the
+    protected violations, but the net-diff block carrying them is ``None`` here.
+    Reconstruct them from ``workspace.block_violations`` — recorded by the original
+    block, i.e. exactly the protected paths the preserved commit changed — using
+    ``message`` (the leak reason) as the block message so the pause event and
+    operator notification stay informative. Returns ``None`` when no violation can
+    be rebuilt so the caller falls back to parking a needs_human hint."""
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:  # pragma: no cover - the active monitor cycle holds the row
+            return None
+        recorded = list(workspace.block_violations or [])
+    violations: list[QualityGateViolation] = []
+    for entry in recorded:
+        path = entry.get("path")
+        if not path:
+            continue
+        line = entry.get("line")
+        violations.append(
+            QualityGateViolation(
+                path=str(path),
+                protected_pattern=str(entry.get("protected_pattern") or path),
+                section=cast("str | None", entry.get("section")),
+                line=line if isinstance(line, int) and not isinstance(line, bool) else None,
+                reason=str(
+                    entry.get("reason")
+                    or "protected quality-gate file changed outside declared owned_paths"
+                ),
+            )
+        )
+    if not violations:
+        return None
+    return _ProtectedScopePushBlock(
+        message=message,
+        reason_code=_PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+        violations=tuple(violations),
+    )
 
 
 async def _finalize_operator_hint_resume(
