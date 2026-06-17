@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -1016,6 +1017,7 @@ async def test_remote_branch_diff_base_still_fails_closed_after_unrepairable_fet
 async def test_remote_branch_diff_base_fails_closed_when_broken_ref_workspace_active(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A broken AWF ref belonging to an active workspace must not be deleted."""
     workspace_id = await seed_monitoring_workspace(factory)
@@ -1050,6 +1052,61 @@ async def test_remote_branch_diff_base_fails_closed_when_broken_ref_workspace_ac
             "refs/heads/awf/ws_remote_missing",
         )
     ]
+
+
+@pytest.mark.unit
+async def test_remote_branch_diff_base_logs_repair_exception(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A broken AWF ref repair exception emits monitor.git_mirror_broken_ref_repair_failed."""
+    from awf.common.config import Settings
+    from awf.common.logging import configure_logging
+
+    configure_logging(Settings(service_name="test", env="local", log_level="INFO", _env_file=None))
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    terminal_id = await seed_monitoring_workspace(factory)
+    await _force_workspace_status(factory, terminal_id, WorkspaceStatus.failed)
+    worktree = tmp_path / "worktree"
+    cmd = FakeCommandRunner()
+    broken_ref = f"refs/heads/awf/{terminal_id}"
+    cmd.queue_result(returncode=128, stderr=f"fatal: bad object {broken_ref}")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    # Force the repair to raise so the exception-log path is exercised.
+    async def _exploding_repair(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("repair exploded")
+
+    runner._repair_orphaned_broken_awf_ref = _exploding_repair  # type: ignore[method-assign]
+
+    logger_name = "awf.runtime.pr_monitor_runner.logging"
+    caplog.set_level(logging.ERROR, logger=logger_name)
+    stdlib_logger = logging.getLogger(logger_name)
+    stdlib_logger.addHandler(caplog.handler)
+    stdlib_logger.propagate = False
+
+    with pytest.raises(ProtectedScopeDiffError) as exc_info:
+        await runner._remote_branch_diff_base_and_changed_paths(
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch="awf/ws_remote_missing",
+        )
+
+    assert "repair exploded" in str(exc_info.value)
+    assert any(
+        "monitor.git_mirror_broken_ref_repair_failed" in record.message
+        and record.levelno == logging.ERROR
+        and record.name == logger_name
+        for record in caplog.records
+    )
 
 
 @pytest.mark.unit

@@ -28,6 +28,7 @@ from awf.runtime.pr_monitor_runner.helpers import (
     _changed_paths_from_name_status_z,
     _read_worktree_text,
 )
+from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GIT_MIRROR_BROKEN_REF_REPAIR_MAX_ATTEMPTS,
 )
@@ -76,6 +77,12 @@ async def _remote_branch_diff_base_and_changed_paths(
                 stderr=fetch_result.stderr,
             )
         except Exception as exc:
+            _log.exception(
+                "monitor.git_mirror_broken_ref_repair_failed",
+                workspace_id=workspace_id,
+                remote_branch=remote_branch,
+                repairs_attempted=repairs_attempted,
+            )
             raise ProtectedScopeDiffError(
                 "Could not resolve committed diff against the remote PR branch "
                 "for protected-scope validation: broken AWF ref repair failed "
