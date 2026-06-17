@@ -271,6 +271,7 @@ async def _run_post_validation_conformance_check(
     model: str | None,
     handoff: _PlanningValidationHandoff,
     validation_run_id: str,
+    base_commit: str,
 ) -> _PlanningRunFailure | None:
     # Post-validation conformance is strictly report-only, regardless of
     # ordinary planning unexplained-deviation policy.
@@ -389,13 +390,16 @@ async def _run_post_validation_conformance_check(
         # above and by the validation-run artifact deposit.
         #
         # The report may be tracked in the project profile. When the path is
-        # tracked, ``git restore --source=HEAD --worktree --staged`` restores the
-        # committed content to both the index and worktree, so the worktree is
-        # clean and the file must be left alone. ``unlink()`` would re-delete the
-        # restored file and leave an unstaged deletion (`` D ...``). For untracked
-        # or gitignored reports the restore will fail; fall back to a plain unlink
-        # in that case. Use ``--`` to avoid mis-interpreting report paths that
-        # start with a dash.
+        # tracked, ``git restore --source=base_commit --worktree --staged``
+        # restores the original base content to both the index and worktree, so
+        # the worktree is clean and the file must be left alone. Restoring from
+        # HEAD would resurrect any stale AWF-authored report committed by an
+        # earlier fix pass; base_commit is the pre-workspace baseline and is the
+        # only safe source. ``unlink()`` would re-delete the restored file and
+        # leave an unstaged deletion (`` D ...``). For paths that do not exist at
+        # base_commit or are untracked/gitignored, the restore will fail; fall
+        # back to a plain unlink in that case. Use ``--`` to avoid
+        # mis-interpreting report paths that start with a dash.
         restore_result = await self._runner.run(
             [
                 "git",
@@ -403,7 +407,8 @@ async def _run_post_validation_conformance_check(
                 "-C",
                 str(worktree_path),
                 "restore",
-                "--source=HEAD",
+                "--source",
+                base_commit,
                 "--worktree",
                 "--staged",
                 "--",

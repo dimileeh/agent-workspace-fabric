@@ -579,6 +579,7 @@ async def run_validation_and_fix_cycle(
                         model=run_model,
                         handoff=conformance_handoff,
                         validation_run_id=validation_run_id,
+                        base_commit=base_commit,
                     )
                 except ComposeExecCleanupError as exc:
                     message = cleanup_failure_message(exc)

@@ -573,6 +573,7 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is None
@@ -666,6 +667,7 @@ async def test_post_validation_conformance_unlink_failure_is_non_fatal(
             model=None,
             handoff=handoff,
             validation_run_id="validation-run-1",
+            base_commit="base-commit-sha",
         )
 
     assert failure is None

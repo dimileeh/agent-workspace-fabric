@@ -162,7 +162,7 @@ def _executor_with_runner(
 
 
 class _GitRestoreFakeRunner(FakeCommandRunner):
-    """FakeCommandRunner that simulates ``git restore --source=HEAD``.
+    """FakeCommandRunner that simulates ``git restore --source=<base_commit>``.
 
     A successful ``git restore`` puts the committed content back into the index
     and worktree, so the path remains on disk with the tracked content and the
@@ -737,6 +737,7 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     # Write failure is non-fatal: success returned, event still recorded, and
@@ -748,7 +749,7 @@ async def test_satisfied_post_validation_conformance_report_write_failure_procee
     assert not report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
         in call
         for call in joined_calls
     )
@@ -817,6 +818,7 @@ async def test_satisfied_post_validation_conformance_report_untracked_fallback_t
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is None
@@ -824,7 +826,7 @@ async def test_satisfied_post_validation_conformance_report_untracked_fallback_t
     assert not report_file.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
         in call
         for call in joined_calls
     )
@@ -932,6 +934,7 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is None
@@ -942,7 +945,7 @@ async def test_satisfied_post_validation_conformance_stdout_deposits_artifact_be
     assert not report_abs.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
         in call
         for call in joined_calls
     )
@@ -1769,6 +1772,7 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is None
@@ -1778,12 +1782,121 @@ async def test_satisfied_post_validation_conformance_report_is_written_not_commi
     assert event_markers == ["record"]
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
         in call
         for call in joined_calls
     )
     assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
-    # It is never staged or committed.
+    # No staging or committing of the AWF artifact.
+    assert all("add" not in call.args for call in runner.calls)
+    assert all("commit" not in call.args for call in runner.calls)
+
+
+@pytest.mark.unit
+async def test_satisfied_post_validation_conformance_report_restores_from_base_commit(
+    tmp_path: Path,
+) -> None:
+    """PRRT_kwDOSJAM6s6KIyra regression: a tracked conformance report must be
+    restored from ``base_commit``, not from ``HEAD``.
+
+    When a post-validation conformance miss gets a fix pass, the unsatisfied
+    report can be committed (``git add -A`` stages everything). If the
+    subsequent satisfied check restores the report path from ``HEAD``, it will
+    resurrect that stale unsatisfied report in the worktree and leave the tree
+    clean, allowing the PR to push an AWF-authored unsatisfied report. Restoring
+    from ``base_commit`` instead keeps the original baseline content and avoids
+    committing AWF-authored reports.
+    """
+    worktree_path = tmp_path / "worktree"
+    runner = _GitRestoreFakeRunner(worktree_path)
+    report_path = Path("docs/awf-plans/ws_post.conformance.json")
+    report_file = worktree_path / report_path
+    report_file.parent.mkdir(parents=True)
+    # Simulate the worktree state after a fix pass committed an unsatisfied
+    # report at HEAD: the on-disk file now carries the stale unsatisfied content,
+    # but the original baseline content is the one we want restored.
+    base_content = '{"status":"satisfied","summary":"baseline pre-awf content","gaps":[]}'
+    stale_unsatisfied = '{"status":"needs_iteration","summary":"stale miss","gaps":["fix me"]}'
+    report_file.write_text(stale_unsatisfied, encoding="utf-8")
+    runner.queue_result(returncode=0, stdout=f" M {report_path.as_posix()}\n")  # before_compare
+    runner.queue_result(returncode=0, stdout="fix-pass-head\n")  # before_compare_head
+    runner.queue_result(returncode=0, stdout=f" M {report_path.as_posix()}\n")  # after_compare
+    runner.queue_result(returncode=0, stdout="")  # committed paths since validated HEAD
+    runner.queue_result(
+        returncode=0, stdout="D  docs/awf-plans/ws_post.conformance.json\n"
+    )  # git restore report path succeeds
+    executor = _executor_with_runner(runner, tmp_path)
+    executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
+        return_value="VALIDED_OK"
+    )
+    event_markers: list[str] = []
+
+    async def record_event(**_kwargs: object) -> None:
+        event_markers.append("record")
+
+    executor._record_post_validation_conformance_event = record_event  # type: ignore[method-assign]
+
+    # Make the fake runner actually restore the base content so the test can
+    # assert the file ends up with baseline content, not the stale HEAD content.
+    real_run = runner.run
+
+    async def restoring_run(
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        result = await real_run(args, input_bytes=input_bytes, cwd=cwd)
+        if result.ok and args and args[0] == "git" and "restore" in args:
+            if not report_file.exists():
+                return result
+            # Simulate restore from base_commit: put the baseline content back.
+            report_file.write_text(base_content, encoding="utf-8")
+        return result
+
+    runner.run = restoring_run  # type: ignore[method-assign]
+
+    profile = WorkspaceProfile.model_validate({"name": "planned", "planning": {"required": True}})
+    handoff = _PlanningValidationHandoff(
+        report=PlanConformanceReport(
+            status=PlanConformanceStatus.needs_iteration,
+            summary="AWF validation evidence is missing.",
+            gaps=("Run AWF validation.",),
+            reason_code=CONFORMANCE_REQUIRES_AWF_VALIDATION,
+        ),
+        plan_path=Path("docs/awf-plans/ws_post.md"),
+        report_path=report_path,
+        iteration=0,
+        max_iterations=2,
+    )
+
+    failure = await executor._run_post_validation_conformance_check(
+        adapter=_PlanningAdapter(
+            '{"status":"satisfied","summary":"validated evidence satisfies plan","gaps":[]}'
+        ),  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_post", task_prompt="do it", task_tag=None),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=worktree_path,
+        model=None,
+        handoff=handoff,
+        validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
+    )
+
+    assert failure is None
+    assert event_markers == ["record"]
+    # Restored from base_commit, so the stale unsatisfied content is gone and
+    # the baseline content is present.
+    assert report_file.read_text(encoding="utf-8") == base_content
+    joined_calls = [" ".join(call.args) for call in runner.calls]
+    assert any(
+        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        in call
+        for call in joined_calls
+    )
+    assert not any("rm -- docs/awf-plans/ws_post.conformance.json" in call for call in joined_calls)
     assert all("add" not in call.args for call in runner.calls)
     assert all("commit" not in call.args for call in runner.calls)
 
@@ -1845,6 +1958,7 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is None
@@ -1855,7 +1969,7 @@ async def test_post_validation_conformance_prefers_stdout_when_report_is_stale(
     executor._record_post_validation_conformance_event.assert_awaited_once()  # type: ignore[attr-defined]
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
         in call
         for call in joined_calls
     )
@@ -1909,6 +2023,7 @@ async def test_post_validation_conformance_ignores_stale_report_without_stdout(
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is not None
@@ -1959,6 +2074,7 @@ async def test_post_validation_conformance_failure_counts_handoff_iterations(
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is not None
@@ -2011,6 +2127,7 @@ async def test_post_validation_conformance_rejects_committed_implementation_path
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is not None
@@ -2075,6 +2192,7 @@ async def test_post_validation_conformance_rejects_pre_dirty_committed_paths(
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is not None
@@ -2140,6 +2258,7 @@ async def test_post_validation_conformance_rejects_edits_to_pre_dirty_paths(
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is not None
@@ -2214,18 +2333,20 @@ async def test_satisfied_post_validation_conformance_report_unlinks_tracked_repo
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is None
     assert event_markers == ["record"]
-    # Tracked report restored to HEAD: the committed copy remains on disk so the
-    # worktree stays clean, instead of re-deleting the restored file. The stale
-    # on-worktree content was overwritten above, so existence proves restore
-    # put the tracked committed content back.
+    # Tracked report restored from base_commit: the original baseline copy
+    # remains on disk so the worktree stays clean, instead of re-deleting the
+    # restored file. Restoring from HEAD would resurrect any stale AWF-authored
+    # report committed by an earlier fix pass; restoring from base_commit keeps
+    # the original project content.
     assert report_file.exists()
     joined_calls = [" ".join(call.args) for call in runner.calls]
     assert any(
-        "restore --source=HEAD --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
+        "restore --source base-commit-sha --worktree --staged -- docs/awf-plans/ws_post.conformance.json"
         in call
         for call in joined_calls
     )

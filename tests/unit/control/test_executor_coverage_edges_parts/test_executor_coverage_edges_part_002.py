@@ -245,6 +245,7 @@ async def test_post_validation_conformance_rejects_committed_paths_when_deviatio
         model=None,
         handoff=handoff,
         validation_run_id="validation-run-1",
+        base_commit="base-commit-sha",
     )
 
     assert failure is not None
