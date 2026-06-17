@@ -527,6 +527,96 @@ async def test_operator_hint_repair_marks_protected_scope_push_blocked_as_needs_
 
 
 @pytest.mark.unit
+async def test_operator_hint_repair_marks_reblocked_pause_as_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="operator hint repair would edit a protected workflow",
+        operation_id="op_protected_scope_reblock_hint",
+        requested_at="2026-05-31T02:15:00+00:00",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("abc1234567890def", None)
+
+    async def _fix_committed(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="fix_committed")
+
+    async def _protected_scope_block(**_kwargs: object) -> _ProtectedScopePushBlock:
+        return _ProtectedScopePushBlock(
+            message="operator hint repair touched protected workflow",
+            reason_code="PROTECTED_SCOPE_PUSH_BLOCKED",
+        )
+
+    async def _reblocked_protected_scope_repair(**_kwargs: object) -> _GitPushResult:
+        # The directive-repair re-tripped the gate and re-paused the workspace.
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="protected-scope policy re-blocked the workspace after operator hint repair",
+            reason_code="PROTECTED_SCOPE_PAUSED_FOR_OPERATOR",
+        )
+
+    monkeypatch.setattr(
+        runner,
+        "_pre_existing_dirty_repair_worktree_result",
+        _no_preexisting_dirty,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_repair_operation_start_head_result",
+        _start_head_ok,
+    )
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _fix_committed)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _protected_scope_block)
+    monkeypatch.setattr(
+        runner,
+        "_repair_protected_scope_commits_before_push",
+        _reblocked_protected_scope_repair,
+    )
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id="ws_operator_hint_protected_scope_reblock",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch="awf/ws_operator_hint_protected_scope_reblock",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.paused_into_blocked is True
+    # A re-block is NON-terminal: the monitor pauses, it does not fail.
+    assert result.terminal_monitor_failure is False
+    assert state.pending_operator_hint == OperatorHint(
+        reason=hint.reason,
+        operation_id=hint.operation_id,
+        requested_at=hint.requested_at,
+        status="needs_human",
+        status_reason=(
+            "protected-scope policy re-blocked the workspace after operator hint repair"
+        ),
+    )
+
+
+@pytest.mark.unit
 async def test_operator_hint_repair_marks_diff_unavailable_push_as_needs_human(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

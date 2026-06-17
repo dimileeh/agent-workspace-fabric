@@ -172,6 +172,17 @@ async def _run_operator_hint_cycle(
             )
             reason = (push_result.stderr or "").strip() or default_reason
             mark_operator_hint_needs_human(state, reason)
+        elif push_result.paused_into_blocked:
+            # The directive-repair tripped another protected-scope violation and
+            # re-paused the workspace into ``blocked`` for a fresh operator
+            # decision. Mark the current hint ``needs_human`` so the state
+            # persisted during the blocked interval reflects that the operator's
+            # resolution did not clear the gate (the next resume bridge replaces
+            # this hint with the new epoch's pending hint).
+            reason = (push_result.stderr or "").strip() or (
+                "protected-scope violation re-blocked the workspace after operator hint repair"
+            )
+            mark_operator_hint_needs_human(state, reason)
         return cast(_GitPushResult, push_result)
     if grant_specs:
         # The resume cleared the protected gate with the grant-aware push (no
