@@ -10,13 +10,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import RepoRef
+from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.repositories import (
+    OperationRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
 from awf.runtime.pr_monitor import (
     CheckFailure,
+    CheckState,
+    MergeableState,
+    MergeStateStatus,
+    MonitorState,
+    PRStatus,
+    SyncBase,
 )
 from tests.postgres import postgres_test_engine
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -153,9 +161,14 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
         compose_file=tmp_path / "compose.yml",
     )
 
+    # A real protected-scope violation in the base-conflict resolution commit
+    # PAUSES the workspace into ``blocked`` for an operator decision (WS-2)
+    # instead of terminally failing the monitor — sync-base was the one POST-PR
+    # push path still outside WS-2.
     assert push_result.failed is True
     assert push_result.pushed is False
-    assert push_result.reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
+    assert push_result.paused_into_blocked is True
+    assert push_result.reason_code == "PROTECTED_SCOPE_PAUSED_BLOCKED"
     assert ".github/workflows/ci.yml" in push_result.stderr
     call_args = [call.args for call in cmd.calls]
     assert any(
@@ -180,10 +193,103 @@ async def test_sync_base_blocks_committed_protected_quality_gate_edits_before_pu
             event_type="workspace.monitor_protected_scope_push_blocked",
             limit=10,
         )
+        workspace = await WorkspaceRepository(s).get(workspace_id)
     assert len(events) == 1
     assert events[0].reason_code == "PROTECTED_SCOPE_PUSH_BLOCKED"
     assert events[0].payload is not None
     assert events[0].payload["paths"] == [".github/workflows/ci.yml"]
+    # The workspace is paused into ``blocked`` with the sync-base resume phase so
+    # the monitor-origin blocked/guide resume flow (not terminal failure) owns it.
+    assert workspace is not None
+    assert workspace.status == "blocked"
+    assert workspace.block_resume_phase == "monitor_protected_scope_sync_base"
+
+
+def _sync_base_status() -> PRStatus:
+    return PRStatus(
+        number=42,
+        head_sha="abc1234567890def",
+        mergeable=MergeableState.MERGEABLE,
+        check_state=CheckState.SUCCESS,
+        unresolved_inline_threads=(),
+        unresolved_review_comments=(),
+        blocking_reviews=(),
+        base_behind_count=1,
+        merge_state_status=MergeStateStatus.BEHIND,
+    )
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_protected_violation_pauses_into_blocked_not_terminal(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A protected-scope violation in the base-conflict resolution commit must
+    PAUSE the workspace into ``blocked`` (WS-2) instead of terminally failing it.
+
+    The SyncBase loop branch previously only handled terminal failure, so a
+    ``PROTECTED_SCOPE_PUSH_BLOCKED`` result failed the workspace. The pause result
+    now routes through the ``paused_into_blocked`` handler: the monitor cycle ends
+    cleanly, the operation is recorded as succeeded, and no push is attempted.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        workspace.owned_paths = ["src/**"]
+        await s.commit()
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch base
+    cmd.queue_result(returncode=0)  # merge (clean)
+    cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
+    cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
+    cmd.queue_result(returncode=0, stdout="")  # refresh base branch for sync-base diff
+    cmd.queue_result(returncode=0, stdout="merged-base-sha\n")
+    cmd.queue_result(returncode=0, stdout=_name_status_z(".github/workflows/ci.yml", "src/fix.py"))
+    _queue_protected_workflow_diff(cmd)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_sync_base_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    # Paused-into-blocked ends the monitor cycle but does NOT terminally fail.
+    assert terminal is True
+    assert not any(args[:1] == ["git"] and "push" in args for args in (c.args for c in cmd.calls))
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.blocked.value
+    assert ws.block_resume_phase == "monitor_protected_scope_sync_base"
+    sync_op = next(operation for operation in operations if operation.type == "sync_base")
+    assert sync_op.status == OperationStatus.succeeded.value
+    assert sync_op.result is not None
+    assert sync_op.result["outcome"] == "protected_scope_paused"
+    assert sync_op.result["reason_code"] == "PROTECTED_SCOPE_PAUSED_BLOCKED"
 
 
 @pytest.mark.unit

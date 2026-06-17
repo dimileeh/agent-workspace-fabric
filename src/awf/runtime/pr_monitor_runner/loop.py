@@ -284,6 +284,7 @@ async def _execute(
                 state=state,
                 repo=repo,
                 pr_number=pr_number,
+                pr_head_sha=status.head_sha,
                 base_branch=base_branch,
                 remote_branch=remote_branch,
                 remote_push_url=remote_push_url,
@@ -378,6 +379,25 @@ async def _execute(
                 workspace_id,
                 message=cleanup_failure_message(exc),
                 reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+            )
+            return True
+        if push_result.paused_into_blocked:
+            # A protected-scope violation in the base-conflict resolution commit
+            # paused the workspace into ``blocked`` for an operator decision
+            # (WS-2). The row already left ``monitoring_pr`` (preserving the
+            # offending commit); end the monitor cycle cleanly — do NOT terminally
+            # fail. Persist state so the notification dedupe + preserved-commit
+            # marker survive a restart.
+            await self._persist_state(workspace_id, state)
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "status": "succeeded",
+                    "outcome": "protected_scope_paused",
+                    "reason_code": push_result.reason_code,
+                    "pushed": False,
+                },
             )
             return True
         if push_result.failed:

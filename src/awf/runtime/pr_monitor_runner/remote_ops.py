@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from awf.adapters.base import AgentRunError
 from awf.common.audit import redact_audit_text
@@ -15,6 +15,7 @@ from awf.common.commands import CommandResult
 from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.common.task_tag import commit_message_with_task_tag
+from awf.control.blocked_transition import MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
@@ -45,6 +46,7 @@ from awf.runtime.validation_worktree_constants import (
 
 if TYPE_CHECKING:
     from awf.common.github_client import RepoRef
+    from awf.runtime.pr_monitor import MonitorState
     from awf.runtime.pr_monitor_runner import PullRequestMonitorRunner
 
 _log = get_logger(__name__)
@@ -684,6 +686,7 @@ async def _run_sync_base(
     state: object | None = None,
     repo: RepoRef,
     pr_number: int,
+    pr_head_sha: str | None = None,
     base_branch: str,
     remote_branch: str,
     remote_push_url: str | None = None,
@@ -802,6 +805,26 @@ async def _run_sync_base(
         base_branch=base_branch,
     )
     if protected_scope_block is not None:
+        if protected_scope_block.violations:
+            # A real protected-scope violation in the base-conflict resolution
+            # commit PAUSES the workspace into ``blocked`` for an operator
+            # decision (WS-2), preserving the offending commit, instead of
+            # terminally failing the monitor. Without this, sync-base was the
+            # one POST-PR push path still outside WS-2: it returned a plain
+            # failed ``PROTECTED_SCOPE_PUSH_BLOCKED`` result that the loop's
+            # SyncBase branch treated as terminal. A diff-unavailable block (no
+            # violations) keeps the terminal failed handling below.
+            return await runner._pause_monitor_for_protected_scope_block(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                pr_head_sha=pr_head_sha or "",
+                protected_scope_block=protected_scope_block,
+                worktree_path=worktree_path,
+                resume_phase=MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE,
+                state=cast("MonitorState | None", state),
+                remote_branch=remote_branch,
+                base_branch=base_branch,
+            )
         return _GitPushResult(
             pushed=False,
             failed=True,
