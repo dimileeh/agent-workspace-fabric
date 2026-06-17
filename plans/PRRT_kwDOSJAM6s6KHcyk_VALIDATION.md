@@ -36,7 +36,7 @@ uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_validation_workt
 
 Result:
 
-```
+```text
 42 passed in 1.50s
 ```
 
@@ -49,7 +49,7 @@ uv run --python 3.12 --extra dev mypy src/awf/runtime/validation_worktree.py
 
 Result:
 
-```
+```text
 All checks passed!
 Success: no issues found in 1 source file
 ```
