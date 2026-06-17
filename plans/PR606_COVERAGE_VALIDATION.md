@@ -69,10 +69,11 @@ CI run 27666319065 produced `coverage.xml` with:
 The owned gaps in this fix are:
 
 - `runtime/validation_worktree.py`: removed 5 unreachable/duplicated statements
-  and 2 unreachable branches from measurement, plus added 1 newly covered branch.
+  and 2 unreachable branches from measurement, plus added 2 newly covered branches
+  (the ancestor-replaces-descendants branch and the descendant-after-ancestor drop
+  branch).
 - `runtime/pr_monitor_runner/pre_push_validation.py`: new regression test covers
-  the previously uncovered `return True, rollback_failure_reason` path (2 lines,
-  4 branches).
+  the previously uncovered rollback-failure-after-exception path (2 lines, 4 branches).
 
 These changes close the shortfall without touching the threshold configuration.
 The full combined-coverage gate is intentionally left to AWF/GitHub CI; the
@@ -88,6 +89,8 @@ local checks above target only the files and behaviors changed.
   - No source logic change; new test covers existing rollback-failure branch.
 - `tests/unit/runtime/test_validation_worktree.py`
   - Added `test_collapse_descendant_cleanup_paths_keeps_later_ancestor`.
+  - Added `test_collapse_descendant_cleanup_paths_drops_later_descendant` to cover the
+    descendant-after-ancestor drop branch that the first regression test did not reach.
 - `tests/unit/runtime/test_pr_monitor_pre_push_validation.py`
   - Added `test_pre_push_validation_fix_pass_reports_failed_rollback`.
 
