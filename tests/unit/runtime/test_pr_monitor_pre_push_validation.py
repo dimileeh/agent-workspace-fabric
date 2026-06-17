@@ -1236,6 +1236,151 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_finalize_preserves_policy_blocked_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A policy-blocked finalize must surface MONITOR_POLICY_BLOCKED, not generic dirty.
+
+    ``_commit_dirty_worktree`` raises ``_MonitorPolicyBlockedError`` when
+    monitor-authored changes violate blocking workspace policy. Before the
+    fix, the broad ``except Exception`` in
+    ``_try_finalize_pre_push_dirty_repair_state`` swallowed it and returned
+    ``None``, so the stale dirty check was reused and the failure was
+    reported as the generic ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``,
+    losing the policy reason code end-to-end (regression for thread
+    ``PRRT_kwDOSJAM6s6KUmpr``).
+    """
+    from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
+    from awf.runtime.pr_monitor_runner.types import _MonitorPolicyBlockedError
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(side_effect=_MonitorPolicyBlockedError("policy blocked finalize")),
+    )
+    state = MonitorState()
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _MONITOR_POLICY_BLOCKED_REASON
+    assert result.validation_run_id is None
+    # The finalize failure must not re-check the tree (no verify/recheck pass).
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_preserves_ownership_repair_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """An ownership-repair-failed finalize must surface its reason code, not generic dirty.
+
+    ``_commit_dirty_worktree`` raises
+    ``_MonitorAgentRuntimeOwnershipRepairFailedError`` (carrying a
+    ``reason_code`` property) when monitor cannot repair agent worktree
+    ownership. Before the fix, the broad ``except Exception`` in
+    ``_try_finalize_pre_push_dirty_repair_state`` swallowed it and returned
+    ``None``, so the stale dirty check was reused and the failure was
+    reported as the generic ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``,
+    losing the ownership-repair reason code end-to-end (regression for
+    thread ``PRRT_kwDOSJAM6s6KUmpr``).
+    """
+    from awf.runtime.ownership import AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    from awf.runtime.pr_monitor_runner.types import (
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(
+            side_effect=_MonitorAgentRuntimeOwnershipRepairFailedError(
+                AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+            )
+        ),
+    )
+    state = MonitorState()
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED_REASON_CODE
+    assert result.validation_run_id is None
+    # The finalize failure must not re-check the tree (no verify/recheck pass).
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fails(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],

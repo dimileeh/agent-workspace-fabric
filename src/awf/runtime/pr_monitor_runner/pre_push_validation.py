@@ -35,6 +35,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.runtime.agent_scratch import apply_agent_scratch_excludes
+from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
@@ -45,6 +46,10 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON,
 )
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
+from awf.runtime.pr_monitor_runner.types import (
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorPolicyBlockedError,
+)
 from awf.runtime.validation import profile_phase_command_plan
 from awf.runtime.validation_identity import (
     environment_identity_digest,
@@ -552,6 +557,8 @@ async def _try_finalize_pre_push_dirty_repair_state(
 
     if state is None or check.clean or check.reason_code == VALIDATION_WORKTREE_STATUS_FAILED:
         return None
+    from awf.runtime.validation_worktree import ValidationWorktreeCheck
+
     try:
         committed = bool(
             await self._commit_dirty_worktree(
@@ -561,6 +568,44 @@ async def _try_finalize_pre_push_dirty_repair_state(
                 compose_file=compose_file,
                 state=state,
             )
+        )
+    except _MonitorPolicyBlockedError as exc:
+        # ``_commit_dirty_worktree`` raises this when monitor-authored changes
+        # violate blocking workspace policy. Like the other commit callers
+        # (``remote_ops.py``, ``ci_ops.py``, ``fix_cycle.py``,
+        # ``operator_hints.py``), preserve the policy reason code end-to-end
+        # instead of letting it collapse into the generic pre-existing-dirty
+        # failure. Returning a non-clean check carrying the reason code flows
+        # through ``_pre_push_dirty_result`` into ``_GitPushResult.reason_code``.
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_policy_blocked",
+            workspace_id=workspace_id,
+            error=repr(exc),
+            paths=list(check.paths),
+        )
+        return ValidationWorktreeCheck(
+            clean=False,
+            paths=check.paths,
+            reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+            message=str(exc) or "monitor policy blocked the pre-push dirty finalize",
+        )
+    except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+        # ``_commit_dirty_worktree`` raises this (carrying a ``reason_code``
+        # property) when monitor cannot repair agent worktree ownership.
+        # Preserve that reason code end-to-end like the other commit callers
+        # instead of collapsing it into the generic pre-existing-dirty failure.
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_ownership_repair_failed",
+            workspace_id=workspace_id,
+            error=repr(exc),
+            paths=list(check.paths),
+            reason_code=exc.reason_code,
+        )
+        return ValidationWorktreeCheck(
+            clean=False,
+            paths=check.paths,
+            reason_code=exc.reason_code,
+            message=str(exc) or "agent runtime ownership repair failed",
         )
     except Exception as exc:
         _log.warning(
