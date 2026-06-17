@@ -1562,6 +1562,13 @@ async def test_operator_hint_terminal_directive_grant_moved_head_parks_not_reblo
     assert result.paused_into_blocked is not True
     assert state.pending_operator_hint is not None
     assert state.pending_operator_hint.status == "needs_human"
+    # The DROPPED preserved commit leaves nothing to protect, so the stale marker is
+    # cleared even though a grant is still active. Otherwise a later FRESH directive —
+    # which revokes that grant in ``guide_workspace`` — would leave no active grants
+    # plus a stale marker and a local HEAD already on the remote, letting the
+    # directive-drop restart shortcut no-op the operator's follow-up
+    # (PRRT_kwDOSJAM6s6KVgwV).
+    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
 
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)

@@ -667,7 +667,14 @@ async def _terminal_directive_grant_reblock(
     ``None`` too when the directive CLI moved HEAD away from the preserved commit so
     it is no longer reachable: re-blocking would overwrite the preserved marker with
     the moved HEAD and let a later grant-only resume no-op while consuming the grant
-    (PRRT_kwDOSJAM6s6KVCYD)."""
+    (PRRT_kwDOSJAM6s6KVCYD). In that dropped-commit case it ALSO clears the stale
+    preserved-head marker before parking: with a grant still active,
+    ``_clear_dropped_preserved_marker_after_terminal_directive`` deliberately skips
+    clearing, so without this a later FRESH directive (which revokes the grant in
+    ``guide_workspace``) would leave no active grants plus a stale marker and a local
+    HEAD already on the remote — satisfying the directive-drop restart shortcut at the
+    top of ``_run_operator_hint_cycle``, which would finalize the new hint as a no-op
+    and SKIP the CLI, silently ignoring the operator's follow-up (PRRT_kwDOSJAM6s6KVgwV)."""
     if not (preserved_head_sha and active_grant_specs):
         return None
     # The combined directive CLI may have MOVED HEAD before returning the terminal
@@ -686,6 +693,13 @@ async def _terminal_directive_grant_reblock(
         worktree_path=worktree_path,
         preserved_head_sha=preserved_head_sha,
     ):
+        # The preserved commit was DROPPED by the combined directive CLI. There is
+        # nothing left to protect, so clear the stale marker before parking — the
+        # grant-active early return in
+        # ``_clear_dropped_preserved_marker_after_terminal_directive`` would otherwise
+        # leave it set, and a later grant-revoking directive's drop-restart shortcut
+        # would silently no-op the operator's follow-up (PRRT_kwDOSJAM6s6KVgwV).
+        state.threads_addressed_ids.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None)
         return None
     message = (
         f"operator directive resume returned '{verdict.verdict}' before landing the "
@@ -758,7 +772,8 @@ async def _clear_dropped_preserved_marker_after_terminal_directive(
 
     Scoped to directive-only resumes (``hint.directive`` AND no active grants): a
     grant-bearing terminal resume is handled by ``_terminal_directive_grant_reblock``
-    (it re-blocks while the preserved commit is reachable and parks otherwise), and the
+    (it re-blocks while the preserved commit is reachable, and clears the marker before
+    parking when the commit was dropped — PRRT_kwDOSJAM6s6KVgwV), and the
     two restart shortcuts both require ``not active_grant_specs`` so a surviving grant
     already excludes them. Clears ONLY when a resolvable local HEAD proves the preserved
     commit is gone from local history: an unresolvable HEAD is ambiguous (the drop may
