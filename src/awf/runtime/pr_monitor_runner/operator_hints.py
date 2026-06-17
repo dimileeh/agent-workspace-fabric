@@ -239,15 +239,29 @@ async def _run_operator_hint_cycle(
     # tree matching the remote PR branch, so ``protected_scope_block`` is None, yet
     # pushing HEAD would still fast-forward the remote branch over the original
     # ungranted protected-file commit plus its revert. Only an approve-and-keep
-    # grant (no directive) authorizes publishing the preserved commit, so this guard
-    # is scoped to directive resumes. When the preserved commit is still inside the
-    # range this push would publish, surface needs_human instead of leaking it; the
-    # operator can re-issue a directive that resets the worktree (or grant the path)
+    # grant authorizes publishing the preserved commit, so this guard is scoped to
+    # directive resumes. When the preserved commit is still inside the range this
+    # push would publish, surface needs_human instead of leaking it; the operator can
+    # re-issue a directive that resets the worktree (or grant the path)
     # (PRRT_kwDOSJAM6s6KFytV).
+    #
+    # EXCEPTION: a combined ``--directive ... --grant ...`` resume can intentionally
+    # KEEP the preserved protected edit while the directive fixes other files. The
+    # same-request grant (preserved across the combined guide) covers the protected
+    # paths, so ``protected_scope_block`` is None for an authorized keep — NOT a leak.
+    # Honor that operator decision: skip the guard when active grants cover every
+    # protected path of the current block, otherwise this wedges a valid push at
+    # needs_human where no further grant can be added (PRRT_kwDOSJAM6s6KG1hs). A
+    # grant that covers only some of those paths (or none) still leaves an ungranted
+    # protected change, so the guard keeps firing.
     if (
         protected_scope_block is None
         and hint.directive
         and preserved_head_sha
+        and not await self._preserved_protected_change_fully_granted(
+            workspace_id=workspace_id,
+            grant_specs=active_grant_specs,
+        )
         and await self._preserved_commit_in_unpushed_range(
             workspace_id=workspace_id,
             worktree_path=worktree_path,

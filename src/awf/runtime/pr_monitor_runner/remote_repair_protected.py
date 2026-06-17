@@ -38,6 +38,7 @@ from awf.control.quality_gates import (
     PROTECTED_QUALITY_GATE_BLOCK_TYPE,
     GrantSpec,
     QualityGateViolation,
+    _grant_matches,
     find_protected_quality_gate_changes,
     quality_gate_violation_details,
     quality_gate_violation_message,
@@ -1013,6 +1014,43 @@ async def _active_operator_grant_specs(self: Any, workspace_id: str) -> list[Gra
     no-op outside the resume path."""
     async with self._deps.session_factory() as session:
         return await active_operator_grant_specs_in_session(session, workspace_id)
+
+
+async def _preserved_protected_change_fully_granted(
+    self: Any,
+    *,
+    workspace_id: str,
+    grant_specs: Sequence[GrantSpec],
+) -> bool:
+    """Return whether active grants cover every protected path of the current block.
+
+    A combined ``--directive ... --grant ...`` resume can intentionally KEEP the
+    preserved protected edit while the directive fixes other files: the same-request
+    grant (preserved across the combined guide) suppresses the net-diff violation, so
+    ``_protected_scope_push_block`` returns None even though the preserved commit is
+    still in the unpushed range. The directive leak guard must NOT treat that
+    operator-approved keep as an ungranted leak. When every protected path recorded
+    for the workspace's current block (``block_violations``, i.e. exactly the
+    protected paths the preserved commit changed) is covered by an active grant,
+    publishing the preserved commit is the operator's authorized decision
+    (PRRT_kwDOSJAM6s6KG1hs). A grant that covers only SOME of those paths — or none —
+    still leaves an ungranted protected change, so the guard must keep firing."""
+    if not grant_specs:
+        return False
+    async with self._deps.session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        if workspace is None:
+            return False
+        violation_paths = [
+            str(violation.get("path"))
+            for violation in (workspace.block_violations or [])
+            if isinstance(violation, dict) and violation.get("path")
+        ]
+    if not violation_paths:
+        return False
+    return all(
+        any(_grant_matches(path, grant.path) for grant in grant_specs) for path in violation_paths
+    )
 
 
 async def _preserved_commit_already_on_remote(

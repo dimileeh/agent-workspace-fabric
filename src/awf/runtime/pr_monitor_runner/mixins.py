@@ -123,6 +123,9 @@ class RunnerDelegatesMixin:
     )
     _post_protected_block_notification = _remote_repair_protected._post_protected_block_notification
     _active_operator_grant_specs = _remote_repair_protected._active_operator_grant_specs
+    _preserved_protected_change_fully_granted = (
+        _remote_repair_protected._preserved_protected_change_fully_granted
+    )
     _consume_active_operator_grants = _remote_repair_protected._consume_active_operator_grants
     _preserved_commit_already_on_remote = (
         _remote_repair_protected._preserved_commit_already_on_remote
