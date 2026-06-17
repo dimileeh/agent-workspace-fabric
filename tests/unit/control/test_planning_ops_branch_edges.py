@@ -526,7 +526,9 @@ async def test_post_validation_conformance_uses_fresh_on_disk_report_and_skips_r
     runner.queue_result(returncode=0, stdout="head-before\n")  # before_compare_head
     runner.queue_result(returncode=0, stdout="")  # after_compare (changed paths)
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since
-    runner.queue_result(returncode=0, stdout="")  # git restore report path
+    # The report path is gitignored/untracked, so git restore fails; AWF falls
+    # back to unlinking the fresh on-disk report (#604).
+    runner.queue_result(returncode=1, stdout="", stderr="error: path not tracked")
 
     executor = _executor_with_runner(runner, tmp_path)
     executor._validation_run_evidence_for_conformance = AsyncMock(  # type: ignore[method-assign]
