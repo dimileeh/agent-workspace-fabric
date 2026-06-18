@@ -449,6 +449,16 @@ async def test_ci_fix_dirty_commit_failed_status_recheck_failure_preserved(
         _raising_handle_provider_agent_run_error,
     )
 
+    # Regression for PRRT_kwDOSJAM6s6KaXdB: the status-recheck-failure warning
+    # must log the actual ``git status`` recheck stderr (the status failure that
+    # produced ``REPAIR_WORKTREE_STATUS_FAILED``), not the provider run stderr
+    # (``agent_run_err.result.stderr``), so triage sees the right root cause.
+    warnings: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.ci_ops._log.warning",
+        lambda event, **fields: warnings.append((event, fields)),
+    )
+
     push_result = await runner._run_ci_fix(
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
@@ -475,3 +485,13 @@ async def test_ci_fix_dirty_commit_failed_status_recheck_failure_preserved(
         "status_stderr": "fatal: not a git repository\n",
         "pushed": False,
     }
+    # PRRT_kwDOSJAM6s6KaXdB: the recheck-status-failed warning logs the status
+    # failure stderr, not the provider run stderr.
+    recheck_warning = next(
+        (event, fields)
+        for event, fields in warnings
+        if event == "monitor.ci_fix_dirty_commit_recheck_status_failed"
+    )
+    assert recheck_warning is not None
+    assert recheck_warning[1]["stderr"] == "fatal: not a git repository\n"
+    assert recheck_warning[1]["workspace_id"] == workspace_id

@@ -233,7 +233,7 @@ async def _run_ci_fix(
                     _log.warning(
                         "monitor.ci_fix_dirty_commit_recheck_status_failed",
                         workspace_id=workspace_id,
-                        stderr=agent_run_err.result.stderr[:400],
+                        stderr=str((stranded_dirty.details or {}).get("status_stderr", ""))[:400],
                     )
                     return cast(_GitPushResult, stranded_dirty)
                 _log.warning(
