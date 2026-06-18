@@ -76,10 +76,20 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
 
     ``restore_ref`` is ``operation_start_head``: the worktree was proven
     clean at that HEAD by the repair-start guard, so resetting to it
-    discards only this operation's stranded residue. A cleanup failure is
-    logged but never clobbers the pending provider-recovery exception: the
-    loop's recovery handlers still run, and a stranded residue surfaces as
-    the next attempt's pre-existing-dirty guard rather than being silently
+    discards only this operation's stranded residue. ``git reset --hard``
+    only restores tracked paths; the repair agents can also leave
+    UNTRACKED residue (a newly generated file), and the next cycle's
+    repair-start guard enumerates untracked paths via
+    ``--untracked-files=all`` and treats them as dirty, so untracked
+    residue would still trip ``PRE_EXISTING_DIRTY_WORKTREE``. The
+    ``_pre_push_validation_cleanup`` path (which runs ``git restore`` for
+    tracked paths and ``git clean -ffd`` for non-ignored untracked paths)
+    is therefore invoked AFTER the reset to remove untracked residue,
+    mirroring the fix-pass and finalize residue rollbacks (review thread
+    ``PRRT_kwDOSJAM6s6Khuvf``). A cleanup failure is logged but never
+    clobbers the pending provider-recovery exception: the loop's recovery
+    handlers still run, and a stranded residue surfaces as the next
+    attempt's pre-existing-dirty guard rather than being silently
     swallowed here.
     """
     reset = await self._deps.runner.run(
@@ -92,6 +102,31 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
             restore_ref=restore_ref,
             reset_returncode=reset.returncode,
             reset_stderr=(reset.stderr or "")[:400],
+        )
+        return
+    # ``git reset --hard`` does not remove untracked files; the repair agents
+    # can leave untracked residue that the next cycle's repair-start guard
+    # (``_pre_existing_dirty_repair_worktree_result``) treats as dirty. Run the
+    # shared validation cleanup path, which invokes ``git clean -ffd`` for
+    # non-ignored untracked paths, mirroring the fix-pass and finalize residue
+    # rollbacks (review thread ``PRRT_kwDOSJAM6s6Khuvf``). Resolve the helper
+    # through the module namespace so test monkeypatches on
+    # ``pre_push_validation._pre_push_validation_cleanup`` intercept this call.
+    from awf.runtime.pr_monitor_runner import pre_push_validation as _ppv
+
+    cleanup = await _ppv._pre_push_validation_cleanup(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=restore_ref,
+    )
+    if not cleanup.ok:
+        _log.warning(
+            "monitor.ci_fix_provider_recovery_rollback_untracked_cleanup_failed",
+            workspace_id=workspace_id,
+            restore_ref=restore_ref,
+            cleanup_reason_code=cleanup.reason_code,
+            cleanup_message=cleanup.message[:400],
+            cleanup_stderr=cleanup.cleanup_stderr[:400],
         )
         return
     _log.info(

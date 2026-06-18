@@ -861,3 +861,110 @@ async def test_ci_fix_commit_sink_provider_recovery_rolls_back_residue_before_re
         "reset" in call and "--hard" in call and operation_start_head in call
         for call in joined_calls
     ), joined_calls
+
+
+@pytest.mark.unit
+async def test_ci_fix_commit_sink_provider_recovery_cleans_untracked_residue_before_re_raise(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6Khuvf — untracked residue must be cleaned.
+
+    ``git reset --hard`` only resets HEAD/index/tracked working-tree files; it
+    does NOT remove untracked files. The protected-scope repair agent (or the
+    CI-repair agent) can leave untracked repair output behind, and
+    ``_pre_existing_dirty_repair_worktree_result`` (which enumerates untracked
+    paths via ``--untracked-files=all``) treats untracked files as dirty, so
+    the next monitor cycle trips ``PRE_EXISTING_DIRTY_WORKTREE`` instead of
+    retrying the provider recovery. The rollback must therefore also clean
+    untracked residue — mirroring the fix-pass residue rollback
+    (``PRRT_kwDOSJAM6s6Kc_Ak``) and the finalize residue rollback
+    (``PRRT_kwDOSJAM6s6KewGH``), both of which run ``_pre_push_validation_cleanup``
+    (which invokes ``git clean -ffd`` for non-ignored untracked paths).
+    """
+    from unittest.mock import AsyncMock
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    # Mark the worktree as a git worktree so ``check_validation_worktree_clean``
+    # (invoked inside ``_pre_push_validation_cleanup``) does not short-circuit
+    # to ``skipped`` and actually drives the cleanup git commands.
+    (worktree).mkdir(parents=True, exist_ok=True)
+    (worktree / ".git").write_text("gitdir: /tmp/fake.git\n", encoding="utf-8")
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr="MODEL_CAPACITY_EXHAUSTED",
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    operation_start_head = "abc1234567890def"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
+    # rollback: git reset --hard <operation_start_head>
+    cmd.queue_result(returncode=0)
+    # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``:
+    # the protected-scope repair agent left an untracked residue file behind.
+    cmd.queue_result(returncode=0, stdout="?? src/generated_repair.py\n")
+    # ``git clean -ffd -- src/generated_repair.py`` removes the untracked residue.
+    cmd.queue_result(returncode=0)
+    # HEAD verification: ``rev-parse <restore_ref>`` + ``rev-parse HEAD``.
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    raised_exc = ProviderRecoveryRetryError(
+        "provider recovery raised inside the CI fix commit sink"
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    # The rollback MUST remove untracked residue via ``git clean -ffd`` (or the
+    # equivalent validation cleanup path) before re-raising, so the next monitor
+    # attempt does not trip ``PRE_EXISTING_DIRTY_WORKTREE`` on the untracked
+    # repair output the provider-recovery path left behind.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any("clean" in call and "-ffd" in call for call in joined_calls), joined_calls
