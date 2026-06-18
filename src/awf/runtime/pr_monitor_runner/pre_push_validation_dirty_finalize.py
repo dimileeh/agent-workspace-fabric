@@ -379,12 +379,36 @@ async def _try_finalize_pre_push_dirty_repair_state(
         )
     except _MonitorPolicyBlockedError as exc:
         # ``_commit_dirty_worktree`` raises this when monitor-authored changes
-        # violate blocking workspace policy. Like the other commit callers
-        # (``remote_ops.py``, ``ci_ops.py``, ``fix_cycle.py``,
-        # ``operator_hints.py``), preserve the policy reason code end-to-end
-        # instead of letting it collapse into the generic pre-existing-dirty
-        # failure. Returning a non-clean check carrying the reason code flows
-        # through ``_pre_push_dirty_result`` into ``_GitPushResult.reason_code``.
+        # violate blocking workspace policy. The policy check runs BEFORE the
+        # actual ``git commit`` (``_refresh_supply_chain_policy_before_push``),
+        # so the dirty paths being finalized are still in the worktree. Like the
+        # other commit callers (``remote_ops.py``, ``ci_ops.py``,
+        # ``fix_cycle.py``, ``operator_hints.py``), preserve the policy reason
+        # code end-to-end instead of letting it collapse into the generic
+        # pre-existing-dirty failure. Returning a non-clean check carrying the
+        # reason code flows through ``_pre_push_dirty_result`` into
+        # ``_GitPushResult.reason_code``. That reason is intentionally
+        # NON-terminal (``_GitPushResult.terminal_monitor_failure`` does not
+        # include ``MONITOR_POLICY_BLOCKED``), so the monitor loop increments
+        # and retries. Returning without rolling back strands the residue, and
+        # the next repair cycle's repair-start guard
+        # (``_pre_existing_dirty_repair_worktree_result``) trips as
+        # ``PRE_EXISTING_DIRTY_WORKTREE``, losing the policy reason and wedging
+        # recovery instead of re-polling cleanly. Roll back to
+        # ``finalize_start_head`` before returning this reason, mirroring the
+        # fix-pass policy-blocked rollback (review thread
+        # ``PRRT_kwDOSJAM6s6KjRRL``, mirroring ``PRRT_kwDOSJAM6s6Kg7Dm``). A
+        # rollback failure is logged but never clobbers the policy reason: the
+        # loop still sees ``MONITOR_POLICY_BLOCKED`` and a stranded residue
+        # surfaces as the next attempt's pre-existing-dirty guard rather than
+        # being silently swallowed here.
+        await _rollback_finalize_dirty_residue_before_provider_recovery(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=finalize_start_head,
+            reason="policy_blocked_dirty_residue",
+        )
         _log.warning(
             "monitor.pre_push_dirty_finalize_policy_blocked",
             workspace_id=workspace_id,

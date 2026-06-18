@@ -928,12 +928,24 @@ async def test_pre_push_validation_finalize_preserves_policy_blocked_reason_code
         "_pre_push_validation_worktree_check",
         check_worktree_clean,
     )
+    finalize_start_head = "a" * 40
     cmd = FakeCommandRunner()
-    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")  # initial rev-parse HEAD
     # Operation-owned delta includes the dirty path, so the finalize proceeds.
     # The committed delta is parsed from ``--name-status -z``; the staged delta
     # is unqueued and resolves to the default empty result (no staged paths).
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``
+    # (status): report the policy-blocked residue the finalize was trying to
+    # commit (the policy check runs before the actual ``git commit``).
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")
+    # ``git restore --source <finalize_start_head> --staged --worktree -- src/fix.py``.
+    cmd.queue_result(returncode=0)
+    # Post-restore status recheck (no more residue after the restore).
+    cmd.queue_result(returncode=0, stdout="")
+    # HEAD verification: ``rev-parse <finalize_start_head>`` + ``rev-parse HEAD``.
+    cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -966,6 +978,16 @@ async def test_pre_push_validation_finalize_preserves_policy_blocked_reason_code
     assert result.validation_run_id is None
     # The finalize failure must not re-check the tree (no verify/recheck pass).
     assert check_worktree_clean.await_count == 1
+    # The finalize MUST roll back the policy-blocked residue to the
+    # finalize-start HEAD before returning so the next monitor attempt does
+    # not trip ``PRE_EXISTING_DIRTY_WORKTREE`` (the policy reason is
+    # non-terminal, so the loop retries — review thread
+    # ``PRRT_kwDOSJAM6s6KjRRL``, mirroring ``PRRT_kwDOSJAM6s6Kg7Dm``).
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        f"restore --source {finalize_start_head} --staged --worktree" in call
+        for call in joined_calls
+    ), joined_calls
 
 
 @pytest.mark.unit
