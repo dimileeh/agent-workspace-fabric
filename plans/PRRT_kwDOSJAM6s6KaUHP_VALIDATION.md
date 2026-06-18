@@ -36,7 +36,7 @@
 ## Evidence (focused checks only — broad validation owned by AWF/GitHub)
 
 TDD red (unfixed code, new regression test):
-```
+```text
 $ uv run --python 3.12 --extra dev python -m pytest \
     tests/unit/runtime/test_pr_monitor_pre_push_validation_finalize.py::test_pre_push_validation_finalize_commits_operation_owned_unstaged_dirt -q
 ...
@@ -46,7 +46,7 @@ monitor.pre_push_dirty_finalize_skipped_unrelated_dirt dirty_paths=['src/fix.py'
 ```
 
 TDD green (fixed code, full finalize file):
-```
+```text
 $ uv run --python 3.12 --extra dev python -m pytest \
     tests/unit/runtime/test_pr_monitor_pre_push_validation.py \
     tests/unit/runtime/test_pr_monitor_pre_push_validation_finalize.py -q
@@ -55,7 +55,7 @@ $ uv run --python 3.12 --extra dev python -m pytest \
 ```
 
 Edges/cleanup regressions:
-```
+```text
 $ uv run --python 3.12 --extra dev python -m pytest \
     tests/unit/runtime/test_pr_monitor_pre_push_validation_edges.py \
     tests/unit/runtime/test_pr_monitor_pre_push_validation_cleanup.py -q
@@ -64,7 +64,7 @@ $ uv run --python 3.12 --extra dev python -m pytest \
 ```
 
 Lint:
-```
+```text
 $ uv run --python 3.12 --extra dev ruff check \
     src/awf/runtime/pr_monitor_runner/pre_push_validation.py \
     tests/unit/runtime/test_pr_monitor_pre_push_validation_finalize.py
@@ -72,7 +72,7 @@ All checks passed!
 ```
 
 Typecheck:
-```
+```text
 $ uv run --python 3.12 --extra dev mypy \
     src/awf/runtime/pr_monitor_runner/pre_push_validation.py
 Success: no issues found in 1 source file
