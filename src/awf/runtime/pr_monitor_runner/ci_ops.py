@@ -33,6 +33,7 @@ from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
 from awf.runtime.pr_monitor_runner.constants import (
     _MONITOR_POLICY_BLOCKED_REASON,
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
+    _REPAIR_WORKTREE_STATUS_FAILED_REASON,
 )
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
@@ -221,6 +222,20 @@ async def _run_ci_fix(
                     await self._handle_provider_agent_run_error(
                         workspace_id, agent_run_err, state=state
                     )
+                # If the post-commit recheck failed because ``git status``
+                # itself errored (transient status/inspection failure), the
+                # helper returns ``REPAIR_WORKTREE_STATUS_FAILED`` — not dirty
+                # paths. That is a status-failure result, not stranded repair
+                # output, so preserve it as-is instead of converting it into a
+                # misleading ``REPAIR_DIRTY_COMMIT_FAILED`` with empty
+                # ``stranded_paths``. See PRRT_kwDOSJAM6s6KZP8c.
+                if stranded_dirty.reason_code == _REPAIR_WORKTREE_STATUS_FAILED_REASON:
+                    _log.warning(
+                        "monitor.ci_fix_dirty_commit_recheck_status_failed",
+                        workspace_id=workspace_id,
+                        stderr=agent_run_err.result.stderr[:400],
+                    )
+                    return cast(_GitPushResult, stranded_dirty)
                 _log.warning(
                     "monitor.ci_fix_dirty_commit_failed",
                     workspace_id=workspace_id,

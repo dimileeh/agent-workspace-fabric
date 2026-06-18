@@ -355,3 +355,123 @@ async def test_ci_fix_dirty_commit_failed_surfaces_terminal_result_not_provider_
         "dirty_worktree_pre_commit",
         "dirty_worktree_post_commit_failed",
     ]
+
+
+@pytest.mark.unit
+async def test_ci_fix_dirty_commit_failed_status_recheck_failure_preserved(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KZP8c (discussion r3432359049).
+
+    When the CI agent raises a recoverable ``AgentRunError`` AND
+    ``_commit_dirty_worktree`` returns False (commit sink failed), and the
+    post-commit dirty recheck returns a result *because ``git status`` itself
+    failed* (``REPAIR_WORKTREE_STATUS_FAILED``, not dirty paths), the recheck
+    result must be preserved as-is — it is a status-failure result, not
+    stranded repair output. Converting it into a misleading
+    ``REPAIR_DIRTY_COMMIT_FAILED`` with empty ``stranded_paths`` hides the
+    transient status/inspection failure behind a commit-sink reason.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    expected_stderr = "MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr=expected_stderr,
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
+    cmd.queue_result(returncode=0)  # git add
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=1, stderr="git commit failed\n")  # git commit FAILS
+    # post-commit dirty recheck: git status itself FAILS (not dirty paths)
+    cmd.queue_result(
+        returncode=128,
+        stdout="",
+        stderr="fatal: not a git repository\n",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    ownership_reasons: list[str] = []
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        ownership_reasons.append(reason)
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    handle_calls: list[tuple[str, AgentRunError]] = []
+
+    async def _raising_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: object = None,
+    ) -> str:
+        handle_calls.append((workspace_id_arg, exc))
+        raise ProviderRecoveryRetryError()
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _raising_handle_provider_agent_run_error,
+    )
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    # Provider state is still recorded once before the terminal result.
+    assert len(handle_calls) == 1
+    assert handle_calls[0][0] == workspace_id
+    assert handle_calls[0][1].result.stderr == expected_stderr
+    # The helper's status-failure result is preserved as-is — not converted
+    # into a misleading REPAIR_DIRTY_COMMIT_FAILED with empty stranded_paths.
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == "REPAIR_WORKTREE_STATUS_FAILED"
+    assert push_result.terminal_monitor_failure is True
+    assert push_result.details == {
+        "phase": "repair_start",
+        "operation_type": "ci_repair",
+        "status_stderr": "fatal: not a git repository\n",
+        "pushed": False,
+    }
