@@ -295,6 +295,114 @@ async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_except
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exc_cls", "expected_reason_code"),
+    [
+        ("ProtectedScopeDiffError", "PROTECTED_SCOPE_DIFF_UNAVAILABLE"),
+        ("_MonitorPolicyBlockedError", "MONITOR_POLICY_BLOCKED"),
+        (
+            "_MonitorAgentRuntimeOwnershipRepairFailedError",
+            "AGENT_RUNTIME_OWNERSHIP_REPAIR_FAILED",
+        ),
+    ],
+)
+async def test_pre_push_validation_fix_pass_reason_coded_commit_exception_is_structured_push_failure(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls: str,
+    expected_reason_code: str,
+) -> None:
+    """Reason-coded commit exceptions during a fix pass must surface as a
+    structured ``_GitPushResult`` (terminal reason code + failure accounting),
+    not escape the validated-push boundary and abort the monitor without a
+    result.  See review thread PRRT_kwDOSJAM6s6KbbE4.
+    """
+    from typing import Any
+
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    fix_start_head = "a" * 40
+    cmd = FakeCommandRunner()
+    # ``_run_pre_push_validation_fix_pass`` reads HEAD before the agent run and
+    # again after a clean (no-commit) fix pass.  Both resolve to ``fix_start_head``
+    # so the genuine-no-commit rollback path is bypassed when the commit sink
+    # raises before reaching the no-commit branch.
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        pre_push_validation_fix_passes=1,
+    )
+    runner._deps.validation = _FakeValidation(  # type: ignore[assignment]
+        _validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+    )
+
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: PYTEST_TEST_FAILURE",
+        validation_reason_code="PYTEST_TEST_FAILURE",
+        result=_validation_result(tmp_path, ok=False, reason_code="PYTEST_TEST_FAILURE"),
+    )
+
+    async def _run_pre_push_validation(
+        _self: Any,
+        **_kwargs: object,
+    ) -> pre_push_validation._PrePushValidationResult:
+        """Bypass the real validation flow; the fix-pass commit path is under test."""
+        return validation_result
+
+    monkeypatch.setattr(
+        pre_push_validation,
+        "_run_pre_push_validation",
+        _run_pre_push_validation,
+    )
+
+    raised_exc = getattr(monitor_types, exc_cls)("reason-coded fix-pass commit failure")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Simulate a reason-coded commit-sink failure during a fix pass."""
+        raise raised_exc
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+
+    result = await runner._validated_git_push_result(
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.reason_code == expected_reason_code
+    # The terminal reason codes (protected-scope diff unavailable and agent
+    # runtime ownership repair failed) must flow into ``terminal_monitor_failure``
+    # so the monitor loop records a failed operation and terminates instead of
+    # looping forever or crashing the background task.  ``MONITOR_POLICY_BLOCKED``
+    # is intentionally non-terminal (the monitor re-polls to re-address, matching
+    # the other commit-sink callers in ``fix_cycle.py`` / ``ci_ops.py``).
+    if expected_reason_code != "MONITOR_POLICY_BLOCKED":
+        assert result.terminal_monitor_failure is True
+    # No push should be attempted after a reason-coded fix-pass commit failure.
+    assert "git push" not in [" ".join(call.args) for call in cmd.calls]
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

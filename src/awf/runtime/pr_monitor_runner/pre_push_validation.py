@@ -455,19 +455,80 @@ async def _run_pre_push_validation_with_fix_passes(
                 workspace_id=workspace_id,
                 worktree_path=worktree_path,
             )
-        committed, fix_pass_failure_reason = await _run_pre_push_validation_fix_pass(
-            self,
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            remote_branch=remote_branch,
-            remote_url=remote_url,
-            state=state,
-            validation_result=validation_result,
-            pass_number=pass_index + 1,
-            total_passes=max_fix_passes,
-            validation_commands=validation_commands,
-        )
+        # ``_run_pre_push_validation_fix_pass`` re-raises reason-coded commit-sink
+        # exceptions (``ProtectedScopeDiffError`` / ``_MonitorPolicyBlockedError`` /
+        # ``_MonitorAgentRuntimeOwnershipRepairFailedError``) so the monitor loop's
+        # dedicated handlers surface the right reason code. The monitor action loops
+        # only catch provider-recovery exceptions around this validated-push call;
+        # the protected/policy catches live in the earlier thread/comment address
+        # arms of ``_run_fix_cycle``. Letting these escape would abort the monitor
+        # without a ``_GitPushResult``, terminal reason code, or the rollback/failure
+        # accounting the push path expects. Convert them here into the same
+        # structured failure result used by the other commit-sink callers
+        # (``ci_ops.py``, ``operator_hints.py``, ``fix_cycle.py``,
+        # ``remote_ops.py``) so ``_validated_git_push_result`` returns a
+        # ``_GitPushResult`` carrying the terminal reason code and the loop's
+        # push-failure accounting runs normally (review thread PRRT_kwDOSJAM6s6KbbE4).
+        try:
+            committed, fix_pass_failure_reason = await _run_pre_push_validation_fix_pass(
+                self,
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                remote_branch=remote_branch,
+                remote_url=remote_url,
+                state=state,
+                validation_result=validation_result,
+                pass_number=pass_index + 1,
+                total_passes=max_fix_passes,
+                validation_commands=validation_commands,
+            )
+        except ProtectedScopeDiffError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_protected_scope_diff_unavailable",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+            )
+            return replace(
+                validation_result,
+                reason_code=_PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
+                message=(
+                    "PR monitor pre-push validation fix pass blocked: "
+                    f"protected-scope diff unavailable: {exc}"
+                ),
+            )
+        except _MonitorPolicyBlockedError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_policy_blocked",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+            )
+            return replace(
+                validation_result,
+                reason_code=_MONITOR_POLICY_BLOCKED_REASON,
+                message=(
+                    "PR monitor pre-push validation fix pass blocked: "
+                    f"monitor policy blocked the commit: {exc}"
+                ),
+            )
+        except _MonitorAgentRuntimeOwnershipRepairFailedError as exc:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_ownership_repair_failed",
+                workspace_id=workspace_id,
+                pass_number=pass_index + 1,
+                error=repr(exc),
+                reason_code=exc.reason_code,
+            )
+            return replace(
+                validation_result,
+                reason_code=exc.reason_code,
+                message=(
+                    "PR monitor pre-push validation fix pass blocked: "
+                    f"agent runtime ownership repair failed: {exc}"
+                ),
+            )
         if fix_pass_failure_reason is not None:
             failure_label = (
                 "infrastructure failed"
