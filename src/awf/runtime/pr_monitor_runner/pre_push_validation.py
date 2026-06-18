@@ -511,55 +511,57 @@ async def _operation_owned_delta_paths(
     worktree_path: Path,
     operation_start_head: str,
 ) -> set[str] | None:
-    """Return paths changed by the current operation's committed and staged delta.
+    """Return paths changed by the current operation's committed delta.
 
     The repair-start dirty guard proves the worktree was clean at
-    ``operation_start_head``, so the current monitor operation owns the union
-    of:
+    ``operation_start_head``, so the current monitor operation owns its
+    committed delta:
 
     - its committed delta: ``git diff --name-status -z operation_start_head..HEAD``
-    - its staged delta: ``git diff --name-status -z --cached operation_start_head``
 
-    Both deltas are parsed from ``--name-status -z`` (via
+    The delta is parsed from ``--name-status -z`` (via
     ``_changed_paths_from_name_status_z``) rather than raw ``--name-only``
     lines so the owned set uses the same path representation as the dirty
     check (``check_validation_worktree_clean`` ->
     ``changed_paths_from_porcelain``). ``--name-status -z`` emits NUL-delimited
     records with both the source and destination for ``R``/``C`` records, and
-    never C-quotes paths (the ``-z`` form always emits raw bytes), so a staged
-    rename's source path and a non-ASCII path are not mistaken for unrelated
-    dirt and stranded as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (review
-    thread ``PRRT_kwDOSJAM6s6KaAWk``).
+    never C-quotes paths (the ``-z`` form always emits raw bytes), so a
+    committed rename's source path and a non-ASCII path are not mistaken for
+    unrelated dirt and stranded as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
+    (review thread ``PRRT_kwDOSJAM6s6KaAWk``).
 
-    The staged delta is load-bearing for the case where the operation's
-    ``_commit_dirty_worktree`` returns False *before* creating a commit (e.g.
-    ``git commit`` fails after the agent already staged its edits via
-    ``git add -A``): ``operation_start_head..HEAD`` is then empty, but the
-    operation still owns the staged paths it attempted to commit. Without the
-    staged union every operation-owned dirty path would be treated as
-    unrelated and the finalize would strand the operation's own residue as
-    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (review thread
-    ``PRRT_kwDOSJAM6s6KYd-r``).
+    The gate deliberately does NOT union the staged delta
+    (``git diff --name-status -z --cached operation_start_head``). Per
+    ``git diff -h``, the ``--cached [<commit>]`` form compares the *current
+    index* against the commit, so a tracked file staged after the repair-start
+    dirty guard by a failed cleanup or another local process is treated as
+    operation-owned merely because it is staged. ``_commit_dirty_worktree``
+    then runs a fresh ``git status`` and ``git add -A --`` on every
+    non-ignored dirty path, staging and committing that unrelated edit, and the
+    post-commit re-validation does not catch it because the pre-commit owned
+    set already held the path. The committed delta is the only set the
+    operation actually captured, which is what the gate must use rather than
+    whatever is in the live index at finalization time (review thread
+    ``PRRT_kwDOSJAM6s6KdVXx``, mirroring the ``PRRT_kwDOSJAM6s6KbbE6``
+    working-tree-delta removal and the ``PRRT_kwDOSJAM6s6KcSj`` untracked
+    fold-in removal).
 
-    The gate deliberately does NOT union the live working-tree delta
-    (``git diff --name-status -z operation_start_head``, commit vs working
-    tree). That diff reports *every* tracked file that differs from the anchor,
-    so a tracked modification introduced after the repair-start dirty guard by
-    a failed cleanup or another local process would be treated as
-    operation-owned merely because it differs from ``operation_start_head``.
-    ``_commit_dirty_worktree`` then runs a fresh ``git status`` and
-    ``git add -A --`` on every non-ignored dirty path, staging and committing
-    that unrelated edit, and the post-commit re-validation does not catch it
-    because the pre-commit owned set already held the path. The committed and
-    staged deltas are paths the operation actually captured/attempted
-    (committed = successfully committed; staged = successfully staged), which
-    is what the gate must use rather than every live worktree difference since
-    ``operation_start_head`` (review thread ``PRRT_kwDOSJAM6s6KbbE6``).
+    The staged delta was previously unioned for the case where the operation's
+    ``_commit_dirty_worktree`` returned False *before* creating a commit
+    (e.g. ``git commit`` failed after the agent already staged its edits via
+    ``git add -A``): ``operation_start_head..HEAD`` was then empty, but the
+    operation still owned the staged paths it attempted to commit. That
+    recovery (``PRRT_kwDOSJAM6s6KYd-r``) regresses to fail-closed
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` — visible and human-recoverable,
+    not a silent sweep. Restoring it without the over-broadening requires
+    capturing the operation's attempted paths (the ``stage_paths`` the commit
+    sink computes) and threading them to the gate; tracked as a deferred
+    follow-up (see ``plans/PRRT_kwDOSJAM6s6KdVXx_PLAN.md``).
 
-    Returns ``None`` when either delta cannot be resolved (e.g. the start ref
-    is unknown, git failed, or the parsed ``--name-status -z`` output was
-    malformed) so the caller can keep the fail-closed dirty path instead of
-    committing unowned dirt.
+    Returns ``None`` when the committed delta cannot be resolved (e.g. the
+    start ref is unknown, git failed, or the parsed ``--name-status -z``
+    output was malformed) so the caller can keep the fail-closed dirty path
+    instead of committing unowned dirt.
     """
     committed_result = await self._deps.runner.run(
         git_worktree_command(
@@ -574,31 +576,15 @@ async def _operation_owned_delta_paths(
             stderr=(committed_result.stderr or "")[:400],
         )
         return None
-    staged_result = await self._deps.runner.run(
-        git_worktree_command(
-            worktree_path, "diff", "--name-status", "-z", "--cached", operation_start_head
-        )
-    )
-    if not staged_result.ok:
+    try:
+        return set(_changed_paths_from_name_status_z(committed_result.stdout or ""))
+    except ProtectedScopeDiffError:
         _log.warning(
-            "monitor.pre_push_dirty_finalize_staged_delta_unavailable",
+            "monitor.pre_push_dirty_finalize_delta_malformed",
             operation_start_head=operation_start_head,
-            returncode=staged_result.returncode,
-            stderr=(staged_result.stderr or "")[:400],
+            source=(committed_result.stdout or "")[:400],
         )
         return None
-    owned_paths: set[str] = set()
-    for source in (committed_result.stdout, staged_result.stdout):
-        try:
-            owned_paths.update(_changed_paths_from_name_status_z(source or ""))
-        except ProtectedScopeDiffError:
-            _log.warning(
-                "monitor.pre_push_dirty_finalize_delta_malformed",
-                operation_start_head=operation_start_head,
-                source=(source or "")[:400],
-            )
-            return None
-    return owned_paths
 
 
 async def _committed_delta_paths(
@@ -663,20 +649,14 @@ async def _try_finalize_pre_push_dirty_repair_state(
     The finalize is gated on the dirty paths being operation-owned: the
     repair-start dirty guard (``_pre_existing_dirty_repair_worktree_result``)
     proves the worktree was clean at ``operation_start_head``, so the current
-    monitor operation's own delta is the union of its committed delta
-    (``git diff --name-status -z operation_start_head..HEAD``) and its staged
-    delta (``git diff --name-status -z --cached operation_start_head``). Both
-    deltas are parsed from ``--name-status -z`` so the owned set uses the same
-    path representation as the dirty check (``changed_paths_from_porcelain``):
+    monitor operation's own delta is its committed delta
+    (``git diff --name-status -z operation_start_head..HEAD``). The delta is
+    parsed from ``--name-status -z`` so the owned set uses the same path
+    representation as the dirty check (``changed_paths_from_porcelain``):
     ``--name-status -z`` emits both the source and destination for ``R``/``C``
-    records and never C-quotes paths, so a staged rename's source and a
+    records and never C-quotes paths, so a committed rename's source and a
     non-ASCII path are not mistaken for unrelated dirt (review thread
-    ``PRRT_kwDOSJAM6s6KaAWk``). The staged union covers the case where the
-    operation's ``_commit_dirty_worktree`` returned
-    False before creating a commit (e.g. ``git commit`` failed after
-    ``git add -A``), leaving the operation's staged edits dirty but
-    ``operation_start_head..HEAD`` empty (review thread
-    ``PRRT_kwDOSJAM6s6KYd-r``). Only dirt confined to those paths is safe to
+    ``PRRT_kwDOSJAM6s6KaAWk``). Only dirt confined to those paths is safe to
     finalize — dirt on any other path was introduced after the repair-start
     guard (e.g. by a failed cleanup or another local process) and must stay
     fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` so it is never
@@ -691,14 +671,32 @@ async def _try_finalize_pre_push_dirty_repair_state(
     would be treated as operation-owned merely because it differs from
     ``operation_start_head``, swept into the PR via ``_commit_dirty_worktree``'s
     ``git add -A``, and missed by the post-commit re-validation. The committed
-    and staged deltas are paths the operation actually captured/attempted, so
-    they are the correct ownership proxy (review thread
-    ``PRRT_kwDOSJAM6s6KbbE6``). The previous working-tree-delta union (added
-    for ``PRRT_kwDOSJAM6s6KaUHP`` to recover operation-owned unstaged tracked
-    edits left by a failed ``git add -A``) is removed here as over-broadening;
-    that recovery now fails closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
-    and is tracked as a deferred follow-up (capturing the operation's attempted
-    paths would restore it without the over-broadening).
+    delta is the only set the operation actually captured, so it is the
+    correct ownership proxy (review thread ``PRRT_kwDOSJAM6s6KbbE6``). The
+    previous working-tree-delta union (added for ``PRRT_kwDOSJAM6s6KaUHP`` to
+    recover operation-owned unstaged tracked edits left by a failed
+    ``git add -A``) is removed here as over-broadening; that recovery now fails
+    closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` and is tracked as a
+    deferred follow-up (capturing the operation's attempted paths would restore
+    it without the over-broadening).
+
+    The gate deliberately does NOT consult the staged delta
+    (``git diff --name-status -z --cached operation_start_head``): per
+    ``git diff -h`` the ``--cached [<commit>]`` form compares the *current
+    index* against the commit, so a tracked file staged after the repair-start
+    guard by a failed cleanup or another local process would be treated as
+    operation-owned merely because it is staged, swept into the PR via
+    ``_commit_dirty_worktree``'s ``git add -A``, and missed by the post-commit
+    re-validation because the pre-commit owned set already held the path. The
+    committed delta is the correct ownership proxy (review thread
+    ``PRRT_kwDOSJAM6s6KdVXx``, mirroring the ``PRRT_kwDOSJAM6s6KbbE6``
+    working-tree delta removal). The previous staged-delta union (added for
+    ``PRRT_kwDOSJAM6s6KYd-r`` to recover operation-owned staged edits left by
+    a failed ``git commit`` after a successful ``git add -A``) is removed here
+    as over-broadening; that recovery now fails closed as
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` and is tracked as a deferred
+    follow-up (capturing the operation's attempted paths would restore it
+    without the over-broadening).
 
     The gate deliberately does NOT fold ``check.untracked_paths`` into the
     owned set. The repair-start dirty guard only proves the worktree was clean
@@ -759,9 +757,9 @@ async def _try_finalize_pre_push_dirty_repair_state(
     if owned_delta_paths is None:
         # The delta could not be resolved; do not commit unowned dirt.
         return None
-    # The ownership gate is intentionally limited to the committed and staged
-    # deltas — paths the operation actually captured/attempted. It deliberately
-    # does NOT fold in ``check.untracked_paths``. The repair-start dirty guard
+    # The ownership gate is intentionally limited to the committed delta —
+    # paths the operation actually captured. It deliberately does NOT fold in
+    # ``check.untracked_paths``. The repair-start dirty guard
     # (``_pre_existing_dirty_repair_worktree_result``) only proves the worktree
     # was clean at ``operation_start_head`` at repair *start*;
     # ``check.untracked_paths`` is computed at pre-push validation time, which
@@ -771,14 +769,14 @@ async def _try_finalize_pre_push_dirty_repair_state(
     # ``_commit_dirty_worktree`` would then stage it via ``git add -A`` and the
     # post-commit re-validation would see it as committed and confined to the
     # owned set, silently sweeping the unrelated untracked file into the PR
-    # instead of failing closed. The committed and staged deltas are the
-    # correct ownership proxy (committed = successfully committed; staged =
-    # successfully staged); the untracked fold-in is removed for the same
-    # reason the live working-tree delta was removed (review thread
-    # ``PRRT_kwDOSJAM6s6KcSj``, mirroring ``PRRT_kwDOSJAM6s6KbbE6``). The
-    # recovery for operation-owned purely-untracked repair output left by a
-    # never-run ``git add -A`` (added by ``PRRT_kwDOSJAM6s6Ka0aK``) regresses
-    # to fail-closed ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` — visible and
+    # instead of failing closed. The committed delta is the correct ownership
+    # proxy (committed = successfully committed); the untracked fold-in is
+    # removed for the same reason the live working-tree delta and the live
+    # staged delta were removed (review threads ``PRRT_kwDOSJAM6s6KbbE6``,
+    # ``PRRT_kwDOSJAM6s6KdVXx``, ``PRRT_kwDOSJAM6s6KcSj``). The recovery for
+    # operation-owned purely-untracked repair output left by a never-run
+    # ``git add -A`` (added by ``PRRT_kwDOSJAM6s6Ka0aK``) regresses to
+    # fail-closed ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` — visible and
     # human-recoverable, not a silent sweep; restoring it without the
     # over-broadening requires capturing only the operation's attempted
     # untracked paths and is tracked as a deferred follow-up.
@@ -957,10 +955,10 @@ async def _try_finalize_pre_push_dirty_repair_state(
     # ``PRRT_kwDOSJAM6s6KZP8f``).
     #
     # Only the *committed* delta is re-validated here. ``owned_delta_paths``
-    # (the pre-commit union of committed + staged + working-tree deltas) is the
-    # baseline the finalize was allowed to commit; after a successful finalize
-    # commit the operation's owned residue has moved into the committed delta.
-    # Re-using the full ``_operation_owned_delta_paths`` union would include the
+    # (the pre-commit committed delta) is the baseline the finalize was allowed
+    # to commit; after a successful finalize commit the operation's owned
+    # residue has moved into the committed delta. Re-using the full
+    # ``_operation_owned_delta_paths`` union would include the
     # commit-vs-working-tree diff, so an unrelated tracked edit that remains
     # only in the working tree after a valid finalize would be flagged as
     # ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` even though the finalize commit
