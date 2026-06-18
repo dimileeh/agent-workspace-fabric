@@ -667,6 +667,50 @@ async def _operation_owned_delta_paths(
     return owned_paths
 
 
+async def _committed_delta_paths(
+    self: Any,
+    *,
+    worktree_path: Path,
+    operation_start_head: str,
+) -> set[str] | None:
+    """Return only the paths committed since ``operation_start_head``.
+
+    Unlike ``_operation_owned_delta_paths``, this excludes the staged and
+    unstaged working-tree deltas. A successful finalize commit moves the
+    operation's owned residue into the committed delta, so the post-commit
+    unowned-delta re-validation only needs to inspect what was actually
+    committed — paths that remain only in the working tree were not added by
+    the finalize commit and must not be flagged as
+    ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` (review thread
+    ``PRRT_kwDOSJAM6s6Ka0aO``).
+
+    Returns ``None`` when the committed delta cannot be resolved so the caller
+    can keep the fail-closed dirty path instead of trusting the commit.
+    """
+    committed_result = await self._deps.runner.run(
+        git_worktree_command(
+            worktree_path, "diff", "--name-status", "-z", f"{operation_start_head}..HEAD"
+        )
+    )
+    if not committed_result.ok:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_committed_delta_unavailable",
+            operation_start_head=operation_start_head,
+            returncode=committed_result.returncode,
+            stderr=(committed_result.stderr or "")[:400],
+        )
+        return None
+    try:
+        return set(_changed_paths_from_name_status_z(committed_result.stdout or ""))
+    except ProtectedScopeDiffError:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_committed_delta_malformed",
+            operation_start_head=operation_start_head,
+            source=(committed_result.stdout or "")[:400],
+        )
+        return None
+
+
 async def _try_finalize_pre_push_dirty_repair_state(
     self: Any,
     *,
@@ -942,13 +986,26 @@ async def _try_finalize_pre_push_dirty_repair_state(
     # sweeping unowned dirt into the PR. Fail closed with a dedicated reason
     # code so the unowned commit is never pushed (review thread
     # ``PRRT_kwDOSJAM6s6KZP8f``).
-    post_commit_delta = await _operation_owned_delta_paths(
+    #
+    # Only the *committed* delta is re-validated here. ``owned_delta_paths``
+    # (the pre-commit union of committed + staged + working-tree deltas) is the
+    # baseline the finalize was allowed to commit; after a successful finalize
+    # commit the operation's owned residue has moved into the committed delta.
+    # Re-using the full ``_operation_owned_delta_paths`` union would include the
+    # commit-vs-working-tree diff, so an unrelated tracked edit that remains
+    # only in the working tree after a valid finalize would be flagged as
+    # ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` even though the finalize commit
+    # did not add it. Restricting the re-validation to the committed delta
+    # confines the fail-closed check to paths the finalize commit actually
+    # introduced (review thread ``PRRT_kwDOSJAM6s6Ka0aO``).
+    post_commit_delta = await _committed_delta_paths(
         self,
         worktree_path=worktree_path,
         operation_start_head=operation_start_head,
     )
     if post_commit_delta is None:
-        # The post-commit delta could not be resolved; do not trust the commit.
+        # The post-commit committed delta could not be resolved; do not trust
+        # the commit.
         _log.warning(
             "monitor.pre_push_dirty_finalize_post_commit_delta_unavailable",
             workspace_id=workspace_id,
@@ -960,8 +1017,8 @@ async def _try_finalize_pre_push_dirty_repair_state(
             paths=check.paths,
             reason_code=_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
             message=(
-                "pre-push dirty finalize could not re-validate the operation "
-                "delta after the commit sink side effects"
+                "pre-push dirty finalize could not re-validate the committed "
+                "operation delta after the commit sink side effects"
             ),
         )
     unowned_committed = post_commit_delta - owned_delta_paths
