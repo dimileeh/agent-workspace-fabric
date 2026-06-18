@@ -8,6 +8,7 @@ import {
   formatCostWithPricing,
   formatUsageProvenance,
   lifecycleStages,
+  normalizeLifecycle,
   pickWorkspaceLogStreams,
   renderLogEntries,
   statusGlyph,
@@ -114,6 +115,65 @@ test("lifecycleStages includes blocked as an in-flight stage before monitoring_p
   assert.ok(lifecycleStages.indexOf("blocked") < lifecycleStages.indexOf("monitoring_pr"));
   // blocked stays a non-terminal stage, so it must not appear after completed.
   assert.ok(lifecycleStages.indexOf("blocked") < lifecycleStages.indexOf("completed"));
+});
+
+// The backend lifecycle omits `blocked`, so a real blocked workspace arrives with no
+// active stage. normalizeLifecycle injects the active pause so the rail surfaces it.
+function stage(name, status) {
+  return { stage: name, started_at: null, ended_at: null, duration_seconds: null, status };
+}
+
+test("normalizeLifecycle injects an active blocked stage for a real blocked workspace", () => {
+  // Mirrors the backend for a pause from validating: stages it left are completed,
+  // downstream pending, and (since blocked isn't a lifecycle stage) nothing active.
+  const backend = [
+    stage("requested", "completed"),
+    stage("provisioning", "completed"),
+    stage("ready", "completed"),
+    stage("running", "completed"),
+    stage("validating", "completed"),
+    stage("pushing", "pending"),
+    stage("monitoring_pr", "pending"),
+    stage("completed", "pending"),
+  ];
+
+  const result = normalizeLifecycle("blocked", backend);
+  const rendered = result.map((s) => [s.stage, s.status]);
+
+  // blocked is inserted at its canonical position (after pushing, before monitoring_pr)
+  // and is the single active stage; the backend stages are untouched.
+  assert.deepEqual(rendered, [
+    ["requested", "completed"],
+    ["provisioning", "completed"],
+    ["ready", "completed"],
+    ["running", "completed"],
+    ["validating", "completed"],
+    ["pushing", "pending"],
+    ["blocked", "active"],
+    ["monitoring_pr", "pending"],
+    ["completed", "pending"],
+  ]);
+  assert.equal(result.filter((s) => s.status === "active").length, 1);
+});
+
+test("normalizeLifecycle is a no-op for a non-blocked workspace", () => {
+  const backend = [stage("running", "active"), stage("validating", "pending")];
+  assert.equal(normalizeLifecycle("running", backend), backend);
+});
+
+test("normalizeLifecycle is idempotent when a blocked stage is already present", () => {
+  const backend = [stage("validating", "completed"), stage("blocked", "active")];
+  assert.equal(normalizeLifecycle("blocked", backend), backend);
+});
+
+test("normalizeLifecycle appends blocked when no later stage is present to anchor it", () => {
+  const backend = [stage("requested", "completed"), stage("running", "completed")];
+  const rendered = normalizeLifecycle("blocked", backend).map((s) => [s.stage, s.status]);
+  assert.deepEqual(rendered, [
+    ["requested", "completed"],
+    ["running", "completed"],
+    ["blocked", "active"],
+  ]);
 });
 
 test("formatUsageProvenance maps ccusage source and reason codes to friendly labels", () => {

@@ -75,6 +75,37 @@ export function fallbackLifecycleStages(
   });
 }
 
+// The backend lifecycle (`LIFECYCLE_STAGES`, workspace_observability.py) omits the
+// non-terminal `blocked` pause. So a real blocked workspace arrives with its linear
+// stages and NO active stage: the stage it paused at is marked `completed` once left,
+// and `blocked` isn't a lifecycle stage, so `_stage_summary` never marks anything
+// active. Inject a synthetic active `blocked` stage at its canonical position (after
+// `pushing`) so the operator sees the workspace is paused awaiting them, instead of a
+// rail with no active step. No-op unless the workspace is blocked and the supplied
+// lifecycle lacks a blocked stage (idempotent + safe for every other status).
+export function normalizeLifecycle(
+  status: WorkspaceStatus,
+  lifecycle: WorkspaceLifecycleStage[],
+): WorkspaceLifecycleStage[] {
+  if (status !== "blocked" || lifecycle.some((stage) => stage.stage === "blocked")) {
+    return lifecycle;
+  }
+  const blockedStage: WorkspaceLifecycleStage = {
+    stage: "blocked",
+    started_at: null,
+    ended_at: null,
+    duration_seconds: null,
+    status: "active",
+  };
+  const blockedOrder = lifecycleStages.indexOf("blocked");
+  const insertAt = lifecycle.findIndex(
+    (stage) => lifecycleStages.indexOf(stage.stage as WorkspaceStatus) > blockedOrder,
+  );
+  return insertAt === -1
+    ? [...lifecycle, blockedStage]
+    : [...lifecycle.slice(0, insertAt), blockedStage, ...lifecycle.slice(insertAt)];
+}
+
 export function fallbackLlmUsage(
   usage?: Partial<LlmUsageSummary> | null,
 ): LlmUsageSummary {

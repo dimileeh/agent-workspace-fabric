@@ -75,7 +75,7 @@ test("formatBlockedResolutionCommands builds grant and revert commands from the 
   ]);
   assert.equal(
     grantCommand,
-    "awf workspace guide ws_abc123 --grant '.github/workflows/ci.yml' --reason '<why>'",
+    "awf workspace guide ws_abc123 --grant '.github/workflows/ci.yml' --approve-policy-downgrade --reason '<why>'",
   );
   assert.equal(
     revertCommand,
@@ -85,7 +85,7 @@ test("formatBlockedResolutionCommands builds grant and revert commands from the 
 
 test("formatBlockedResolutionCommands uses a placeholder when there are no violations", () => {
   const { grantCommand, revertCommand } = formatBlockedResolutionCommands("ws_abc123", []);
-  assert.equal(grantCommand, "awf workspace guide ws_abc123 --grant '<path>' --reason '<why>'");
+  assert.equal(grantCommand, "awf workspace guide ws_abc123 --grant '<path>' --approve-policy-downgrade --reason '<why>'");
   assert.equal(revertCommand, "awf workspace guide ws_abc123 --directive 'revert <path>; <alternative>'");
 });
 
@@ -93,13 +93,13 @@ test("formatBlockedResolutionCommands treats an empty/whitespace path as missing
   const { grantCommand, revertCommand } = formatBlockedResolutionCommands("ws_abc123", [
     { path: "   " },
   ]);
-  assert.equal(grantCommand, "awf workspace guide ws_abc123 --grant '<path>' --reason '<why>'");
+  assert.equal(grantCommand, "awf workspace guide ws_abc123 --grant '<path>' --approve-policy-downgrade --reason '<why>'");
   assert.equal(revertCommand, "awf workspace guide ws_abc123 --directive 'revert <path>; <alternative>'");
 });
 
 test("formatBlockedResolutionCommands tolerates a null violations list", () => {
   const { grantCommand } = formatBlockedResolutionCommands("ws_abc123", null);
-  assert.equal(grantCommand, "awf workspace guide ws_abc123 --grant '<path>' --reason '<why>'");
+  assert.equal(grantCommand, "awf workspace guide ws_abc123 --grant '<path>' --approve-policy-downgrade --reason '<why>'");
 });
 
 test("formatBlockedResolutionCommands escapes a single quote in the path so the shell command stays valid", () => {
@@ -110,7 +110,7 @@ test("formatBlockedResolutionCommands escapes a single quote in the path so the 
   ]);
   assert.equal(
     grantCommand,
-    "awf workspace guide ws_abc123 --grant 'it'\\''s/config.yml' --reason '<why>'",
+    "awf workspace guide ws_abc123 --grant 'it'\\''s/config.yml' --approve-policy-downgrade --reason '<why>'",
   );
   assert.equal(
     revertCommand,

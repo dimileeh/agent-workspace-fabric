@@ -61,7 +61,11 @@ export function formatBlockedResolutionCommands(
 ): BlockedResolutionCommands {
   const path = shellSingleQuote(firstViolationPath(violations));
   return {
-    grantCommand: `awf workspace guide ${workspaceId} --grant '${path}' --reason '${REASON_PLACEHOLDER}'`,
+    // The guide service rejects a grant that covers a recorded block violation
+    // unless `--approve-policy-downgrade` is set (controls_guide.py): the grant
+    // always targets the recorded violation path, so the flag is mandatory for
+    // the command to actually unblock — include it so the copied command works.
+    grantCommand: `awf workspace guide ${workspaceId} --grant '${path}' --approve-policy-downgrade --reason '${REASON_PLACEHOLDER}'`,
     revertCommand: `awf workspace guide ${workspaceId} --directive 'revert ${path}; ${ALTERNATIVE_PLACEHOLDER}'`,
   };
 }
