@@ -896,3 +896,174 @@ async def test_pre_push_validation_finalize_no_commit_clean_proceeds_when_self_c
     assert result.workspace_head_sha == "b" * 40
     assert check_worktree_clean.await_count == 2
     cleanup.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_no_commit_clean_blocks_self_commit_delta_when_finalize_start_head_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A no-commit-clean finalize must fail closed when finalize_start_head is None.
+
+    When the initial HEAD capture failed (``finalize_start_head`` is None),
+    HEAD movement cannot be ruled out, so the no-commit-clean path must still
+    run the committed-delta ownership check using ``operation_start_head``
+    (always available at this branch). An agent self-commit containing paths
+    outside the operation-owned delta must fail closed with
+    ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON`` instead of being accepted
+    on the strength of a clean tree that may hide an uninspectable commit
+    (regression for review thread ``PRRT_kwDOSJAM6s6Kq_8T``).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+        _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    # Initial rev-parse HEAD failed (empty stdout) -> finalize_start_head is None.
+    cmd.queue_result(returncode=0, stdout="\n")
+    # Pre-commit ownership gate (committed delta): the dirty path is owned.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    # Post-no-commit-clean rev-parse HEAD succeeds on retry: the protected-scope
+    # repair agent self-committed, advancing HEAD to a real SHA.
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
+    # No-commit-clean committed-delta re-validation: the agent's self-commit
+    # introduced an extra unowned path outside ``owned_delta_paths``.
+    cmd.queue_result(
+        returncode=0,
+        stdout=_name_status_z("M\0src/fix.py\0", "M\0unrelated/extra.py\0"),
+    )
+    # Final rev-parse HEAD captured by ``_run_pre_push_validation`` after the
+    # finalize returns the fail-closed unowned-delta check.
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(return_value=False))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
+    assert result.validation_run_id is None
+    assert result.workspace_head_sha == "b" * 40
+    assert validation.calls == []
+    assert check_worktree_clean.await_count == 2
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_no_commit_clean_blocks_self_commit_delta_when_post_agent_head_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A no-commit-clean finalize must fail closed when post_agent_head is None.
+
+    When the post-agent rev-parse transiently fails (``post_agent_head`` is
+    None) but ``finalize_start_head`` is known, HEAD movement cannot be ruled
+    out — the protected-scope repair agent may have self-committed. The
+    no-commit-clean path must run the committed-delta ownership check using
+    ``operation_start_head`` and fail closed when the committed delta contains
+    paths outside the operation-owned delta, instead of accepting the clean
+    recheck and letting the caller recapture HEAD and push the uninspected
+    self-commit (regression for review thread ``PRRT_kwDOSJAM6s6Kq_8T``).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+        _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    # Initial rev-parse HEAD: finalize_start_head captured.
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
+    # Pre-commit ownership gate (committed delta): the dirty path is owned.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    # Post-no-commit-clean rev-parse HEAD transiently fails (empty stdout).
+    cmd.queue_result(returncode=0, stdout="\n")
+    # No-commit-clean committed-delta re-validation: the agent's self-commit
+    # introduced an extra unowned path outside ``owned_delta_paths``.
+    cmd.queue_result(
+        returncode=0,
+        stdout=_name_status_z("M\0src/fix.py\0", "M\0unrelated/extra.py\0"),
+    )
+    # Final rev-parse HEAD captured by ``_run_pre_push_validation`` after the
+    # finalize returns the fail-closed unowned-delta check.
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(return_value=False))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
+    assert result.validation_run_id is None
+    assert result.workspace_head_sha == "b" * 40
+    assert validation.calls == []
+    assert check_worktree_clean.await_count == 2

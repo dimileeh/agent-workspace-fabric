@@ -614,11 +614,35 @@ async def _try_finalize_pre_push_dirty_repair_state(
             # ``PRRT_kwDOSJAM6s6KpCpP``, mirroring the ``PRRT_kwDOSJAM6s6KZP8f``
             # post-commit re-validation).
             post_agent_head = await self._rev_parse_head(worktree_path)
-            if (
-                finalize_start_head is not None
-                and post_agent_head is not None
-                and post_agent_head != finalize_start_head
-            ):
+            # The self-commit gate runs whenever HEAD movement cannot be PROVEN
+            # absent. ``finalize_start_head`` is the HEAD the caller captured
+            # before the finalize; ``post_agent_head`` is captured here after
+            # ``_commit_dirty_worktree`` returned False. The protected-scope
+            # repair agent runs INSIDE the sink and may self-commit, advancing
+            # HEAD while leaving the tree clean. Only ``finalize_start_head ==
+            # post_agent_head`` (both present and equal) PROVES no self-commit
+            # occurred; if either anchor is missing (a transient ``rev-parse``
+            # failure) the agent may still have self-committed and HEAD
+            # movement cannot be ruled out. Skipping the gate on a missing
+            # anchor would accept the clean recheck, the caller would recapture
+            # HEAD (which may succeed on retry), and an uninspected self-commit
+            # containing paths outside ``owned_delta_paths`` would be pushed
+            # without comparing its committed delta to the owned set. Since
+            # ``operation_start_head`` and ``owned_delta_paths`` are guaranteed
+            # non-None at this branch (early returns above), the committed-delta
+            # ownership check can always run; when no self-commit occurred the
+            # committed delta equals ``owned_delta_paths`` and the gate passes,
+            # so a missing anchor fails closed only when there actually is an
+            # unowned (or uninspectable) committed delta (review thread
+            # ``PRRT_kwDOSJAM6s6Kq_8T``, mirroring the ``PRRT_kwDOSJAM6s6KpCpP``
+            # no-commit-clean self-commit re-validation and the
+            # ``PRRT_kwDOSJAM6s6KhtZJ`` delta-unavailable fail-closed).
+            head_movement_unknown = (
+                finalize_start_head is None
+                or post_agent_head is None
+                or post_agent_head != finalize_start_head
+            )
+            if head_movement_unknown:
                 post_no_commit_delta = await _committed_delta_paths(
                     self,
                     worktree_path=worktree_path,
@@ -630,7 +654,9 @@ async def _try_finalize_pre_push_dirty_repair_state(
                     # closed with the dedicated delta-unavailable reason, as
                     # the committed-delta re-validation does for the
                     # ``committed=True`` path (review thread
-                    # ``PRRT_kwDOSJAM6s6KhtZJ``).
+                    # ``PRRT_kwDOSJAM6s6KhtZJ``). This also covers the case
+                    # where a missing anchor left HEAD movement unprovable
+                    # and the committed delta itself could not be resolved.
                     _log.warning(
                         "monitor.pre_push_dirty_finalize_no_commit_clean_delta_unavailable",
                         workspace_id=workspace_id,
