@@ -343,35 +343,23 @@ async def _run_ci_fix(
                         "pushed": False,
                     },
                 )
-        try:
-            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
-        except (
-            ProviderRecoveryRetryError,
-            ProviderRecoveryFallbackError,
-            ProviderRecoveryAuthError,
-        ):
-            # The clean commit-sink path: ``_commit_dirty_worktree`` committed
-            # the CI-repair output, then ``_handle_provider_agent_run_error``
-            # raised a provider-recovery control-flow exception. Roll back the
-            # operation's committed residue to ``operation_start_head`` BEFORE
-            # re-raising so the next monitor attempt does not trip
-            # ``_pre_existing_dirty_repair_worktree_result`` as
-            # ``PRE_EXISTING_DIRTY_WORKTREE`` and wedge the workspace on a
-            # transient outage (review thread ``PRRT_kwDOSJAM6s6Kg4JR``,
-            # mirroring the fix-pass residue rollback
-            # ``PRRT_kwDOSJAM6s6Kc_Ak`` and the finalize residue rollback
-            # ``PRRT_kwDOSJAM6s6KewGH``). A rollback failure is logged but
-            # never clobbers the recovery exception: the loop's recovery
-            # handlers still run, and a stranded residue surfaces as the next
-            # attempt's pre-existing-dirty guard rather than being silently
-            # swallowed here.
-            await _rollback_ci_fix_residue_before_provider_recovery(
-                self,
-                workspace_id=workspace_id,
-                worktree_path=worktree_path,
-                restore_ref=operation_start_head,
-            )
-            raise
+        # ``_commit_dirty_worktree`` returned ``True``: the CI-repair output
+        # was committed successfully and the worktree is clean, so there is NO
+        # stranded residue to roll back here. The pre-existing-dirty guard
+        # (``_pre_existing_dirty_repair_worktree_result``) returns ``None`` for
+        # a clean worktree, so the next monitor attempt will NOT trip
+        # ``PRE_EXISTING_DIRTY_WORKTREE``. ``_handle_provider_agent_run_error``
+        # may raise a provider-recovery control-flow exception
+        # (``ProviderRecoveryRetryError`` / ``ProviderRecoveryFallbackError`` /
+        # ``ProviderRecoveryAuthError``); let it propagate WITHOUT rolling back
+        # so the just-committed CI-repair progress is preserved for the next
+        # attempt to build on (mirroring ``comments.py``, which also commits
+        # first and then lets the handler raise without a rollback). The
+        # commit-sink-raised exception path above already rolls back the dirty
+        # residue the protected-scope repair agent left behind; that case is
+        # distinct because the commit never ran there (review thread
+        # ``PRRT_kwDOSJAM6s6Kg4JR`` / Bugbot comment id 4524501356).
+        await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
         _log.warning(
             "monitor.ci_fix_cli_failed",
             workspace_id=workspace_id,

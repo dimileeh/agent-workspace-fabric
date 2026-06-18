@@ -506,33 +506,31 @@ async def test_ci_fix_dirty_commit_failed_status_recheck_failure_preserved(
         "ProviderRecoveryAuthError",
     ],
 )
-async def test_ci_fix_provider_recovery_rolls_back_residue_before_re_raise(
+async def test_ci_fix_clean_commit_preserves_commit_when_provider_recovery_raises(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     exc_cls_name: str,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6Kg4JR (discussion r3435165285).
+    """Regression for Bugbot comment id 4524501356 (review-level on PR #615).
 
-    When ``_commit_dirty_worktree`` ->
-    ``_repair_protected_scope_changes_before_commit`` raises a
-    provider-recovery control-flow exception
-    (``ProviderRecoveryRetryError`` / ``ProviderRecoveryFallbackError`` /
-    ``ProviderRecoveryAuthError``), ``_run_ci_fix`` must roll the worktree
-    back to ``operation_start_head`` BEFORE re-raising. Otherwise the
-    CI-repair agent's committed dirt + the protected-scope repair agent's
-    partial edits strand in the worktree, and the next monitor attempt
-    trips ``_pre_existing_dirty_repair_worktree_result`` as
-    ``PRE_EXISTING_DIRTY_WORKTREE`` before the provider retry can actually
-    run, wedging the workspace on a transient outage. Mirrors the fix-pass
-    residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak`` and the finalize residue
-    rollback ``PRRT_kwDOSJAM6s6KewGH``.
+    On the CLEAN commit-sink path (``committed is True``) the CI agent raises
+    a recoverable ``AgentRunError``, ``_commit_dirty_worktree`` commits the
+    repair successfully (the worktree is now clean), and then
+    ``_handle_provider_agent_run_error`` raises a provider-recovery control-flow
+    exception (``ProviderRecoveryRetryError`` / ``ProviderRecoveryFallbackError``
+    / ``ProviderRecoveryAuthError``). The committed CI-repair progress MUST be
+    PRESERVED — the exception propagates WITHOUT a ``git reset --hard`` to
+    ``operation_start_head``.
 
-    This test exercises the clean commit-sink path (``committed is True``):
-    the CI agent raises a recoverable ``AgentRunError``, the commit sink
-    commits the repair successfully, then ``_handle_provider_agent_run_error``
-    raises the provider-recovery exception. The residue must be rolled back
-    to ``operation_start_head`` before the exception propagates.
+    A clean worktree cannot trip ``_pre_existing_dirty_repair_worktree_result``
+    (the guard returns ``None`` for empty ``git status``), so rolling back the
+    just-committed repair would only discard valid CI-repair work and defeat the
+    PR's "commit dirty output before retry" intent. This mirrors
+    ``comments.py``, which commits first and then lets the handler raise without
+    a rollback. The commit-sink-RAISED path (where the commit never ran) still
+    rolls back its dirty residue; that case is covered by
+    ``test_ci_fix_commit_sink_provider_recovery_rolls_back_residue_before_re_raise``.
     """
     from awf.runtime.pr_monitor_runner import types as monitor_types
 
@@ -562,7 +560,6 @@ async def test_ci_fix_provider_recovery_rolls_back_residue_before_re_raise(
     cmd.queue_result(returncode=0)  # git add
     cmd.queue_result(returncode=1)  # git diff --cached --quiet
     cmd.queue_result(returncode=0)  # git commit succeeds
-    cmd.queue_result(returncode=0)  # rollback: git reset --hard <operation_start_head>
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -602,8 +599,8 @@ async def test_ci_fix_provider_recovery_rolls_back_residue_before_re_raise(
         state: object = None,
     ) -> str:
         # Mirror the real handler: record the provider state then raise the
-        # recovery control-flow exception. The fix must roll back the
-        # residue to operation_start_head before re-raising.
+        # recovery control-flow exception. The committed CI-repair output MUST
+        # be preserved — no rollback to operation_start_head.
         handle_calls.append((workspace_id_arg, exc))
         raise raised_exc
 
@@ -637,11 +634,12 @@ async def test_ci_fix_provider_recovery_rolls_back_residue_before_re_raise(
         "dirty_worktree_pre_commit",
         "dirty_worktree_post_commit_succeeded",
     ]
-    # The rollback MUST reset the worktree to operation_start_head before
-    # re-raising so the next monitor attempt does not trip
-    # ``PRE_EXISTING_DIRTY_WORKTREE``.
+    # The committed CI-repair output MUST be preserved: NO ``git reset --hard``
+    # to ``operation_start_head`` runs on the clean commit path, so the next
+    # monitor attempt can build on the preserved commit instead of redoing the
+    # CI-repair work.
     joined_calls = [" ".join(call.args) for call in cmd.calls]
-    assert any(
+    assert not any(
         "reset" in call and "--hard" in call and operation_start_head in call
         for call in joined_calls
     ), joined_calls
@@ -660,8 +658,16 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
     loop's dedicated handlers surface ``PROVIDER_OUTAGE`` semantics. A stranded
     residue surfaces as the next attempt's pre-existing-dirty guard rather
     than being silently swallowed here.
+
+    This exercises the commit-sink-RAISED path: ``_commit_dirty_worktree``
+    itself raises ``ProviderRecoveryRetryError`` (e.g. from
+    ``_repair_protected_scope_changes_before_commit``), so the dirty
+    protected-scope repair residue MUST be rolled back to
+    ``operation_start_head`` before re-raising. The clean commit path no
+    longer rolls back (its worktree is clean), so the rollback-failure branch
+    is only reachable on the commit-sink-raised path now.
     """
-    from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+    from unittest.mock import AsyncMock
 
     workspace_id = await seed_monitoring_workspace(factory)
     worktree = tmp_path / "worktrees" / workspace_id
@@ -683,11 +689,6 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
-    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
-    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
-    cmd.queue_result(returncode=0)  # git add
-    cmd.queue_result(returncode=1)  # git diff --cached --quiet
-    cmd.queue_result(returncode=0)  # git commit succeeds
     # rollback FAILS: ``git reset --hard`` errors out.
     cmd.queue_result(returncode=128, stderr="fatal: could not parse object\n")
     runner = make_runner(
@@ -715,20 +716,15 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
         _repair_agent_runtime_ownership,
     )
 
-    async def _raising_handle_provider_agent_run_error(
-        workspace_id_arg: str,
-        exc: AgentRunError,
-        *,
-        state: object = None,
-    ) -> str:
-        del workspace_id_arg, exc, state
-        raise ProviderRecoveryRetryError()
-
-    monkeypatch.setattr(
-        runner,
-        "_handle_provider_agent_run_error",
-        _raising_handle_provider_agent_run_error,
+    raised_exc = ProviderRecoveryRetryError(
+        "provider recovery raised inside the CI fix commit sink"
     )
+    # The commit sink itself raises the provider-recovery exception (e.g. from
+    # ``_repair_protected_scope_changes_before_commit`` ->
+    # ``_handle_provider_agent_run_error``). The dirty residue the
+    # protected-scope repair agent left behind must be rolled back before
+    # re-raising; a rollback failure must not swallow the recovery exception.
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
 
     warnings: list[tuple[str, dict[str, object]]] = []
     monkeypatch.setattr(
