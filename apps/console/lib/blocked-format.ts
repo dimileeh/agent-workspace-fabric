@@ -59,11 +59,20 @@ export function formatBlockedResolutionCommands(
   workspaceId: string,
   violations: readonly Pick<WorkspaceBlockViolation, "path">[] | null | undefined,
 ): BlockedResolutionCommands {
-  const path = firstViolationPath(violations);
+  const path = shellSingleQuote(firstViolationPath(violations));
   return {
     grantCommand: `awf workspace guide ${workspaceId} --grant '${path}' --reason '${REASON_PLACEHOLDER}'`,
     revertCommand: `awf workspace guide ${workspaceId} --directive 'revert ${path}; ${ALTERNATIVE_PLACEHOLDER}'`,
   };
+}
+
+// The violating path is interpolated inside single-quoted shell arguments above.
+// Git filenames may legally contain a single quote (e.g. `it's/config.yml`), which
+// would break the quoting and let extra shell tokens slip in when an operator copies
+// the command. Escape it the POSIX way: close the quote, emit a literal quote, reopen
+// (`'` -> `'\''`). The `<path>` placeholder has no quote, so this is a no-op for it.
+function shellSingleQuote(value: string): string {
+  return value.replace(/'/g, "'\\''");
 }
 
 function firstViolationPath(

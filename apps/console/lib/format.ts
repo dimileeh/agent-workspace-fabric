@@ -43,6 +43,13 @@ export function fallbackLifecycleStages(
   const terminal = status === "failed" || status === "cancelled";
   const terminalSourceIndex = lifecycleStages.indexOf(terminalSourceStage as WorkspaceStatus);
   const completedThroughIndex = terminal ? Math.max(-1, terminalSourceIndex) : activeIndex - 1;
+  // `blocked` can be entered from running/validating/pushing, but it sits at a
+  // fixed position (after `pushing`) in this linear list. Without the real
+  // lifecycle data we can't tell which execution stage it paused at, so we must
+  // NOT claim the execution stages completed (a validating-time pause would
+  // otherwise falsely render `pushing` as done). Stages before execution
+  // (requested/provisioning/ready) are still safely "completed".
+  const executionStartIndex = lifecycleStages.indexOf("running");
 
   return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
     let stageStatus: WorkspaceLifecycleStage["status"];
@@ -50,6 +57,8 @@ export function fallbackLifecycleStages(
       stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
     } else if (stage === status) {
       stageStatus = "active";
+    } else if (status === "blocked" && index >= executionStartIndex) {
+      stageStatus = "pending";
     } else if (index < activeIndex) {
       stageStatus = "completed";
     } else {

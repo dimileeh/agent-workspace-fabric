@@ -101,3 +101,19 @@ test("formatBlockedResolutionCommands tolerates a null violations list", () => {
   const { grantCommand } = formatBlockedResolutionCommands("ws_abc123", null);
   assert.equal(grantCommand, "awf workspace guide ws_abc123 --grant '<path>' --reason '<why>'");
 });
+
+test("formatBlockedResolutionCommands escapes a single quote in the path so the shell command stays valid", () => {
+  // Git filenames may legally contain a single quote; without escaping it would
+  // break the single-quoted shell argument and could inject extra tokens.
+  const { grantCommand, revertCommand } = formatBlockedResolutionCommands("ws_abc123", [
+    { path: "it's/config.yml" },
+  ]);
+  assert.equal(
+    grantCommand,
+    "awf workspace guide ws_abc123 --grant 'it'\\''s/config.yml' --reason '<why>'",
+  );
+  assert.equal(
+    revertCommand,
+    "awf workspace guide ws_abc123 --directive 'revert it'\\''s/config.yml; <alternative>'",
+  );
+});

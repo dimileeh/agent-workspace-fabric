@@ -83,6 +83,24 @@ test("fallbackLifecycleStages preserves active non-terminal status", () => {
   assert.equal(stages.pushing, "pending");
 });
 
+test("fallbackLifecycleStages does not claim execution stages completed for a blocked workspace", () => {
+  // `blocked` can be entered from running/validating/pushing but sits at a fixed
+  // position in the linear list; without the real lifecycle the fallback must not
+  // falsely render a later execution stage (e.g. pushing) as completed.
+  const stages = Object.fromEntries(
+    fallbackLifecycleStages("blocked").map((stage) => [stage.stage, stage.status]),
+  );
+
+  assert.equal(stages.requested, "completed");
+  assert.equal(stages.provisioning, "completed");
+  assert.equal(stages.ready, "completed");
+  assert.equal(stages.running, "pending");
+  assert.equal(stages.validating, "pending");
+  assert.equal(stages.pushing, "pending");
+  assert.equal(stages.blocked, "active");
+  assert.equal(stages.monitoring_pr, "pending");
+});
+
 test("statusTone marks a blocked workspace as warn (operator attention)", () => {
   assert.equal(statusTone("blocked"), "warn");
 });
