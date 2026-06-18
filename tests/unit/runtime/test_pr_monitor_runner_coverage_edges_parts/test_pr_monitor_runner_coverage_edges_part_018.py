@@ -711,7 +711,7 @@ async def test_protected_scope_status_check_ignores_grant_for_new_dirty_edit(
                 operator="op@example.com",
                 reason="approved keeping the preserved protected change",
                 normalized_path=".coveragerc",
-                block_epoch=0,
+                block_epoch=workspace.block_epoch,
                 approve_policy_downgrade=True,
             )
         )
