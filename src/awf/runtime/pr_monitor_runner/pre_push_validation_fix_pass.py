@@ -27,6 +27,14 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON,
     _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON,
 )
+from awf.runtime.pr_monitor_runner.types import (
+    ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryRetryError,
+    _MonitorAgentRuntimeOwnershipRepairFailedError,
+    _MonitorPolicyBlockedError,
+)
 from awf.runtime.validation_worktree_constants import VALIDATION_WORKTREE_CLEANUP_FAILED
 
 if TYPE_CHECKING:
@@ -432,6 +440,24 @@ async def _run_pre_push_validation_fix_pass(
                 remote_push_url=remote_url,
             )
         )
+    except (
+        ProtectedScopeDiffError,
+        ProviderRecoveryAuthError,
+        ProviderRecoveryFallbackError,
+        ProviderRecoveryRetryError,
+        _MonitorAgentRuntimeOwnershipRepairFailedError,
+        _MonitorPolicyBlockedError,
+    ):
+        # ``_commit_dirty_worktree`` (and the protected-scope / provider-recovery
+        # paths it invokes) raises these reason-coded exceptions so the monitor
+        # loop's dedicated handlers surface the right reason code. The broad
+        # ``except Exception`` below would collapse them into a generic
+        # ``commit_exception`` rollback reason, hiding the structured failure
+        # semantics — re-raise before that handler. Mirrors the explicit-clause
+        # pattern every other ``_commit_dirty_worktree`` caller already uses
+        # (``fix_cycle.py``, ``remote_ops.py``, ``ci_ops.py``,
+        # ``operator_hints.py``, ``_try_finalize_pre_push_dirty_repair_state``).
+        raise
     except Exception as exc:
         _log.warning(
             "monitor.pre_push_validation_fix_commit_failed",

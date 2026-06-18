@@ -214,6 +214,87 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_cls",
+    [
+        "ProtectedScopeDiffError",
+        "ProviderRecoveryRetryError",
+        "ProviderRecoveryFallbackError",
+        "ProviderRecoveryAuthError",
+        "_MonitorPolicyBlockedError",
+        "_MonitorAgentRuntimeOwnershipRepairFailedError",
+    ],
+)
+async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_exceptions(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls: str,
+) -> None:
+    """Reason-coded exceptions from ``_commit_dirty_worktree`` must propagate, not collapse into ``commit_exception``."""
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    fix_start_head = "9" * 40
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
+    cmd.queue_result(returncode=0, stdout="?? generated.tmp\n")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    raised_exc = getattr(monitor_types, exc_cls)("reason-coded failure")
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        raise raised_exc
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    with pytest.raises(type(raised_exc)):
+        await pre_push_validation._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch="codex/pr",
+            remote_url=None,
+            state=None,
+            validation_result=validation_result,
+            pass_number=1,
+            total_passes=1,
+            validation_commands=("pytest -q",),
+        )
+
+    # The rollback handler must NOT run for reason-coded exceptions: no
+    # ``reset --hard`` against ``fix_start_head`` should be queued.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert not any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_fix_pass_rollback_preserves_ignored_paths(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
