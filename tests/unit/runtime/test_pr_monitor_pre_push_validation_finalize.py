@@ -83,16 +83,14 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
     # Operation-owned committed delta includes the dirty path, so the finalize
-    # proceeds. The staged delta is empty (the operation already committed);
-    # the working-tree delta mirrors the committed delta (working tree matches
-    # HEAD after the commit).
+    # proceeds. The staged delta is empty (the operation already committed).
+    # The live working-tree delta is NOT consulted (removed for
+    # PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     # Post-commit re-validation: only the committed delta is re-checked (the
-    # staged + working-tree deltas are not re-run post-commit), and it is still
-    # confined to the operation-owned path, so the finalize proceeds to the
-    # verify recheck.
+    # staged delta is not re-run post-commit), and it is still confined to the
+    # operation-owned path, so the finalize proceeds to the verify recheck.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
     runner = make_runner(
@@ -183,15 +181,15 @@ async def test_pre_push_validation_finalize_commits_operation_owned_staged_dirt(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Committed delta is empty (HEAD never moved): the operation staged but
-    # did not commit. The working-tree delta (commit vs working tree) carries
-    # the staged path too, since staged edits are in the working tree.
+    # did not commit. The staged delta carries the operation-owned path. The
+    # live working-tree delta is NOT consulted (removed for
+    # PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     # Post-commit re-validation: only the committed delta is re-checked (the
-    # staged + working-tree deltas are not re-run post-commit). The commit sink
-    # committed the staged path, so the committed delta now carries the
-    # operation-owned path — still confined to the operation-owned set.
+    # staged delta is not re-run post-commit). The commit sink committed the
+    # staged path, so the committed delta now carries the operation-owned path
+    # — still confined to the operation-owned set.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
@@ -234,12 +232,12 @@ async def test_pre_push_validation_finalize_commits_operation_owned_staged_dirt(
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_finalize_commits_operation_owned_unstaged_dirt(
+async def test_pre_push_validation_finalize_strands_operation_owned_unstaged_dirt_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Operation-owned unstaged dirt (failed ``git add -A``) must be finalized.
+    """Operation-owned unstaged dirt (failed ``git add -A``) strands fail-closed (deferred).
 
     When the repair operation's ``_commit_dirty_worktree`` returns False
     *before* creating a commit because ``git add -A`` failed
@@ -248,16 +246,24 @@ async def test_pre_push_validation_finalize_commits_operation_owned_unstaged_dir
     proved the worktree was clean at ``operation_start_head``. Both
     ``git diff --name-status -z operation_start_head..HEAD`` (HEAD never moved)
     and ``git diff --name-status -z --cached operation_start_head`` (nothing was
-    staged) are empty, so the committed + staged union added for
-    ``PRRT_kwDOSJAM6s6KYd-r`` still leaves ``owned_delta_paths`` empty. The
-    pre-push dirty finalize ownership gate must also include the operation's
-    unstaged working-tree delta against ``operation_start_head``
-    (``git diff --name-status -z operation_start_head``, which compares the
-    commit to the working tree and includes unstaged edits), or every
-    operation-owned unstaged dirty path is treated as unrelated and the
-    finalize is skipped, stranding the operation's own residue as
-    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (review thread
-    ``PRRT_kwDOSJAM6s6KaUHP``).
+    staged) are empty, so the committed + staged union leaves
+    ``owned_delta_paths`` empty.
+
+    ``PRRT_kwDOSJAM6s6KaUHP`` previously recovered this case by unioning the
+    live working-tree delta ``git diff --name-status -z operation_start_head``
+    (commit vs working tree). That diff reports *every* tracked file differing
+    from the anchor, so an unrelated tracked modification introduced after the
+    repair-start guard was treated as operation-owned and swept into the PR via
+    ``_commit_dirty_worktree``'s ``git add -A``, with the post-commit
+    re-validation unable to catch it (review thread
+    ``PRRT_kwDOSJAM6s6KbbE6``). The working-tree-delta branch was therefore
+    removed and this recovery now strands the operation's own unstaged tracked
+    edits as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` — fail-closed and
+    visible to a human, rather than a silent sweep of unrelated dirt. Restoring
+    this recovery without the over-broadening requires capturing the
+    operation's attempted paths (the ``stage_paths`` the commit sink computes)
+    and threading them to the gate; tracked as a deferred follow-up (see
+    ``plans/PRRT_kwDOSJAM6s6KbbE6_PLAN.md``).
     """
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
@@ -269,35 +275,21 @@ async def test_pre_push_validation_finalize_commits_operation_owned_unstaged_dir
         paths=("src/fix.py",),
         reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     )
-    clean_check = ValidationWorktreeCheck(clean=True)
-    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
     monkeypatch.setattr(
         pre_push_validation_module,
         "_pre_push_validation_worktree_check",
         check_worktree_clean,
     )
-    cleanup = AsyncMock(
-        return_value=ValidationWorktreeCleanup(
-            cleaned=False,
-            check=clean_check,
-            restore_ref="b" * 40,
-        )
-    )
-    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Pre-commit ownership gate: committed delta empty (HEAD never moved),
-    # staged delta empty (``git add -A`` failed), and the working-tree delta
-    # against operation_start_head carries the unstaged operation-owned path.
+    # staged delta empty (``git add -A`` failed). The live working-tree delta
+    # is NOT consulted (removed for PRRT_kwDOSJAM6s6KbbE6), so the unstaged
+    # operation-owned path is treated as unrelated and the finalize skips.
     cmd.queue_result(returncode=0, stdout="")  # committed delta
     cmd.queue_result(returncode=0, stdout="")  # staged delta
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # working-tree delta
-    # Post-commit re-validation: only the committed delta is re-checked (the
-    # staged + working-tree deltas are not re-run post-commit). The commit sink
-    # committed the unstaged path, so the committed delta now carries it — still
-    # confined to the operation-owned set.
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
-    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -305,7 +297,7 @@ async def test_pre_push_validation_finalize_commits_operation_owned_unstaged_dir
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    runner._deps.validation = validation  # type: ignore[assignment]
     commit_dirty = AsyncMock(return_value=True)
     monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
     state = MonitorState()
@@ -322,19 +314,121 @@ async def test_pre_push_validation_finalize_commits_operation_owned_unstaged_dir
         operation_start_head=operation_start_head,
     )
 
-    assert result.passed is True
-    assert result.workspace_head_sha == "b" * 40
-    commit_dirty.assert_awaited_once_with(
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    # The operation-owned unstaged tracked edits strand fail-closed (deferred
+    # recovery) — the commit sink must not run.
+    commit_dirty.assert_not_awaited()
+    # Validation must never run on a dirty worktree.
+    assert validation.calls == []
+    # The dirty check is not re-run after a skipped finalize (no verify pass).
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_skips_unrelated_working_tree_only_dirt(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Unrelated working-tree-only tracked dirt must stay fail-closed, not be swept in.
+
+    The ownership gate added for ``PRRT_kwDOSJAM6s6KaUHP`` unioned the live
+    working-tree delta ``git diff --name-status -z operation_start_head``
+    (commit vs working tree) into ``owned_delta_paths``. That diff reports *any*
+    tracked file that differs from the anchor, so a tracked modification
+    introduced after the repair-start dirty guard by a failed cleanup or another
+    local process is treated as operation-owned merely because it differs from
+    ``operation_start_head``. The gate then passes, ``_commit_dirty_worktree``
+    runs a fresh ``git status`` and ``git add -A --`` on every non-ignored dirty
+    path (so the unrelated edit is staged and committed), and the post-commit
+    re-validation (``PRRT_kwDOSJAM6s6KZP8f``/``Ka0aO``) does not catch it because
+    the pre-commit ``owned_delta_paths`` already contained that path. The
+    previous fail-closed behavior for unrelated dirt (``PRRT_kwDOSJAM6s6KXLaI``)
+    was lost for the working-tree-only case.
+
+    The gate must use paths captured/attempted by the repair operation (the
+    committed delta, the staged delta, and the operation's untracked output),
+    not every live worktree difference since ``operation_start_head``. A tracked
+    modification that is NOT committed, NOT staged, and NOT untracked must stay
+    fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` and never be
+    committed into the PR (review thread ``PRRT_kwDOSJAM6s6KbbE6``).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    # A tracked file modified after the repair-start guard by an unrelated
+    # process: present in the working tree (so the live working-tree diff
+    # against operation_start_head carries it) but NOT committed, NOT staged,
+    # and NOT untracked.
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("unrelated/lefover.log",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    # On the unfixed (KaUHP) code the gate treats the unrelated path as owned
+    # and the commit sink commits it; the post-commit re-validation + verify
+    # recheck then run. Queue a clean verify so the unfixed path can reach the
+    # commit_dirty assertion. On the fixed code the finalize skips before any
+    # of these run, so the extra side effect is simply unused.
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # The operation committed nothing (HEAD never moved) and staged nothing,
+    # so neither the committed nor the staged delta carries the unrelated path.
+    cmd.queue_result(returncode=0, stdout="")  # committed delta
+    cmd.queue_result(returncode=0, stdout="")  # staged delta
+    # The live working-tree diff against operation_start_head DOES carry the
+    # unrelated path (it differs from the anchor). On the KaUHP code this makes
+    # the gate treat it as operation-owned; the fix must not consult this diff.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0unrelated/lefover.log\0"))
+    # Post-commit re-validation (unfixed path only): the commit sink committed
+    # the unrelated path, so the committed delta carries it — still "owned" on
+    # the unfixed code because the pre-commit owned set also held it via the
+    # working-tree delta, so the re-validation passes. Unused on the fixed code.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0unrelated/lefover.log\0"))
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
         workspace_id=workspace_id,
-        message=f"awf: finalize PR monitor repair for {workspace_id}",
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         state=state,
-        protected_scope_revert_remote_branch=f"awf/{workspace_id}",
-        remote_push_url=None,
+        operation_start_head=operation_start_head,
     )
-    cleanup.assert_awaited_once()
-    assert check_worktree_clean.await_count == 2
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    # The unrelated working-tree-only tracked edit must not be committed.
+    commit_dirty.assert_not_awaited()
+    # Validation must never run on a dirty worktree.
+    assert validation.calls == []
+    # The dirty check is not re-run after a skipped finalize (no verify pass).
+    assert check_worktree_clean.await_count == 1
 
 
 @pytest.mark.unit
@@ -653,11 +747,11 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Operation-owned committed delta includes the dirty path, so the finalize
-    # proceeds. The staged delta is empty (the operation already committed);
-    # the working-tree delta mirrors the committed delta.
+    # proceeds. The staged delta is empty (the operation already committed).
+    # The live working-tree delta is NOT consulted (removed for
+    # PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
@@ -980,13 +1074,12 @@ async def test_pre_push_validation_finalize_threads_remote_branch_and_url_to_com
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Operation-owned committed delta includes the dirty path; staged delta
-    # empty; working-tree delta mirrors the committed delta.
+    # empty. The live working-tree delta is NOT consulted (removed for
+    # PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     # Post-commit re-validation: only the committed delta is re-checked (the
-    # staged + working-tree deltas are not re-run post-commit), and it is still
-    # operation-owned.
+    # staged delta is not re-run post-commit), and it is still operation-owned.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
     runner = make_runner(
@@ -1492,17 +1585,16 @@ async def test_pre_push_validation_finalize_fail_closed_when_commit_introduces_u
     )
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
-    # Pre-commit operation-owned delta: the dirty path is owned, so the gate
-    # lets the finalize proceed. The working-tree delta mirrors the committed
-    # delta (the path is in the working tree).
+    # Pre-commit operation-owned delta: the dirty path is owned via the
+    # committed delta, so the gate lets the finalize proceed. The live
+    # working-tree delta is NOT consulted (removed for PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
     cmd.queue_result(returncode=0, stdout="")  # staged delta
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # working-tree delta
     # Post-commit re-validation: only the committed delta is re-checked (the
-    # staged + working-tree deltas are not re-run post-commit). The commit
-    # sink's side effects introduced an extra unowned path that was committed,
-    # so the committed delta now carries both the operation-owned path and the
-    # unowned extra path.
+    # staged delta is not re-run post-commit). The commit sink's side effects
+    # introduced an extra unowned path that was committed, so the committed
+    # delta now carries both the operation-owned path and the unowned extra
+    # path.
     cmd.queue_result(
         returncode=0,
         stdout=_name_status_z("M\0src/fix.py\0", "M\0unrelated/extra.py\0"),
@@ -1559,6 +1651,13 @@ async def test_pre_push_validation_finalize_ignores_working_tree_only_unowned_di
     commit-vs-working-tree diff) would flag that working-tree-only dirt and
     fail-closed on a valid finalize (regression for review thread
     ``PRRT_kwDOSJAM6s6Ka0aO``).
+
+    Note: the live working-tree delta was removed from the pre-commit ownership
+    gate by ``PRRT_kwDOSJAM6s6KbbE6`` (it over-broadened ownership to every
+    tracked working-tree difference). The dirty path here is therefore owned
+    via the committed delta, and the unrelated working-tree-only path is simply
+    never consulted by the gate — the post-commit committed-delta-only
+    re-validation remains the load-bearing guard against unowned commits.
     """
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
@@ -1586,11 +1685,11 @@ async def test_pre_push_validation_finalize_ignores_working_tree_only_unowned_di
     monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
-    # Pre-commit ownership gate (committed + staged + working-tree deltas): the
-    # dirty path ``src/fix.py`` is operation-owned via the working-tree delta.
-    cmd.queue_result(returncode=0, stdout="")  # committed delta (HEAD never moved)
+    # Pre-commit ownership gate (committed + staged deltas only; the live
+    # working-tree delta is NOT consulted — removed for PRRT_kwDOSJAM6s6KbbE6):
+    # the dirty path ``src/fix.py`` is operation-owned via the committed delta.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
     cmd.queue_result(returncode=0, stdout="")  # staged delta
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # working-tree delta
     # Post-commit re-validation inspects ONLY the committed delta. The finalize
     # commit added the operation-owned ``src/fix.py`` and did NOT commit the
     # unrelated working-tree-only ``unrelated/extra.py``, so the committed delta
@@ -1700,16 +1799,12 @@ async def test_pre_push_validation_finalize_commits_operation_owned_rename_sourc
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Committed delta is empty (HEAD never moved): the operation staged but
-    # did not commit the rename. The working-tree delta (commit vs working
-    # tree) carries the rename record too, since staged edits are in the
-    # working tree.
+    # did not commit the rename. The staged delta carries the rename record.
+    # The live working-tree delta is NOT consulted (removed for
+    # PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout="")
     # Staged delta against operation_start_head carries the rename record,
     # which ``--name-status -z`` emits as both the source and destination.
-    cmd.queue_result(
-        returncode=0,
-        stdout=_name_status_z("R100\0oldname.txt\0newname.txt\0"),
-    )
     cmd.queue_result(
         returncode=0,
         stdout=_name_status_z("R100\0oldname.txt\0newname.txt\0"),
@@ -1810,12 +1905,11 @@ async def test_pre_push_validation_finalize_commits_operation_owned_non_ascii_di
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Committed delta is empty (HEAD never moved): the operation staged but
-    # did not commit the non-ASCII path. The working-tree delta carries it too
-    # (staged edits are in the working tree).
+    # did not commit the non-ASCII path. The staged delta carries it. The live
+    # working-tree delta is NOT consulted (removed for PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout="")
     # Staged delta against operation_start_head carries the non-ASCII path as
     # raw UTF-8 bytes (``--name-status -z`` never C-quotes paths).
-    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0caf\u00e9.txt\0"))
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0caf\u00e9.txt\0"))
     # Post-commit re-validation inspects ONLY the committed delta: the commit
     # sink committed the non-ASCII path, so the committed delta carries it —
@@ -1913,14 +2007,14 @@ async def test_pre_push_validation_finalize_commits_operation_owned_untracked_di
     monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
-    # Pre-commit ownership gate: every diff delta is empty because the path is
-    # purely untracked — not committed, not staged, and not in the
-    # commit-vs-working-tree diff. The owned set must therefore come from
-    # ``check.untracked_paths`` or the finalize would strand the operation's own
-    # untracked repair output.
+    # Pre-commit ownership gate: the committed and staged deltas are empty
+    # because the path is purely untracked — not committed, not staged. The
+    # live working-tree delta is NOT consulted (removed for
+    # PRRT_kwDOSJAM6s6KbbE6). The owned set must therefore come from
+    # ``check.untracked_paths`` or the finalize would strand the operation's
+    # own untracked repair output.
     cmd.queue_result(returncode=0, stdout="")  # committed delta
     cmd.queue_result(returncode=0, stdout="")  # staged delta
-    cmd.queue_result(returncode=0, stdout="")  # working-tree delta
     # Post-commit re-validation inspects ONLY the committed delta: the commit
     # sink committed the previously untracked path, so the committed delta now
     # carries it — still confined to the operation-owned set.
@@ -2003,13 +2097,13 @@ async def test_pre_push_validation_finalize_excludes_agent_runtime_untracked_dir
     validation = _FakeValidation(_validation_result(tmp_path, ok=True))
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
-    # Every diff delta is empty (the path is purely untracked) AND
-    # ``check.untracked_paths`` is empty (the dirty check suppressed it), so the
-    # owned set is empty and the finalize must skip and fail closed — the
-    # agent-runtime artifact must never be committed into the PR.
+    # The committed and staged deltas are empty (the path is purely untracked)
+    # AND ``check.untracked_paths`` is empty (the dirty check suppressed it),
+    # so the owned set is empty and the finalize must skip and fail closed —
+    # the agent-runtime artifact must never be committed into the PR. The live
+    # working-tree delta is NOT consulted (removed for PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout="")  # committed delta
     cmd.queue_result(returncode=0, stdout="")  # staged delta
-    cmd.queue_result(returncode=0, stdout="")  # working-tree delta
     runner = make_runner(
         factory=factory,
         cmd=cmd,
