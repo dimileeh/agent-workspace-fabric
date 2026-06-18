@@ -851,7 +851,12 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
     # PRRT_kwDOSJAM6s6KdVXx); the live working-tree delta is NOT consulted
     # (removed for PRRT_kwDOSJAM6s6KbbE6).
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
-    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
+    # The protected-scope repair only reverted working-tree edits (no
+    # self-commit), so HEAD did NOT advance past ``finalize_start_head``; the
+    # no-commit-clean self-commit gate is therefore skipped (review thread
+    # ``PRRT_kwDOSJAM6s6KpCpP``).
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # no-commit-clean rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -878,7 +883,7 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
     )
 
     assert result.passed is True
-    assert result.workspace_head_sha == "b" * 40
+    assert result.workspace_head_sha == "a" * 40
     # The no-op finalize path rechecks the worktree once (dirty check + recheck).
     assert check_worktree_clean.await_count == 2
     commit_dirty.assert_awaited_once_with(

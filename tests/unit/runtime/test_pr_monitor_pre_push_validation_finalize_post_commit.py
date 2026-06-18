@@ -1485,3 +1485,262 @@ async def test_pre_push_validation_finalize_skips_unrelated_untracked_dirt(
     assert validation.calls == []
     # The dirty check is not re-run after a skipped finalize (no verify pass).
     assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_no_commit_clean_blocks_self_commit_unowned_delta(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A no-commit clean finalize must re-validate a self-commit's owned delta.
+
+    The protected-scope repair agent invoked inside ``_commit_dirty_worktree``
+    can self-commit, advancing HEAD past ``finalize_start_head``. If that
+    self-commit cleans the worktree, the sink returns False (no remaining
+    ``stage_paths``) and the ``if not committed`` branch returns the clean
+    recheck WITHOUT comparing the new HEAD/committed delta against
+    ``owned_delta_paths``. An agent-created commit containing paths outside the
+    operation-owned delta then bypasses the post-commit
+    ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` gate and proceeds to
+    validation/push. The no-commit-clean path must first detect HEAD movement
+    and run the same committed-delta ownership check (regression for review
+    thread ``PRRT_kwDOSJAM6s6KpCpP``).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+        _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    # Only the initial pre-validation check is dirty; the no-commit recheck is
+    # clean because the protected-scope repair agent's self-commit cleaned the
+    # tree. The post-commit fail-closed branch must NOT re-run the worktree
+    # cleanliness check — the committed-delta gate is the load-bearing guard.
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Pre-commit ownership gate (committed delta only): the dirty path is owned
+    # via the committed delta, so the gate lets the finalize proceed. The staged
+    # delta is NOT consulted (removed for PRRT_kwDOSJAM6s6KdVXx); the live
+    # working-tree delta is NOT consulted (removed for PRRT_kwDOSJAM6s6KbbE6).
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
+    # Post-no-commit-clean HEAD: the protected-scope repair agent self-committed
+    # after ``finalize_start_head`` (``'a' * 40``), advancing HEAD to a new SHA.
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # no-commit-clean rev-parse HEAD
+    # No-commit-clean committed-delta re-validation: the agent's self-commit
+    # introduced an extra unowned path outside ``owned_delta_paths``, so the
+    # committed delta now carries both the operation-owned path and the unowned
+    # extra path.
+    cmd.queue_result(
+        returncode=0,
+        stdout=_name_status_z("M\0src/fix.py\0", "M\0unrelated/extra.py\0"),
+    )  # no-commit-clean committed delta re-validation
+    # Final rev-parse HEAD captured by ``_run_pre_push_validation`` after the
+    # finalize returns the fail-closed unowned-delta check.
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    # The protected-scope repair agent self-committed and cleaned the tree, so
+    # there is nothing left for the finalize commit to stage; the sink returns
+    # False even though HEAD advanced.
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(return_value=False))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
+    assert result.validation_run_id is None
+    assert result.workspace_head_sha == "b" * 40
+    # Validation must never run when the no-commit-clean path fails closed on
+    # an unowned self-commit delta.
+    assert validation.calls == []
+    # The no-commit-clean path re-runs the worktree check exactly once (the
+    # initial dirty check + the clean recheck); the committed-delta gate, not
+    # a third worktree check, fails the finalize closed.
+    assert check_worktree_clean.await_count == 2
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_no_commit_clean_delta_unavailable_when_self_commit_delta_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A no-commit-clean finalize whose self-commit delta can't be inspected must fail closed.
+
+    When the protected-scope repair agent self-commits (advancing HEAD past
+    ``finalize_start_head``) and leaves the tree clean, the no-commit-clean
+    path re-validates the committed delta. If that re-validation cannot
+    inspect the committed delta (``git diff`` failed or its ``--name-status
+    -z`` output was malformed), the finalize must fail closed with the
+    dedicated delta-unavailable reason — NOT proceed to validation on the
+    strength of a clean tree that may hide an uninspectable agent commit
+    (regression for review thread ``PRRT_kwDOSJAM6s6KpCpP``, mirroring the
+    ``committed=True`` delta-unavailable gate ``PRRT_kwDOSJAM6s6KhtZJ``).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+        _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # no-commit-clean rev-parse HEAD
+    # No-commit-clean committed-delta re-validation: ``git diff`` fails, so
+    # the agent's self-commit delta cannot be inspected.
+    cmd.queue_result(returncode=1, stdout="", stderr="unknown revision")
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(return_value=False))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON
+    assert result.validation_run_id is None
+    assert result.workspace_head_sha == "b" * 40
+    assert validation.calls == []
+    assert check_worktree_clean.await_count == 2
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_no_commit_clean_proceeds_when_self_commit_owned(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A no-commit-clean finalize with an operation-owned self-commit must proceed to validation.
+
+    When the protected-scope repair agent self-commits (advancing HEAD past
+    ``finalize_start_head``) but the self-commit's committed delta is confined
+    to the operation-owned delta, the no-commit-clean path must accept the
+    clean recheck and proceed to validation — the HEAD-movement gate must not
+    strand a legitimate operation-owned self-commit (regression for review
+    thread ``PRRT_kwDOSJAM6s6KpCpP``).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cleanup = AsyncMock(
+        return_value=ValidationWorktreeCleanup(
+            cleaned=False,
+            check=clean_check,
+            restore_ref="b" * 40,
+        )
+    )
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # no-commit-clean rev-parse HEAD
+    # No-commit-clean committed-delta re-validation: the agent's self-commit is
+    # confined to the operation-owned path, so the gate passes.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(return_value=False))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is True
+    assert result.workspace_head_sha == "b" * 40
+    assert check_worktree_clean.await_count == 2
+    cleanup.assert_awaited_once()

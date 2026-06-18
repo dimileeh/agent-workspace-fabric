@@ -597,6 +597,79 @@ async def _try_finalize_pre_push_dirty_repair_state(
             worktree_path=worktree_path,
         )
         if recheck.clean:
+            # The protected-scope repair agent invoked inside
+            # ``_commit_dirty_worktree`` (via
+            # ``_repair_protected_scope_changes_before_commit``) can self-commit,
+            # advancing HEAD past ``finalize_start_head`` while leaving the
+            # worktree clean, so the sink finds no remaining ``stage_paths`` and
+            # returns False. A clean tree therefore does NOT prove the absence
+            # of an agent-created commit: the self-commit may contain paths
+            # outside the operation-owned delta, which would bypass the
+            # post-commit ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` gate below
+            # (that gate only runs when ``committed=True``) and proceed to
+            # validation/push. Before accepting the clean recheck, detect HEAD
+            # movement and run the same committed-delta ownership check so an
+            # agent-created commit containing paths outside the operation-owned
+            # delta fails closed here (review thread
+            # ``PRRT_kwDOSJAM6s6KpCpP``, mirroring the ``PRRT_kwDOSJAM6s6KZP8f``
+            # post-commit re-validation).
+            post_agent_head = await self._rev_parse_head(worktree_path)
+            if (
+                finalize_start_head is not None
+                and post_agent_head is not None
+                and post_agent_head != finalize_start_head
+            ):
+                post_no_commit_delta = await _committed_delta_paths(
+                    self,
+                    worktree_path=worktree_path,
+                    operation_start_head=operation_start_head,
+                )
+                if post_no_commit_delta is None:
+                    # The post-no-commit-clean committed delta could not be
+                    # inspected; do not trust the agent's self-commit. Fail
+                    # closed with the dedicated delta-unavailable reason, as
+                    # the committed-delta re-validation does for the
+                    # ``committed=True`` path (review thread
+                    # ``PRRT_kwDOSJAM6s6KhtZJ``).
+                    _log.warning(
+                        "monitor.pre_push_dirty_finalize_no_commit_clean_delta_unavailable",
+                        workspace_id=workspace_id,
+                        operation_start_head=operation_start_head,
+                        post_agent_head=post_agent_head,
+                        finalize_start_head=finalize_start_head,
+                        paths=list(check.paths),
+                    )
+                    return ValidationWorktreeCheck(
+                        clean=False,
+                        paths=check.paths,
+                        reason_code=_PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
+                        message=(
+                            "pre-push dirty finalize could not re-validate the "
+                            "committed operation delta after a no-commit-clean "
+                            "agent self-commit"
+                        ),
+                    )
+                unowned_no_commit = post_no_commit_delta - owned_delta_paths
+                if unowned_no_commit:
+                    _log.warning(
+                        "monitor.pre_push_dirty_finalize_no_commit_clean_unowned_delta",
+                        workspace_id=workspace_id,
+                        operation_start_head=operation_start_head,
+                        post_agent_head=post_agent_head,
+                        finalize_start_head=finalize_start_head,
+                        owned_delta_paths=sorted(owned_delta_paths),
+                        unowned_no_commit=sorted(unowned_no_commit),
+                    )
+                    return ValidationWorktreeCheck(
+                        clean=False,
+                        paths=tuple(sorted(unowned_no_commit)),
+                        reason_code=_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+                        message=(
+                            "pre-push dirty finalize accepted a clean "
+                            "no-commit worktree whose agent self-commit "
+                            "contained paths outside the operation-owned delta"
+                        ),
+                    )
             _log.info(
                 "monitor.pre_push_dirty_finalize_no_commit_clean",
                 workspace_id=workspace_id,
