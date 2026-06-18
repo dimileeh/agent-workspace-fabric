@@ -1008,9 +1008,6 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-    cmd.queue_result(
-        returncode=0, stdout="abc1234567890def\n"
-    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout="")  # dirty status (clean: agent wrote nothing)
     # ``_run_ci_fix`` re-checks the worktree dirty state after the commit sink
     # returns False with an agent run error in flight, to decide whether the
@@ -1099,9 +1096,6 @@ async def test_execute_report_ci_failure_push_failure_records_failed_audit(
     worktree.mkdir(parents=True)
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-    cmd.queue_result(
-        returncode=0, stdout="abc1234567890def\n"
-    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")

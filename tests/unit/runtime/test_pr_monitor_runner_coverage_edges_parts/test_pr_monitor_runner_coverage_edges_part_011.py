@@ -63,9 +63,6 @@ async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-    cmd.queue_result(
-        returncode=0, stdout="abc1234567890def\n"
-    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout=" M pnpm-lock.yaml\n")  # git status
     runner = make_runner(
         factory=factory,
@@ -91,7 +88,7 @@ async def test_ci_fix_blocking_supply_chain_finding_is_not_committed_or_pushed(
     assert push_result.failed is True
     assert "Supply-chain policy blocked" in push_result.stderr
     assert push_result.reason_code == "MONITOR_POLICY_BLOCKED"
-    assert cmd.calls[3].args == _git_worktree_command(
+    assert cmd.calls[2].args == _git_worktree_command(
         tmp_path / "worktrees" / workspace_id,
         "status",
         "--porcelain",
@@ -175,9 +172,6 @@ async def test_ci_fix_provider_retry_commits_dirty_output_before_retry(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-    cmd.queue_result(
-        returncode=0, stdout="abc1234567890def\n"
-    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
     cmd.queue_result(returncode=0)  # git add
@@ -272,9 +266,6 @@ async def test_ci_fix_dirty_commit_failed_surfaces_terminal_result_not_provider_
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-    cmd.queue_result(
-        returncode=0, stdout="abc1234567890def\n"
-    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
     cmd.queue_result(returncode=0)  # git add
@@ -403,9 +394,6 @@ async def test_ci_fix_dirty_commit_failed_status_recheck_failure_preserved(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
-    cmd.queue_result(
-        returncode=0, stdout="abc1234567890def\n"
-    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
     cmd.queue_result(returncode=0)  # git add
@@ -567,9 +555,6 @@ async def test_ci_fix_clean_commit_preserves_commit_when_provider_recovery_raise
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
-    cmd.queue_result(
-        returncode=0, stdout=f"{operation_start_head}\n"
-    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
     cmd.queue_result(returncode=0)  # git add
@@ -704,9 +689,10 @@ async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_except
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
-    cmd.queue_result(
-        returncode=0, stdout=f"{operation_start_head}\n"
-    )  # post-agent HEAD (agent did not commit)
+    # post-raise HEAD (captured inside the provider-recovery ``except`` clause
+    # AFTER the sink raised; the agent did not self-commit in the sink, so it
+    # equals the operation-start HEAD).
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")
     # rollback FAILS: ``git reset --hard`` errors out.
     cmd.queue_result(returncode=128, stderr="fatal: could not parse object\n")
     runner = make_runner(
@@ -822,10 +808,11 @@ async def test_ci_fix_commit_sink_provider_recovery_rolls_back_residue_before_re
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
-    cmd.queue_result(
-        returncode=0, stdout=f"{operation_start_head}\n"
-    )  # post-agent HEAD (agent did not commit)
-    cmd.queue_result(returncode=0)  # rollback: git reset --hard <post_agent_head>
+    # post-raise HEAD (captured inside the provider-recovery ``except`` clause
+    # AFTER the sink raised; the agent did not self-commit in the sink, so it
+    # equals the operation-start HEAD).
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")
+    cmd.queue_result(returncode=0)  # rollback: git reset --hard <post_raise_head>
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -931,10 +918,11 @@ async def test_ci_fix_commit_sink_provider_recovery_cleans_untracked_residue_bef
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
-    cmd.queue_result(
-        returncode=0, stdout=f"{operation_start_head}\n"
-    )  # post-agent HEAD (agent did not commit)
-    # rollback: git reset --hard <post_agent_head>
+    # post-raise HEAD (captured inside the provider-recovery ``except`` clause
+    # AFTER the sink raised; the agent did not self-commit in the sink, so it
+    # equals the operation-start HEAD).
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")
+    # rollback: git reset --hard <post_raise_head>
     cmd.queue_result(returncode=0)
     # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``:
     # the protected-scope repair agent left an untracked residue file behind.
@@ -1042,10 +1030,12 @@ async def test_ci_fix_commit_sink_provider_recovery_rolls_back_to_post_agent_hea
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
-    cmd.queue_result(
-        returncode=0, stdout=f"{agent_commit_head}\n"
-    )  # post-agent HEAD (agent committed)
-    # rollback: git reset --hard <post_agent_head> (NOT operation_start_head)
+    # post-raise HEAD (captured inside the provider-recovery ``except`` clause
+    # AFTER the sink raised; the commit sink raised before making its own
+    # commit, so HEAD has not moved since the agent's self-commit and the
+    # post-raise HEAD equals the agent's committed HEAD).
+    cmd.queue_result(returncode=0, stdout=f"{agent_commit_head}\n")
+    # rollback: git reset --hard <post_raise_head> (NOT operation_start_head)
     cmd.queue_result(returncode=0)
     runner = make_runner(
         factory=factory,
@@ -1095,7 +1085,7 @@ async def test_ci_fix_commit_sink_provider_recovery_rolls_back_to_post_agent_hea
             remote_branch=f"awf/{workspace_id}",
         )
 
-    # The rollback MUST reset to the post-agent/pre-sink HEAD
+    # The rollback MUST reset to the post-raise HEAD
     # (``agent_commit_head``), NOT ``operation_start_head`` — preserving the
     # CI-repair agent's already-committed fix so the provider retry starts
     # from the agent-advanced tree instead of redoing or losing valid work.
@@ -1110,20 +1100,175 @@ async def test_ci_fix_commit_sink_provider_recovery_rolls_back_to_post_agent_hea
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_cls_name",
+    [
+        "ProviderRecoveryRetryError",
+        "ProviderRecoveryFallbackError",
+        "ProviderRecoveryAuthError",
+    ],
+)
+async def test_ci_fix_commit_sink_provider_recovery_rolls_back_to_post_raise_head_not_pre_sink_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls_name: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KpAD6 — preserve in-sink protected-scope self-commits.
+
+    The protected-scope repair agent runs INSIDE ``_commit_dirty_worktree`` (via
+    ``_repair_protected_scope_changes_before_commit``) and may self-commit,
+    advancing HEAD past the pre-sink HEAD snapshot BEFORE the commit sink raises
+    a provider-recovery control-flow exception. Capturing the rollback anchor
+    BEFORE the sink (a pre-try ``post_agent_head``) is stale against that in-sink
+    self-commit: ``git reset --hard <pre_sink_head>`` would drop the valid
+    protected-scope repair self-commit, so the provider retry starts from the old
+    tree and loses or redoes valid repair work.
+
+    The rollback must anchor against the HEAD captured AFTER the sink raised
+    (inside the provider-recovery ``except`` block), mirroring the dirty-finalize
+    path (``_rollback_finalize_dirty_residue_before_provider_recovery``,
+    regression ``PRRT_kwDOSJAM6s6KnWkn``), which already established the
+    post-raise anchoring contract for in-sink self-commits. The pre-try capture
+    is therefore removed from ``_run_ci_fix``; the anchor is resolved inside
+    the ``except`` clause after the sink raised.
+
+    This test simulates the in-sink self-commit by advancing a mutable HEAD cell
+    inside the mocked ``_commit_dirty_worktree`` side effect BEFORE it raises, so
+    the pre-try capture (buggy code) sees the stale pre-sink HEAD while the
+    post-raise capture (fixed code) sees the advanced HEAD.
+    """
+    from unittest.mock import AsyncMock
+
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr="MODEL_CAPACITY_EXHAUSTED",
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    operation_start_head = "abc1234567890def"
+    # The CI-repair agent did NOT self-commit, so the pre-sink HEAD still equals
+    # ``operation_start_head``. The protected-scope repair agent INSIDE the
+    # commit sink then self-commits and advances HEAD to
+    # ``in_sink_self_commit_head`` BEFORE the sink raises. The rollback must
+    # anchor against the post-raise HEAD (``in_sink_self_commit_head``), NOT the
+    # stale pre-sink HEAD (``operation_start_head``) — otherwise the in-sink
+    # self-commit is dropped.
+    in_sink_self_commit_head = "1111122222333344"
+    head_cell: dict[str, str] = {"sha": operation_start_head}
+
+    async def _fake_rev_parse_head(worktree_path_arg: Path) -> str | None:
+        del worktree_path_arg
+        return head_cell["sha"]
+
+    async def _commit_sink_side_effect(*_args: object, **_kwargs: object) -> bool:
+        # Simulate the protected-scope repair agent self-committing inside the
+        # sink and advancing HEAD BEFORE the provider-recovery exception is
+        # raised (e.g. from ``_repair_protected_scope_changes_before_commit``
+        # -> ``_handle_provider_agent_run_error``).
+        head_cell["sha"] = in_sink_self_commit_head
+        raise raised_exc
+
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
+    # rollback: ``git reset --hard <post_raise_head>`` (``in_sink_self_commit_head``
+    # under the fixed code; the stale ``operation_start_head`` under the buggy
+    # pre-try capture).
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+    # Replace ``_rev_parse_head`` with the mutable-cell mock so the pre-try
+    # capture (buggy code) and the post-raise capture (fixed code) observe
+    # different HEADs without consuming FakeCommandRunner queue slots.
+    monkeypatch.setattr(runner, "_rev_parse_head", _fake_rev_parse_head)
+
+    raised_exc = getattr(monitor_types, exc_cls_name)(
+        "provider recovery raised after protected-scope repair self-committed inside the CI fix commit sink"
+    )
+    monkeypatch.setattr(
+        runner, "_commit_dirty_worktree", AsyncMock(side_effect=_commit_sink_side_effect)
+    )
+
+    with pytest.raises(type(raised_exc)):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    # The rollback MUST reset to the post-raise HEAD
+    # (``in_sink_self_commit_head``), NOT the stale pre-sink HEAD
+    # (``operation_start_head``) — preserving the protected-scope repair
+    # agent's in-sink self-commit so the provider retry starts from the
+    # advanced tree instead of dropping valid repair work.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        "reset" in call and "--hard" in call and in_sink_self_commit_head in call
+        for call in joined_calls
+    ), joined_calls
+    assert not any(
+        "reset" in call and "--hard" in call and operation_start_head in call
+        for call in joined_calls
+    ), joined_calls
+
+
+@pytest.mark.unit
 async def test_ci_fix_commit_sink_provider_recovery_rollback_skipped_when_post_agent_head_unavailable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for PRRT_kwDOSJAM6s6Klf74 — missing anchor skips the reset.
+    """Regression for PRRT_kwDOSJAM6s6Klf74 / PRRT_kwDOSJAM6s6KpAD6 — missing anchor skips the reset.
 
-    If the post-agent/pre-sink HEAD cannot be resolved (``git rev-parse HEAD``
-    fails or returns empty), the rollback must be SKIPPED instead of
-    restoring against the wrong ref (``operation_start_head``), mirroring the
-    finalize rollback's ``restore_ref is None`` guard. A missing anchor makes
-    a safe ``git reset --hard`` impossible — better to strand visibly than
-    discard the agent's committed work against the wrong baseline. The
-    provider-recovery exception still propagates so the loop's handlers run.
+    If the post-raise HEAD cannot be resolved (``git rev-parse HEAD`` fails or
+    returns empty inside the provider-recovery ``except`` clause), the rollback
+    must be SKIPPED instead of restoring against the wrong ref
+    (``operation_start_head`` or the stale pre-sink HEAD), mirroring the
+    finalize rollback's ``restore_ref is None`` guard. A missing anchor makes a
+    safe ``git reset --hard`` impossible — better to strand visibly than discard
+    the agent's committed work against the wrong baseline. The provider-recovery
+    exception still propagates so the loop's handlers run.
     """
     from unittest.mock import AsyncMock
 
@@ -1149,7 +1294,7 @@ async def test_ci_fix_commit_sink_provider_recovery_rollback_skipped_when_post_a
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
     cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
-    # post-agent HEAD resolution FAILS (rev-parse errors) -> ``_rev_parse_head``
+    # post-raise HEAD resolution FAILS (rev-parse errors) -> ``_rev_parse_head``
     # returns None, so the rollback is skipped.
     cmd.queue_result(returncode=128, stderr="fatal: not a git repository\n")
     runner = make_runner(
