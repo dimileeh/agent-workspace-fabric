@@ -350,8 +350,14 @@ async def _validated_git_push_result(
     refspec: str | None = None,
     state: object | None = None,
     allow_validation_fix_passes: bool = True,
+    allow_resync_on_rejection: bool = True,
 ) -> _GitPushResult:
     """Run pre-push validation with optional fix passes before pushing.
+
+    ``allow_resync_on_rejection`` is threaded straight to ``_git_push_result``: an
+    approve-and-keep operator-hint resume sets it ``False`` so a non-fast-forward
+    rejection does NOT reset --hard the preserved protected commit away before its
+    grant is consumed (PRRT_kwDOSJAM6s6KZK1v).
 
     ``allow_validation_fix_passes`` gates the agent fix-pass + commit retry loop.
     The operator-hint resume path sets it ``False`` while an approve-and-keep grant
@@ -371,6 +377,7 @@ async def _validated_git_push_result(
                 remote_branch=remote_branch,
                 remote_url=remote_url,
                 refspec=refspec,
+                allow_resync_on_rejection=allow_resync_on_rejection,
             ),
         )
     validation_result = await _run_pre_push_validation_with_fix_passes(
@@ -400,6 +407,7 @@ async def _validated_git_push_result(
             remote_branch=remote_branch,
             remote_url=remote_url,
             refspec=refspec,
+            allow_resync_on_rejection=allow_resync_on_rejection,
         ),
     )
 

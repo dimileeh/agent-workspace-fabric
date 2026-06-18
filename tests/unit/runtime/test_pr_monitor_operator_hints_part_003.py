@@ -30,6 +30,9 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.constants import (
+    _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+)
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult, _ProtectedScopePushBlock
 from awf.runtime.pr_monitor_runner.types import ProtectedScopeDiffError
 from awf.service.controls import WorkspaceControlService
@@ -1234,3 +1237,213 @@ async def test_preserved_protected_change_fully_granted_edge_cases(
         )
         is False
     )
+
+
+@pytest.mark.unit
+async def test_grant_resume_non_fast_forward_rejection_reblocks_preserving_commit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approve-and-keep (grant-only) resume whose push is rejected non-fast-forward
+    — because the PR branch was advanced externally while the workspace was blocked —
+    must KEEP the preserved protected commit and RE-BLOCK so ``guide --grant`` stays
+    reachable. Before this fix the generic push helper ran fetch + ``reset --hard`` to
+    the remote head, dropping the preserved commit before the grant was consumed; the
+    next cycle then no-op'd and parked the hint at ``monitoring_pr`` where
+    ``guide --grant`` is rejected — stranding the operator (PRRT_kwDOSJAM6s6KZK1v)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep the protected edit",
+        directive=None,
+        operation_id="op_grant_only_rejection",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GRANT",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+    push_calls: list[dict[str, object]] = []
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _cli_must_not_run(**_kwargs: object) -> VerdictResult:
+        pytest.fail("a grant-only resume must NOT invoke the CLI")
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _rejected_push(**kwargs: object) -> _GitPushResult:
+        push_calls.append(kwargs)
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="[rejected] non-fast-forward",
+            reason_code=_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+        )
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "preserved-granted-sha"
+
+    async def _no_notification(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _cli_must_not_run)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _rejected_push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+    monkeypatch.setattr(runner, "_post_protected_block_notification", _no_notification)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # The grant-active push suppressed the destructive resync so the preserved commit
+    # survives, and the cycle re-blocked instead of dropping it.
+    assert push_calls, "the grant-only resume push must run"
+    assert push_calls[0]["allow_resync_on_rejection"] is False
+    assert result.paused_into_blocked is True
+    assert state.pending_operator_hint is None
+
+    async with factory() as session:
+        blocked = await WorkspaceRepository(session).get(workspace_id)
+        assert blocked is not None
+        assert blocked.status == WorkspaceStatus.blocked.value
+        assert blocked.block_resume_phase == MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+        blocked_version = blocked.version
+
+    # ``guide --grant`` is now accepted (it raised ``WorkspaceGuideGrantNotAllowedError``
+    # while parked at ``monitoring_pr``) and resolves the workspace back into the monitor.
+    async with factory() as session:
+        service = _guide_service(session)
+        response = await service.guide_workspace(
+            workspace_id,
+            directive="",
+            reason="re-approve keeping the protected pyproject.toml change",
+            grants=["pyproject.toml"],
+            approve_policy_downgrade=True,
+            operator="op@example.com",
+            idempotency_key="guide-after-rejection-reblock",
+            expected_version=blocked_version,
+        )
+        await session.commit()
+        assert response.status == WorkspaceStatus.monitoring_pr
+
+
+@pytest.mark.unit
+async def test_grant_resume_non_fast_forward_rejection_without_marker_parks_needs_human(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive branch: a grant-active resume whose push is rejected non-fast-forward
+    but with NO recorded preserved-head marker (effectively unreachable, since a
+    grant-active resume always followed a genuine block) cannot anchor a re-block. It
+    parks needs_human with a NON-failed result so the recoverable workspace stays at
+    ``monitoring_pr`` rather than being terminally failed (PRRT_kwDOSJAM6s6KZK1v)."""
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep the protected edit",
+        directive=None,
+        operation_id="op_grant_only_rejection_no_marker",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GRANT",
+    )
+    # No preserved-head marker recorded on the state.
+    state = MonitorState(pending_operator_hint=hint)
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("some-sha", None)
+
+    async def _no_block(**_kwargs: object) -> None:
+        return None
+
+    async def _not_on_remote(**_kwargs: object) -> bool:
+        return False
+
+    async def _rejected_push(**_kwargs: object) -> _GitPushResult:
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=1,
+            stderr="[rejected] non-fast-forward",
+            reason_code=_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+        )
+
+    async def _head(*_args: object, **_kwargs: object) -> str:
+        return "some-sha"
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_protected_scope_push_block", _no_block)
+    monkeypatch.setattr(runner, "_preserved_commit_already_on_remote", _not_on_remote)
+    monkeypatch.setattr(runner, "_validated_git_push_result", _rejected_push)
+    monkeypatch.setattr(runner, "_rev_parse_head", _head)
+
+    result = await runner._run_operator_hint_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        pr_head_sha="abc1234567890def",
+        hint=hint,
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    # NON-failed result so the loop parks the recoverable workspace at ``monitoring_pr``
+    # instead of terminally failing it; the hint is marked needs_human.
+    assert result.failed is False
+    assert result.paused_into_blocked is False
+    assert state.pending_operator_hint is not None
+    assert state.pending_operator_hint.status == "needs_human"

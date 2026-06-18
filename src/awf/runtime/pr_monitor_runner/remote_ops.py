@@ -20,6 +20,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.pr_monitor_runner.constants import (
     _GIT_MIRROR_BROKEN_REF_REMOVED_REASON,
+    _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
     _GITHUB_WORKFLOW_SCOPE_REQUIRED_REASON,
     _SYNC_BASE_RESOLVABLE_STALE_REASONS,
 )
@@ -511,8 +512,21 @@ async def _git_push_result(
     remote_branch: str,
     remote_url: str | None = None,
     refspec: str | None = None,
+    allow_resync_on_rejection: bool = True,
 ) -> _GitPushResult:
-    """Push HEAD and return detailed failure or resync information."""
+    """Push HEAD and return detailed failure or resync information.
+
+    ``allow_resync_on_rejection`` gates the non-fast-forward divergence recovery
+    (``git fetch`` + ``git reset --hard`` to the remote head). It defaults to
+    ``True`` (every ordinary monitor/merge push resyncs a stale local branch). The
+    operator-hint approve-and-keep resume sets it ``False``: that recovery would
+    drop the preserved protected commit the grant is meant to land BEFORE the grant
+    is consumed, then no-op the next cycle and wedge the hint at ``monitoring_pr``
+    where ``guide --grant`` is rejected. When ``False`` and the push is rejected
+    non-fast-forward, return the failure WITHOUT resetting — HEAD (and the preserved
+    commit) is kept — tagged with ``_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON`` so
+    the caller can re-block instead (PRRT_kwDOSJAM6s6KZK1v).
+    """
     from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 
     remote = remote_url or "origin"
@@ -578,6 +592,26 @@ async def _git_push_result(
             returncode=r.returncode,
             stdout=r.stdout,
             stderr=r.stderr,
+        )
+
+    if not allow_resync_on_rejection:
+        # The caller (an approve-and-keep operator-hint resume) must KEEP the
+        # preserved protected commit; resyncing here would reset --hard it away
+        # before the grant is consumed. Surface the rejection unrecovered so the
+        # caller re-blocks. ``recovered_by_resync`` stays False — no recovery ran.
+        _log.warning(
+            "monitor.push_rejected_resync_suppressed",
+            worktree_path=str(worktree_path),
+            remote_branch=remote_branch,
+            stderr=(r.stderr or "")[:400],
+        )
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=r.returncode,
+            stdout=r.stdout,
+            stderr=r.stderr,
+            reason_code=_GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
         )
 
     _log.warning(

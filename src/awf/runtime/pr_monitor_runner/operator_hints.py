@@ -25,7 +25,10 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
-from awf.runtime.pr_monitor_runner.constants import _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
+from awf.runtime.pr_monitor_runner.constants import (
+    _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON,
+    _PROTECTED_SCOPE_PUSH_BLOCKED_REASON,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
 )
@@ -396,49 +399,21 @@ async def _run_operator_hint_cycle(
         # machinery resolves it (``guide --grant`` -> ``blocked -> monitoring_pr``
         # grant-only resume -> grant-aware push). Preserve the resume ORIGIN exactly
         # as the net-diff re-block branch above (PR #609 codex P2 thread).
-        leak_block = await _directive_preserved_leak_protected_block(
-            self, workspace_id=workspace_id, message=reason
+        return await _reblock_preserved_protected_leak(
+            self,
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            pr_head_sha=pr_head_sha,
+            worktree_path=worktree_path,
+            state=state,
+            remote_branch=remote_branch,
+            base_branch=base_branch or "",
+            operation_id=_operation_id,
+            operation_type=_operation_type,
+            operation_start_head=operation_start_head,
+            block_resume_phase=block_resume_phase,
+            reason=reason,
         )
-        if leak_block is not None:
-            reblock_resume_phase = (
-                MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-                if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
-                else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
-            )
-            reblock_result = cast(
-                _GitPushResult,
-                await self._pause_monitor_for_protected_scope_block(
-                    workspace_id=workspace_id,
-                    pr_number=pr_number,
-                    pr_head_sha=pr_head_sha,
-                    protected_scope_block=leak_block,
-                    worktree_path=worktree_path,
-                    resume_phase=reblock_resume_phase,
-                    state=state,
-                    remote_branch=remote_branch,
-                    base_branch=base_branch or "",
-                    operation_id=_operation_id,
-                    operation_type=_operation_type,
-                    source_head_sha=operation_start_head,
-                ),
-            )
-            if reblock_result.paused_into_blocked:
-                # Mirror the net-diff re-block branch: the bumped block epoch
-                # supersedes this hint, so clear the in-memory monitor hint and let
-                # the resume re-arm a fresh one.
-                state.pending_operator_hint = None
-            return reblock_result
-        # Defensive fallback: a real protected block always records >=1 violation
-        # (``_protected_scope_push_block`` only returns a block for non-empty
-        # violations), so this is effectively unreachable once the preserved-head
-        # marker was set by a genuine block. If nothing can be reconstructed, keep
-        # the prior behavior: mark the hint needs_human and return a NON-failed
-        # result so the loop parks the recoverable workspace at ``monitoring_pr``
-        # awaiting the operator rather than ``_terminate_failed``ing it — a
-        # failed/terminal row would also reject a later approve-and-keep grant
-        # (PRRT_kwDOSJAM6s6KHEEU).
-        mark_operator_hint_needs_human(state, reason)
-        return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
     # Idempotent push (divergence recovery, WS-2 §5): if the preserved commit is
     # already on the remote PR branch (a monitor/worker restart re-ran the resume
     # after the push landed), treat it as a no-op rather than re-pushing.
@@ -487,9 +462,57 @@ async def _run_operator_hint_cycle(
             # (PR #609 comment 4512881681). Validation still runs; a real failure
             # surfaces and the grant survives for a re-resume.
             allow_validation_fix_passes=not active_grant_specs,
+            # Suppress the non-fast-forward resync (fetch + reset --hard to the
+            # remote head) while an approve-and-keep grant is active. If the PR
+            # branch was advanced externally during the blocked interval, that
+            # recovery would DROP the preserved protected commit the grant is meant
+            # to land before the grant is consumed, then no-op the next cycle and
+            # wedge the hint at ``monitoring_pr`` where ``guide --grant`` is rejected.
+            # Keep the commit and re-block instead (handled below)
+            # (PRRT_kwDOSJAM6s6KZK1v).
+            allow_resync_on_rejection=not active_grant_specs,
         )
     )
     if push_result.failed:
+        if (
+            push_result.reason_code == _GIT_PUSH_REJECTED_NON_FAST_FORWARD_REASON
+            and active_grant_specs
+        ):
+            # Approve-and-keep resume whose push was rejected non-fast-forward: the
+            # PR branch was advanced externally while the workspace was blocked. The
+            # push helper was told NOT to resync (``allow_resync_on_rejection`` above),
+            # so the preserved protected commit is STILL the worktree HEAD — not reset
+            # to the remote head. Re-block (keeping the commit) so ``guide --grant``
+            # becomes reachable and the operator can resolve the divergence, instead of
+            # dropping the approved commit and wedging the hint at ``monitoring_pr``
+            # (PRRT_kwDOSJAM6s6KZK1v).
+            reason = (push_result.stderr or "").strip() or (
+                "approve-and-keep resume could not fast-forward the PR branch (it was "
+                "advanced externally while the workspace was blocked); the preserved "
+                "commit was kept (not reset to the remote head)"
+            )
+            if preserved_head_sha:
+                return await _reblock_preserved_protected_leak(
+                    self,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    pr_head_sha=pr_head_sha,
+                    worktree_path=worktree_path,
+                    state=state,
+                    remote_branch=remote_branch,
+                    base_branch=base_branch or "",
+                    operation_id=_operation_id,
+                    operation_type=_operation_type,
+                    operation_start_head=operation_start_head,
+                    block_resume_phase=block_resume_phase,
+                    reason=reason,
+                )
+            # No preserved-head marker to anchor the re-block (effectively unreachable
+            # for a grant-active resume, which always followed a genuine block). Park
+            # needs_human with a NON-failed result so the recoverable workspace stays
+            # at ``monitoring_pr`` rather than being terminally failed.
+            mark_operator_hint_needs_human(state, reason)
+            return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
         if (
             push_result.reason_code == _PROTECTED_SCOPE_PUSH_BLOCKED_REASON
             or push_result.protected_scope_diff_unavailable
@@ -579,6 +602,79 @@ async def _run_operator_hint_cycle(
     # so a later DIFFERENT protected change re-blocks and must be granted again.
     await _finalize_operator_hint_resume(self, workspace_id=workspace_id, state=state)
     return cast(_GitPushResult, push_result)
+
+
+async def _reblock_preserved_protected_leak(
+    self: Any,
+    *,
+    workspace_id: str,
+    pr_number: int,
+    pr_head_sha: str,
+    worktree_path: Path,
+    state: MonitorState,
+    remote_branch: str,
+    base_branch: str,
+    operation_id: str | None,
+    operation_type: str | None,
+    operation_start_head: str | None,
+    block_resume_phase: str,
+    reason: str,
+) -> _GitPushResult:
+    """Re-block a still-undeliverable preserved protected commit into ``blocked``.
+
+    Shared by the directive-leak guard and the grant-active non-fast-forward
+    rejection branch. Both reach a state where the preserved ungranted/undelivered
+    protected commit is still in local history but the workspace is at
+    ``monitoring_pr`` — where ``guide_workspace`` rejects ``--grant`` inputs
+    (``WorkspaceGuideGrantNotAllowedError``). Rebuild the protected block from the
+    violations recorded at the original block (exactly the protected paths the
+    preserved commit changed) and reuse the shared WS-1 ``enter_blocked`` pause path
+    so the existing blocked-status + operator-grant machinery resolves it
+    (``guide --grant`` -> ``blocked -> monitoring_pr`` grant resume -> grant-aware
+    push). The resume ORIGIN is preserved exactly as the net-diff re-block branch.
+
+    Defensive fallback: a real protected block always records >=1 violation
+    (``_protected_scope_push_block`` only returns a block for non-empty violations),
+    so a ``None`` reconstruction is effectively unreachable once the preserved-head
+    marker was set by a genuine block. When nothing can be reconstructed, mark the
+    hint needs_human and return a NON-failed result so the loop parks the recoverable
+    workspace at ``monitoring_pr`` rather than ``_terminate_failed``ing it — a
+    failed/terminal row would also reject a later approve-and-keep grant
+    (PRRT_kwDOSJAM6s6KHEEU)."""
+    leak_block = await _directive_preserved_leak_protected_block(
+        self, workspace_id=workspace_id, message=reason
+    )
+    if leak_block is not None:
+        reblock_resume_phase = (
+            MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+            if block_resume_phase == MONITOR_PROTECTED_SCOPE_SYNC_BASE_RESUME_PHASE
+            else MONITOR_PROTECTED_SCOPE_PUSH_RESUME_PHASE
+        )
+        reblock_result = cast(
+            _GitPushResult,
+            await self._pause_monitor_for_protected_scope_block(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                pr_head_sha=pr_head_sha,
+                protected_scope_block=leak_block,
+                worktree_path=worktree_path,
+                resume_phase=reblock_resume_phase,
+                state=state,
+                remote_branch=remote_branch,
+                base_branch=base_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                source_head_sha=operation_start_head,
+            ),
+        )
+        if reblock_result.paused_into_blocked:
+            # Mirror the net-diff re-block branch: the bumped block epoch supersedes
+            # this hint, so clear the in-memory monitor hint and let the resume
+            # re-arm a fresh one.
+            state.pending_operator_hint = None
+        return reblock_result
+    mark_operator_hint_needs_human(state, reason)
+    return _GitPushResult(pushed=False, failed=False, returncode=1, stderr=reason)
 
 
 async def _directive_preserved_leak_protected_block(
