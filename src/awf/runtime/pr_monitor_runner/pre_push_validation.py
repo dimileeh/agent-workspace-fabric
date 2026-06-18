@@ -31,6 +31,9 @@ from awf.runtime.pr_monitor_runner.constants import (
     _PROTECTED_SCOPE_DIFF_UNAVAILABLE_REASON,
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
+from awf.runtime.pr_monitor_runner.path_parsing import (
+    _changed_paths_from_name_status_z,
+)
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
     _PRE_PUSH_VALIDATION_FAILED_REASON,
@@ -567,8 +570,19 @@ async def _operation_owned_delta_paths(
     ``operation_start_head``, so the current monitor operation owns the union
     of:
 
-    - its committed delta: ``git diff --name-only operation_start_head..HEAD``
-    - its staged delta: ``git diff --name-only --cached operation_start_head``
+    - its committed delta: ``git diff --name-status -z operation_start_head..HEAD``
+    - its staged delta: ``git diff --name-status -z --cached operation_start_head``
+
+    Both deltas are parsed from ``--name-status -z`` (via
+    ``_changed_paths_from_name_status_z``) rather than raw ``--name-only``
+    lines so the owned set uses the same path representation as the dirty
+    check (``check_validation_worktree_clean`` ->
+    ``changed_paths_from_porcelain``). ``--name-status -z`` emits NUL-delimited
+    records with both the source and destination for ``R``/``C`` records, and
+    never C-quotes paths (the ``-z`` form always emits raw bytes), so a staged
+    rename's source path and a non-ASCII path are not mistaken for unrelated
+    dirt and stranded as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (review
+    thread ``PRRT_kwDOSJAM6s6KaAWk``).
 
     The staged delta is load-bearing for the case where the operation's
     ``_commit_dirty_worktree`` returns False *before* creating a commit (e.g.
@@ -581,11 +595,14 @@ async def _operation_owned_delta_paths(
     ``PRRT_kwDOSJAM6s6KYd-r``).
 
     Returns ``None`` when either delta cannot be resolved (e.g. the start ref
-    is unknown or git failed) so the caller can keep the fail-closed dirty path
-    instead of committing unowned dirt.
+    is unknown, git failed, or the parsed ``--name-status -z`` output was
+    malformed) so the caller can keep the fail-closed dirty path instead of
+    committing unowned dirt.
     """
     committed_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "diff", "--name-only", f"{operation_start_head}..HEAD")
+        git_worktree_command(
+            worktree_path, "diff", "--name-status", "-z", f"{operation_start_head}..HEAD"
+        )
     )
     if not committed_result.ok:
         _log.warning(
@@ -596,7 +613,9 @@ async def _operation_owned_delta_paths(
         )
         return None
     staged_result = await self._deps.runner.run(
-        git_worktree_command(worktree_path, "diff", "--name-only", "--cached", operation_start_head)
+        git_worktree_command(
+            worktree_path, "diff", "--name-status", "-z", "--cached", operation_start_head
+        )
     )
     if not staged_result.ok:
         _log.warning(
@@ -606,12 +625,18 @@ async def _operation_owned_delta_paths(
             stderr=(staged_result.stderr or "")[:400],
         )
         return None
-    return {
-        line
-        for source in (committed_result.stdout, staged_result.stdout)
-        for line in (source or "").splitlines()
-        if line
-    }
+    owned_paths: set[str] = set()
+    for source in (committed_result.stdout, staged_result.stdout):
+        try:
+            owned_paths.update(_changed_paths_from_name_status_z(source or ""))
+        except ProtectedScopeDiffError:
+            _log.warning(
+                "monitor.pre_push_dirty_finalize_delta_malformed",
+                operation_start_head=operation_start_head,
+                source=(source or "")[:400],
+            )
+            return None
+    return owned_paths
 
 
 async def _try_finalize_pre_push_dirty_repair_state(
@@ -633,9 +658,15 @@ async def _try_finalize_pre_push_dirty_repair_state(
     repair-start dirty guard (``_pre_existing_dirty_repair_worktree_result``)
     proves the worktree was clean at ``operation_start_head``, so the current
     monitor operation's own delta is the union of its committed delta
-    (``git diff --name-only operation_start_head..HEAD``) and its staged delta
-    (``git diff --name-only --cached operation_start_head``). The staged union
-    covers the case where the operation's ``_commit_dirty_worktree`` returned
+    (``git diff --name-status -z operation_start_head..HEAD``) and its staged
+    delta (``git diff --name-status -z --cached operation_start_head``). Both
+    deltas are parsed from ``--name-status -z`` so the owned set uses the same
+    path representation as the dirty check (``changed_paths_from_porcelain``):
+    ``--name-status -z`` emits both the source and destination for ``R``/``C``
+    records and never C-quotes paths, so a staged rename's source and a
+    non-ASCII path are not mistaken for unrelated dirt (review thread
+    ``PRRT_kwDOSJAM6s6KaAWk``). The staged union covers the case where the
+    operation's ``_commit_dirty_worktree`` returned
     False before creating a commit (e.g. ``git commit`` failed after
     ``git add -A``), leaving the operation's staged edits dirty but
     ``operation_start_head..HEAD`` empty (review thread
