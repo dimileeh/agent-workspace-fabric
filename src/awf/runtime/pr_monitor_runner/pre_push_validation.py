@@ -753,6 +753,22 @@ async def _try_finalize_pre_push_dirty_repair_state(
     if owned_delta_paths is None:
         # The delta could not be resolved; do not commit unowned dirt.
         return None
+    # ``git diff --name-status -z`` (committed/staged/working-tree) cannot see
+    # purely untracked paths, so the operation-owned delta computed from diffs
+    # omits repair output that was never staged (e.g. a file the agent created
+    # but ``git add -A`` never reached). The pre-push cleanliness check uses
+    # ``git status --porcelain``, which DOES list untracked files, so those
+    # operation-owned untracked paths would otherwise be flagged as
+    # ``unrelated_dirty`` and the finalize would skip, stranding the
+    # operation's own residue as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` and
+    # the push would fail-closed. The repair-start dirty guard
+    # (``_pre_existing_dirty_repair_worktree_result``) proved the worktree was
+    # clean at ``operation_start_head``, so every untracked path now present is
+    # owned by this operation. ``check.untracked_paths`` already excludes
+    # AWF-agent-runtime artifacts (``check_validation_worktree_clean`` suppresses
+    # them unconditionally), so folding them in here is safe and does not sweep
+    # agent-runtime dirt into the PR (review thread ``PRRT_kwDOSJAM6s6Ka0aK``).
+    owned_delta_paths = owned_delta_paths | set(check.untracked_paths)
     dirty_paths = set(check.paths)
     if not dirty_paths:
         return None
