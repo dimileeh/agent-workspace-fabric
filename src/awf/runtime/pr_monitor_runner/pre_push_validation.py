@@ -51,6 +51,8 @@ from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
 from awf.runtime.pr_monitor_runner.remote_ops import _GitPushResult
 from awf.runtime.pr_monitor_runner.types import (
     ProtectedScopeDiffError,
+    ProviderRecoveryAuthError,
+    ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
@@ -755,6 +757,34 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # pre-existing-dirty failure.
         _log.warning(
             "monitor.pre_push_dirty_finalize_provider_recovery_retry",
+            workspace_id=workspace_id,
+            paths=list(check.paths),
+        )
+        raise
+    except ProviderRecoveryFallbackError:
+        # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit`` ->
+        # ``_handle_provider_agent_run_error`` raises this when a provider failure
+        # triggers a fallback workspace. The loop's
+        # ``except ProviderRecoveryFallbackError`` handler surfaces ``PROVIDER_FALLBACK``
+        # semantics, so the finalize must re-raise it instead of letting the broad
+        # ``except Exception`` below swallow it into the generic pre-existing-dirty
+        # failure (review thread ``PRRT_kwDOSJAM6s6KYd-t``).
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_provider_recovery_fallback",
+            workspace_id=workspace_id,
+            paths=list(check.paths),
+        )
+        raise
+    except ProviderRecoveryAuthError:
+        # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit`` ->
+        # ``_handle_provider_agent_run_error`` raises this when provider auth is broken
+        # and the operation cannot continue. The loop's
+        # ``except ProviderRecoveryAuthError`` handler surfaces the auth-failed operation
+        # outcome, so the finalize must re-raise it instead of letting the broad
+        # ``except Exception`` below swallow it into the generic pre-existing-dirty
+        # failure (review thread ``PRRT_kwDOSJAM6s6KYd-t``).
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_provider_recovery_auth",
             workspace_id=workspace_id,
             paths=list(check.paths),
         )

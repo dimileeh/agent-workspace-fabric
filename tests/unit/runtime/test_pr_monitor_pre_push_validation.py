@@ -1837,6 +1837,146 @@ async def test_pre_push_validation_finalize_propagates_provider_recovery_retry(
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_finalize_propagates_provider_recovery_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A provider-recovery-fallback finalize must propagate, not collapse into generic dirty.
+
+    ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit`` ->
+    ``_handle_provider_agent_run_error`` raises ``ProviderRecoveryFallbackError``
+    when a provider failure triggers a fallback workspace. The loop's
+    ``except ProviderRecoveryFallbackError`` handler surfaces ``PROVIDER_FALLBACK``
+    semantics, so the finalize must re-raise it instead of swallowing it (the broad
+    ``except Exception`` previously returned ``None``, reusing the stale dirty check
+    and reporting the generic ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``) —
+    regression for thread ``PRRT_kwDOSJAM6s6KYd-t``.
+    """
+    from awf.runtime.pr_monitor_runner.types import ProviderRecoveryFallbackError
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(side_effect=ProviderRecoveryFallbackError()),
+    )
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await pre_push_validation_module._run_pre_push_validation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=state,
+            operation_start_head=operation_start_head,
+        )
+
+    # The finalize failure must not re-check the tree (no verify/recheck pass).
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_propagates_provider_recovery_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A provider-recovery-auth-failed finalize must propagate, not collapse into generic dirty.
+
+    ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit`` ->
+    ``_handle_provider_agent_run_error`` raises ``ProviderRecoveryAuthError`` when
+    provider auth is broken and the operation cannot continue. The loop's
+    ``except ProviderRecoveryAuthError`` handler surfaces the auth-failed operation
+    outcome, so the finalize must re-raise it instead of swallowing it (the broad
+    ``except Exception`` previously returned ``None``, reusing the stale dirty check
+    and reporting the generic ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``) —
+    regression for thread ``PRRT_kwDOSJAM6s6KYd-t``.
+    """
+    from awf.runtime.pr_monitor_runner.types import ProviderRecoveryAuthError
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Operation-owned delta includes the dirty path, so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    monkeypatch.setattr(
+        runner,
+        "_commit_dirty_worktree",
+        AsyncMock(side_effect=ProviderRecoveryAuthError()),
+    )
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    with pytest.raises(ProviderRecoveryAuthError):
+        await pre_push_validation_module._run_pre_push_validation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=state,
+            operation_start_head=operation_start_head,
+        )
+
+    # The finalize failure must not re-check the tree (no verify/recheck pass).
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fails(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
