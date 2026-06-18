@@ -30,7 +30,10 @@ from awf.runtime.pr_monitor import (
     PRStatus,
 )
 from awf.runtime.pr_monitor_runner.comments import _owned_paths_for_prompt
-from awf.runtime.pr_monitor_runner.constants import _MONITOR_POLICY_BLOCKED_REASON
+from awf.runtime.pr_monitor_runner.constants import (
+    _MONITOR_POLICY_BLOCKED_REASON,
+    _REPAIR_DIRTY_COMMIT_FAILED_REASON,
+)
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
@@ -112,7 +115,7 @@ async def _run_ci_fix(
         )
 
     try:
-        await self._commit_dirty_worktree(
+        committed = await self._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=f"fix: address PR #{pr_number} CI failure",
             compose_project=compose_project,
@@ -186,6 +189,61 @@ async def _run_ci_fix(
         )
 
     if agent_run_err is not None:
+        # ``_commit_dirty_worktree`` returns False for two reasons: the
+        # worktree was clean (the agent committed locally itself, or wrote
+        # nothing PR-worthy) — in which case there is no stranded dirt and
+        # provider recovery may safely retry — OR the commit sink itself
+        # failed (``git add`` / ``git commit`` errored) after the agent left
+        # repair output dirty/staged. In the second case invoking
+        # ``_handle_provider_agent_run_error`` raises a recovery control-flow
+        # exception (``ProviderRecoveryRetryError``) BEFORE the validated-push
+        # finalizer or any failure result can run, so the dirty repair output
+        # is left in the worktree and the next monitor attempt trips
+        # ``_pre_existing_dirty_repair_worktree_result`` (reporting
+        # ``PRE_EXISTING_DIRTY_WORKTREE``), hiding the commit-sink failure.
+        # Re-check the worktree dirty state here: if operation-owned dirt
+        # remains, surface a terminal commit-sink failure (recording the
+        # provider state first, like the exception handlers above do) instead
+        # of letting provider recovery strand the dirty repair output. See
+        # PRRT_kwDOSJAM6s6KY4Wi.
+        if not committed:
+            stranded_dirty = await self._pre_existing_dirty_repair_worktree_result(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                operation_type="ci_repair",
+            )
+            if stranded_dirty is not None:
+                with contextlib.suppress(
+                    ProviderRecoveryRetryError,
+                    ProviderRecoveryFallbackError,
+                    ProviderRecoveryAuthError,
+                ):
+                    await self._handle_provider_agent_run_error(
+                        workspace_id, agent_run_err, state=state
+                    )
+                _log.warning(
+                    "monitor.ci_fix_dirty_commit_failed",
+                    workspace_id=workspace_id,
+                    stderr=agent_run_err.result.stderr[:400],
+                )
+                return _GitPushResult(
+                    pushed=False,
+                    failed=True,
+                    returncode=1,
+                    stderr=(
+                        "CI repair commit sink failed; refusing to invoke "
+                        "provider recovery because the dirty repair output "
+                        "would be stranded for the next monitor attempt."
+                    ),
+                    reason_code=_REPAIR_DIRTY_COMMIT_FAILED_REASON,
+                    details={
+                        "phase": "ci_repair_commit_sink",
+                        "operation_type": "ci_repair",
+                        "provider_error_stderr": agent_run_err.result.stderr[:400],
+                        "stranded_paths": list((stranded_dirty.details or {}).get("paths", [])),
+                        "pushed": False,
+                    },
+                )
         await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
         _log.warning(
             "monitor.ci_fix_cli_failed",

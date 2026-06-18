@@ -224,3 +224,134 @@ async def test_ci_fix_provider_retry_commits_dirty_output_before_retry(
         "dirty_worktree_pre_commit",
         "dirty_worktree_post_commit_succeeded",
     ]
+
+
+@pytest.mark.unit
+async def test_ci_fix_dirty_commit_failed_surfaces_terminal_result_not_provider_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KY4Wi (discussion r3432225780).
+
+    When the CI agent raises a recoverable ``AgentRunError`` AND
+    ``_commit_dirty_worktree`` returns False *because the commit sink failed*
+    (``git add`` / ``git commit`` errored after leaving the repair output
+    dirty/staged), ``_run_ci_fix`` must NOT invoke provider recovery in a way
+    that raises ``ProviderRecoveryRetryError`` — that would strand the dirty
+    repair output, so the next monitor attempt trips
+    ``_pre_existing_dirty_repair_worktree_result`` and reports
+    ``PRE_EXISTING_DIRTY_WORKTREE``, hiding the commit-sink failure. Instead
+    the provider state is recorded (handler invoked) and a terminal
+    ``REPAIR_DIRTY_COMMIT_FAILED`` push result is returned so the operator
+    sees the real reason.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    expected_stderr = "MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr=expected_stderr,
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
+    cmd.queue_result(returncode=0)  # git add
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=1, stderr="git commit failed\n")  # git commit FAILS
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # post-commit dirty recheck
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    ownership_reasons: list[str] = []
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        ownership_reasons.append(reason)
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    handle_calls: list[tuple[str, AgentRunError]] = []
+
+    async def _raising_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: object = None,
+    ) -> str:
+        # Mirror the real handler: record the provider state then raise the
+        # retry control-flow exception. The fix must suppress this raise so
+        # the terminal commit-sink failure result is returned instead.
+        handle_calls.append((workspace_id_arg, exc))
+        raise ProviderRecoveryRetryError()
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _raising_handle_provider_agent_run_error,
+    )
+
+    push_result = await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),),
+        compose_project=f"awf_{workspace_id}",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+
+    # The provider state was still recorded (handler invoked once), but the
+    # retry control-flow exception was suppressed — no retry is raised.
+    assert len(handle_calls) == 1
+    assert handle_calls[0][0] == workspace_id
+    assert handle_calls[0][1].result.stderr == expected_stderr
+    # A terminal commit-sink failure result is returned instead of stranding
+    # the dirty repair output for the next attempt.
+    assert push_result.failed is True
+    assert push_result.pushed is False
+    assert push_result.reason_code == "REPAIR_DIRTY_COMMIT_FAILED"
+    assert push_result.terminal_monitor_failure is True
+    assert push_result.details == {
+        "phase": "ci_repair_commit_sink",
+        "operation_type": "ci_repair",
+        "provider_error_stderr": expected_stderr,
+        "stranded_paths": ["src/fix.py"],
+        "pushed": False,
+    }
+    # The commit sink failed, so the post-commit-failed ownership repair
+    # runs (inside ``_commit_dirty_worktree``) but the post-commit-succeeded
+    # one does not — confirming the commit genuinely failed before returning
+    # False, which is the strand-risk scenario this regression guards.
+    assert ownership_reasons == [
+        "dirty_worktree_pre_commit",
+        "dirty_worktree_post_commit_failed",
+    ]
