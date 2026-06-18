@@ -495,3 +495,373 @@ async def test_ci_fix_dirty_commit_failed_status_recheck_failure_preserved(
     assert recheck_warning is not None
     assert recheck_warning[1]["stderr"] == "fatal: not a git repository\n"
     assert recheck_warning[1]["workspace_id"] == workspace_id
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_cls_name",
+    [
+        "ProviderRecoveryRetryError",
+        "ProviderRecoveryFallbackError",
+        "ProviderRecoveryAuthError",
+    ],
+)
+async def test_ci_fix_provider_recovery_rolls_back_residue_before_re_raise(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls_name: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6Kg4JR (discussion r3435165285).
+
+    When ``_commit_dirty_worktree`` ->
+    ``_repair_protected_scope_changes_before_commit`` raises a
+    provider-recovery control-flow exception
+    (``ProviderRecoveryRetryError`` / ``ProviderRecoveryFallbackError`` /
+    ``ProviderRecoveryAuthError``), ``_run_ci_fix`` must roll the worktree
+    back to ``operation_start_head`` BEFORE re-raising. Otherwise the
+    CI-repair agent's committed dirt + the protected-scope repair agent's
+    partial edits strand in the worktree, and the next monitor attempt
+    trips ``_pre_existing_dirty_repair_worktree_result`` as
+    ``PRE_EXISTING_DIRTY_WORKTREE`` before the provider retry can actually
+    run, wedging the workspace on a transient outage. Mirrors the fix-pass
+    residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak`` and the finalize residue
+    rollback ``PRRT_kwDOSJAM6s6KewGH``.
+
+    This test exercises the clean commit-sink path (``committed is True``):
+    the CI agent raises a recoverable ``AgentRunError``, the commit sink
+    commits the repair successfully, then ``_handle_provider_agent_run_error``
+    raises the provider-recovery exception. The residue must be rolled back
+    to ``operation_start_head`` before the exception propagates.
+    """
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    expected_stderr = "MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr=expected_stderr,
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    operation_start_head = "abc1234567890def"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
+    cmd.queue_result(returncode=0)  # git add
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=0)  # git commit succeeds
+    cmd.queue_result(returncode=0)  # rollback: git reset --hard <operation_start_head>
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    ownership_reasons: list[str] = []
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        ownership_reasons.append(reason)
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    handle_calls: list[tuple[str, AgentRunError]] = []
+    raised_exc = getattr(monitor_types, exc_cls_name)(
+        "provider recovery raised by protected-scope repair in CI fix commit sink"
+    )
+
+    async def _raising_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: object = None,
+    ) -> str:
+        # Mirror the real handler: record the provider state then raise the
+        # recovery control-flow exception. The fix must roll back the
+        # residue to operation_start_head before re-raising.
+        handle_calls.append((workspace_id_arg, exc))
+        raise raised_exc
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _raising_handle_provider_agent_run_error,
+    )
+
+    with pytest.raises(type(raised_exc)):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    # The provider state was recorded (handler invoked once).
+    assert len(handle_calls) == 1
+    assert handle_calls[0][0] == workspace_id
+    assert handle_calls[0][1].result.stderr == expected_stderr
+    # The commit succeeded, so the post-commit-succeeded ownership repair
+    # runs (matching the existing clean-commit retry test); the failed one
+    # does not.
+    assert ownership_reasons == [
+        "dirty_worktree_pre_commit",
+        "dirty_worktree_post_commit_succeeded",
+    ]
+    # The rollback MUST reset the worktree to operation_start_head before
+    # re-raising so the next monitor attempt does not trip
+    # ``PRE_EXISTING_DIRTY_WORKTREE``.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        "reset" in call and "--hard" in call and operation_start_head in call
+        for call in joined_calls
+    ), joined_calls
+
+
+@pytest.mark.unit
+async def test_ci_fix_provider_recovery_rollback_failure_does_not_clobber_exception(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6Kg4JR — rollback failure must not swallow recovery.
+
+    When the residue rollback itself fails (``git reset --hard`` errors), the
+    pending provider-recovery exception must still propagate so the monitor
+    loop's dedicated handlers surface ``PROVIDER_OUTAGE`` semantics. A stranded
+    residue surfaces as the next attempt's pre-existing-dirty guard rather
+    than being silently swallowed here.
+    """
+    from awf.runtime.pr_monitor_runner.types import ProviderRecoveryRetryError
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr="MODEL_CAPACITY_EXHAUSTED",
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    operation_start_head = "abc1234567890def"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # dirty status
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")  # stage status
+    cmd.queue_result(returncode=0)  # git add
+    cmd.queue_result(returncode=1)  # git diff --cached --quiet
+    cmd.queue_result(returncode=0)  # git commit succeeds
+    # rollback FAILS: ``git reset --hard`` errors out.
+    cmd.queue_result(returncode=128, stderr="fatal: could not parse object\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    async def _raising_handle_provider_agent_run_error(
+        workspace_id_arg: str,
+        exc: AgentRunError,
+        *,
+        state: object = None,
+    ) -> str:
+        del workspace_id_arg, exc, state
+        raise ProviderRecoveryRetryError()
+
+    monkeypatch.setattr(
+        runner,
+        "_handle_provider_agent_run_error",
+        _raising_handle_provider_agent_run_error,
+    )
+
+    warnings: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.ci_ops._log.warning",
+        lambda event, **fields: warnings.append((event, fields)),
+    )
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    # The rollback failure was logged but did NOT swallow the recovery
+    # exception — the loop's recovery handlers still run.
+    assert any(
+        event == "monitor.ci_fix_provider_recovery_rollback_failed" for event, _ in warnings
+    ), warnings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_cls_name",
+    [
+        "ProviderRecoveryRetryError",
+        "ProviderRecoveryFallbackError",
+        "ProviderRecoveryAuthError",
+    ],
+)
+async def test_ci_fix_commit_sink_provider_recovery_rolls_back_residue_before_re_raise(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls_name: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6Kg4JR — commit-sink provider-recovery path.
+
+    When ``_commit_dirty_worktree`` itself raises a provider-recovery
+    control-flow exception (via ``_repair_protected_scope_changes_before_commit``
+    -> ``_handle_provider_agent_run_error`` or
+    ``_provider_recovery_suppresses_cli``), ``_run_ci_fix`` must roll the
+    worktree back to ``operation_start_head`` BEFORE re-raising so the
+    protected-scope repair agent's residue does not strand and trip
+    ``PRE_EXISTING_DIRTY_WORKTREE`` on the next attempt. Mirrors the fix-pass
+    residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak`` and the finalize residue
+    rollback ``PRRT_kwDOSJAM6s6KewGH``.
+    """
+    from unittest.mock import AsyncMock
+
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    expected_stderr = "MODEL_CAPACITY_EXHAUSTED"
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.codex,
+            result=CommandResult(
+                returncode=1,
+                stdout="partial fix written\n",
+                stderr=expected_stderr,
+            ),
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            details={"provider": "openai", "model": "gpt-5.3-codex-spark"},
+        )
+    )
+    operation_start_head = "abc1234567890def"
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="")  # pre-existing dirty guard
+    cmd.queue_result(returncode=0, stdout=f"{operation_start_head}\n")  # op start HEAD
+    cmd.queue_result(returncode=0)  # rollback: git reset --hard <operation_start_head>
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _repair_agent_runtime_ownership(
+        logger: object,
+        workspace_id: str,
+        worktree_path: Path,
+        reason: str,
+        event_name: str,
+        reason_code: str,
+    ) -> bool:
+        del logger, workspace_id, worktree_path, event_name, reason_code
+        return True
+
+    monkeypatch.setattr(
+        pr_remote_repair,
+        "repair_agent_runtime_ownership",
+        _repair_agent_runtime_ownership,
+    )
+
+    raised_exc = getattr(monitor_types, exc_cls_name)(
+        "provider recovery raised inside the CI fix commit sink"
+    )
+    # The commit sink itself raises the provider-recovery exception (e.g. from
+    # ``_repair_protected_scope_changes_before_commit`` ->
+    # ``_handle_provider_agent_run_error``). The CI agent's run error is still
+    # recorded by the handler inside the sink before the raise, so the outer
+    # rollback must run and the exception must propagate.
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
+
+    with pytest.raises(type(raised_exc)):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(
+                CheckFailure(name="test", conclusion="FAILURE", log_excerpt="pytest failed"),
+            ),
+            compose_project=f"awf_{workspace_id}",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
+
+    # The rollback MUST reset the worktree to operation_start_head before
+    # re-raising so the next monitor attempt does not trip
+    # ``PRE_EXISTING_DIRTY_WORKTREE``.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        "reset" in call and "--hard" in call and operation_start_head in call
+        for call in joined_calls
+    ), joined_calls

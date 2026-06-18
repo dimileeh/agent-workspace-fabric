@@ -35,6 +35,7 @@ from awf.runtime.pr_monitor_runner.constants import (
     _REPAIR_DIRTY_COMMIT_FAILED_REASON,
     _REPAIR_WORKTREE_STATUS_FAILED_REASON,
 )
+from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.logging import _log
 from awf.runtime.pr_monitor_runner.remote_ops import (
     _GitPushResult,
@@ -47,6 +48,57 @@ from awf.runtime.pr_monitor_runner.types import (
     _MonitorAgentRuntimeOwnershipRepairFailedError,
     _MonitorPolicyBlockedError,
 )
+
+
+async def _rollback_ci_fix_residue_before_provider_recovery(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    restore_ref: str,
+) -> None:
+    """Roll back CI-repair residue before re-raising provider recovery.
+
+    ``_commit_dirty_worktree`` ->
+    ``_repair_protected_scope_changes_before_commit`` can run the agent CLI
+    to remove protected-scope edits; if that raises a provider-recovery
+    control-flow exception (retry/fallback/auth) the CI-repair agent and the
+    protected-scope repair agent may leave dirty residue in the worktree.
+    Re-raising without rolling back strands that residue: the outer monitor
+    records a provider outcome and exits the operation, then the next
+    repair cycle's repair-start guard
+    (``_pre_existing_dirty_repair_worktree_result``) sees the still-dirty
+    worktree and fails as ``PRE_EXISTING_DIRTY_WORKTREE`` before the
+    provider retry can actually run, wedging the workspace on a transient
+    outage (review thread ``PRRT_kwDOSJAM6s6Kg4JR``, mirroring the fix-pass
+    residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak`` and the finalize residue
+    rollback ``PRRT_kwDOSJAM6s6KewGH``).
+
+    ``restore_ref`` is ``operation_start_head``: the worktree was proven
+    clean at that HEAD by the repair-start guard, so resetting to it
+    discards only this operation's stranded residue. A cleanup failure is
+    logged but never clobbers the pending provider-recovery exception: the
+    loop's recovery handlers still run, and a stranded residue surfaces as
+    the next attempt's pre-existing-dirty guard rather than being silently
+    swallowed here.
+    """
+    reset = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
+    )
+    if not reset.ok:
+        _log.warning(
+            "monitor.ci_fix_provider_recovery_rollback_failed",
+            workspace_id=workspace_id,
+            restore_ref=restore_ref,
+            reset_returncode=reset.returncode,
+            reset_stderr=(reset.stderr or "")[:400],
+        )
+        return
+    _log.info(
+        "monitor.ci_fix_provider_recovery_rolled_back_residue",
+        workspace_id=workspace_id,
+        restore_ref=restore_ref,
+    )
 
 
 async def _run_ci_fix(
@@ -124,6 +176,38 @@ async def _run_ci_fix(
             command_evidence=command_evidence,
             task_tag=task_tag,
         )
+    except (
+        ProviderRecoveryRetryError,
+        ProviderRecoveryFallbackError,
+        ProviderRecoveryAuthError,
+    ):
+        # ``_commit_dirty_worktree`` ->
+        # ``_repair_protected_scope_changes_before_commit`` raises these
+        # provider-recovery control-flow exceptions when a provider outage
+        # suppresses the CLI or a recoverable agent-run error triggers
+        # retry/fallback/auth during protected-scope repair inside the sink.
+        # They must propagate so the monitor loop's dedicated handlers
+        # surface ``PROVIDER_OUTAGE`` / ``PROVIDER_FALLBACK`` / auth-failed
+        # semantics — BUT only AFTER rolling back the CI-repair residue the
+        # agent (and the protected-scope repair agent) left behind. Without
+        # this rollback the protected-scope edits remain dirty and the next
+        # monitor attempt trips ``_pre_existing_dirty_repair_worktree_result``
+        # as ``PRE_EXISTING_DIRTY_WORKTREE``, masking the provider outage and
+        # wedging the PR instead of letting the provider retry actually run
+        # (review thread ``PRRT_kwDOSJAM6s6Kg4JR``, mirroring the fix-pass
+        # residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak`` and the finalize residue
+        # rollback ``PRRT_kwDOSJAM6s6KewGH``). A rollback failure is logged
+        # but never clobbers the recovery exception: the loop's recovery
+        # handlers still run, and a stranded residue surfaces as the next
+        # attempt's pre-existing-dirty guard rather than being silently
+        # swallowed here.
+        await _rollback_ci_fix_residue_before_provider_recovery(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=operation_start_head,
+        )
+        raise
     except ProtectedScopeDiffError as exc:
         if agent_run_err is not None:
             # Record provider recovery state, but do not let the recovery
@@ -259,7 +343,35 @@ async def _run_ci_fix(
                         "pushed": False,
                     },
                 )
-        await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+        try:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+        except (
+            ProviderRecoveryRetryError,
+            ProviderRecoveryFallbackError,
+            ProviderRecoveryAuthError,
+        ):
+            # The clean commit-sink path: ``_commit_dirty_worktree`` committed
+            # the CI-repair output, then ``_handle_provider_agent_run_error``
+            # raised a provider-recovery control-flow exception. Roll back the
+            # operation's committed residue to ``operation_start_head`` BEFORE
+            # re-raising so the next monitor attempt does not trip
+            # ``_pre_existing_dirty_repair_worktree_result`` as
+            # ``PRE_EXISTING_DIRTY_WORKTREE`` and wedge the workspace on a
+            # transient outage (review thread ``PRRT_kwDOSJAM6s6Kg4JR``,
+            # mirroring the fix-pass residue rollback
+            # ``PRRT_kwDOSJAM6s6Kc_Ak`` and the finalize residue rollback
+            # ``PRRT_kwDOSJAM6s6KewGH``). A rollback failure is logged but
+            # never clobbers the recovery exception: the loop's recovery
+            # handlers still run, and a stranded residue surfaces as the next
+            # attempt's pre-existing-dirty guard rather than being silently
+            # swallowed here.
+            await _rollback_ci_fix_residue_before_provider_recovery(
+                self,
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                restore_ref=operation_start_head,
+            )
+            raise
         _log.warning(
             "monitor.ci_fix_cli_failed",
             workspace_id=workspace_id,
