@@ -244,25 +244,33 @@ async def _rollback_failed_pre_push_validation_fix_pass(
 ) -> str | None:
     """Roll back fix-pass edits and return a failure reason when recovery fails.
 
-    ``restore_ref`` is the HEAD captured AFTER the fix-pass agent ran but
-    BEFORE the commit sink (``post_agent_head``), NOT ``fix_start_head``. The
-    fix-pass agent may commit its own validation fix and advance HEAD past
-    ``fix_start_head``; the commit sink then raises a control-flow exception
-    (provider-recovery / policy-blocked / generic) BEFORE making its own
-    commit, so HEAD has not moved since ``post_agent_head``. Resetting to
-    ``fix_start_head`` would discard the agent's already-committed validation
-    fix along with the stranded residue, so the retry would start from the old
-    tree and redo (or lose) valid repair work (review thread
-    ``PRRT_kwDOSJAM6s6Klf78``). This mirrors the CI-repair rollback
-    (``_rollback_ci_fix_residue_before_provider_recovery``, thread
-    ``PRRT_kwDOSJAM6s6Klf74``) and the finalize rollback
-    (``_rollback_finalize_dirty_residue_before_provider_recovery``), which
-    both anchor against the post-agent/pre-sink HEAD for the same reason.
-    ``None`` means the post-agent HEAD could not be resolved; the rollback is
-    skipped (the residue strands, but a missing anchor makes a safe
-    ``git reset --hard`` impossible — better to strand visibly than restore
-    against the wrong ref, mirroring the CI-repair and finalize rollbacks'
-    ``restore_ref is None`` guards).
+    ``restore_ref`` is the HEAD captured AFTER ``_commit_dirty_worktree``
+    raised (the post-raise HEAD, captured INSIDE each commit-sink ``except``
+    clause in ``_run_pre_push_validation_fix_pass``), NOT a pre-sink
+    ``post_agent_head`` snapshot and NOT ``fix_start_head``. The protected-scope
+    repair agent runs INSIDE ``_commit_dirty_worktree`` (via
+    ``_repair_protected_scope_changes_before_commit``) and may self-commit,
+    advancing HEAD past ``fix_start_head`` and past any pre-sink snapshot
+    BEFORE the provider-recovery / policy-blocked / generic exception is
+    raised; ``_commit_dirty_worktree`` raises before its own ``git commit``, so
+    HEAD has not moved since the in-sink self-commit. A pre-sink snapshot would
+    be stale against that in-sink self-commit: resetting to it would discard
+    the valid protected-scope repair self-commit (and the agent's own
+    validation fix) along with the stranded residue, so the retry would start
+    from the old tree and lose or repeatedly redo valid repair work (review
+    threads ``PRRT_kwDOSJAM6s6Klf78`` and ``PRRT_kwDOSJAM6s6KpAD6``). Capturing
+    the anchor AFTER the sink raised preserves both the agent's
+    already-committed validation fix and any in-sink protected-scope repair
+    self-commit while discarding only the stranded residue. This mirrors the
+    CI-repair rollback (``_rollback_ci_fix_residue_before_provider_recovery``,
+    thread ``PRRT_kwDOSJAM6s6Klf74`` / ``PRRT_kwDOSJAM6s6KpAD6``) and the
+    finalize rollback (``_rollback_finalize_dirty_residue_before_provider_recovery``,
+    thread ``PRRT_kwDOSJAM6s6KnWkn``), which both anchor against the
+    post-raise HEAD for the same reason. ``None`` means the post-raise HEAD
+    could not be resolved; the rollback is skipped (the residue strands, but a
+    missing anchor makes a safe ``git reset --hard`` impossible — better to
+    strand visibly than restore against the wrong ref, mirroring the CI-repair
+    and finalize rollbacks' ``restore_ref is None`` guards).
     """
     if restore_ref is None:
         _log.warning(
@@ -456,25 +464,22 @@ async def _run_pre_push_validation_fix_pass(
             return False, rollback_failure_reason
         return False, None
 
-    # Capture HEAD AFTER the fix-pass agent ran but BEFORE the commit sink
-    # (``_commit_dirty_worktree``). The agent may have committed its own
-    # validation fix and advanced HEAD past ``fix_start_head``; if the commit
-    # sink then raises a control-flow exception (provider-recovery /
-    # policy-blocked / generic) BEFORE making its own commit, the residue
-    # rollbacks below must anchor against THIS HEAD, not ``fix_start_head``.
-    # Resetting to ``fix_start_head`` would discard the agent's
-    # already-committed validation fix along with the stranded protected-scope
-    # residue, so the retry would start from the old tree and redo (or lose)
-    # valid repair work (review thread ``PRRT_kwDOSJAM6s6Klf78``). This mirrors
-    # the CI-repair rollback (``_rollback_ci_fix_residue_before_provider_recovery``,
-    # thread ``PRRT_kwDOSJAM6s6Klf74``) and the finalize rollback
-    # (``_rollback_finalize_dirty_residue_before_provider_recovery``), which
-    # both anchor against the post-agent/pre-sink HEAD for the same reason.
-    # ``None`` means HEAD could not be resolved; the rollback helper then
-    # skips the reset (a missing anchor makes a safe restore impossible —
-    # better to strand visibly than restore against the wrong ref, mirroring
-    # the CI-repair and finalize rollbacks' ``restore_ref is None`` guards).
-    post_agent_head = await self._rev_parse_head(worktree_path)
+    # The rollback anchor for the commit-sink ``except`` clauses below is
+    # captured INSIDE each clause (after ``_commit_dirty_worktree`` raised),
+    # NOT here before the sink. The protected-scope repair agent runs INSIDE
+    # ``_commit_dirty_worktree`` (via
+    # ``_repair_protected_scope_changes_before_commit``) and may self-commit,
+    # advancing HEAD past any pre-sink snapshot BEFORE the provider-recovery
+    # / policy-blocked / generic exception is raised; a pre-sink anchor would
+    # be stale against that in-sink self-commit and ``git reset --hard`` would
+    # discard it, forcing the retry to start from the old tree and lose or
+    # repeatedly redo the repair work. Mirrors the CI-repair rollback
+    # (``_rollback_ci_fix_residue_before_provider_recovery``, thread
+    # ``PRRT_kwDOSJAM6s6Klf74`` / ``PRRT_kwDOSJAM6s6KpAD6``) and the
+    # dirty-finalize rollback
+    # (``_rollback_finalize_dirty_residue_before_provider_recovery``, thread
+    # ``PRRT_kwDOSJAM6s6KnWkn``), which both capture the post-raise HEAD
+    # inside each provider-recovery ``except`` clause for the same reason.
 
     try:
         committed = bool(
@@ -504,15 +509,33 @@ async def _run_pre_push_validation_fix_pass(
         # dirty and the next monitor attempt trips ``_pre_existing_dirty_repair_worktree_result``
         # as ``PRE_EXISTING_DIRTY_WORKTREE``, masking the provider outage and
         # wedging the PR (review thread ``PRRT_kwDOSJAM6s6Kc_Ak``). The rollback
-        # anchors against ``post_agent_head`` (captured above), NOT
-        # ``fix_start_head``: the agent may have self-committed a validation fix
-        # and advanced HEAD past ``fix_start_head`` before the commit sink
-        # raised, so resetting to ``fix_start_head`` would discard the
-        # already-committed fix along with the stranded residue (review thread
-        # ``PRRT_kwDOSJAM6s6Klf78``). A rollback failure is logged but never
-        # clobbers the recovery exception: the loop's recovery handlers still
-        # run, and the stranded residue surfaces as the next attempt's
-        # pre-existing-dirty guard rather than being silently swallowed here.
+        # anchors against the HEAD captured HERE (after ``_commit_dirty_worktree``
+        # raised), NOT ``fix_start_head`` and NOT a stale pre-sink snapshot:
+        # the protected-scope repair agent runs INSIDE the commit sink (via
+        # ``_repair_protected_scope_changes_before_commit``) and may self-commit,
+        # advancing HEAD past ``fix_start_head`` and past any pre-sink HEAD
+        # BEFORE the provider-recovery exception is raised; ``_commit_dirty_worktree``
+        # raises before its own ``git commit``, so HEAD has not moved since the
+        # in-sink self-commit. Anchoring against ``fix_start_head`` would discard
+        # the agent's already-committed validation fix, and anchoring against a
+        # pre-sink ``post_agent_head`` would discard the in-sink protected-scope
+        # repair self-commit (review threads ``PRRT_kwDOSJAM6s6Klf78`` and
+        # ``PRRT_kwDOSJAM6s6KpAD6``). Capturing the anchor AFTER the sink raised
+        # preserves both while discarding only the stranded residue, mirroring
+        # the CI-repair rollback (``_rollback_ci_fix_residue_before_provider_recovery``,
+        # thread ``PRRT_kwDOSJAM6s6Klf74`` / ``PRRT_kwDOSJAM6s6KpAD6``) and the
+        # dirty-finalize rollback
+        # (``_rollback_finalize_dirty_residue_before_provider_recovery``, thread
+        # ``PRRT_kwDOSJAM6s6KnWkn``). ``None`` means HEAD could not be resolved;
+        # the rollback helper then skips the reset (a missing anchor makes a
+        # safe ``git reset --hard`` impossible — better to strand visibly than
+        # restore against the wrong ref, mirroring the CI-repair and finalize
+        # rollbacks' ``restore_ref is None`` guards). A rollback failure is
+        # logged but never clobbers the recovery exception: the loop's recovery
+        # handlers still run, and a stranded residue surfaces as the next
+        # attempt's pre-existing-dirty guard rather than being silently
+        # swallowed here.
+        post_agent_head = await self._rev_parse_head(worktree_path)
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
             workspace_id=workspace_id,
@@ -541,15 +564,25 @@ async def _run_pre_push_validation_fix_pass(
         # and the next cycle's repair-start dirty guard
         # (``_pre_existing_dirty_repair_worktree_result``) trips as
         # ``PRE_EXISTING_DIRTY_WORKTREE``, losing the policy reason and wedging
-        # recovery instead of re-polling cleanly. Roll back to
-        # ``post_agent_head`` (captured above) before re-raising so the next
-        # attempt starts clean, mirroring the provider-recovery residue rollback
-        # above (review thread ``PRRT_kwDOSJAM6s6Kg7Dm``). The anchor is
-        # ``post_agent_head``, NOT ``fix_start_head``, for the same reason as
-        # the provider-recovery handler: the agent may have self-committed a
-        # validation fix before the commit sink raised (review thread
-        # ``PRRT_kwDOSJAM6s6Klf78``). A rollback failure is logged but never
-        # clobbers the policy exception.
+        # recovery instead of re-polling cleanly. Roll back to the HEAD
+        # captured HERE (after ``_commit_dirty_worktree`` raised) before
+        # re-raising so the next attempt starts clean, mirroring the
+        # provider-recovery residue rollback above (review thread
+        # ``PRRT_kwDOSJAM6s6Kg7Dm``). The anchor is the post-raise HEAD, NOT
+        # ``fix_start_head`` and NOT a stale pre-sink ``post_agent_head``, for
+        # the same reason as the provider-recovery handler: the protected-scope
+        # repair agent runs INSIDE the commit sink and may self-commit,
+        # advancing HEAD past ``fix_start_head`` and past any pre-sink snapshot
+        # BEFORE the policy exception is raised; anchoring against either stale
+        # ref would discard valid repair progress via ``git reset --hard``
+        # (review threads ``PRRT_kwDOSJAM6s6Klf78`` and ``PRRT_kwDOSJAM6s6KpAD6``).
+        # Mirrors the CI-repair and dirty-finalize rollbacks, which capture the
+        # post-raise HEAD inside each commit-sink ``except`` clause for the same
+        # reason (threads ``PRRT_kwDOSJAM6s6Klf74`` / ``PRRT_kwDOSJAM6s6KpAD6``
+        # / ``PRRT_kwDOSJAM6s6KnWkn``). ``None`` means HEAD could not be
+        # resolved; the rollback helper skips the reset. A rollback failure is
+        # logged but never clobbers the policy exception.
+        post_agent_head = await self._rev_parse_head(worktree_path)
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
             workspace_id=workspace_id,
@@ -592,13 +625,20 @@ async def _run_pre_push_validation_fix_pass(
             pass_number=pass_number,
             error=repr(exc),
         )
-        # Anchor against ``post_agent_head`` (captured above), NOT
-        # ``fix_start_head``: the agent may have self-committed a validation
-        # fix and advanced HEAD past ``fix_start_head`` before the commit sink
-        # raised this generic exception, so resetting to ``fix_start_head``
-        # would discard the already-committed fix along with the stranded
-        # residue (review thread ``PRRT_kwDOSJAM6s6Klf78``, mirroring the
-        # provider-recovery and policy-blocked handlers above).
+        # Anchor against the HEAD captured HERE (after ``_commit_dirty_worktree``
+        # raised), NOT ``fix_start_head`` and NOT a stale pre-sink
+        # ``post_agent_head``: the protected-scope repair agent runs INSIDE the
+        # commit sink (via ``_repair_protected_scope_changes_before_commit``)
+        # and may self-commit, advancing HEAD past ``fix_start_head`` and past
+        # any pre-sink snapshot BEFORE this generic exception is raised, so
+        # resetting to either stale ref would discard the already-committed
+        # validation fix (or the in-sink protected-scope repair self-commit)
+        # along with the stranded residue (review threads
+        # ``PRRT_kwDOSJAM6s6Klf78`` and ``PRRT_kwDOSJAM6s6KpAD6``, mirroring the
+        # provider-recovery and policy-blocked handlers above and the
+        # CI-repair / dirty-finalize rollbacks). ``None`` means HEAD could not
+        # be resolved; the rollback helper skips the reset.
+        post_agent_head = await self._rev_parse_head(worktree_path)
         rollback_failure_reason = await _rollback_failed_fix_pass(
             self,
             workspace_id=workspace_id,

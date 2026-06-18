@@ -357,3 +357,151 @@ async def test_pre_push_validation_fix_pass_provider_recovery_rollback_skipped_w
         event == "monitor.pre_push_validation_fix_rollback_skipped_no_anchor"
         for event, _ in warnings
     ), warnings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_cls_name",
+    [
+        "ProviderRecoveryRetryError",
+        "ProviderRecoveryFallbackError",
+        "ProviderRecoveryAuthError",
+    ],
+)
+async def test_pre_push_validation_fix_pass_provider_recovery_rolls_back_to_post_raise_head_not_pre_sink_head(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls_name: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KpAD6 — preserve in-sink protected-scope self-commits (fix-pass).
+
+    The protected-scope repair agent runs INSIDE ``_commit_dirty_worktree`` (via
+    ``_repair_protected_scope_changes_before_commit``) and may self-commit,
+    advancing HEAD past the fix-pass pre-sink HEAD snapshot BEFORE the commit
+    sink raises a provider-recovery control-flow exception. Capturing the
+    rollback anchor BEFORE the sink (a pre-try ``post_agent_head``) is stale
+    against that in-sink self-commit: ``git reset --hard <pre_sink_head>`` would
+    drop the valid protected-scope repair self-commit, so the provider retry
+    starts from the old tree and loses or redoes valid repair work.
+
+    The rollback must anchor against the HEAD captured AFTER the sink raised
+    (inside the provider-recovery ``except`` block), mirroring the CI-repair
+    path (``_rollback_ci_fix_residue_before_provider_recovery``, regression
+    ``PRRT_kwDOSJAM6s6KpAD6``) and the dirty-finalize path
+    (``_rollback_finalize_dirty_residue_before_provider_recovery``, regression
+    ``PRRT_kwDOSJAM6s6KnWkn``), which already established the post-raise
+    anchoring contract for in-sink self-commits. The pre-sink capture is
+    therefore removed from ``_run_pre_push_validation_fix_pass``; the anchor
+    is resolved inside the ``except`` clause after the sink raised.
+
+    This test simulates the in-sink self-commit by advancing a mutable HEAD cell
+    inside the mocked ``_commit_dirty_worktree`` side effect BEFORE it raises, so
+    the pre-sink capture (buggy code) sees the stale pre-sink HEAD while the
+    post-raise capture (fixed code) sees the advanced HEAD.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    fix_start_head = "7" * 40
+    # The validation-fix agent did NOT self-commit, so the pre-sink HEAD still
+    # equals ``fix_start_head``. The protected-scope repair agent INSIDE the
+    # commit sink then self-commits and advances HEAD to
+    # ``in_sink_self_commit_head`` BEFORE the sink raises. The rollback must
+    # anchor against the post-raise HEAD (``in_sink_self_commit_head``), NOT the
+    # stale pre-sink HEAD (``fix_start_head``) — otherwise the in-sink
+    # self-commit is dropped.
+    in_sink_self_commit_head = "a" * 40
+    head_cell: dict[str, str] = {"sha": fix_start_head}
+
+    async def _fake_rev_parse_head(_worktree_path: Path) -> str | None:
+        return head_cell["sha"]
+
+    async def _commit_sink_side_effect(*_args: object, **_kwargs: object) -> bool:
+        # Simulate the protected-scope repair agent self-committing inside the
+        # sink and advancing HEAD BEFORE the provider-recovery exception is
+        # raised (e.g. from ``_repair_protected_scope_changes_before_commit``
+        # -> ``_handle_provider_agent_run_error``).
+        head_cell["sha"] = in_sink_self_commit_head
+        raise raised_exc
+
+    # ``_run_pre_push_validation_fix_pass`` reads HEAD before the agent run.
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # rollback: ``git reset --hard <post_raise_head>`` (``in_sink_self_commit_head``
+    # under the fixed code; the stale ``fix_start_head`` under the buggy
+    # pre-try capture).
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {in_sink_self_commit_head[:8]}\n")
+    # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``
+    # (status): report the protected-scope residue the agent left behind.
+    cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
+    # ``git restore --source <in_sink_self_commit_head> --staged --worktree -- <path>``.
+    cmd.queue_result(returncode=0)
+    # Post-restore status recheck (no more residue after the restore).
+    cmd.queue_result(returncode=0, stdout="")
+    # HEAD verification: ``rev-parse <in_sink_self_commit_head>`` + ``rev-parse HEAD``.
+    cmd.queue_result(returncode=0, stdout=f"{in_sink_self_commit_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{in_sink_self_commit_head}\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    # Replace ``_rev_parse_head`` with the mutable-cell mock so the pre-try
+    # capture (buggy code) and the post-raise capture (fixed code) observe
+    # different HEADs without consuming FakeCommandRunner queue slots.
+    monkeypatch.setattr(runner, "_rev_parse_head", _fake_rev_parse_head)
+
+    raised_exc = getattr(monitor_types, exc_cls_name)(
+        "provider recovery raised after protected-scope repair self-committed inside the pre-push validation fix commit sink"
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_sink_side_effect)
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    # The provider-recovery exception must still propagate so the monitor
+    # loop's dedicated handlers surface ``PROVIDER_OUTAGE`` /
+    # ``PROVIDER_FALLBACK`` / auth-failed semantics — but only AFTER the
+    # fix-pass residue has been rolled back to the post-raise HEAD.
+    with pytest.raises(type(raised_exc)):
+        await pre_push_validation._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch="codex/pr",
+            remote_url=None,
+            state=None,
+            validation_result=validation_result,
+            pass_number=1,
+            total_passes=1,
+            validation_commands=("pytest -q",),
+        )
+
+    # The rollback MUST reset to the post-raise HEAD
+    # (``in_sink_self_commit_head``), NOT the stale pre-sink HEAD
+    # (``fix_start_head``) — preserving the protected-scope repair agent's
+    # in-sink self-commit so the provider retry starts from the advanced tree
+    # instead of dropping valid repair work.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        "reset" in call and "--hard" in call and in_sink_self_commit_head in call
+        for call in joined_calls
+    ), joined_calls
+    assert not any(
+        "reset" in call and "--hard" in call and fix_start_head in call for call in joined_calls
+    ), joined_calls
