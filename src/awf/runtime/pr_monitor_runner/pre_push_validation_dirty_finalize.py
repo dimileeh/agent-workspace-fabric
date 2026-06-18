@@ -287,7 +287,7 @@ async def _try_finalize_pre_push_dirty_repair_state(
 
     ``finalize_start_head`` is the HEAD captured by the caller immediately
     before the finalize (the operation's committed work). It is the rollback
-    anchor for provider-recovery control-flow exceptions raised by
+    anchor FALLBACK for provider-recovery control-flow exceptions raised by
     ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``:
     the protected-scope repair agent can leave the dirty residue the finalize
     was trying to commit still in the worktree, and re-raising without rolling
@@ -295,8 +295,21 @@ async def _try_finalize_pre_push_dirty_repair_state(
     (``_pre_existing_dirty_repair_worktree_result``) as
     ``PRE_EXISTING_DIRTY_WORKTREE``, wedging the workspace on a transient
     outage (review thread ``PRRT_kwDOSJAM6s6KewGH``, mirroring the fix-pass
-    residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak``). It is the finalize-start HEAD,
-    not ``operation_start_head``: the operation may have committed repair work
+    residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak``). The preferred anchor is the
+    POST-AGENT/PRE-SINK HEAD captured in each provider-recovery handler after
+    ``_commit_dirty_worktree`` raised: the protected-scope repair agent runs
+    INSIDE ``_commit_dirty_worktree`` and may self-commit, advancing HEAD
+    past ``finalize_start_head`` before the exception is raised.
+    ``_pre_push_validation_cleanup`` ->
+    ``cleanup_validation_worktree_side_effects`` resets HEAD back to the
+    restore_ref when it sees HEAD advanced, so anchoring to
+    ``finalize_start_head`` would discard the valid protected-scope repair
+    self-commit and the provider retry would start from the old tree and
+    lose or repeatedly redo the repair work (review thread
+    ``PRRT_kwDOSJAM6s6KnWkn``, mirroring the fix-pass rollback
+    ``PRRT_kwDOSJAM6s6Klf78`` and the CI-repair rollback
+    ``PRRT_kwDOSJAM6s6Klf74``). It is the post-agent HEAD, not
+    ``operation_start_head``: the operation may have committed repair work
     since ``operation_start_head``, and resetting to the older anchor would
     discard that committed work. ``None`` means the caller could not capture
     HEAD; the rollback is skipped (the residue strands, but a missing anchor
@@ -468,20 +481,38 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # loop's ``except ProviderRecoveryRetryError`` handler surfaces ``PROVIDER_OUTAGE``
         # retry semantics; re-raise here instead of swallowing it into the generic
         # pre-existing-dirty failure. BUT first roll back the dirty-finalize residue
-        # the protected-scope repair agent left behind (see the
-        # ``finalize_start_head`` capture above), otherwise the next repair cycle's
-        # repair-start guard trips ``PRE_EXISTING_DIRTY_WORKTREE`` and the provider
-        # retry never actually runs — a transient outage wedges the workspace
-        # (review thread ``PRRT_kwDOSJAM6s6KewGH``, mirroring the fix-pass rollback
-        # ``PRRT_kwDOSJAM6s6Kc_Ak``). A rollback failure is logged but never
-        # clobbers the recovery exception: the loop's recovery handlers still run,
-        # and a stranded residue surfaces as the next attempt's pre-existing-dirty
-        # guard rather than being silently swallowed here.
+        # the protected-scope repair agent left behind, otherwise the next repair
+        # cycle's repair-start guard trips ``PRE_EXISTING_DIRTY_WORKTREE`` and the
+        # provider retry never actually runs — a transient outage wedges the
+        # workspace (review thread ``PRRT_kwDOSJAM6s6KewGH``, mirroring the fix-pass
+        # rollback ``PRRT_kwDOSJAM6s6Kc_Ak``). The rollback anchor is the
+        # post-agent/pre-sink HEAD captured HERE (after ``_commit_dirty_worktree``
+        # raised), NOT ``finalize_start_head``: the protected-scope repair agent
+        # runs INSIDE ``_commit_dirty_worktree`` and may self-commit, advancing
+        # HEAD past ``finalize_start_head`` before the provider-recovery exception
+        # is raised. ``_pre_push_validation_cleanup`` ->
+        # ``cleanup_validation_worktree_side_effects`` resets HEAD back to the
+        # restore_ref when it sees HEAD advanced, so anchoring to
+        # ``finalize_start_head`` would discard the valid protected-scope repair
+        # self-commit and the provider retry would start from the old tree and
+        # lose or repeatedly redo the repair work (review thread
+        # ``PRRT_kwDOSJAM6s6KnWkn``, mirroring the fix-pass rollback
+        # ``PRRT_kwDOSJAM6s6Klf78`` and the CI-repair rollback
+        # ``PRRT_kwDOSJAM6s6Klf74``, which both anchor against the
+        # post-agent/pre-sink HEAD for the same reason). A missing anchor falls
+        # back to ``finalize_start_head`` so the residue is still rolled back
+        # (the self-commit cannot be preserved without a resolved HEAD, but
+        # stranding the residue would wedge the next cycle). A rollback failure
+        # is logged but never clobbers the recovery exception: the loop's
+        # recovery handlers still run, and a stranded residue surfaces as the
+        # next attempt's pre-existing-dirty guard rather than being silently
+        # swallowed here.
+        post_agent_head = await self._rev_parse_head(worktree_path)
         await _rollback_finalize_dirty_residue_before_provider_recovery(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=finalize_start_head,
+            restore_ref=post_agent_head or finalize_start_head,
             reason="provider_recovery_retry",
         )
         _log.warning(
@@ -498,15 +529,18 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # semantics, so the finalize must re-raise it instead of letting the broad
         # ``except Exception`` below swallow it into the generic pre-existing-dirty
         # failure (review thread ``PRRT_kwDOSJAM6s6KYd-t``). Roll back the dirty-finalize
-        # residue first (see the ``finalize_start_head`` capture above and the
-        # ``ProviderRecoveryRetryError`` handler) so the next repair cycle is not
-        # wedged as ``PRE_EXISTING_DIRTY_WORKTREE`` (review thread
+        # residue first (see the ``ProviderRecoveryRetryError`` handler for the
+        # post-agent/pre-sink HEAD anchoring — review thread
+        # ``PRRT_kwDOSJAM6s6KnWkn``, mirroring ``PRRT_kwDOSJAM6s6Klf78`` /
+        # ``PRRT_kwDOSJAM6s6Klf74``) so the next repair cycle is not wedged as
+        # ``PRE_EXISTING_DIRTY_WORKTREE`` (review thread
         # ``PRRT_kwDOSJAM6s6KewGH``, mirroring ``PRRT_kwDOSJAM6s6Kc_Ak``).
+        post_agent_head = await self._rev_parse_head(worktree_path)
         await _rollback_finalize_dirty_residue_before_provider_recovery(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=finalize_start_head,
+            restore_ref=post_agent_head or finalize_start_head,
             reason="provider_recovery_fallback",
         )
         _log.warning(
@@ -523,15 +557,18 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # outcome, so the finalize must re-raise it instead of letting the broad
         # ``except Exception`` below swallow it into the generic pre-existing-dirty
         # failure (review thread ``PRRT_kwDOSJAM6s6KYd-t``). Roll back the dirty-finalize
-        # residue first (see the ``finalize_start_head`` capture above and the
-        # ``ProviderRecoveryRetryError`` handler) so the next repair cycle is not
-        # wedged as ``PRE_EXISTING_DIRTY_WORKTREE`` (review thread
+        # residue first (see the ``ProviderRecoveryRetryError`` handler for the
+        # post-agent/pre-sink HEAD anchoring — review thread
+        # ``PRRT_kwDOSJAM6s6KnWkn``, mirroring ``PRRT_kwDOSJAM6s6Klf78`` /
+        # ``PRRT_kwDOSJAM6s6Klf74``) so the next repair cycle is not wedged as
+        # ``PRE_EXISTING_DIRTY_WORKTREE`` (review thread
         # ``PRRT_kwDOSJAM6s6KewGH``, mirroring ``PRRT_kwDOSJAM6s6Kc_Ak``).
+        post_agent_head = await self._rev_parse_head(worktree_path)
         await _rollback_finalize_dirty_residue_before_provider_recovery(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=finalize_start_head,
+            restore_ref=post_agent_head or finalize_start_head,
             reason="provider_recovery_auth",
         )
         _log.warning(
@@ -685,14 +722,28 @@ async def _rollback_finalize_dirty_residue_before_provider_recovery(
     (review thread ``PRRT_kwDOSJAM6s6KewGH``, mirroring the fix-pass residue
     rollback ``PRRT_kwDOSJAM6s6Kc_Ak``).
 
-    ``restore_ref`` is the HEAD captured at the start of the finalize (the
-    operation's committed work). ``_commit_dirty_worktree`` raises before its
-    own ``git commit``, so HEAD has not moved and restoring tracked paths to
-    this ref preserves the committed repair while discarding only the
-    uncommitted residue. ``None`` means the finalize-start HEAD could not be
-    captured; the rollback is skipped (the residue strands, but a missing
-    anchor makes a safe ``git restore`` impossible — better to strand
-    visibly than restore against the wrong ref).
+    ``restore_ref`` is the HEAD captured AFTER the protected-scope repair
+    agent ran but BEFORE the residue cleanup (the post-agent/pre-sink HEAD),
+    NOT ``finalize_start_head``. The protected-scope repair agent runs INSIDE
+    ``_commit_dirty_worktree`` (via
+    ``_repair_protected_scope_changes_before_commit``) and may self-commit,
+    advancing HEAD past ``finalize_start_head`` before the provider-recovery
+    exception is raised. ``_commit_dirty_worktree`` raises before its own
+    ``git commit``, so HEAD has not moved since the agent's self-commit;
+    restoring tracked paths to this ref preserves the committed repair while
+    discarding only the uncommitted residue. Anchoring to
+    ``finalize_start_head`` instead would reset HEAD back to the pre-agent
+    ref via ``cleanup_validation_worktree_side_effects``' HEAD-verification
+    ``git reset --hard``, discarding the valid protected-scope repair
+    self-commit and forcing the provider retry to start from the old tree
+    and lose or repeatedly redo the repair work (review thread
+    ``PRRT_kwDOSJAM6s6KnWkn``, mirroring the fix-pass rollback
+    ``PRRT_kwDOSJAM6s6Klf78`` and the CI-repair rollback
+    ``PRRT_kwDOSJAM6s6Klf74``, which both anchor against the
+    post-agent/pre-sink HEAD for the same reason). ``None`` means the
+    finalize-start HEAD could not be captured; the rollback is skipped (the
+    residue strands, but a missing anchor makes a safe ``git restore``
+    impossible — better to strand visibly than restore against the wrong ref).
 
     A cleanup failure is logged but never clobbers the pending
     provider-recovery exception: the loop's recovery handlers still run, and

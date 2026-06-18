@@ -317,14 +317,21 @@ async def test_pre_push_validation_finalize_rolls_back_dirty_residue_before_prov
     finalize_start_head = "c" * 40
     cmd = FakeCommandRunner()
     # ``_run_pre_push_validation`` reads HEAD before the finalize call; that
-    # SHA is threaded in as ``finalize_start_head`` (the rollback anchor) so
-    # the finalize does NOT issue a second ``rev-parse HEAD`` in the success
-    # path — only the rollback (error) path issues extra git commands.
+    # SHA is threaded in as ``finalize_start_head`` (the rollback anchor
+    # fallback) so the finalize does NOT issue a second ``rev-parse HEAD`` in
+    # the success path — only the rollback (error) path issues extra git
+    # commands.
     cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")
     # ``_operation_owned_delta_paths`` reads the committed delta
     # (``git diff --name-status -z operation_start_head..HEAD``); the dirty
     # path is operation-owned so the finalize proceeds.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    # ``_commit_dirty_worktree`` is mocked to raise; the protected-scope
+    # repair agent in this scenario did NOT self-commit, so the
+    # post-agent/pre-sink HEAD captured in the exception handler still equals
+    # ``finalize_start_head`` and is used as the rollback anchor (preserving
+    # the operation's committed work while discarding only the residue).
+    cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")
     # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``:
     # the protected-scope repair agent left the dirty residue behind.
     cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")
@@ -379,6 +386,134 @@ async def test_pre_push_validation_finalize_rolls_back_dirty_residue_before_prov
     # the rollback's own ``check_validation_worktree_clean`` runs inside
     # ``_pre_push_validation_cleanup`` and does not go through the patched
     # module-level helper.
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_cls",
+    [
+        "ProviderRecoveryRetryError",
+        "ProviderRecoveryFallbackError",
+        "ProviderRecoveryAuthError",
+    ],
+)
+async def test_pre_push_validation_finalize_provider_recovery_rolls_back_to_post_agent_head_not_finalize_start_head(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    exc_cls: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KnWkn — preserve protected-scope repair self-commits.
+
+    In the dirty-finalize path ``_commit_dirty_worktree`` ->
+    ``_repair_protected_scope_changes_before_commit`` runs the protected-scope
+    repair agent, which may self-commit and advance HEAD past
+    ``finalize_start_head`` BEFORE a recoverable provider error is raised. The
+    residue rollback must anchor against the post-agent/pre-sink HEAD (the
+    advanced HEAD carrying the self-commit), NOT ``finalize_start_head``:
+    ``_pre_push_validation_cleanup`` ->
+    ``cleanup_validation_worktree_side_effects`` resets HEAD back to the
+    restore_ref when it sees HEAD advanced, so anchoring to
+    ``finalize_start_head`` discards the valid protected-scope repair
+    self-commit and the provider retry then starts from the old tree and can
+    lose or repeatedly redo the repair work. Mirrors the fix-pass rollback
+    (``PRRT_kwDOSJAM6s6Klf78``) and the CI-repair rollback
+    (``PRRT_kwDOSJAM6s6Klf74``), which both anchor against the
+    post-agent/pre-sink HEAD for the same reason.
+    """
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    finalize_start_head = "c" * 40
+    # The protected-scope repair agent self-committed inside
+    # ``_commit_dirty_worktree`` and advanced HEAD past
+    # ``finalize_start_head`` before the provider-recovery exception was
+    # raised. The rollback must anchor against THIS HEAD so the self-commit
+    # is preserved.
+    post_agent_head = "d" * 40
+    cmd = FakeCommandRunner()
+    # ``_run_pre_push_validation`` reads HEAD before the finalize call; that
+    # SHA is threaded in as ``finalize_start_head``.
+    cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")
+    # ``_operation_owned_delta_paths`` reads the committed delta; the dirty
+    # path is operation-owned so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    # ``_commit_dirty_worktree`` is mocked to raise after the protected-scope
+    # repair agent self-committed, so no git calls happen inside it. The
+    # exception handler captures the post-agent HEAD via ``_rev_parse_head``.
+    cmd.queue_result(returncode=0, stdout=f"{post_agent_head}\n")
+    # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``:
+    # the protected-scope repair agent left the dirty residue behind.
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")
+    # ``git restore --source <post_agent_head> --staged --worktree -- src/fix.py``.
+    cmd.queue_result(returncode=0)
+    # Post-restore verify ``check_validation_worktree_clean`` (worktree clean).
+    cmd.queue_result(returncode=0, stdout="")
+    # HEAD verification: ``rev-parse <post_agent_head>`` + ``rev-parse HEAD``.
+    # Both resolve to ``post_agent_head`` so no ``git reset --hard`` runs and
+    # the self-commit is preserved.
+    cmd.queue_result(returncode=0, stdout=f"{post_agent_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{post_agent_head}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    raised_exc = getattr(monitor_types, exc_cls)(
+        "provider recovery raised after protected-scope repair self-commit"
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    # The provider-recovery exception must still propagate, but only AFTER the
+    # residue has been rolled back to the post-agent HEAD (preserving the
+    # self-commit).
+    with pytest.raises(type(raised_exc)):
+        await pre_push_validation_module._run_pre_push_validation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=state,
+            operation_start_head=operation_start_head,
+        )
+
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    # The rollback MUST anchor against the post-agent HEAD, NOT
+    # ``finalize_start_head``: restoring tracked paths to the advanced ref
+    # preserves the self-commit, and the HEAD verification sees
+    # ``current == restore_ref`` so no ``git reset --hard`` runs.
+    assert any(
+        f"restore --source {post_agent_head} --staged --worktree" in call for call in joined_calls
+    ), joined_calls
+    assert not any(
+        f"restore --source {finalize_start_head} --staged --worktree" in call
+        for call in joined_calls
+    ), joined_calls
+    assert not any("reset --hard" in call for call in joined_calls), joined_calls
+    # The finalize failure must not re-check the tree via the pre-validation
+    # check (no verify/recheck pass through ``_pre_push_validation_worktree_check``).
     assert check_worktree_clean.await_count == 1
 
 
