@@ -55,7 +55,7 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
     *,
     workspace_id: str,
     worktree_path: Path,
-    restore_ref: str,
+    restore_ref: str | None,
 ) -> None:
     """Roll back CI-repair residue before re-raising provider recovery.
 
@@ -74,12 +74,27 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
     residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak`` and the finalize residue
     rollback ``PRRT_kwDOSJAM6s6KewGH``).
 
-    ``restore_ref`` is ``operation_start_head``: the worktree was proven
-    clean at that HEAD by the repair-start guard, so resetting to it
-    discards only this operation's stranded residue. ``git reset --hard``
-    only restores tracked paths; the repair agents can also leave
-    UNTRACKED residue (a newly generated file), and the next cycle's
-    repair-start guard enumerates untracked paths via
+    ``restore_ref`` is the HEAD captured AFTER the CI-repair agent ran but
+    BEFORE the commit sink (``post_agent_head``), NOT
+    ``operation_start_head``. The CI-repair agent may commit its own CI fix
+    and advance HEAD past ``operation_start_head``; the commit sink then
+    raises BEFORE making its own commit, so HEAD has not moved since
+    ``post_agent_head``. Resetting to ``post_agent_head`` discards only the
+    stranded protected-scope residue while PRESERVING the agent's
+    already-committed CI fix, so the provider retry starts from the
+    agent-advanced tree and does not redo or lose valid repair work
+    (review thread ``PRRT_kwDOSJAM6s6Klf74``). This mirrors the fix-pass
+    (``fix_start_head``) and finalize (``finalize_start_head``) rollbacks,
+    which both anchor against the post-agent/pre-sink HEAD for the same
+    reason. ``None`` means the post-agent HEAD could not be resolved; the
+    rollback is skipped (the residue strands, but a missing anchor makes a
+    safe ``git reset --hard`` impossible — better to strand visibly than
+    restore against the wrong ref, mirroring the finalize rollback's
+    ``restore_ref is None`` guard).
+
+    ``git reset --hard`` only restores tracked paths; the repair agents can
+    also leave UNTRACKED residue (a newly generated file), and the next
+    cycle's repair-start guard enumerates untracked paths via
     ``--untracked-files=all`` and treats them as dirty, so untracked
     residue would still trip ``PRE_EXISTING_DIRTY_WORKTREE``. The
     ``_pre_push_validation_cleanup`` path (which runs ``git restore`` for
@@ -92,6 +107,12 @@ async def _rollback_ci_fix_residue_before_provider_recovery(
     attempt's pre-existing-dirty guard rather than being silently
     swallowed here.
     """
+    if restore_ref is None:
+        _log.warning(
+            "monitor.ci_fix_provider_recovery_rollback_skipped_no_anchor",
+            workspace_id=workspace_id,
+        )
+        return
     reset = await self._deps.runner.run(
         git_worktree_command(worktree_path, "reset", "--hard", restore_ref)
     )
@@ -202,6 +223,25 @@ async def _run_ci_fix(
             stderr=exc.result.stderr,
         )
 
+    # Capture HEAD AFTER the CI-repair agent ran but BEFORE the commit sink
+    # (``_commit_dirty_worktree``). The agent may have committed its own CI fix
+    # and advanced HEAD past ``operation_start_head``; if the commit sink then
+    # raises a provider-recovery control-flow exception (from
+    # ``_repair_protected_scope_changes_before_commit``) BEFORE making its own
+    # commit, the residue rollback below must anchor against THIS HEAD, not
+    # ``operation_start_head``. Resetting to ``operation_start_head`` would
+    # discard the agent's already-committed CI fix along with the stranded
+    # protected-scope residue, so the provider retry would start from the old
+    # tree and redo (or lose) valid repair work. Mirrors the fix-pass
+    # (``fix_start_head``) and finalize (``finalize_start_head``) rollbacks,
+    # which both anchor against the post-agent/pre-sink HEAD for the same
+    # reason (review thread ``PRRT_kwDOSJAM6s6Klf74``). ``None`` means HEAD
+    # could not be resolved; the rollback helper then skips the reset (a
+    # missing anchor makes a safe restore impossible — better to strand
+    # visibly than restore against the wrong ref, mirroring the finalize
+    # rollback's ``restore_ref is None`` guard).
+    post_agent_head = await self._rev_parse_head(worktree_path)
+
     try:
         committed = await self._commit_dirty_worktree(
             workspace_id=workspace_id,
@@ -240,7 +280,7 @@ async def _run_ci_fix(
             self,
             workspace_id=workspace_id,
             worktree_path=worktree_path,
-            restore_ref=operation_start_head,
+            restore_ref=post_agent_head,
         )
         raise
     except ProtectedScopeDiffError as exc:

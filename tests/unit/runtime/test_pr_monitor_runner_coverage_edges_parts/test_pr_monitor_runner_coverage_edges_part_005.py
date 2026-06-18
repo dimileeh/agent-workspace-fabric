@@ -972,6 +972,9 @@ async def test_ci_fix_pauses_into_blocked_when_committed_protected_quality_gate_
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(
+        returncode=0, stdout="abc1234567890def\n"
+    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -1116,6 +1119,9 @@ async def test_execute_ci_fix_pauses_into_blocked_when_local_commit_touches_prot
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(
+        returncode=0, stdout="abc1234567890def\n"
+    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")

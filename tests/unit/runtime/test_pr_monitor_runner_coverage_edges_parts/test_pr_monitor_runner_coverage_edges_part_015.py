@@ -540,6 +540,7 @@ async def test_ci_fix_commits_and_pushes_even_if_agent_fails(
     for result in [
         (0, "", ""),  # clean worktree before repair
         (0, "abc1234567890def\n", ""),  # operation start HEAD
+        (0, "abc1234567890def\n", ""),  # post-agent HEAD (agent did not commit)
         (0, " M tests/test_app.py\n", ""),  # commit_dirty status --porcelain
         (0, " M tests/test_app.py\n", ""),  # commit_dirty status --untracked-files=all
         (0, "", ""),

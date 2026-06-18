@@ -425,6 +425,9 @@ async def test_run_ci_fix_resolves_once_and_threads_to_sink(
     async def _owned_paths(_self: object, _workspace_id: str) -> list[str]:
         return []
 
+    async def _rev_parse_head(_worktree_path: Path) -> str | None:
+        return "headsha"
+
     async def _commit_dirty_worktree(**kwargs: object) -> bool:
         sink_tags.append(kwargs.get("task_tag"))
         return True
@@ -449,6 +452,7 @@ async def test_run_ci_fix_resolves_once_and_threads_to_sink(
         _pre_existing_dirty_repair_worktree_result=_pre_existing,
         _provider_recovery_suppresses_cli=_suppress,
         _repair_operation_start_head_result=_head,
+        _rev_parse_head=_rev_parse_head,
         _commit_dirty_worktree=_commit_dirty_worktree,
         _protected_scope_push_block=_psb,
         _validated_git_push_result=_validated,

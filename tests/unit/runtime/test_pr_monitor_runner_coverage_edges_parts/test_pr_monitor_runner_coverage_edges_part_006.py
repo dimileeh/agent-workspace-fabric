@@ -473,6 +473,9 @@ async def test_ci_fix_pauses_instead_of_committing_verified_protected_revert(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(
+        returncode=0, stdout="abc1234567890def\n"
+    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -533,6 +536,9 @@ async def test_ci_fix_pauses_before_protected_revert_baseline_fetch(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(
+        returncode=0, stdout="abc1234567890def\n"
+    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=0, stdout="")  # fetch remote branch for committed diff
     cmd.queue_result(returncode=0, stdout="merge-base-sha\n")
@@ -595,6 +601,9 @@ async def test_execute_ci_fix_diff_baseline_unavailable_terminates_with_diff_rea
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout="")  # clean worktree before repair
     cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # operation start HEAD
+    cmd.queue_result(
+        returncode=0, stdout="abc1234567890def\n"
+    )  # post-agent HEAD (agent did not commit)
     cmd.queue_result(returncode=0, stdout="")  # clean worktree: agent committed locally itself
     cmd.queue_result(returncode=128, stderr="network reset")  # committed-diff baseline fetch
     adapter = FakeAdapter()
@@ -673,6 +682,7 @@ async def test_execute_ci_fix_workflow_scope_push_failure_is_terminal(
     """Verify CI repair workflow-scope push failures are terminal."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # post-agent HEAD (rev-parse)
     cmd.queue_result(
         returncode=1,
         stderr=(
@@ -752,6 +762,7 @@ async def test_execute_ci_fix_workflow_scope_notification_failure_still_terminat
     """Notification failures must not skip terminal workflow-scope handling."""
     workspace_id = await seed_monitoring_workspace(factory)
     cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout="abc1234567890def\n")  # post-agent HEAD (rev-parse)
     cmd.queue_result(
         returncode=1,
         stderr=(
