@@ -513,8 +513,8 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
     async def _preserved_commit_already_on_remote(**_kwargs: object) -> bool:
         return False
 
-    async def _consume_grants(_workspace_id: str) -> int:
-        return 0
+    async def _clear_marker_and_consume_grants(_workspace_id: str) -> None:
+        return None
 
     async def _clear_block_resume_phase(_workspace_id: str) -> None:
         return None
@@ -535,7 +535,7 @@ async def test_run_operator_hint_cycle_resolves_once_and_threads_to_sink(
         _active_operator_grant_specs=_grant_specs,
         _resolve_block_resume_phase=_resolve_block_resume_phase,
         _preserved_commit_already_on_remote=_preserved_commit_already_on_remote,
-        _consume_active_operator_grants=_consume_grants,
+        _clear_preserved_marker_and_consume_grants_durably=_clear_marker_and_consume_grants,
         _clear_block_resume_phase=_clear_block_resume_phase,
         _invoke_cli_for_verdict_result=_invoke,
         _protected_scope_push_block=_psb,

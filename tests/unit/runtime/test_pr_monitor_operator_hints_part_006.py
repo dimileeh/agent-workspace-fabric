@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     OperatorHint,
 )
 from awf.runtime.pr_monitor_runner.comments import VerdictResult
+from awf.runtime.pr_monitor_runner.operator_hints import _finalize_operator_hint_resume
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
     _PRE_PUSH_VALIDATION_FAILED_REASON,
 )
@@ -639,3 +640,76 @@ async def test_terminal_directive_grant_drop_clears_marker_and_consumes_grant_at
         grant = await session.get(OperatorGrantAuditRecord, grant_id)
         assert grant is not None
         assert grant.consumed_at is None
+
+
+@pytest.mark.unit
+async def test_finalize_operator_hint_resume_clears_marker_durably_with_grant_consume(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A settled resume's finalize must drop the preserved-head marker DURABLY on the
+    row, atomically with the grant consume (PRRT_kwDOSJAM6s6KaBND).
+
+    The grant consume commits in its own helper transaction, so if the marker were only
+    dropped in the in-memory ``state`` the loop flushes later, a crash AFTER the grant
+    consume but BEFORE ``_persist_state`` would durably reload the row with the grant
+    GONE but the preserved-head marker STILL PRESENT (recorded durably at block time). A
+    fresh operator guide arriving before recovery would then satisfy the no-op restart
+    shortcut at the top of ``_run_operator_hint_cycle`` (``not active_grant_specs`` plus
+    the old preserved SHA already on the remote) and be finalized WITHOUT running its
+    directive — silently swallowing the follow-up. Assert that after ``_finalize_operator
+    _hint_resume`` the marker is gone from the persisted ``monitor_threads_addressed`` row
+    (NOT merely the in-memory ``state``) and the grant is consumed, with NO ``_persist
+    _state`` flush, mirroring ``test_terminal_directive_grant_drop_clears_marker_and
+    _consumes_grant_atomically``."""
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    grant_id = await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {
+            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "preserved-granted-sha"
+        }
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep pyproject.toml and fix the rest",
+        directive="redo the unrelated files but keep the protected edit",
+        operation_id="op_finalize_marker_durable",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    await _finalize_operator_hint_resume(runner, workspace_id=workspace_id, state=state)
+
+    # In-memory bookkeeping: the hint is processed (pending hint cleared) and the marker
+    # is dropped from state.
+    assert state.pending_operator_hint is None
+    assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in state.threads_addressed_ids
+    # Durable on the row WITHOUT any later ``_persist_state`` flush: marker gone AND grant
+    # consumed, so a fresh guide after a crash here cannot hit the no-op restart shortcut.
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY not in (
+            workspace.monitor_threads_addressed or {}
+        )
+        grant = await session.get(OperatorGrantAuditRecord, grant_id)
+        assert grant is not None
+        assert grant.consumed_at is not None

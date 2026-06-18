@@ -939,14 +939,28 @@ async def _finalize_operator_hint_resume(
 ) -> None:
     """Close out a settled protected-block resume so the next cycle starts clean.
 
-    Bundles the three teardown steps a finalized resume must perform: consume the
-    single-use operator grants, reset the ``block_resume_phase`` discriminator (set
-    at block time and never overwritten except by a fresh block) so a later
-    operator-hint / remonitor cycle — which arms a hint WITHOUT re-blocking — cannot
-    reuse a stale sync-base phase to skew the protected-scope validator selection
-    (PRRT_kwDOSJAM6s6KFqEg), and mark the operator hint processed (which also drops
-    the preserved-head marker, PRRT_kwDOSJAM6s6KE2BX)."""
-    await self._consume_active_operator_grants(workspace_id)
+    Bundles the teardown steps a finalized resume must perform: consume the
+    single-use operator grants AND durably drop the preserved-head marker in ONE
+    transaction, reset the ``block_resume_phase`` discriminator (set at block time
+    and never overwritten except by a fresh block) so a later operator-hint /
+    remonitor cycle — which arms a hint WITHOUT re-blocking — cannot reuse a stale
+    sync-base phase to skew the protected-scope validator selection
+    (PRRT_kwDOSJAM6s6KFqEg), and mark the operator hint processed in memory.
+
+    The marker drop MUST be durable, not left to the outer loop's later
+    ``_persist_state``: the grant consume commits in its own helper transaction, so a
+    crash AFTER it but BEFORE ``_persist_state`` would durably reload the row with the
+    grant GONE but the preserved-head marker STILL PRESENT (recorded durably at block
+    time, PRRT_kwDOSJAM6s6KEtU6). A fresh operator guide arriving before recovery would
+    then satisfy the no-op restart shortcut at the top of ``_run_operator_hint_cycle``
+    (``not active_grant_specs`` + the old preserved SHA already on the remote) and be
+    finalized WITHOUT running its directive — silently swallowing the follow-up
+    (PRRT_kwDOSJAM6s6KaBND, the KE2BX/KWAIx durability class). Clearing the marker and
+    consuming the grant atomically keeps marker-gone tied to grant-consumed across a
+    crash, so the shortcut is skipped (no marker) until a fresh block re-records one.
+    ``_finalize_processed_operator_hint`` still pops the in-memory copy and marks the
+    hint processed for the remainder of this cycle."""
+    await self._clear_preserved_marker_and_consume_grants_durably(workspace_id)
     await self._clear_block_resume_phase(workspace_id)
     _finalize_processed_operator_hint(state)
 
