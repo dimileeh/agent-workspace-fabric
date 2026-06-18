@@ -1851,6 +1851,90 @@ async def test_pre_push_validation_finalize_fail_closed_when_commit_introduces_u
 
 
 @pytest.mark.unit
+async def test_pre_push_validation_finalize_fail_closed_with_delta_unavailable_reason_when_post_commit_delta_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A finalize whose post-commit committed delta cannot be inspected must use a dedicated reason.
+
+    When ``_committed_delta_paths`` returns ``None`` after the finalize commit
+    (because ``git diff`` failed or its ``--name-status -z`` output was
+    malformed), the finalize must still fail closed — but the reason code must
+    reflect that the committed delta could not be *inspected*, not that an
+    unowned path was *committed*. Reusing
+    ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` here would mislabel an
+    un-inspectable commit as a proven-unowned commit and mislead operators
+    (review thread ``PRRT_kwDOSJAM6s6KhtZJ``).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+        _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
+        _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    # Only the initial pre-validation check is expected; the post-commit
+    # fail-closed branch must NOT re-run the worktree cleanliness check.
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Pre-commit operation-owned delta: the dirty path is owned via the
+    # committed delta, so the gate lets the finalize proceed.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
+    # Post-commit re-validation: ``git diff`` fails, so the committed delta
+    # cannot be inspected and ``_committed_delta_paths`` returns None.
+    cmd.queue_result(returncode=1, stdout="", stderr="unknown revision")
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(return_value=True))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON
+    assert result.reason_code != _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
+    assert result.validation_run_id is None
+    assert result.workspace_head_sha == "b" * 40
+    # Validation must never run when the finalize fails closed on an
+    # un-inspectable committed delta.
+    assert validation.calls == []
+    # The post-commit fail-closed branch must not re-run the worktree check.
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_finalize_ignores_working_tree_only_unowned_dirt(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],

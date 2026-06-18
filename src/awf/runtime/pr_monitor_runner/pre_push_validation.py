@@ -34,6 +34,7 @@ from awf.runtime.pr_monitor_runner.path_parsing import (
     _changed_paths_from_name_status_z,
 )
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
     _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
@@ -98,6 +99,7 @@ PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON = _PRE_PUSH_VALIDATION_ROLLBACK_FAILE
 PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON = _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON
 PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON = _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
 PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON = _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
+PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON = _PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON
 
 _FAILING_COMMAND_DETAIL_LIMIT = 1000
 
@@ -1028,7 +1030,11 @@ async def _try_finalize_pre_push_dirty_repair_state(
     )
     if post_commit_delta is None:
         # The post-commit committed delta could not be resolved; do not trust
-        # the commit.
+        # the commit. This is distinct from an *unowned* delta: no path was
+        # proven to be unowned, the committed delta simply could not be
+        # inspected, so a dedicated reason code is used instead of
+        # ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` (review thread
+        # ``PRRT_kwDOSJAM6s6KhtZJ``).
         _log.warning(
             "monitor.pre_push_dirty_finalize_post_commit_delta_unavailable",
             workspace_id=workspace_id,
@@ -1038,7 +1044,7 @@ async def _try_finalize_pre_push_dirty_repair_state(
         return ValidationWorktreeCheck(
             clean=False,
             paths=check.paths,
-            reason_code=_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+            reason_code=_PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON,
             message=(
                 "pre-push dirty finalize could not re-validate the committed "
                 "operation delta after the commit sink side effects"

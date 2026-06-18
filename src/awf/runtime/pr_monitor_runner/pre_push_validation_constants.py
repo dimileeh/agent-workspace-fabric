@@ -21,3 +21,12 @@ _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON = "PRE_PUSH_VALIDATION_REPARENT_FAIL
 # closed so the unowned commit is never silently pushed (review thread
 # ``PRRT_kwDOSJAM6s6KZP8f``).
 _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON = "PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA"
+
+# The post-commit committed delta could not be re-resolved after the finalize
+# commit sink's side effects (``git diff`` failed or its ``--name-status -z``
+# output was malformed). This is distinct from
+# ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA``: no path was proven to be unowned,
+# the committed delta simply could not be inspected. The finalize still fails
+# closed with this dedicated reason so the un-inspectable commit is never
+# silently trusted (review thread ``PRRT_kwDOSJAM6s6KhtZJ``).
+_PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE_REASON = "PRE_PUSH_DIRTY_FINALIZE_DELTA_UNAVAILABLE"
