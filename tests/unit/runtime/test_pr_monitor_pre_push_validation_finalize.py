@@ -1955,12 +1955,12 @@ async def test_pre_push_validation_finalize_commits_operation_owned_non_ascii_di
 
 
 @pytest.mark.unit
-async def test_pre_push_validation_finalize_commits_operation_owned_untracked_dirt(
+async def test_pre_push_validation_finalize_strands_operation_owned_untracked_dirt_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Operation-owned purely untracked dirt must be finalized, not stranded.
+    """Operation-owned purely untracked dirt strands fail-closed (deferred).
 
     ``git diff --name-status -z`` (committed, staged, and working-tree) cannot
     see a purely untracked path: the agent created the file but ``git add -A``
@@ -1968,14 +1968,26 @@ async def test_pre_push_validation_finalize_commits_operation_owned_untracked_di
     commit-vs-working-tree diff. The pre-push cleanliness check uses
     ``git status --porcelain``, which DOES list untracked files, so the dirty
     set carries the path while the operation-owned delta computed from diffs is
-    empty. Without folding ``check.untracked_paths`` into the owned set the
-    finalize treats the operation's own untracked repair output as unrelated
-    dirt and skips, stranding it as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY``
-    and the push fails-closed — the recovery path this gate added cannot run for
-    that common residue (review thread ``PRRT_kwDOSJAM6s6Ka0aK``). The
-    repair-start dirty guard proved the worktree was clean at
-    ``operation_start_head``, so the untracked path is owned by this operation
-    and must be finalized.
+    empty.
+
+    ``PRRT_kwDOSJAM6s6Ka0aK`` previously recovered this case by folding
+    ``check.untracked_paths`` into ``owned_delta_paths``. But the repair-start
+    dirty guard only proves the worktree was clean at ``operation_start_head``
+    at repair *start*; ``check.untracked_paths`` is computed at pre-push
+    validation time, which is later. A failed cleanup or another local process
+    can create an untracked file in that window, and the fold-in treated it as
+    operation-owned solely because it was untracked — ``_commit_dirty_worktree``
+    then staged it via ``git add -A`` and the post-commit re-validation saw it as
+    committed and confined, silently sweeping the unrelated untracked file into
+    the PR instead of failing closed (review thread
+    ``PRRT_kwDOSJAM6s6KcSj``). The untracked fold-in was therefore removed and
+    this recovery now strands the operation's own purely-untracked repair
+    output as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` — fail-closed and
+    visible to a human, rather than a silent sweep of unrelated dirt. Restoring
+    this recovery without the over-broadening requires capturing only the
+    operation's attempted untracked paths and threading them to the gate;
+    tracked as a deferred follow-up (see
+    ``plans/PRRT_kwDOSJAM6s6KcSj_PLAN.md``).
     """
     workspace_id = await seed_monitoring_workspace(factory)
     await _set_resolved_profile(factory, workspace_id)
@@ -1990,36 +2002,23 @@ async def test_pre_push_validation_finalize_commits_operation_owned_untracked_di
         untracked_paths=("src/fix.py",),
         reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
     )
-    clean_check = ValidationWorktreeCheck(clean=True)
-    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
     monkeypatch.setattr(
         pre_push_validation_module,
         "_pre_push_validation_worktree_check",
         check_worktree_clean,
     )
-    cleanup = AsyncMock(
-        return_value=ValidationWorktreeCleanup(
-            cleaned=False,
-            check=clean_check,
-            restore_ref="b" * 40,
-        )
-    )
-    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Pre-commit ownership gate: the committed and staged deltas are empty
     # because the path is purely untracked — not committed, not staged. The
     # live working-tree delta is NOT consulted (removed for
-    # PRRT_kwDOSJAM6s6KbbE6). The owned set must therefore come from
-    # ``check.untracked_paths`` or the finalize would strand the operation's
-    # own untracked repair output.
+    # PRRT_kwDOSJAM6s6KbbE6). The untracked fold-in is NOT applied (removed for
+    # PRRT_kwDOSJAM6s6KcSj), so the purely-untracked path is treated as
+    # unrelated and the finalize skips — fail-closed, not a silent sweep.
     cmd.queue_result(returncode=0, stdout="")  # committed delta
     cmd.queue_result(returncode=0, stdout="")  # staged delta
-    # Post-commit re-validation inspects ONLY the committed delta: the commit
-    # sink committed the previously untracked path, so the committed delta now
-    # carries it — still confined to the operation-owned set.
-    cmd.queue_result(returncode=0, stdout=_name_status_z("A\0src/fix.py\0"))
-    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
         cmd=cmd,
@@ -2027,7 +2026,7 @@ async def test_pre_push_validation_finalize_commits_operation_owned_untracked_di
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
-    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    runner._deps.validation = validation  # type: ignore[assignment]
     commit_dirty = AsyncMock(return_value=True)
     monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
     state = MonitorState()
@@ -2044,19 +2043,16 @@ async def test_pre_push_validation_finalize_commits_operation_owned_untracked_di
         operation_start_head=operation_start_head,
     )
 
-    assert result.passed is True
-    assert result.workspace_head_sha == "b" * 40
-    commit_dirty.assert_awaited_once_with(
-        workspace_id=workspace_id,
-        message=f"awf: finalize PR monitor repair for {workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        state=state,
-        protected_scope_revert_remote_branch=f"awf/{workspace_id}",
-        remote_push_url=None,
-    )
-    cleanup.assert_awaited_once()
-    assert check_worktree_clean.await_count == 2
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    # The operation-owned purely-untracked repair output strands fail-closed
+    # (deferred recovery) — the commit sink must not run.
+    commit_dirty.assert_not_awaited()
+    # Validation must never run on a dirty worktree.
+    assert validation.calls == []
+    # The dirty check is not re-run after a skipped finalize (no verify pass).
+    assert check_worktree_clean.await_count == 1
 
 
 @pytest.mark.unit
@@ -2134,4 +2130,102 @@ async def test_pre_push_validation_finalize_excludes_agent_runtime_untracked_dir
     # The agent-runtime artifact must not be committed into the PR.
     commit_dirty.assert_not_awaited()
     assert validation.calls == []
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_skips_unrelated_untracked_dirt(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Unrelated purely-untracked dirt must not be swept into the PR.
+
+    The repair-start dirty guard
+    (``_pre_existing_dirty_repair_worktree_result``) proves the worktree was
+    clean at ``operation_start_head`` at repair *start*, but the pre-push
+    cleanliness check (``check_validation_worktree_clean``) computes
+    ``check.untracked_paths`` at pre-push validation time, which is later. A
+    failed cleanup or another local process can create an untracked file in
+    that window; it is NOT a path the operation captured or attempted (it is
+    neither committed nor staged).
+
+    ``PRRT_kwDOSJAM6s6Ka0aK`` folded ``check.untracked_paths`` into
+    ``owned_delta_paths`` solely because the worktree was clean at
+    ``operation_start_head``, treating every current untracked path as
+    operation-owned. That let ``_commit_dirty_worktree`` stage the unrelated
+    untracked file via ``git add -A`` and the post-commit re-validation see it
+    as committed and confined to the owned set, silently sweeping the
+    unrelated file into the PR instead of failing closed (review thread
+    ``PRRT_kwDOSJAM6s6KcSj``). The untracked fold-in is removed for the same
+    reason the live working-tree delta was removed
+    (``PRRT_kwDOSJAM6s6KbbE6``): silent over-broadening is worse than visible
+    fail-closed.
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    # A failed cleanup or another local process created this purely-untracked
+    # file AFTER the repair-start guard, between the operation's own committed
+    # edits. Porcelain reports it as ``?? unrelated/cleanup.log``; it is not
+    # agent-runtime-ignored so it stays in both ``paths`` and
+    # ``untracked_paths``. The operation's own edits were committed, so the
+    # worktree would otherwise be clean — this untracked file is the only dirt.
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("unrelated/cleanup.log",),
+        untracked_paths=("unrelated/cleanup.log",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Pre-commit ownership gate: the committed and staged deltas are empty
+    # relative to ``operation_start_head`` because the unrelated untracked file
+    # is purely untracked (not committed, not staged). The live working-tree
+    # delta is NOT consulted (removed for PRRT_kwDOSJAM6s6KbbE6), and the
+    # untracked fold-in is NOT applied (removed for PRRT_kwDOSJAM6s6KcSj), so
+    # the unrelated untracked path is treated as unrelated dirt and the
+    # finalize skips — fail-closed, not a silent sweep.
+    cmd.queue_result(returncode=0, stdout="")  # committed delta
+    cmd.queue_result(returncode=0, stdout="")  # staged delta
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = validation  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == VALIDATION_WORKTREE_PRE_EXISTING_DIRTY
+    assert result.validation_run_id is None
+    # The unrelated untracked file must NOT be committed into the PR.
+    commit_dirty.assert_not_awaited()
+    # Validation must never run on a dirty worktree.
+    assert validation.calls == []
+    # The dirty check is not re-run after a skipped finalize (no verify pass).
     assert check_worktree_clean.await_count == 1

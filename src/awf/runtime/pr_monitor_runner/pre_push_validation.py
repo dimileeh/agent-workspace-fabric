@@ -814,6 +814,25 @@ async def _try_finalize_pre_push_dirty_repair_state(
     and is tracked as a deferred follow-up (capturing the operation's attempted
     paths would restore it without the over-broadening).
 
+    The gate deliberately does NOT fold ``check.untracked_paths`` into the
+    owned set. The repair-start dirty guard only proves the worktree was clean
+    at ``operation_start_head`` at repair *start*; ``check.untracked_paths`` is
+    computed at pre-push validation time, which is later. A failed cleanup or
+    another local process can create an untracked file in that window, and
+    folding it in would treat that unrelated file as operation-owned solely
+    because it is untracked — ``_commit_dirty_worktree`` would then stage it via
+    ``git add -A`` and the post-commit re-validation would see it as committed
+    and confined to the owned set, silently sweeping the unrelated untracked
+    file into the PR instead of failing closed (review thread
+    ``PRRT_kwDOSJAM6s6KcSj``, mirroring the ``PRRT_kwDOSJAM6s6KbbE6`` working-tree
+    delta removal). The previous untracked fold-in (added by
+    ``PRRT_kwDOSJAM6s6Ka0aK`` to recover operation-owned purely-untracked repair
+    output left by a never-run ``git add -A``) is removed here as over-broadening
+    for the same safety reason: that recovery now fails closed as
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` and is tracked as a deferred
+    follow-up (capturing only the operation's attempted untracked paths would
+    restore it without the over-broadening).
+
     The pre-commit gate is necessary but not sufficient: ``_commit_dirty_worktree``
     runs a fresh ``git status``, may invoke protected-scope repair (which runs
     the agent CLI), and then stages all non-ignored dirty paths. A side effect
@@ -854,22 +873,29 @@ async def _try_finalize_pre_push_dirty_repair_state(
     if owned_delta_paths is None:
         # The delta could not be resolved; do not commit unowned dirt.
         return None
-    # ``git diff --name-status -z`` (committed/staged/working-tree) cannot see
-    # purely untracked paths, so the operation-owned delta computed from diffs
-    # omits repair output that was never staged (e.g. a file the agent created
-    # but ``git add -A`` never reached). The pre-push cleanliness check uses
-    # ``git status --porcelain``, which DOES list untracked files, so those
-    # operation-owned untracked paths would otherwise be flagged as
-    # ``unrelated_dirty`` and the finalize would skip, stranding the
-    # operation's own residue as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` and
-    # the push would fail-closed. The repair-start dirty guard
-    # (``_pre_existing_dirty_repair_worktree_result``) proved the worktree was
-    # clean at ``operation_start_head``, so every untracked path now present is
-    # owned by this operation. ``check.untracked_paths`` already excludes
-    # AWF-agent-runtime artifacts (``check_validation_worktree_clean`` suppresses
-    # them unconditionally), so folding them in here is safe and does not sweep
-    # agent-runtime dirt into the PR (review thread ``PRRT_kwDOSJAM6s6Ka0aK``).
-    owned_delta_paths = owned_delta_paths | set(check.untracked_paths)
+    # The ownership gate is intentionally limited to the committed and staged
+    # deltas — paths the operation actually captured/attempted. It deliberately
+    # does NOT fold in ``check.untracked_paths``. The repair-start dirty guard
+    # (``_pre_existing_dirty_repair_worktree_result``) only proves the worktree
+    # was clean at ``operation_start_head`` at repair *start*;
+    # ``check.untracked_paths`` is computed at pre-push validation time, which
+    # is later. A failed cleanup or another local process can create an
+    # untracked file in that window, and folding it in would treat that
+    # unrelated file as operation-owned solely because it is untracked;
+    # ``_commit_dirty_worktree`` would then stage it via ``git add -A`` and the
+    # post-commit re-validation would see it as committed and confined to the
+    # owned set, silently sweeping the unrelated untracked file into the PR
+    # instead of failing closed. The committed and staged deltas are the
+    # correct ownership proxy (committed = successfully committed; staged =
+    # successfully staged); the untracked fold-in is removed for the same
+    # reason the live working-tree delta was removed (review thread
+    # ``PRRT_kwDOSJAM6s6KcSj``, mirroring ``PRRT_kwDOSJAM6s6KbbE6``). The
+    # recovery for operation-owned purely-untracked repair output left by a
+    # never-run ``git add -A`` (added by ``PRRT_kwDOSJAM6s6Ka0aK``) regresses
+    # to fail-closed ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` — visible and
+    # human-recoverable, not a silent sweep; restoring it without the
+    # over-broadening requires capturing only the operation's attempted
+    # untracked paths and is tracked as a deferred follow-up.
     dirty_paths = set(check.paths)
     if not dirty_paths:
         return None
