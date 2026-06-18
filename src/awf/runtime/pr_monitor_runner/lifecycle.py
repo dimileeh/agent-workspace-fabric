@@ -19,6 +19,9 @@ from typing import Any
 
 from awf.common.audit import redact_audit_text
 from awf.common.compose_exec import EXEC_PROCESS_CLEANUP_FAILED
+from awf.control.operator_grants import (
+    consume_active_operator_grants_in_session,
+)
 from awf.db.enums import (
     FailureReason,
     WorkspaceStatus,
@@ -544,6 +547,42 @@ async def _clear_preserved_head_marker_durably(self: Any, workspace_id: str) -> 
             return
         ws.monitor_threads_addressed = threads_addressed
         await s.commit()
+
+
+async def _clear_preserved_marker_and_consume_grants_durably(self: Any, workspace_id: str) -> None:
+    """Clear the preserved-head marker AND consume the active operator grants in ONE
+    durable transaction.
+
+    The terminal directive+grant DROP branch of ``_terminal_directive_grant_reblock``
+    must do BOTH when the combined CLI dropped the preserved commit: clear the stale
+    marker (so a later grant-revoking directive cannot satisfy the directive-drop
+    restart shortcut and no-op the operator's follow-up — PRRT_kwDOSJAM6s6KVgwV) AND
+    consume the single-use grant that approved ONLY the now-dropped commit (so a later
+    ``SyncBase`` cannot honor it for a conflict edit — PRRT_kwDOSJAM6s6KVt_Q).
+
+    Running these as two SEPARATE committed transactions leaves a crash window: clearing
+    the marker first drops ``has_preserved_protected_block`` to False on the persisted
+    row, so ``decide()`` no longer ranks the resume ahead of ``SyncBase``; if the process
+    dies after that commit but before the grant consume commits, the row durably reloads
+    with the marker GONE but the grant STILL ACTIVE — exactly the KVt_Q grant leak the
+    consume was added to close. Performing both writes under one transaction closes that
+    window: a crash before the single commit leaves marker-present + grant-active (the
+    resume re-blocks / re-runs safely), and a crash after leaves marker-gone +
+    grant-consumed (nothing carries the stale approval forward). Never flushes the rest
+    of the in-memory state. No-ops when both are already settled."""
+    async with self._deps.session_factory() as s:
+        ws = await WorkspaceRepository(s).get_for_update(workspace_id)
+        if ws is None:
+            return
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        marker_cleared = (
+            threads_addressed.pop(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, None) is not None
+        )
+        if marker_cleared:
+            ws.monitor_threads_addressed = threads_addressed
+        consumed = await consume_active_operator_grants_in_session(s, workspace_id)
+        if marker_cleared or consumed:
+            await s.commit()
 
 
 async def _terminate_completed(

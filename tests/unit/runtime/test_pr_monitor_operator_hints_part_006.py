@@ -534,3 +534,108 @@ async def test_terminal_directive_grant_drop_clears_stale_preserved_marker_durab
         grant = await session.get(OperatorGrantAuditRecord, grant_id)
         assert grant is not None
         assert grant.consumed_at is not None
+
+
+@pytest.mark.unit
+async def test_terminal_directive_grant_drop_clears_marker_and_consumes_grant_atomically(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal directive+grant DROP branch must clear the preserved marker AND
+    consume the single-use grant in ONE durable transaction.
+
+    Clearing the marker drops ``has_preserved_protected_block`` to False on the persisted
+    row, so ``decide()`` stops ranking the resume ahead of ``SyncBase``. If the marker
+    clear committed in its own transaction and the process then died before a SEPARATE
+    grant-consume commit, the row would durably reload with the marker GONE but the grant
+    STILL ACTIVE — and a base advance would let ``_protected_scope_violations_for_sync_base_push``
+    honor that stale grant for a conflict edit on the granted path: the KVt_Q grant leak
+    the consume was added to close. Assert the two writes are atomic: when the grant
+    consume fails, the marker clear ROLLS BACK with it, so the row never reaches the
+    marker-gone + grant-active state."""
+    from awf.db.models import OperatorGrantAuditRecord
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    grant_id = await _seed_grant_and_block_violations(
+        factory,
+        workspace_id,
+        grant_path="pyproject.toml",
+        violation_paths=("pyproject.toml",),
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get_for_update(workspace_id)
+        assert workspace is not None
+        workspace.monitor_threads_addressed = {
+            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY: "preserved-granted-sha"
+        }
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path,
+    )
+    hint = OperatorHint(
+        reason="keep pyproject.toml and fix the rest",
+        directive="redo the unrelated files but keep the protected edit",
+        operation_id="op_terminal_directive_grant_drop_atomic",
+        requested_at="2026-06-17T00:00:00+00:00",
+        reason_code="OPERATOR_GUIDE",
+    )
+    state = MonitorState(pending_operator_hint=hint)
+    state.mark_addressed(_PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY, "preserved-granted-sha")
+
+    async def _no_preexisting_dirty(**_kwargs: object) -> None:
+        return None
+
+    async def _start_head_ok(**_kwargs: object) -> tuple[str, None]:
+        return ("preserved-granted-sha", None)
+
+    async def _needs_human(**_kwargs: object) -> VerdictResult:
+        return VerdictResult(verdict="needs_human", reason="operator must decide")
+
+    async def _preserved_gone(**_kwargs: object) -> bool:
+        return False
+
+    class _ConsumeError(RuntimeError):
+        pass
+
+    async def _consume_raises(*_args: object, **_kwargs: object) -> int:
+        raise _ConsumeError("grant consume failed mid-drop")
+
+    monkeypatch.setattr(runner, "_pre_existing_dirty_repair_worktree_result", _no_preexisting_dirty)
+    monkeypatch.setattr(runner, "_repair_operation_start_head_result", _start_head_ok)
+    monkeypatch.setattr(runner, "_invoke_cli_for_verdict_result", _needs_human)
+    monkeypatch.setattr(runner, "_preserved_commit_reachable_from_head", _preserved_gone)
+    monkeypatch.setattr(
+        "awf.runtime.pr_monitor_runner.lifecycle.consume_active_operator_grants_in_session",
+        _consume_raises,
+    )
+
+    with pytest.raises(_ConsumeError):
+        await runner._run_operator_hint_cycle(
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            pr_head_sha="abc1234567890def",
+            hint=hint,
+            state=state,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    # The consume failed, so the marker clear must have ROLLED BACK with it: the row must
+    # NOT be left in the marker-gone + grant-active state that leaks the grant to SyncBase.
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        assert (workspace.monitor_threads_addressed or {}).get(
+            _PROTECTED_BLOCK_PRESERVED_HEAD_STATE_KEY
+        ) == "preserved-granted-sha"
+        grant = await session.get(OperatorGrantAuditRecord, grant_id)
+        assert grant is not None
+        assert grant.consumed_at is None

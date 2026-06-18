@@ -722,13 +722,15 @@ async def _terminal_directive_grant_reblock(
         # drop branch (PRRT_kwDOSJAM6s6KWAIx). Popping only the in-memory copy here is
         # not durable until the loop's later _persist_state, and the follow-up
         # _clear_dropped_preserved_marker_after_terminal_directive early-returns once a
-        # grant is present, so nothing else persists the removal. The grant is consumed
-        # durably just below; a crash after that but before _persist_state would reload
-        # the pending directive with NO active grants plus the STALE marker, letting the
-        # directive-drop restart shortcut no-op the operator's follow-up and swallow the
-        # terminal verdict (PRRT_kwDOSJAM6s6KWAIx, the grant-bearing sibling).
-        await self._clear_preserved_head_marker_durably(workspace_id)
-        await self._consume_active_operator_grants(workspace_id)
+        # grant is present, so nothing else persists the removal. The marker clear and
+        # the grant consume must be ATOMIC: clearing the marker drops
+        # ``has_preserved_protected_block`` to False so ``decide()`` stops ranking this
+        # resume ahead of ``SyncBase``, so a crash BETWEEN two separate commits (marker
+        # cleared, grant not yet consumed) would durably leave marker-gone + grant-active
+        # — the very KVt_Q grant leak the consume closes. Do both in one transaction so a
+        # crash before the commit leaves marker-present + grant-active (re-blocks /
+        # re-runs safely) and a crash after leaves marker-gone + grant-consumed.
+        await self._clear_preserved_marker_and_consume_grants_durably(workspace_id)
         return None
     message = (
         f"operator directive resume returned '{verdict.verdict}' before landing the "
