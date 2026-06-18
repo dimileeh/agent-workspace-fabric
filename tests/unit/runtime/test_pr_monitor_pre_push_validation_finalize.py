@@ -86,6 +86,10 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
     # proceeds. The staged delta is empty (the operation already committed).
     cmd.queue_result(returncode=0, stdout="src/fix.py\n")
     cmd.queue_result(returncode=0, stdout="")
+    # Post-commit re-validation: the committed delta is still confined to the
+    # operation-owned path, so the finalize proceeds to the verify recheck.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
     runner = make_runner(
         factory=factory,
@@ -177,6 +181,11 @@ async def test_pre_push_validation_finalize_commits_operation_owned_staged_dirt(
     cmd.queue_result(returncode=0, stdout="")
     # Staged delta against operation_start_head carries the operation-owned path.
     cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    # Post-commit re-validation: the commit sink committed the staged path, so
+    # the committed delta now carries the operation-owned path and the staged
+    # delta is empty — both still confined to the operation-owned set.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")
+    cmd.queue_result(returncode=0, stdout="")
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
@@ -1144,3 +1153,91 @@ async def test_pre_push_validation_coverage_provider_skip_still_pushes(
     runs = await _validation_runs(factory, workspace_id)
     assert runs[-1].status == "succeeded"
     assert runs[-1].coverage is None
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_fail_closed_when_commit_introduces_unowned_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A finalize commit that introduces paths outside the operation delta must fail closed.
+
+    The pre-push dirty finalize ownership gate is checked *before* calling
+    ``_commit_dirty_worktree``, but that commit sink runs a fresh ``git status``,
+    may invoke protected-scope repair (which runs the agent CLI), and then
+    stages **all** non-ignored dirty paths. If a side effect between the gate
+    check and the fresh staging scan creates an extra path outside
+    ``owned_delta_paths``, the stale gate is bypassed and the unowned path is
+    committed. The finalize must re-validate the operation's committed delta
+    after the commit and fail closed with a dedicated reason code so the
+    unowned commit is never silently pushed (regression for review thread
+    ``PRRT_kwDOSJAM6s6KZP8f``).
+    """
+    from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+        _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+    )
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    # Only the initial pre-validation check is expected; the post-commit
+    # fail-closed branch must NOT re-run the worktree cleanliness check.
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Pre-commit operation-owned delta: the dirty path is owned, so the gate
+    # lets the finalize proceed.
+    cmd.queue_result(returncode=0, stdout="src/fix.py\n")  # committed delta
+    cmd.queue_result(returncode=0, stdout="")  # staged delta
+    # Post-commit re-validation: the commit sink's side effects introduced an
+    # extra unowned path outside the operation delta. ``_operation_owned_delta_paths``
+    # recomputes both the committed and staged delta, so both diffs are queued.
+    cmd.queue_result(
+        returncode=0, stdout="src/fix.py\nunrelated/extra.py\n"
+    )  # post-commit committed delta
+    cmd.queue_result(returncode=0, stdout="")  # post-commit staged delta
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    validation = _FakeValidation(_validation_result(tmp_path, ok=True))
+    runner._deps.validation = validation  # type: ignore[assignment]
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(return_value=True))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is False
+    assert result.reason_code == _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
+    assert result.validation_run_id is None
+    assert result.workspace_head_sha == "b" * 40
+    # Validation must never run when the finalize fails closed on unowned delta.
+    assert validation.calls == []
+    # The post-commit fail-closed branch must not re-run the worktree check.
+    assert check_worktree_clean.await_count == 1

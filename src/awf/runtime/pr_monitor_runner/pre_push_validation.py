@@ -32,6 +32,7 @@ from awf.runtime.pr_monitor_runner.constants import (
 )
 from awf.runtime.pr_monitor_runner.git_utils import git_worktree_command
 from awf.runtime.pr_monitor_runner.pre_push_validation_constants import (
+    _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
     _PRE_PUSH_VALIDATION_FAILED_REASON,
     _PRE_PUSH_VALIDATION_FIX_FAILED_REASON,
     _PRE_PUSH_VALIDATION_INFRASTRUCTURE_FAILED_REASON,
@@ -87,6 +88,7 @@ PRE_PUSH_VALIDATION_FIX_FAILED_REASON = _PRE_PUSH_VALIDATION_FIX_FAILED_REASON
 PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON = _PRE_PUSH_VALIDATION_ROLLBACK_FAILED_REASON
 PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON = _PRE_PUSH_VALIDATION_TOOLCHAIN_MISSING_REASON
 PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON = _PRE_PUSH_VALIDATION_REPARENT_FAILED_REASON
+PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON = _PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON
 
 _FAILING_COMMAND_DETAIL_LIMIT = 1000
 
@@ -641,6 +643,17 @@ async def _try_finalize_pre_push_dirty_repair_state(
     silently swept into the PR (review thread ``PRRT_kwDOSJAM6s6KXLaI``).
     When ``operation_start_head`` is unavailable (no operation-owned anchor),
     the finalize is skipped entirely.
+
+    The pre-commit gate is necessary but not sufficient: ``_commit_dirty_worktree``
+    runs a fresh ``git status``, may invoke protected-scope repair (which runs
+    the agent CLI), and then stages all non-ignored dirty paths. A side effect
+    between the gate check and the fresh staging scan can introduce an extra
+    path outside ``owned_delta_paths``, bypassing the stale gate. After a
+    successful commit the finalize therefore re-validates the operation's
+    committed delta and fails closed with
+    ``PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA`` if any unowned path appears, so
+    the unowned commit is never silently pushed (review thread
+    ``PRRT_kwDOSJAM6s6KZP8f``).
     """
 
     # Skip finalization if: no state provided, the tree is already clean, or
@@ -819,6 +832,59 @@ async def _try_finalize_pre_push_dirty_repair_state(
             paths=list(check.paths),
         )
         return recheck
+
+    # Re-validate the operation's committed delta AFTER the commit sink's side
+    # effects. The ownership gate above was computed before calling
+    # ``_commit_dirty_worktree``, but that sink runs a fresh ``git status``, may
+    # invoke protected-scope repair (which runs the agent CLI), and then stages
+    # all non-ignored dirty paths. A side effect between the gate check and the
+    # fresh staging scan can introduce an extra path outside
+    # ``owned_delta_paths``; without this post-commit re-validation the stale
+    # gate would let the unowned commit through and the verify recheck below
+    # would observe a clean tree (the unowned path was just committed), silently
+    # sweeping unowned dirt into the PR. Fail closed with a dedicated reason
+    # code so the unowned commit is never pushed (review thread
+    # ``PRRT_kwDOSJAM6s6KZP8f``).
+    post_commit_delta = await _operation_owned_delta_paths(
+        self,
+        worktree_path=worktree_path,
+        operation_start_head=operation_start_head,
+    )
+    if post_commit_delta is None:
+        # The post-commit delta could not be resolved; do not trust the commit.
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_post_commit_delta_unavailable",
+            workspace_id=workspace_id,
+            operation_start_head=operation_start_head,
+            paths=list(check.paths),
+        )
+        return ValidationWorktreeCheck(
+            clean=False,
+            paths=check.paths,
+            reason_code=_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+            message=(
+                "pre-push dirty finalize could not re-validate the operation "
+                "delta after the commit sink side effects"
+            ),
+        )
+    unowned_committed = post_commit_delta - owned_delta_paths
+    if unowned_committed:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_unowned_delta",
+            workspace_id=workspace_id,
+            operation_start_head=operation_start_head,
+            owned_delta_paths=sorted(owned_delta_paths),
+            unowned_committed=sorted(unowned_committed),
+        )
+        return ValidationWorktreeCheck(
+            clean=False,
+            paths=tuple(sorted(unowned_committed)),
+            reason_code=_PRE_PUSH_DIRTY_FINALIZE_UNOWNED_DELTA_REASON,
+            message=(
+                "pre-push dirty finalize committed paths outside the "
+                "operation-owned delta after the commit sink side effects"
+            ),
+        )
 
     verify = await _pre_push_validation_worktree_check(
         self,
