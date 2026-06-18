@@ -564,7 +564,7 @@ async def _operation_owned_delta_paths(
     worktree_path: Path,
     operation_start_head: str,
 ) -> set[str] | None:
-    """Return paths changed by the current operation's committed and staged delta.
+    """Return paths changed by the current operation's committed, staged, and unstaged delta.
 
     The repair-start dirty guard proves the worktree was clean at
     ``operation_start_head``, so the current monitor operation owns the union
@@ -572,8 +572,11 @@ async def _operation_owned_delta_paths(
 
     - its committed delta: ``git diff --name-status -z operation_start_head..HEAD``
     - its staged delta: ``git diff --name-status -z --cached operation_start_head``
+    - its unstaged working-tree delta:
+      ``git diff --name-status -z operation_start_head`` (compares the commit
+      to the working tree, so it includes both staged and unstaged edits)
 
-    Both deltas are parsed from ``--name-status -z`` (via
+    All three deltas are parsed from ``--name-status -z`` (via
     ``_changed_paths_from_name_status_z``) rather than raw ``--name-only``
     lines so the owned set uses the same path representation as the dirty
     check (``check_validation_worktree_clean`` ->
@@ -594,7 +597,17 @@ async def _operation_owned_delta_paths(
     ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (review thread
     ``PRRT_kwDOSJAM6s6KYd-r``).
 
-    Returns ``None`` when either delta cannot be resolved (e.g. the start ref
+    The unstaged working-tree delta is load-bearing for the case where the
+    operation's ``_commit_dirty_worktree`` returns False because ``git add -A``
+    itself failed: the repair output was never staged and remains as unstaged
+    working-tree changes, so both ``operation_start_head..HEAD`` and
+    ``--cached operation_start_head`` are empty. Without the working-tree
+    union those operation-owned unstaged paths would be treated as unrelated
+    and the finalize would strand the operation's own repair output as
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (review thread
+    ``PRRT_kwDOSJAM6s6KaUHP``).
+
+    Returns ``None`` when any delta cannot be resolved (e.g. the start ref
     is unknown, git failed, or the parsed ``--name-status -z`` output was
     malformed) so the caller can keep the fail-closed dirty path instead of
     committing unowned dirt.
@@ -625,8 +638,23 @@ async def _operation_owned_delta_paths(
             stderr=(staged_result.stderr or "")[:400],
         )
         return None
+    working_tree_result = await self._deps.runner.run(
+        git_worktree_command(worktree_path, "diff", "--name-status", "-z", operation_start_head)
+    )
+    if not working_tree_result.ok:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_working_tree_delta_unavailable",
+            operation_start_head=operation_start_head,
+            returncode=working_tree_result.returncode,
+            stderr=(working_tree_result.stderr or "")[:400],
+        )
+        return None
     owned_paths: set[str] = set()
-    for source in (committed_result.stdout, staged_result.stdout):
+    for source in (
+        committed_result.stdout,
+        staged_result.stdout,
+        working_tree_result.stdout,
+    ):
         try:
             owned_paths.update(_changed_paths_from_name_status_z(source or ""))
         except ProtectedScopeDiffError:
@@ -658,8 +686,11 @@ async def _try_finalize_pre_push_dirty_repair_state(
     repair-start dirty guard (``_pre_existing_dirty_repair_worktree_result``)
     proves the worktree was clean at ``operation_start_head``, so the current
     monitor operation's own delta is the union of its committed delta
-    (``git diff --name-status -z operation_start_head..HEAD``) and its staged
-    delta (``git diff --name-status -z --cached operation_start_head``). Both
+    (``git diff --name-status -z operation_start_head..HEAD``), its staged
+    delta (``git diff --name-status -z --cached operation_start_head``), and
+    its unstaged working-tree delta
+    (``git diff --name-status -z operation_start_head``, which compares the
+    commit to the working tree and includes unstaged edits). All three
     deltas are parsed from ``--name-status -z`` so the owned set uses the same
     path representation as the dirty check (``changed_paths_from_porcelain``):
     ``--name-status -z`` emits both the source and destination for ``R``/``C``
@@ -670,11 +701,15 @@ async def _try_finalize_pre_push_dirty_repair_state(
     False before creating a commit (e.g. ``git commit`` failed after
     ``git add -A``), leaving the operation's staged edits dirty but
     ``operation_start_head..HEAD`` empty (review thread
-    ``PRRT_kwDOSJAM6s6KYd-r``). Only dirt confined to those paths is safe to
-    finalize — dirt on any other path was introduced after the repair-start
-    guard (e.g. by a failed cleanup or another local process) and must stay
-    fail-closed as ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` so it is never
-    silently swept into the PR (review thread ``PRRT_kwDOSJAM6s6KXLaI``).
+    ``PRRT_kwDOSJAM6s6KYd-r``). The unstaged working-tree union covers the
+    case where ``_commit_dirty_worktree`` returned False because
+    ``git add -A`` itself failed, leaving the operation's repair output
+    unstaged in the working tree (review thread ``PRRT_kwDOSJAM6s6KaUHP``).
+    Only dirt confined to those paths is safe to finalize — dirt on any
+    other path was introduced after the repair-start guard (e.g. by a
+    failed cleanup or another local process) and must stay fail-closed as
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` so it is never silently swept
+    into the PR (review thread ``PRRT_kwDOSJAM6s6KXLaI``).
     When ``operation_start_head`` is unavailable (no operation-owned anchor),
     the finalize is skipped entirely.
 

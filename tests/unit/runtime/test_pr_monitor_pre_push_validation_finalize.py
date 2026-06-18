@@ -83,13 +83,17 @@ async def test_validated_push_finalizes_monitor_dirty_state_before_validation(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")
     # Operation-owned committed delta includes the dirty path, so the finalize
-    # proceeds. The staged delta is empty (the operation already committed).
+    # proceeds. The staged delta is empty (the operation already committed);
+    # the working-tree delta mirrors the committed delta (working tree matches
+    # HEAD after the commit).
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     # Post-commit re-validation: the committed delta is still confined to the
     # operation-owned path, so the finalize proceeds to the verify recheck.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")
     runner = make_runner(
         factory=factory,
@@ -179,15 +183,122 @@ async def test_pre_push_validation_finalize_commits_operation_owned_staged_dirt(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Committed delta is empty (HEAD never moved): the operation staged but
-    # did not commit.
+    # did not commit. The working-tree delta (commit vs working tree) carries
+    # the staged path too, since staged edits are in the working tree.
     cmd.queue_result(returncode=0, stdout="")
-    # Staged delta against operation_start_head carries the operation-owned path.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     # Post-commit re-validation: the commit sink committed the staged path, so
     # the committed delta now carries the operation-owned path and the staged
     # delta is empty — both still confined to the operation-owned set.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    commit_dirty = AsyncMock(return_value=True)
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", commit_dirty)
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    result = await pre_push_validation_module._run_pre_push_validation(
+        runner,
+        workspace_id=workspace_id,
+        worktree_path=worktree,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        operation_start_head=operation_start_head,
+    )
+
+    assert result.passed is True
+    assert result.workspace_head_sha == "b" * 40
+    commit_dirty.assert_awaited_once_with(
+        workspace_id=workspace_id,
+        message=f"awf: finalize PR monitor repair for {workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        state=state,
+        protected_scope_revert_remote_branch=f"awf/{workspace_id}",
+        remote_push_url=None,
+    )
+    cleanup.assert_awaited_once()
+    assert check_worktree_clean.await_count == 2
+
+
+@pytest.mark.unit
+async def test_pre_push_validation_finalize_commits_operation_owned_unstaged_dirt(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Operation-owned unstaged dirt (failed ``git add -A``) must be finalized.
+
+    When the repair operation's ``_commit_dirty_worktree`` returns False
+    *before* creating a commit because ``git add -A`` failed
+    (``remote_repair.py``), the operation's edits were never staged and remain
+    as unstaged working-tree changes, even though the repair-start dirty guard
+    proved the worktree was clean at ``operation_start_head``. Both
+    ``git diff --name-status -z operation_start_head..HEAD`` (HEAD never moved)
+    and ``git diff --name-status -z --cached operation_start_head`` (nothing was
+    staged) are empty, so the committed + staged union added for
+    ``PRRT_kwDOSJAM6s6KYd-r`` still leaves ``owned_delta_paths`` empty. The
+    pre-push dirty finalize ownership gate must also include the operation's
+    unstaged working-tree delta against ``operation_start_head``
+    (``git diff --name-status -z operation_start_head``, which compares the
+    commit to the working tree and includes unstaged edits), or every
+    operation-owned unstaged dirty path is treated as unrelated and the
+    finalize is skipped, stranding the operation's own residue as
+    ``VALIDATION_WORKTREE_PRE_EXISTING_DIRTY`` (review thread
+    ``PRRT_kwDOSJAM6s6KaUHP``).
+    """
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    # Dirt on a path the operation edited but never staged (failed ``git add -A``).
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    clean_check = ValidationWorktreeCheck(clean=True)
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check, clean_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    cleanup = AsyncMock(
+        return_value=ValidationWorktreeCleanup(
+            cleaned=False,
+            check=clean_check,
+            restore_ref="b" * 40,
+        )
+    )
+    monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
+    # Pre-commit ownership gate: committed delta empty (HEAD never moved),
+    # staged delta empty (``git add -A`` failed), and the working-tree delta
+    # against operation_start_head carries the unstaged operation-owned path.
+    cmd.queue_result(returncode=0, stdout="")  # committed delta
+    cmd.queue_result(returncode=0, stdout="")  # staged delta
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # working-tree delta
+    # Post-commit re-validation: the commit sink committed the unstaged path,
+    # so the committed delta now carries it and the staged + working-tree
+    # deltas are empty — still confined to the operation-owned set.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
+    cmd.queue_result(returncode=0, stdout="")  # staged delta
+    cmd.queue_result(returncode=0, stdout="")  # working-tree delta
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
@@ -544,9 +655,11 @@ async def test_pre_push_validation_rechecks_tree_after_no_op_finalize(
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Operation-owned committed delta includes the dirty path, so the finalize
-    # proceeds. The staged delta is empty (the operation already committed).
+    # proceeds. The staged delta is empty (the operation already committed);
+    # the working-tree delta mirrors the committed delta.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
@@ -868,12 +981,15 @@ async def test_pre_push_validation_finalize_threads_remote_branch_and_url_to_com
     monkeypatch.setattr(pre_push_validation_module, "_pre_push_validation_cleanup", cleanup)
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
-    # Operation-owned committed delta includes the dirty path; staged delta empty.
+    # Operation-owned committed delta includes the dirty path; staged delta
+    # empty; working-tree delta mirrors the committed delta.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     # Post-commit re-validation: committed delta still operation-owned.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
     runner = make_runner(
         factory=factory,
@@ -1379,17 +1495,24 @@ async def test_pre_push_validation_finalize_fail_closed_when_commit_introduces_u
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Pre-commit operation-owned delta: the dirty path is owned, so the gate
-    # lets the finalize proceed.
+    # lets the finalize proceed. The working-tree delta mirrors the committed
+    # delta (the path is in the working tree).
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # committed delta
     cmd.queue_result(returncode=0, stdout="")  # staged delta
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))  # working-tree delta
     # Post-commit re-validation: the commit sink's side effects introduced an
     # extra unowned path outside the operation delta. ``_operation_owned_delta_paths``
-    # recomputes both the committed and staged delta, so both diffs are queued.
+    # recomputes the committed, staged, and working-tree deltas, so all three
+    # diffs are queued.
     cmd.queue_result(
         returncode=0,
         stdout=_name_status_z("M\0src/fix.py\0", "M\0unrelated/extra.py\0"),
     )  # post-commit committed delta
     cmd.queue_result(returncode=0, stdout="")  # post-commit staged delta
+    cmd.queue_result(
+        returncode=0,
+        stdout=_name_status_z("M\0src/fix.py\0", "M\0unrelated/extra.py\0"),
+    )  # post-commit working-tree delta
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # post-finalize rev-parse HEAD
     runner = make_runner(
         factory=factory,
@@ -1487,10 +1610,16 @@ async def test_pre_push_validation_finalize_commits_operation_owned_rename_sourc
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Committed delta is empty (HEAD never moved): the operation staged but
-    # did not commit the rename.
+    # did not commit the rename. The working-tree delta (commit vs working
+    # tree) carries the rename record too, since staged edits are in the
+    # working tree.
     cmd.queue_result(returncode=0, stdout="")
     # Staged delta against operation_start_head carries the rename record,
     # which ``--name-status -z`` emits as both the source and destination.
+    cmd.queue_result(
+        returncode=0,
+        stdout=_name_status_z("R100\0oldname.txt\0newname.txt\0"),
+    )
     cmd.queue_result(
         returncode=0,
         stdout=_name_status_z("R100\0oldname.txt\0newname.txt\0"),
@@ -1503,6 +1632,10 @@ async def test_pre_push_validation_finalize_commits_operation_owned_rename_sourc
         stdout=_name_status_z("R100\0oldname.txt\0newname.txt\0"),
     )
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(
+        returncode=0,
+        stdout=_name_status_z("R100\0oldname.txt\0newname.txt\0"),
+    )
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
@@ -1592,15 +1725,18 @@ async def test_pre_push_validation_finalize_commits_operation_owned_non_ascii_di
     cmd = FakeCommandRunner()
     cmd.queue_result(returncode=0, stdout=f"{'a' * 40}\n")  # initial rev-parse HEAD
     # Committed delta is empty (HEAD never moved): the operation staged but
-    # did not commit the non-ASCII path.
+    # did not commit the non-ASCII path. The working-tree delta carries it too
+    # (staged edits are in the working tree).
     cmd.queue_result(returncode=0, stdout="")
     # Staged delta against operation_start_head carries the non-ASCII path as
     # raw UTF-8 bytes (``--name-status -z`` never C-quotes paths).
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0caf\u00e9.txt\0"))
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0caf\u00e9.txt\0"))
     # Post-commit re-validation: the commit sink committed the non-ASCII
     # path, so the committed delta carries it and the staged delta is empty.
     cmd.queue_result(returncode=0, stdout=_name_status_z("M\0caf\u00e9.txt\0"))
     cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0caf\u00e9.txt\0"))
     cmd.queue_result(returncode=0, stdout=f"{'b' * 40}\n")  # re-captured HEAD after finalize
     runner = make_runner(
         factory=factory,
