@@ -218,9 +218,6 @@ async def test_pre_push_validation_fix_pass_rolls_back_when_commit_raises(
     "exc_cls",
     [
         "ProtectedScopeDiffError",
-        "ProviderRecoveryRetryError",
-        "ProviderRecoveryFallbackError",
-        "ProviderRecoveryAuthError",
         "_MonitorPolicyBlockedError",
         "_MonitorAgentRuntimeOwnershipRepairFailedError",
     ],
@@ -231,7 +228,18 @@ async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_except
     monkeypatch: pytest.MonkeyPatch,
     exc_cls: str,
 ) -> None:
-    """Reason-coded exceptions from ``_commit_dirty_worktree`` must propagate, not collapse into ``commit_exception``."""
+    """Deterministic reason-coded exceptions from ``_commit_dirty_worktree`` must propagate, not collapse into ``commit_exception``.
+
+    The provider-recovery exceptions (``ProviderRecoveryRetryError`` /
+    ``ProviderRecoveryFallbackError`` / ``ProviderRecoveryAuthError``) are
+    covered separately by
+    ``test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_provider_retry``:
+    those roll back the fix-pass residue BEFORE re-raising
+    (``PRRT_kwDOSJAM6s6Kc_Ak``). The three deterministic exceptions here
+    represent commit-sink failures with no provider outage, so they keep
+    the plain re-raise (no rollback) so the loop's dedicated handlers
+    surface the specific reason code.
+    """
     import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
     from awf.runtime.pr_monitor_runner import types as monitor_types
 
@@ -288,10 +296,114 @@ async def test_pre_push_validation_fix_pass_preserves_reason_coded_commit_except
             validation_commands=("pytest -q",),
         )
 
-    # The rollback handler must NOT run for reason-coded exceptions: no
-    # ``reset --hard`` against ``fix_start_head`` should be queued.
+    # The rollback handler must NOT run for reason-coded exceptions when the
+    # worktree is clean (no residue to clean): no ``reset --hard`` against
+    # ``fix_start_head`` should be queued.
     joined_calls = [" ".join(call.args) for call in cmd.calls]
     assert not any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_cls",
+    [
+        "ProviderRecoveryRetryError",
+        "ProviderRecoveryFallbackError",
+        "ProviderRecoveryAuthError",
+    ],
+)
+async def test_pre_push_validation_fix_pass_rolls_back_dirty_residue_before_provider_retry(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exc_cls: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6Kc_Ak (discussion r3433769929).
+
+    When the validation-fix agent leaves protected-scope edits in the
+    worktree and ``_commit_dirty_worktree`` raises a provider-recovery
+    control-flow exception (``ProviderRecoveryRetryError`` /
+    ``ProviderRecoveryFallbackError`` / ``ProviderRecoveryAuthError``)
+    from protected-scope repair, the fix-pass must roll back the
+    residue to ``fix_start_head`` BEFORE re-raising. Otherwise the
+    monitor loop records ``PROVIDER_OUTAGE`` and the next attempt trips
+    ``_pre_existing_dirty_repair_worktree_result`` /
+    ``PRE_EXISTING_DIRTY_WORKTREE``, wedging the PR.
+    """
+    import awf.runtime.pr_monitor_runner.pre_push_validation as pre_push_validation
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    cmd = FakeCommandRunner()
+    fix_start_head = "7" * 40
+    # ``_run_pre_push_validation_fix_pass`` reads HEAD before the agent run.
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    # ``_rollback_failed_pre_push_validation_fix_pass`` -> ``reset --hard``.
+    cmd.queue_result(returncode=0, stdout=f"HEAD is now at {fix_start_head[:8]}\n")
+    # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``
+    # (status): report the protected-scope residue the agent left behind.
+    cmd.queue_result(returncode=0, stdout=" M .github/workflows/ci.yml\n")
+    # ``git restore --source <fix_start_head> --staged --worktree -- <path>``.
+    cmd.queue_result(returncode=0)
+    # Post-restore status recheck (no more residue after the restore).
+    cmd.queue_result(returncode=0, stdout="")
+    # HEAD verification: ``rev-parse <fix_start_head>`` + ``rev-parse HEAD``.
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{fix_start_head}\n")
+    adapter = FakeAdapter()
+    adapter.queue(stdout="attempted fix\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    raised_exc = getattr(monitor_types, exc_cls)(
+        "provider recovery raised by protected-scope repair"
+    )
+
+    async def _commit_dirty_worktree(**_kwargs: object) -> bool:
+        """Simulate protected-scope repair raising a provider-recovery exception."""
+        raise raised_exc
+
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", _commit_dirty_worktree)
+    validation_result = pre_push_validation._PrePushValidationResult(
+        passed=False,
+        validation_run_id="vr_failed",
+        workspace_head_sha=fix_start_head,
+        reason_code="PRE_PUSH_VALIDATION_FAILED",
+        message="PR monitor pre-push validation failed: COMMAND_FAILED",
+        validation_reason_code="COMMAND_FAILED",
+        result=_validation_result(tmp_path, ok=False, reason_code="COMMAND_FAILED"),
+    )
+
+    # The provider-recovery exception must still propagate so the monitor
+    # loop's dedicated handlers surface ``PROVIDER_OUTAGE`` /
+    # ``PROVIDER_FALLBACK`` / auth-failed semantics — but only AFTER the
+    # fix-pass residue has been rolled back.
+    with pytest.raises(type(raised_exc)):
+        await pre_push_validation._run_pre_push_validation_fix_pass(
+            runner,
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            remote_branch="codex/pr",
+            remote_url=None,
+            state=None,
+            validation_result=validation_result,
+            pass_number=1,
+            total_passes=1,
+            validation_commands=("pytest -q",),
+        )
+
+    # The fix-pass MUST roll back to ``fix_start_head`` before re-raising so
+    # the next monitor attempt does not trip ``PRE_EXISTING_DIRTY_WORKTREE``.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(f"reset --hard {fix_start_head}" in call for call in joined_calls)
 
 
 @pytest.mark.unit

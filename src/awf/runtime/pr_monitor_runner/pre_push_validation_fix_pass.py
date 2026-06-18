@@ -441,16 +441,48 @@ async def _run_pre_push_validation_fix_pass(
             )
         )
     except (
-        ProtectedScopeDiffError,
         ProviderRecoveryAuthError,
         ProviderRecoveryFallbackError,
         ProviderRecoveryRetryError,
+    ):
+        # ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
+        # raises these provider-recovery control-flow exceptions when a provider
+        # outage suppresses the CLI or a recoverable agent-run error triggers
+        # retry/fallback/auth. They must propagate so the monitor loop's dedicated
+        # handlers surface ``PROVIDER_OUTAGE`` / ``PROVIDER_FALLBACK`` / auth-failed
+        # semantics — BUT only AFTER rolling back the fix-pass residue the agent
+        # left behind. Without this rollback the protected-scope edits remain
+        # dirty and the next monitor attempt trips ``_pre_existing_dirty_repair_worktree_result``
+        # as ``PRE_EXISTING_DIRTY_WORKTREE``, masking the provider outage and
+        # wedging the PR (review thread ``PRRT_kwDOSJAM6s6Kc_Ak``). A rollback
+        # failure is logged but never clobbers the recovery exception: the loop's
+        # recovery handlers still run, and the stranded residue surfaces as the
+        # next attempt's pre-existing-dirty guard rather than being silently
+        # swallowed here.
+        rollback_failure_reason = await _rollback_failed_fix_pass(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=fix_start_head,
+            pass_number=pass_number,
+            reason="provider_recovery_dirty_residue",
+        )
+        if rollback_failure_reason is not None:
+            _log.warning(
+                "monitor.pre_push_validation_fix_pass_provider_recovery_rollback_failed",
+                workspace_id=workspace_id,
+                pass_number=pass_number,
+                rollback_failure_reason=rollback_failure_reason,
+            )
+        raise
+    except (
+        ProtectedScopeDiffError,
         _MonitorAgentRuntimeOwnershipRepairFailedError,
         _MonitorPolicyBlockedError,
     ):
-        # ``_commit_dirty_worktree`` (and the protected-scope / provider-recovery
-        # paths it invokes) raises these reason-coded exceptions so the monitor
-        # loop's dedicated handlers surface the right reason code. The broad
+        # ``_commit_dirty_worktree`` (and the protected-scope paths it invokes)
+        # raises these deterministic reason-coded exceptions so the monitor loop's
+        # dedicated handlers surface the right reason code. The broad
         # ``except Exception`` below would collapse them into a generic
         # ``commit_exception`` rollback reason, hiding the structured failure
         # semantics — re-raise before that handler. Mirrors the explicit-clause
