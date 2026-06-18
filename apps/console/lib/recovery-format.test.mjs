@@ -109,3 +109,33 @@ test("reverse timeline detection identifies backward workspace transitions", () 
     false,
   );
 });
+
+test("blocked entries and resumes are not flagged as reverse transitions", () => {
+  // Post-PR pause: a higher lifecycle index (monitoring_pr) moving into blocked.
+  assert.equal(
+    isReverseWorkspaceTransition({
+      event_type: "workspace.state_changed",
+      old_state: "monitoring_pr",
+      new_state: "blocked",
+    }),
+    false,
+  );
+  // Pre-PR resume: blocked stepping back to an earlier execution stage.
+  assert.equal(
+    isReverseWorkspaceTransition({
+      event_type: "workspace.state_changed",
+      old_state: "blocked",
+      new_state: "validating",
+    }),
+    false,
+  );
+  // A genuine regression that does not involve blocked is still detected.
+  assert.equal(
+    isReverseWorkspaceTransition({
+      event_type: "workspace.state_changed",
+      old_state: "pushing",
+      new_state: "running",
+    }),
+    true,
+  );
+});
