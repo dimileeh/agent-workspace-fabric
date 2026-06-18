@@ -643,6 +643,7 @@ async def _try_finalize_pre_push_dirty_repair_state(
     operation_start_head: str | None = None,
     remote_branch: str | None = None,
     remote_url: str | None = None,
+    finalize_start_head: str | None = None,
 ) -> ValidationWorktreeCheck | None:
     """Commit monitor-owned residual repair dirt before pre-push validation.
 
@@ -737,6 +738,23 @@ async def _try_finalize_pre_push_dirty_repair_state(
     repair or falls back to a no-commit dirty failure instead of committing
     the safe rollback and proceeding to validation (review thread
     ``PRRT_kwDOSJAM6s6KZjtR``).
+
+    ``finalize_start_head`` is the HEAD captured by the caller immediately
+    before the finalize (the operation's committed work). It is the rollback
+    anchor for provider-recovery control-flow exceptions raised by
+    ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``:
+    the protected-scope repair agent can leave the dirty residue the finalize
+    was trying to commit still in the worktree, and re-raising without rolling
+    back strands it for the next repair cycle's repair-start guard
+    (``_pre_existing_dirty_repair_worktree_result``) as
+    ``PRE_EXISTING_DIRTY_WORKTREE``, wedging the workspace on a transient
+    outage (review thread ``PRRT_kwDOSJAM6s6KewGH``, mirroring the fix-pass
+    residue rollback ``PRRT_kwDOSJAM6s6Kc_Ak``). It is the finalize-start HEAD,
+    not ``operation_start_head``: the operation may have committed repair work
+    since ``operation_start_head``, and resetting to the older anchor would
+    discard that committed work. ``None`` means the caller could not capture
+    HEAD; the rollback is skipped (the residue strands, but a missing anchor
+    makes a safe ``git restore`` impossible).
     """
 
     # Skip finalization if: no state provided, the tree is already clean, or
@@ -873,7 +891,23 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # back off and retry later. Every other commit caller lets it propagate so the
         # loop's ``except ProviderRecoveryRetryError`` handler surfaces ``PROVIDER_OUTAGE``
         # retry semantics; re-raise here instead of swallowing it into the generic
-        # pre-existing-dirty failure.
+        # pre-existing-dirty failure. BUT first roll back the dirty-finalize residue
+        # the protected-scope repair agent left behind (see the
+        # ``finalize_start_head`` capture above), otherwise the next repair cycle's
+        # repair-start guard trips ``PRE_EXISTING_DIRTY_WORKTREE`` and the provider
+        # retry never actually runs — a transient outage wedges the workspace
+        # (review thread ``PRRT_kwDOSJAM6s6KewGH``, mirroring the fix-pass rollback
+        # ``PRRT_kwDOSJAM6s6Kc_Ak``). A rollback failure is logged but never
+        # clobbers the recovery exception: the loop's recovery handlers still run,
+        # and a stranded residue surfaces as the next attempt's pre-existing-dirty
+        # guard rather than being silently swallowed here.
+        await _rollback_finalize_dirty_residue_before_provider_recovery(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=finalize_start_head,
+            reason="provider_recovery_retry",
+        )
         _log.warning(
             "monitor.pre_push_dirty_finalize_provider_recovery_retry",
             workspace_id=workspace_id,
@@ -887,7 +921,18 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # ``except ProviderRecoveryFallbackError`` handler surfaces ``PROVIDER_FALLBACK``
         # semantics, so the finalize must re-raise it instead of letting the broad
         # ``except Exception`` below swallow it into the generic pre-existing-dirty
-        # failure (review thread ``PRRT_kwDOSJAM6s6KYd-t``).
+        # failure (review thread ``PRRT_kwDOSJAM6s6KYd-t``). Roll back the dirty-finalize
+        # residue first (see the ``finalize_start_head`` capture above and the
+        # ``ProviderRecoveryRetryError`` handler) so the next repair cycle is not
+        # wedged as ``PRE_EXISTING_DIRTY_WORKTREE`` (review thread
+        # ``PRRT_kwDOSJAM6s6KewGH``, mirroring ``PRRT_kwDOSJAM6s6Kc_Ak``).
+        await _rollback_finalize_dirty_residue_before_provider_recovery(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=finalize_start_head,
+            reason="provider_recovery_fallback",
+        )
         _log.warning(
             "monitor.pre_push_dirty_finalize_provider_recovery_fallback",
             workspace_id=workspace_id,
@@ -901,7 +946,18 @@ async def _try_finalize_pre_push_dirty_repair_state(
         # ``except ProviderRecoveryAuthError`` handler surfaces the auth-failed operation
         # outcome, so the finalize must re-raise it instead of letting the broad
         # ``except Exception`` below swallow it into the generic pre-existing-dirty
-        # failure (review thread ``PRRT_kwDOSJAM6s6KYd-t``).
+        # failure (review thread ``PRRT_kwDOSJAM6s6KYd-t``). Roll back the dirty-finalize
+        # residue first (see the ``finalize_start_head`` capture above and the
+        # ``ProviderRecoveryRetryError`` handler) so the next repair cycle is not
+        # wedged as ``PRE_EXISTING_DIRTY_WORKTREE`` (review thread
+        # ``PRRT_kwDOSJAM6s6KewGH``, mirroring ``PRRT_kwDOSJAM6s6Kc_Ak``).
+        await _rollback_finalize_dirty_residue_before_provider_recovery(
+            self,
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            restore_ref=finalize_start_head,
+            reason="provider_recovery_auth",
+        )
         _log.warning(
             "monitor.pre_push_dirty_finalize_provider_recovery_auth",
             workspace_id=workspace_id,
@@ -1047,6 +1103,66 @@ async def _pre_push_validation_cleanup(
     )
 
 
+async def _rollback_finalize_dirty_residue_before_provider_recovery(
+    self: Any,
+    *,
+    workspace_id: str,
+    worktree_path: Path,
+    restore_ref: str | None,
+    reason: str,
+) -> None:
+    """Roll back dirty-finalize residue before re-raising provider recovery.
+
+    ``_commit_dirty_worktree`` -> ``_repair_protected_scope_changes_before_commit``
+    can run the agent CLI to remove protected-scope edits; if that raises a
+    provider-recovery control-flow exception (retry/fallback/auth) the agent
+    may leave the dirty residue the finalize was trying to commit still in the
+    worktree. Re-raising without rolling back strands that residue: the outer
+    monitor records a provider outcome and exits the operation, then the next
+    repair cycle's repair-start guard
+    (``_pre_existing_dirty_repair_worktree_result``) sees the still-dirty
+    worktree and fails as ``PRE_EXISTING_DIRTY_WORKTREE`` before the provider
+    retry can actually run, wedging the workspace on a transient outage
+    (review thread ``PRRT_kwDOSJAM6s6KewGH``, mirroring the fix-pass residue
+    rollback ``PRRT_kwDOSJAM6s6Kc_Ak``).
+
+    ``restore_ref`` is the HEAD captured at the start of the finalize (the
+    operation's committed work). ``_commit_dirty_worktree`` raises before its
+    own ``git commit``, so HEAD has not moved and restoring tracked paths to
+    this ref preserves the committed repair while discarding only the
+    uncommitted residue. ``None`` means the finalize-start HEAD could not be
+    captured; the rollback is skipped (the residue strands, but a missing
+    anchor makes a safe ``git restore`` impossible — better to strand
+    visibly than restore against the wrong ref).
+
+    A cleanup failure is logged but never clobbers the pending
+    provider-recovery exception: the loop's recovery handlers still run, and
+    a stranded residue surfaces as the next attempt's pre-existing-dirty
+    guard rather than being silently swallowed here.
+    """
+    if restore_ref is None:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_provider_recovery_rollback_skipped_no_anchor",
+            workspace_id=workspace_id,
+            reason=reason,
+        )
+        return
+    cleanup = await _pre_push_validation_cleanup(
+        self,
+        worktree_path=worktree_path,
+        restore_ref=restore_ref,
+    )
+    if not cleanup.ok:
+        _log.warning(
+            "monitor.pre_push_dirty_finalize_provider_recovery_rollback_failed",
+            workspace_id=workspace_id,
+            reason=reason,
+            restore_ref=restore_ref,
+            cleanup_reason_code=cleanup.reason_code,
+            cleanup_message=cleanup.message[:400],
+        )
+
+
 def _pre_push_dirty_result(
     *,
     workspace_head_sha: str | None,
@@ -1138,6 +1254,7 @@ async def _run_pre_push_validation(
             operation_start_head=operation_start_head,
             remote_branch=remote_branch,
             remote_url=remote_url,
+            finalize_start_head=workspace_head_sha,
         )
         if finalized_check is not None:
             pre_validation_check = finalized_check

@@ -1439,6 +1439,122 @@ async def test_pre_push_validation_finalize_propagates_provider_recovery_auth(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "exc_cls",
+    [
+        "ProviderRecoveryRetryError",
+        "ProviderRecoveryFallbackError",
+        "ProviderRecoveryAuthError",
+    ],
+)
+async def test_pre_push_validation_finalize_rolls_back_dirty_residue_before_provider_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    exc_cls: str,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s6KewGH (discussion r3434397656).
+
+    When protected-scope repair inside
+    ``_try_finalize_pre_push_dirty_repair_state`` raises a provider-recovery
+    control-flow exception (``ProviderRecoveryRetryError`` /
+    ``ProviderRecoveryFallbackError`` / ``ProviderRecoveryAuthError``), the
+    finalize must roll back the dirty residue it was trying to finalize to the
+    finalize-start HEAD BEFORE re-raising. Otherwise the outer monitor records
+    a provider retry/fallback/auth outcome and exits the operation; on the next
+    repair cycle the repair-start guard
+    (``_pre_existing_dirty_repair_worktree_result``) sees the still-dirty
+    worktree and fails as ``PRE_EXISTING_DIRTY_WORKTREE`` before the provider
+    retry can actually run, so a transient provider outage wedges the workspace
+    instead of retrying. Mirrors the fix-pass residue rollback in
+    ``_run_pre_push_validation_fix_pass`` (PRRT_kwDOSJAM6s6Kc_Ak).
+    """
+    from awf.runtime.pr_monitor_runner import types as monitor_types
+
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _set_resolved_profile(factory, workspace_id)
+    worktree = tmp_path / "worktrees" / workspace_id
+    _mark_git_worktree(worktree)
+    dirty_check = ValidationWorktreeCheck(
+        clean=False,
+        paths=("src/fix.py",),
+        reason_code=VALIDATION_WORKTREE_PRE_EXISTING_DIRTY,
+    )
+    check_worktree_clean = AsyncMock(side_effect=[dirty_check])
+    monkeypatch.setattr(
+        pre_push_validation_module,
+        "_pre_push_validation_worktree_check",
+        check_worktree_clean,
+    )
+    finalize_start_head = "c" * 40
+    cmd = FakeCommandRunner()
+    # ``_run_pre_push_validation`` reads HEAD before the finalize call; that
+    # SHA is threaded in as ``finalize_start_head`` (the rollback anchor) so
+    # the finalize does NOT issue a second ``rev-parse HEAD`` in the success
+    # path — only the rollback (error) path issues extra git commands.
+    cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")
+    # ``_operation_owned_delta_paths`` reads the committed delta
+    # (``git diff --name-status -z operation_start_head..HEAD``); the dirty
+    # path is operation-owned so the finalize proceeds.
+    cmd.queue_result(returncode=0, stdout=_name_status_z("M\0src/fix.py\0"))
+    # ``_pre_push_validation_cleanup`` -> ``check_validation_worktree_clean``:
+    # the protected-scope repair agent left the dirty residue behind.
+    cmd.queue_result(returncode=0, stdout=" M src/fix.py\n")
+    # ``git restore --source <finalize_start_head> --staged --worktree -- src/fix.py``.
+    cmd.queue_result(returncode=0)
+    # Post-restore verify ``check_validation_worktree_clean`` (worktree now clean).
+    cmd.queue_result(returncode=0, stdout="")
+    # HEAD verification: ``rev-parse <finalize_start_head>`` + ``rev-parse HEAD``.
+    cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")
+    cmd.queue_result(returncode=0, stdout=f"{finalize_start_head}\n")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.validation = _FakeValidation(_validation_result(tmp_path, ok=True))  # type: ignore[assignment]
+    raised_exc = getattr(monitor_types, exc_cls)(
+        "provider recovery raised by protected-scope repair in finalize"
+    )
+    monkeypatch.setattr(runner, "_commit_dirty_worktree", AsyncMock(side_effect=raised_exc))
+    state = MonitorState()
+    operation_start_head = "0" * 40
+
+    # The provider-recovery exception must still propagate so the monitor
+    # loop's dedicated handlers surface ``PROVIDER_OUTAGE`` /
+    # ``PROVIDER_FALLBACK`` / auth-failed semantics — but only AFTER the
+    # finalize residue has been rolled back.
+    with pytest.raises(type(raised_exc)):
+        await pre_push_validation_module._run_pre_push_validation(
+            runner,
+            workspace_id=workspace_id,
+            worktree_path=worktree,
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            state=state,
+            operation_start_head=operation_start_head,
+        )
+
+    # The finalize MUST roll back the residue to the finalize-start HEAD
+    # before re-raising so the next monitor attempt does not trip
+    # ``PRE_EXISTING_DIRTY_WORKTREE``.
+    joined_calls = [" ".join(call.args) for call in cmd.calls]
+    assert any(
+        f"restore --source {finalize_start_head} --staged --worktree" in call
+        for call in joined_calls
+    ), joined_calls
+    # The finalize failure must not re-check the tree via the pre-validation
+    # check (no verify/recheck pass through ``_pre_push_validation_worktree_check``);
+    # the rollback's own ``check_validation_worktree_clean`` runs inside
+    # ``_pre_push_validation_cleanup`` and does not go through the patched
+    # module-level helper.
+    assert check_worktree_clean.await_count == 1
+
+
+@pytest.mark.unit
 async def test_pre_push_validation_reports_dirty_worktree_when_head_capture_fails(
     monkeypatch: pytest.MonkeyPatch,
     factory: async_sessionmaker[AsyncSession],
